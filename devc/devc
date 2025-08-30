@@ -236,24 +236,25 @@ CACHE_VOLUMES=(
 
 add_cache_mounts() {
   local rwmode="$1"  # ro|rw
-  local -n out="$2"
+  local out_var="$2"
+  local -n __arr_ref="$out_var"
   local entry src target
   ensure_cache_volumes
   for entry in "${CACHE_VOLUMES[@]}"; do
     src="${entry%%:*}"; target="${entry#*:}"
-    out+=( --mount=type=volume,src="$src",target="$target",${rwmode},z )
+    __arr_ref+=( --mount=type=volume,src="$src",target="$target",${rwmode},z )
   done
 }
 
 # Compute container cwd based on mode and relative subpath
 container_target_dir() {
-  local mode="$1"; local -n out="$2"
+  local mode="$1"; local out_var="$2"; local -n __out_ref="$out_var"
   case "$mode" in
     install)
-      out="/home/dev"  # unchanged in 'install' mode for safety
+      __out_ref="/home/dev"  # unchanged in 'install' mode for safety
       ;;
     *)
-      if [[ -n "$REL_SUBPATH" ]]; then out="/workspace/$REL_SUBPATH"; else out="/workspace"; fi
+      if [[ -n "$REL_SUBPATH" ]]; then __out_ref="/workspace/$REL_SUBPATH"; else __out_ref="/workspace"; fi
       ;;
   esac
 }
@@ -263,33 +264,34 @@ build_run_args() {
   # note that --workdir can not be part here, since it is sometimes passed as argument, sometimes used as part of the
   # bash command after rsyncing.
   local mode="$1"
-  local -n out="$2"
-  out=(
+  local out_var="$2"
+  local -n __arr_ref="$out_var"
+  __arr_ref=(
     --userns=keep-id:uid=1000,gid=1000
     --cap-drop=ALL --security-opt=no-new-privileges
     --pids-limit="$PIDS_LIMIT" --memory="$MEM_LIMIT"
     --ipc=private --uts=private --cgroupns=private
   )
   if [[ "$mode" == "quarantine" ]]; then
-    out+=(--network none)
+    __arr_ref+=(--network none)
   fi
   case "$mode" in
     work)
-      out+=( --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z )
-      add_cache_mounts ro out
+      __arr_ref+=( --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z )
+      add_cache_mounts ro "$out_var"
       ;;
     install)
-      out+=( --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z )
-      add_cache_mounts rw out
+      __arr_ref+=( --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z )
+      add_cache_mounts rw "$out_var"
       ;;
     review|quarantine)
       ensure_scratch_volume
       local scratch_vol; scratch_vol="$(scratch_vol_name)"
-      out+=(
+      __arr_ref+=(
         --mount=type=bind,src="$PROJ_DIR",target=/src,ro,z
         --mount=type=volume,src="$scratch_vol",target=/workspace
       )
-      add_cache_mounts ro out
+      add_cache_mounts ro "$out_var"
       ;;
   esac
 }
