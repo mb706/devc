@@ -10,7 +10,8 @@ set -euo pipefail
 IMAGE_DEFAULT="devc/base:latest"
 MEM_LIMIT="${DEVC_MEM_LIMIT:-16g}"
 PIDS_LIMIT="${DEVC_PIDS_LIMIT:-2048}"
-REVIEW_PRELUDE='set -e; rsync -a --delete /src/ /workdir/ 2>/tmp/rsync.log || echo "Warning: rsync failed" >&2;'
+REVIEW_PRELUDE='rsync -a --delete /src/ /workspace/ 2>/tmp/rsync.log || echo "Warning: rsync failed" >&2;'
+REVIEW_PRELUDE_EXIT_ON_ERROR='rsync -a --delete /src/ /workspace/ 2>/tmp/rsync.log || (echo "Warning: rsync failed" >&2; exit 1)'
 
 abs_path() { perl -MCwd=abs_path -e 'print abs_path(shift)' "$1"; }
 hash_short() { printf "%s" "$1" | sha256sum | cut -c1-12; }
@@ -35,7 +36,7 @@ Commands:
 Modes:
   install    Cache volumes read-write; workdir /home/dev; project mounted rw
   work       Cache volumes read-only; workdir /workspace; project mounted rw
-  review     All mounts read-only; project at /src; rsync to scratch at /workdir
+  review     All mounts read-only; project at /src; rsync to scratch at /workspace
   quarantine Like review but with network disabled
 
 Options:
@@ -127,6 +128,13 @@ case "$CUR_PWD" in
     exit 2
     ;;
 esac
+
+# Relative subpath from project to current dir (may be empty)
+if [[ "$CUR_PWD" == "$PROJ_DIR" ]]; then
+  REL_SUBPATH=""
+else
+  REL_SUBPATH="${CUR_PWD#"$PROJ_DIR"/}"
+fi
 
 # Container base name from project
 CNAME="devc-$(basename "$PROJ_DIR")-$(hash_short "$PROJ_DIR")"
@@ -237,8 +245,23 @@ add_cache_mounts() {
   done
 }
 
+# Compute container cwd based on mode and relative subpath
+container_target_dir() {
+  local mode="$1"; local -n out="$2"
+  case "$mode" in
+    install)
+      out="/home/dev"  # unchanged in 'install' mode for safety
+      ;;
+    *)
+      if [[ -n "$REL_SUBPATH" ]]; then out="/workspace/$REL_SUBPATH"; else out="/workspace"; fi
+      ;;
+  esac
+}
+
 # Build podman run args into provided array variable name
 build_run_args() {
+  # note that --workdir can not be part here, since it is sometimes passed as argument, sometimes used as part of the
+  # bash command after rsyncing.
   local mode="$1"
   local -n out="$2"
   out=(
@@ -254,22 +277,19 @@ build_run_args() {
     work)
       out+=( --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z )
       add_cache_mounts ro out
-      out+=( --workdir=/workspace )
       ;;
     install)
       out+=( --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z )
       add_cache_mounts rw out
-      out+=( --workdir=/home/dev )
       ;;
     review|quarantine)
       ensure_scratch_volume
       local scratch_vol; scratch_vol="$(scratch_vol_name)"
       out+=(
         --mount=type=bind,src="$PROJ_DIR",target=/src,ro,z
-        --mount=type=volume,src="$scratch_vol",target=/workdir
+        --mount=type=volume,src="$scratch_vol",target=/workspace
       )
       add_cache_mounts ro out
-      out+=( --workdir=/workdir )
       ;;
   esac
 }
@@ -300,10 +320,11 @@ ensure_running_container() {
 
 exec_shell_in_container() {
   local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
-  podman exec -it "$name" bash -l
+  local target
+  container_target_dir "$mode" target
+  podman exec -it --workdir "$target" "$name" bash -l
 }
 
-# Add this helper near the other helpers
 join_cmd() {
   local out="" first=1 arg esc
   for arg in "$@"; do
@@ -321,7 +342,8 @@ exec_run_in_container() {
   local mode="$1"; shift
   local name; name="$(container_name_for_mode "$mode")"
   local cmd; cmd="$(join_cmd "$@")"
-  podman exec -it "$name" bash -lc "$cmd"
+  local target; container_target_dir "$mode" target
+  podman exec -it --workdir "$target" "$name" bash -lc "$cmd"
 }
 
 one_off_shell() {
@@ -329,14 +351,16 @@ one_off_shell() {
   local one_off_name="${name}-oneoff-$$"
   local -a args=()
   build_run_args "$mode" args
+  local target; container_target_dir "$mode" target
   case "$mode" in
     review|quarantine)
+      # cannot --workdir to target dir because it may not exist before REVIEW_PRELUDE.
       podman run --rm -it --name "$one_off_name" \
         "${args[@]}" \
-        "$IMAGE" bash -lc "$REVIEW_PRELUDE cd /workdir; exec bash -l"
+        "$IMAGE" bash -lc "$REVIEW_PRELUDE cd $(printf %q "$target"); exec bash -l"
       ;;
     *)
-      podman run --rm -it --name "$one_off_name" \
+      podman run --rm -it --workdir "$target" --name "$one_off_name" \
         "${args[@]}" \
         "$IMAGE" bash -l
       ;;
@@ -349,14 +373,16 @@ one_off_run() {
   local -a args=()
   build_run_args "$mode" args
   local cmd; cmd="$(join_cmd "$@")"
+  local target; container_target_dir "$mode" target
   case "$mode" in
     review|quarantine)
+      # cannot --workdir to target dir because it may not exist before REVIEW_PRELUDE.
       podman run --rm -it --name "$name" \
         "${args[@]}" \
-        "$IMAGE" bash -lc "$REVIEW_PRELUDE cd /workdir; $cmd"
+        "$IMAGE" bash -lc "$REVIEW_PRELUDE_EXIT_ON_ERROR cd $(printf %q "$target"); $cmd"
       ;;
     *)
-      podman run --rm -it --name "$name" \
+      podman run --rm -it --workdir "$target" --name "$name" \
         "${args[@]}" \
         "$IMAGE" bash -lc "$cmd"
       ;;
