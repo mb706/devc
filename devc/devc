@@ -42,7 +42,7 @@ Options:
   -i, --image IMG     Image to use (default auto-detected per project)
   -p, --projdir DIR   Project directory (absolute or relative to original PWD)
   -d, --cwd DIR       Change working directory before resolving project
-  -1, --one-off       For shell/run: if container not running, use one-off run
+  -1, --one-off       For shell/run: use one-off run container
   -h, --help          Show this help and exit
 
 Notes:
@@ -378,6 +378,33 @@ if [[ "$ONE_OFF" -eq 1 && ( "$COMMAND" == "start" || "$COMMAND" == "stop" || "$C
   exit 2
 fi
 
+# Reject unexpected extra positional arguments per command
+case "$COMMAND" in
+  status)
+    if (( ${#ARGS[@]} > 2 )); then
+      extras=("${ARGS[@]:2}")
+      echo "Unexpected arguments for 'status': ${extras[*]}" >&2
+      usage_short
+      exit 2
+    fi
+    ;;
+  start|stop|shell)
+    if (( ${#ARGS[@]} > 2 )); then
+      extras=("${ARGS[@]:2}")
+      echo "Unexpected arguments for '$COMMAND': ${extras[*]}" >&2
+      usage_short
+      exit 2
+    fi
+    ;;
+  run)
+    if (( ${#ARGS[@]} < 3 )); then
+      echo "Missing command to run." >&2
+      usage_short
+      exit 2
+    fi
+    ;;
+esac
+
 case "$COMMAND" in
   status)
     if [[ -z "${MODE:-}" ]]; then
@@ -408,11 +435,6 @@ case "$COMMAND" in
     fi
     ;;
   run)
-    if [[ ${#CMD_ARGS[@]} -eq 0 ]]; then
-      echo "Missing command to run." >&2
-      usage_short
-      exit 2
-    fi
     name="$(container_name_for_mode "$MODE")"
     if [[ "$ONE_OFF" -eq 1 ]]; then
       one_off_run "$MODE" "${CMD_ARGS[@]}"
