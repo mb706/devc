@@ -181,4 +181,3 @@ pdf-engine: xelatex
 ---
 
 **Summary:** learn `run` (with \[Interaction], \[Storage], \[Networking], \[Security]), `build`, `pull/push/tag`, `ps/logs/exec/inspect`, plus the pod/volume/network primitives; the rest are for export/import, automation (`generate systemd|kube`), and cleanup (`prune`).
-

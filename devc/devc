@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Podman dev container wrapper (refactored)
 # UI: devc [options...] [command] [mode] <command-args...>
-#   commands: start | stop | status | shell | run
+#   commands: start | stop | pause | restart | sync | status | shell | run
 #   modes:    install | work | review | quarantine
 #   options:  --image|-i IMG  --projdir|-p DIR  --cwd|-d DIR  --one-off|-1  --help|-h
 
@@ -29,6 +29,9 @@ Usage:
 Commands:
   start      Ensure container for project/mode is running (sleep infinity)
   stop       Stop and remove container for project/mode
+  pause      Stop container without removing it (resume with 'start')
+  restart    Stop, remove, and start container fresh
+  sync       Re-run rsync to refresh /workspace (review/quarantine only)
   status     Show container status; with [mode] show only that container
   shell      Start container and open interactive shell
   run        Run a shell command inside the container
@@ -49,6 +52,7 @@ Options:
 Notes:
   - For 'status', [mode] is optional; otherwise [mode] is required.
   - Final PWD must be the project directory or a subdirectory thereof.
+  - 'sync' works only for review|quarantine and reruns rsync to refresh /workspace.
 EOF
 }
 
@@ -119,6 +123,11 @@ else
 fi
 PROJ_DIR="$(abs_path "$PROJ_DIR")"
 
+if [[ ! -d "$PROJ_DIR" ]]; then
+    echo "Error: Project directory does not exist: $PROJ_DIR" >&2
+    exit 2
+fi
+
 # Ensure current directory is within project directory
 CUR_PWD="$(pwd -P)"
 case "$CUR_PWD" in
@@ -162,9 +171,9 @@ if [[ -z "$COMMAND" ]]; then
   exit 2
 fi
 
-ALLOWED_COMMANDS=(start stop status shell run)
+ALLOWED_COMMANDS=(start stop pause restart sync status shell run)
 case " $COMMAND " in
-  " start "|" stop "|" status "|" shell "|" run ") ;;
+  " start "|" stop "|" pause "|" restart "|" sync "|" status "|" shell "|" run ") ;;
   *)
     echo "Unknown command: $COMMAND" >&2
     usage_short
@@ -300,22 +309,19 @@ ensure_running_container() {
   local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
   if container_running "$name"; then return 0; fi
   if container_exists "$name"; then
-    # Start previously created container
     podman start "$name" >/dev/null
     return 0
   fi
   local -a args=()
   build_run_args "$mode" args
+  # Always create containers with a simple long-running command
+  podman run -d --name "$name" \
+    "${args[@]}" \
+    "$IMAGE" sleep infinity
+  # For review/quarantine, perform initial one-time rsync into scratch volume
   case "$mode" in
     review|quarantine)
-      podman run -d --name "$name" \
-        "${args[@]}" \
-        "$IMAGE" bash -lc "$REVIEW_PRELUDE exec sleep infinity"
-      ;;
-    *)
-      podman run -d --name "$name" \
-        "${args[@]}" \
-        "$IMAGE" sleep infinity
+      podman exec "$name" bash -lc "$REVIEW_PRELUDE"
       ;;
   esac
 }
@@ -401,7 +407,7 @@ status_one() {
 }
 
 # Validate contradictory options
-if [[ "$ONE_OFF" -eq 1 && ( "$COMMAND" == "start" || "$COMMAND" == "stop" || "$COMMAND" == "status" ) ]]; then
+if [[ "$ONE_OFF" -eq 1 && ( "$COMMAND" == "start" || "$COMMAND" == "stop" || "$COMMAND" == "pause" || "$COMMAND" == "restart" || "$COMMAND" == "sync" || "$COMMAND" == "status" ) ]]; then
   echo "--one-off is only valid with 'shell' or 'run'." >&2
   exit 2
 fi
@@ -416,7 +422,7 @@ case "$COMMAND" in
       exit 2
     fi
     ;;
-  start|stop|shell)
+  start|stop|pause|restart|sync|shell)
     if (( ${#ARGS[@]} > 2 )); then
       extras=("${ARGS[@]:2}")
       echo "Unexpected arguments for '$COMMAND': ${extras[*]}" >&2
@@ -452,6 +458,33 @@ case "$COMMAND" in
       podman stop "$name" >/dev/null || true
       podman rm "$name" >/dev/null || true
     fi
+    ;;
+  pause)
+    name="$(container_name_for_mode "$MODE")"
+    if container_exists "$name"; then
+      podman stop "$name" >/dev/null || true
+    fi
+    ;;
+  restart)
+    name="$(container_name_for_mode "$MODE")"
+    if container_exists "$name"; then
+      podman stop "$name" >/dev/null || true
+      podman rm "$name" >/dev/null || true
+    fi
+    ensure_running_container "$MODE"
+    ;;
+  sync)
+    case "$MODE" in
+      review|quarantine) ;;
+      *)
+        echo "'sync' is only supported for 'review' and 'quarantine' modes." >&2
+        exit 2
+        ;;
+    esac
+    ensure_running_container "$MODE"
+    name="$(container_name_for_mode "$MODE")"
+    # Re-run rsync and exit non-zero on failure
+    podman exec "$name" bash -lc "$REVIEW_PRELUDE_EXIT_ON_ERROR"
     ;;
   shell)
     name="$(container_name_for_mode "$MODE")"
