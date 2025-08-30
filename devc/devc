@@ -10,7 +10,7 @@ set -euo pipefail
 IMAGE_DEFAULT="devc/base:latest"
 MEM_LIMIT="${DEVC_MEM_LIMIT:-16g}"
 PIDS_LIMIT="${DEVC_PIDS_LIMIT:-2048}"
-REVIEW_PRELUDE='set -e; rsync -a --delete /src/ /workdir/;'
+REVIEW_PRELUDE='set -e; rsync -a --delete /src/ /workdir/ 2>/tmp/rsync.log || echo "Warning: rsync failed" >&2;'
 
 abs_path() { perl -MCwd=abs_path -e 'print abs_path(shift)' "$1"; }
 hash_short() { printf "%s" "$1" | sha256sum | cut -c1-12; }
@@ -294,24 +294,40 @@ exec_shell_in_container() {
   podman exec -it "$name" bash -l
 }
 
+# Add this helper near the other helpers
+join_cmd() {
+  local out="" first=1 arg esc
+  for arg in "$@"; do
+    printf -v esc '%q' "$arg"
+    if [[ $first -eq 1 ]]; then
+      out="$esc"; first=0
+    else
+      out+=" $esc"
+    fi
+  done
+  printf '%s' "$out"
+}
+
 exec_run_in_container() {
   local mode="$1"; shift
   local name; name="$(container_name_for_mode "$mode")"
-  podman exec -it "$name" bash -lc "$*"
+  local cmd; cmd="$(join_cmd "$@")"
+  podman exec -it "$name" bash -lc "$cmd"
 }
 
 one_off_shell() {
   local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
+  local one_off_name="${name}-oneoff-$$"
   local -a args=()
   build_run_args "$mode" args
   case "$mode" in
     review|quarantine)
-      podman run --rm -it --name "$name" \
+      podman run --rm -it --name "$one_off_name" \
         "${args[@]}" \
         "$IMAGE" bash -lc "$REVIEW_PRELUDE cd /workdir; exec bash -l"
       ;;
     *)
-      podman run --rm -it --name "$name" \
+      podman run --rm -it --name "$one_off_name" \
         "${args[@]}" \
         "$IMAGE" bash -l
       ;;
@@ -320,19 +336,20 @@ one_off_shell() {
 
 one_off_run() {
   local mode="$1"; shift
-  local name; name="$(container_name_for_mode "$mode")"
+  local name; name="$(container_name_for_mode "$mode")-oneoff-$$"
   local -a args=()
   build_run_args "$mode" args
+  local cmd; cmd="$(join_cmd "$@")"
   case "$mode" in
     review|quarantine)
       podman run --rm -it --name "$name" \
         "${args[@]}" \
-        "$IMAGE" bash -lc "$REVIEW_PRELUDE cd /workdir; $*"
+        "$IMAGE" bash -lc "$REVIEW_PRELUDE cd /workdir; $cmd"
       ;;
     *)
       podman run --rm -it --name "$name" \
         "${args[@]}" \
-        "$IMAGE" bash -lc "$*"
+        "$IMAGE" bash -lc "$cmd"
       ;;
   esac
 }
@@ -342,7 +359,7 @@ status_one() {
   if container_exists "$name"; then
     podman ps -a --filter "name=$name" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
   else
-    echo "$name\t<absent>\t$IMAGE"
+    printf "%s\t%s\t%s\n" "$name" "<absent>" "$IMAGE"
   fi
 }
 
@@ -374,15 +391,11 @@ case "$COMMAND" in
     ;;
   shell)
     name="$(container_name_for_mode "$MODE")"
-    if container_running "$name"; then
-      exec_shell_in_container "$MODE"
+    if [[ "$ONE_OFF" -eq 1 ]]; then
+      one_off_shell "$MODE"
     else
-      if [[ "$ONE_OFF" -eq 1 ]]; then
-        one_off_shell "$MODE"
-      else
-        ensure_running_container "$MODE"
-        exec_shell_in_container "$MODE"
-      fi
+      ensure_running_container "$MODE"
+      exec_shell_in_container "$MODE"
     fi
     ;;
   run)
@@ -392,15 +405,11 @@ case "$COMMAND" in
       exit 2
     fi
     name="$(container_name_for_mode "$MODE")"
-    if container_running "$name"; then
-      exec_run_in_container "$MODE" "${CMD_ARGS[@]}"
+    if [[ "$ONE_OFF" -eq 1 ]]; then
+      one_off_run "$MODE" "${CMD_ARGS[@]}"
     else
-      if [[ "$ONE_OFF" -eq 1 ]]; then
-        one_off_run "$MODE" "${CMD_ARGS[@]}"
-      else
-        ensure_running_container "$MODE"
-        exec_run_in_container "$MODE" "${CMD_ARGS[@]}"
-      fi
+      ensure_running_container "$MODE"
+      exec_run_in_container "$MODE" "${CMD_ARGS[@]}"
     fi
     ;;
 esac
