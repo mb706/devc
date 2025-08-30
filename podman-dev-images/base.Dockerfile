@@ -10,7 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 # Non-root default user (id doesn't have to match host; we will map with keep-id)
-RUN useradd -m -u 1000 -s /bin/bash dev
+RUN userdel -r ubuntu 2>/dev/null || true \
+ && groupdel ubuntu 2>/dev/null || true \
+ && groupadd -g 1000 dev \
+ && useradd -m -u 1000 -g 1000 -s /bin/bash dev
+
 WORKDIR /workspace
 USER dev
 
