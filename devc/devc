@@ -10,6 +10,7 @@ set -euo pipefail
 IMAGE_DEFAULT="devc/base:latest"
 MEM_LIMIT="${DEVC_MEM_LIMIT:-16g}"
 PIDS_LIMIT="${DEVC_PIDS_LIMIT:-2048}"
+REVIEW_PRELUDE='set -e; rsync -a --delete /src/ /workdir/;'
 
 abs_path() { perl -MCwd=abs_path -e 'print abs_path(shift)' "$1"; }
 hash_short() { printf "%s" "$1" | sha256sum | cut -c1-12; }
@@ -209,6 +210,24 @@ ensure_scratch_volume() {
   podman volume exists "$vol" || podman volume create "$vol" >/dev/null
 }
 
+# Central cache volumes list: "volume:target"
+CACHE_VOLUMES=(
+  "devc_pip_cache:/home/dev/.cache/pip"
+  "devc_npm_cache:/home/dev/.npm"
+  "devc_renv_cache:/home/dev/.cache/R/renv"
+  "devc_rpackages_cache:/home/dev/R"
+)
+
+add_cache_mounts() {
+  local rwmode="$1"  # ro|rw
+  local -n out="$2"
+  local entry src target
+  for entry in "${CACHE_VOLUMES[@]}"; do
+    src="${entry%%:*}"; target="${entry#*:}"
+    out+=( --mount=type=volume,src="$src",target="$target",${rwmode},z )
+  done
+}
+
 # Build podman run args into provided array variable name
 build_run_args() {
   local mode="$1"
@@ -224,24 +243,14 @@ build_run_args() {
   fi
   case "$mode" in
     work)
-      out+=(
-        --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z
-        --mount=type=volume,src=devc_pip_cache,target=/home/dev/.cache/pip,ro,z
-        --mount=type=volume,src=devc_npm_cache,target=/home/dev/.npm,ro,z
-        --mount=type=volume,src=devc_renv_cache,target=/home/dev/.cache/R/renv,ro,z
-        --mount=type=volume,src=devc_rpackages_cache,target=/home/dev/R,ro,z
-        --workdir=/workspace
-      )
+      out+=( --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z )
+      add_cache_mounts ro out
+      out+=( --workdir=/workspace )
       ;;
     install)
-      out+=(
-        --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z
-        --mount=type=volume,src=devc_pip_cache,target=/home/dev/.cache/pip,rw,z
-        --mount=type=volume,src=devc_npm_cache,target=/home/dev/.npm,rw,z
-        --mount=type=volume,src=devc_renv_cache,target=/home/dev/.cache/R/renv,rw,z
-        --mount=type=volume,src=devc_rpackages_cache,target=/home/dev/R,rw,z
-        --workdir=/home/dev
-      )
+      out+=( --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z )
+      add_cache_mounts rw out
+      out+=( --workdir=/home/dev )
       ;;
     review|quarantine)
       ensure_scratch_volume
@@ -249,12 +258,9 @@ build_run_args() {
       out+=(
         --mount=type=bind,src="$PROJ_DIR",target=/src,ro,z
         --mount=type=volume,src="$scratch_vol",target=/workdir
-        --mount=type=volume,src=devc_pip_cache,target=/home/dev/.cache/pip,ro,z
-        --mount=type=volume,src=devc_npm_cache,target=/home/dev/.npm,ro,z
-        --mount=type=volume,src=devc_renv_cache,target=/home/dev/.cache/R/renv,ro,z
-        --mount=type=volume,src=devc_rpackages_cache,target=/home/dev/R,ro,z
-        --workdir=/workdir
       )
+      add_cache_mounts ro out
+      out+=( --workdir=/workdir )
       ;;
   esac
 }
@@ -273,7 +279,7 @@ ensure_running_container() {
     review|quarantine)
       podman run -d --name "$name" \
         "${args[@]}" \
-        "$IMAGE" bash -lc 'set -e; rsync -a --delete /src/ /workdir/; sleep infinity'
+        "$IMAGE" bash -lc "$REVIEW_PRELUDE exec sleep infinity"
       ;;
     *)
       podman run -d --name "$name" \
@@ -285,7 +291,7 @@ ensure_running_container() {
 
 exec_shell_in_container() {
   local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
-  podman exec -it "$name" bash -lc 'exec bash -l'
+  podman exec -it "$name" bash -l
 }
 
 exec_run_in_container() {
@@ -302,12 +308,12 @@ one_off_shell() {
     review|quarantine)
       podman run --rm -it --name "$name" \
         "${args[@]}" \
-        "$IMAGE" bash -lc 'set -e; rsync -a --delete /src/ /workdir/; cd /workdir; exec bash -l'
+        "$IMAGE" bash -lc "$REVIEW_PRELUDE cd /workdir; exec bash -l"
       ;;
     *)
       podman run --rm -it --name "$name" \
         "${args[@]}" \
-        "$IMAGE" bash -lc 'exec bash -l'
+        "$IMAGE" bash -l
       ;;
   esac
 }
@@ -321,7 +327,7 @@ one_off_run() {
     review|quarantine)
       podman run --rm -it --name "$name" \
         "${args[@]}" \
-        "$IMAGE" bash -lc "set -e; rsync -a --delete /src/ /workdir/; cd /workdir; $*"
+        "$IMAGE" bash -lc "$REVIEW_PRELUDE cd /workdir; $*"
       ;;
     *)
       podman run --rm -it --name "$name" \
