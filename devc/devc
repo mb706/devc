@@ -210,6 +210,14 @@ ensure_scratch_volume() {
   podman volume exists "$vol" || podman volume create "$vol" >/dev/null
 }
 
+ensure_cache_volumes() {
+  local entry src
+  for entry in "${CACHE_VOLUMES[@]}"; do
+    src="${entry%%:*}"
+    podman volume exists "$src" || podman volume create "$src" >/dev/null
+  done
+}
+
 # Central cache volumes list: "volume:target"
 CACHE_VOLUMES=(
   "devc_pip_cache:/home/dev/.cache/pip"
@@ -222,6 +230,7 @@ add_cache_mounts() {
   local rwmode="$1"  # ro|rw
   local -n out="$2"
   local entry src target
+  ensure_cache_volumes
   for entry in "${CACHE_VOLUMES[@]}"; do
     src="${entry%%:*}"; target="${entry#*:}"
     out+=( --mount=type=volume,src="$src",target="$target",${rwmode},z )
@@ -233,7 +242,7 @@ build_run_args() {
   local mode="$1"
   local -n out="$2"
   out=(
-    --userns=keep-id --user "1000":"1000"
+    --userns=keep-id:uid=1000,gid=1000
     --cap-drop=ALL --security-opt=no-new-privileges
     --pids-limit="$PIDS_LIMIT" --memory="$MEM_LIMIT"
     --ipc=private --uts=private --cgroupns=private
