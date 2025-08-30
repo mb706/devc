@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Minimal repo-agnostic Podman dev wrapper
+# Usage examples:
+#   devc shell                 # trusted dev shell (rw mount)
+#   devc review-shell          # review shell (ro mount + copy to scratch)
+#   devc quarantine-shell      # strict review (ro mount, no network)
+#   devc run pytest -q         # run a command once in the per-repo container
+#   devc stop                  # stop the per-repo container
+#   devc status                # show container status
+#   devc shell --image devc/polyglot:latest   # override image
+
+IMAGE_DEFAULT="devc/base:latest"
+MEM_LIMIT="${DEVC_MEM_LIMIT:-16g}"
+PIDS_LIMIT="${DEVC_PIDS_LIMIT:-2048}"
+
+# Determine project dir (git toplevel if available; else PWD)
+if git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  PROJ_DIR="$git_root"
+else
+  PROJ_DIR="$PWD"
+fi
+
+abs_path() { perl -MCwd=abs_path -e 'print abs_path(shift)' "$1"; }
+PROJ_DIR="$(abs_path "$PROJ_DIR")"
+
+# name derived from absolute path (safe for many parallel repos/worktrees)
+hash_short() { printf "%s" "$1" | sha256sum | cut -c1-12; }
+CNAME="devc-$(basename "$PROJ_DIR")-$(hash_short "$PROJ_DIR")"
+
+# Try to detect a better image by project type (override with --image)
+detect_image() {
+  if [[ -f "$PROJ_DIR/pyproject.toml" || -f "$PROJ_DIR/requirements.txt" ]]; then
+    echo "devc/base:latest"   # could be devc/python:3.12 later
+  elif [[ -f "$PROJ_DIR/renv.lock" || -f "$PROJ_DIR/DESCRIPTION" ]]; then
+    echo "devc/r-base:latest"   # could be devc/r:4.x later
+  elif [[ -f "$PROJ_DIR/package.json" ]]; then
+    echo "devc/base:latest"   # could be devc/node:20 later
+  elif [[ -f "$PROJ_DIR/Cargo.toml" ]]; then
+    echo "devc/base:latest"   # could be devc/rust:1.80 later
+  else
+    echo "$IMAGE_DEFAULT"
+  fi
+}
+
+IMAGE="$IMAGE_DEFAULT"
+# Parse optional --image override
+if [[ "${1:-}" == "--image" ]]; then
+  IMAGE="$2"; shift 2
+else
+  IMAGE="$(detect_image)"
+fi
+
+COMMONARGS=
+
+if [[ "${1:-}" == "--cache-rw" ]]; then
+  MODE="-cache-rw"; shift 1
+  MOUNTSUFFIX=""
+  WORKDIR=/home/dev
+else
+  MODE="";
+  MOUNTSUFFIX=",ro"
+  WORKDIR=/workspace
+fi
+
+ensure_running_container() {
+  # Start the per-repo container if not running, with a minimal trusted profile.
+  if ! podman container exists "${CNAME}${MODE}"; then
+    :
+  fi
+  if [[ "$(podman inspect -f '{{.State.Running}}' "${CNAME}${MODE}" 2>/dev/null || echo false)" != "true" ]]; then
+    podman run -d --name "${CNAME}${MODE}" \
+      --userns=keep-id --user "1000":"1000" \
+      --cap-drop=ALL --security-opt=no-new-privileges \
+      --pids-limit="$PIDS_LIMIT" --memory="$MEM_LIMIT" \
+      --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z \      --userns=keep-id --user "1000":"1000" \
+      --cap-drop=ALL --security-opt=no-new-privileges \
+      --pids-limit="$PIDS_LIMIT" --memory="$MEM_LIMIT" \
+      --mount=type=volume,src=devc_pip_cache,target=/home/dev/.cache/pip,z$MOUNTSUFFIX \
+      --mount=type=volume,src=devc_npm_cache,target=/home/dev/.npm,z$MOUNTSUFFIX \
+      --mount=type=volume,src=devc_renv_cache,target=/home/dev/.cache/R/renv,z$MOUNTSUFFIX \
+      --mount=type=volume,src=devc_rpackages_cache,target=/home/dev/R,z$MOUNTSUFFIX \
+      --workdir=$WORKDIR \
+      --ipc=private --uts=private --cgroupns=private \
+      "$IMAGE" sleep infinity
+  fi
+}
+
+shell_trusted() {
+  ensure_running_container
+  podman exec -it "${CNAME}${MODE}" bash -lc 'exec bash -l'
+}
+
+shell_review_common() {
+  # Read-only source, writable scratch volume; copy on entry.
+  local mode="$1"  # "review" or "quarantine"
+  local net_args=()
+  if [[ "$mode" == "quarantine" ]]; then
+    net_args+=(--network none)
+  fi
+
+  local scratch_vol="devc_scratch_$(hash_short "$PROJ_DIR")"
+  podman volume exists "$scratch_vol" || podman volume create "$scratch_vol"
+
+  podman run --rm -it --name "$CNAME-$mode" \
+    --userns=keep-id --user "1000":"1000" \
+    --cap-drop=ALL --security-opt=no-new-privileges \
+    --pids-limit="$PIDS_LIMIT" --memory="$MEM_LIMIT" \
+    --mount=type=bind,src="$PROJ_DIR",target=/src,ro,z \
+    --mount=type=volume,src="$scratch_vol",target=/work \
+    --mount=type=volume,src=devc_pip_cache,target=/home/dev/.cache/pip,ro,z \
+    --mount=type=volume,src=devc_npm_cache,target=/home/dev/.npm,ro,z \
+    --mount=type=volume,src=devc_renv_cache,target=/home/dev/.cache/R/renv,ro,z \
+    --mount=type=volume,src=devc_rpackages_cache,target=/home/dev/R,ro,z \
+    --workdir=/work \
+    --ipc=private --uts=private --cgroupns=private \
+    "${net_args[@]}" \
+    "$IMAGE" bash -lc 'set -e; rsync -a --delete /src/ /work/; cd /work; exec bash -l'
+}
+
+run_in_container() {
+  ensure_running_container
+  podman exec -it "$CNAME" bash -lc "$*"
+}
+
+stop_container() {
+  if podman container exists "$CNAME${MODE}"; then
+    podman stop "$CNAME${MODE}" >/dev/null || true
+    podman rm "$CNAME${MODE}" >/dev/null || true
+  fi
+}
+
+status_container() {
+  if podman container exists "$CNAME"; then
+    podman ps --filter "name=$CNAME" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+  else
+    echo "No container present for $PROJ_DIR ($CNAME)."
+  fi
+}
+
+cmd="${1:-shell}"
+shift || true
+
+case "$cmd" in
+  shell)            shell_trusted ;;
+  review-shell)     shell_review_common "review" ;;
+  quarantine-shell) shell_review_common "quarantine" ;;
+  run)              run_in_container "$*" ;;
+  stop)             stop_container ;;
+  status)           status_container ;;
+  *)
+    echo "Unknown command: $cmd
+Usage:
+  devc [--image IMG] shell|review-shell|quarantine-shell|run CMD...|stop|status" >&2
+    exit 1
+  ;;
+esac
+
