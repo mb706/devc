@@ -1,159 +1,401 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Minimal repo-agnostic Podman dev wrapper
-# Usage examples:
-#   devc shell                 # trusted dev shell (rw mount)
-#   devc review-shell          # review shell (ro mount + copy to scratch)
-#   devc quarantine-shell      # strict review (ro mount, no network)
-#   devc run pytest -q         # run a command once in the per-repo container
-#   devc stop                  # stop the per-repo container
-#   devc status                # show container status
-#   devc shell --image devc/polyglot:latest   # override image
+# Podman dev container wrapper (refactored)
+# UI: devc [options...] [command] [mode] <command-args...>
+#   commands: start | stop | status | shell | run
+#   modes:    install | work | review | quarantine
+#   options:  --image|-i IMG  --projdir|-p DIR  --cwd|-d DIR  --one-off|-1  --help|-h
 
 IMAGE_DEFAULT="devc/base:latest"
 MEM_LIMIT="${DEVC_MEM_LIMIT:-16g}"
 PIDS_LIMIT="${DEVC_PIDS_LIMIT:-2048}"
 
-# Determine project dir (git toplevel if available; else PWD)
-if git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-  PROJ_DIR="$git_root"
-else
-  PROJ_DIR="$PWD"
+abs_path() { perl -MCwd=abs_path -e 'print abs_path(shift)' "$1"; }
+hash_short() { printf "%s" "$1" | sha256sum | cut -c1-12; }
+
+usage_short() {
+  echo "Usage: devc [options...] [command] [mode] <command-args...>" >&2
+  echo "Try 'devc --help' for more information." >&2
+}
+
+usage_help() {
+  cat <<'EOF'
+Usage:
+  devc [options...] [command] [mode] <command-args...>
+
+Commands:
+  start      Ensure container for project/mode is running (sleep infinity)
+  stop       Stop and remove container for project/mode
+  status     Show container status; with [mode] show only that container
+  shell      Start container and open interactive shell
+  run        Run a shell command inside the container
+
+Modes:
+  install    Cache volumes read-write; workdir /home/dev; project mounted rw
+  work       Cache volumes read-only; workdir /workspace; project mounted rw
+  review     All mounts read-only; project at /src; rsync to scratch at /workdir
+  quarantine Like review but with network disabled
+
+Options:
+  -i, --image IMG     Image to use (default auto-detected per project)
+  -p, --projdir DIR   Project directory (absolute or relative to original PWD)
+  -d, --cwd DIR       Change working directory before resolving project
+  -1, --one-off       For shell/run: if container not running, use one-off run
+  -h, --help          Show this help and exit
+
+Notes:
+  - For 'status', [mode] is optional; otherwise [mode] is required.
+  - Final PWD must be the project directory or a subdirectory thereof.
+EOF
+}
+
+# Parse options first (do not perform actions yet)
+ORIG_PWD="$PWD"
+OPT_IMAGE=""
+OPT_PROJDIR=""
+OPT_CWD=""
+ONE_OFF=0
+
+ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "${1}" in
+    -h|--help)
+      usage_help
+      exit 0
+      ;;
+    -i|--image)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      OPT_IMAGE="$2"; shift 2; continue
+      ;;
+    -p|--projdir)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      OPT_PROJDIR="$2"; shift 2; continue
+      ;;
+    -d|--cwd)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      OPT_CWD="$2"; shift 2; continue
+      ;;
+    -1|--one-off)
+      ONE_OFF=1; shift; continue
+      ;;
+    --)
+      shift; break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage_short
+      exit 2
+      ;;
+    *)
+      ARGS+=("$1"); shift; continue
+      ;;
+  esac
+done
+if [[ $# -gt 0 ]]; then
+  ARGS+=("$@")
 fi
 
-abs_path() { perl -MCwd=abs_path -e 'print abs_path(shift)' "$1"; }
+# Evaluate --cwd first
+if [[ -n "$OPT_CWD" ]]; then
+  cd "$OPT_CWD"
+fi
+
+# Resolve project directory
+if [[ -n "$OPT_PROJDIR" ]]; then
+  if [[ "$OPT_PROJDIR" = /* ]]; then
+    PROJ_DIR="$OPT_PROJDIR"
+  else
+    PROJ_DIR="$ORIG_PWD/$OPT_PROJDIR"
+  fi
+else
+  if git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    PROJ_DIR="$git_root"
+  else
+    PROJ_DIR="$PWD"
+  fi
+fi
 PROJ_DIR="$(abs_path "$PROJ_DIR")"
 
-# name derived from absolute path (safe for many parallel repos/worktrees)
-hash_short() { printf "%s" "$1" | sha256sum | cut -c1-12; }
+# Ensure current directory is within project directory
+CUR_PWD="$(pwd -P)"
+case "$CUR_PWD" in
+  "$PROJ_DIR"|"$PROJ_DIR"/*) ;;
+  *)
+    echo "Error: Current directory ($CUR_PWD) must be within project directory ($PROJ_DIR)." >&2
+    exit 2
+    ;;
+esac
+
+# Container base name from project
 CNAME="devc-$(basename "$PROJ_DIR")-$(hash_short "$PROJ_DIR")"
 
-# Try to detect a better image by project type (override with --image)
+# Detect image if not overridden
 detect_image() {
   if [[ -f "$PROJ_DIR/pyproject.toml" || -f "$PROJ_DIR/requirements.txt" ]]; then
-    echo "devc/base:latest"   # could be devc/python:3.12 later
+    echo "devc/base:latest"
   elif [[ -f "$PROJ_DIR/renv.lock" || -f "$PROJ_DIR/DESCRIPTION" ]]; then
-    echo "devc/r-base:latest"   # could be devc/r:4.x later
+    echo "devc/r-base:latest"
   elif [[ -f "$PROJ_DIR/package.json" ]]; then
-    echo "devc/base:latest"   # could be devc/node:20 later
+    echo "devc/base:latest"
   elif [[ -f "$PROJ_DIR/Cargo.toml" ]]; then
-    echo "devc/base:latest"   # could be devc/rust:1.80 later
+    echo "devc/base:latest"
   else
     echo "$IMAGE_DEFAULT"
   fi
 }
+IMAGE="${OPT_IMAGE:-$(detect_image)}"
 
-IMAGE="$IMAGE_DEFAULT"
-# Parse optional --image override
-if [[ "${1:-}" == "--image" ]]; then
-  IMAGE="$2"; shift 2
-else
-  IMAGE="$(detect_image)"
+# Positional parsing: [command] [mode] <command-args...>
+COMMAND="${ARGS[0]:-}"
+if [[ -z "$COMMAND" ]]; then
+  usage_short
+  exit 2
 fi
 
-COMMONARGS=
+ALLOWED_COMMANDS=(start stop status shell run)
+case " $COMMAND " in
+  " start "|" stop "|" status "|" shell "|" run ") ;;
+  *)
+    echo "Unknown command: $COMMAND" >&2
+    usage_short
+    exit 2
+    ;;
+esac
 
-if [[ "${1:-}" == "--cache-rw" ]]; then
-  MODE="-cache-rw"; shift 1
-  MOUNTSUFFIX=""
-  WORKDIR=/home/dev
-else
-  MODE="";
-  MOUNTSUFFIX=",ro"
-  WORKDIR=/workspace
+MODE="${ARGS[1]:-}"
+ALLOWED_MODES=(install work review quarantine)
+is_valid_mode() {
+  case " $1 " in
+    " install "|" work "|" review "|" quarantine ") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [[ "$COMMAND" != "status" ]]; then
+  if [[ -z "$MODE" ]]; then
+    echo "Missing mode. Expected one of: install|work|review|quarantine" >&2
+    usage_short
+    exit 2
+  fi
+  if ! is_valid_mode "$MODE"; then
+    echo "Invalid mode: $MODE (expected install|work|review|quarantine)" >&2
+    exit 2
+  fi
 fi
+
+# Remaining args for 'run'
+CMD_ARGS=()
+if [[ "$COMMAND" == "status" ]]; then
+  if [[ -n "$MODE" ]] && ! is_valid_mode "$MODE"; then
+    echo "Invalid mode: $MODE (expected install|work|review|quarantine)" >&2
+    exit 2
+  fi
+  CMD_ARGS=("${ARGS[@]:2}")
+else
+  CMD_ARGS=("${ARGS[@]:2}")
+fi
+
+# Helper: names and state
+container_name_for_mode() { echo "${CNAME}-${1}"; }
+container_exists() { podman container exists "$1"; }
+container_running() {
+  [[ "$(podman inspect -f '{{.State.Running}}' "$1" 2>/dev/null || echo false)" == "true" ]]
+}
+scratch_vol_name() { echo "devc_scratch_$(hash_short "$PROJ_DIR")"; }
+
+ensure_scratch_volume() {
+  local vol; vol="$(scratch_vol_name)"
+  podman volume exists "$vol" || podman volume create "$vol" >/dev/null
+}
+
+# Build podman run args into provided array variable name
+build_run_args() {
+  local mode="$1"
+  local -n out="$2"
+  out=(
+    --userns=keep-id --user "1000":"1000"
+    --cap-drop=ALL --security-opt=no-new-privileges
+    --pids-limit="$PIDS_LIMIT" --memory="$MEM_LIMIT"
+    --ipc=private --uts=private --cgroupns=private
+  )
+  if [[ "$mode" == "quarantine" ]]; then
+    out+=(--network none)
+  fi
+  case "$mode" in
+    work)
+      out+=(
+        --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z
+        --mount=type=volume,src=devc_pip_cache,target=/home/dev/.cache/pip,ro,z
+        --mount=type=volume,src=devc_npm_cache,target=/home/dev/.npm,ro,z
+        --mount=type=volume,src=devc_renv_cache,target=/home/dev/.cache/R/renv,ro,z
+        --mount=type=volume,src=devc_rpackages_cache,target=/home/dev/R,ro,z
+        --workdir=/workspace
+      )
+      ;;
+    install)
+      out+=(
+        --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z
+        --mount=type=volume,src=devc_pip_cache,target=/home/dev/.cache/pip,rw,z
+        --mount=type=volume,src=devc_npm_cache,target=/home/dev/.npm,rw,z
+        --mount=type=volume,src=devc_renv_cache,target=/home/dev/.cache/R/renv,rw,z
+        --mount=type=volume,src=devc_rpackages_cache,target=/home/dev/R,rw,z
+        --workdir=/home/dev
+      )
+      ;;
+    review|quarantine)
+      ensure_scratch_volume
+      local scratch_vol; scratch_vol="$(scratch_vol_name)"
+      out+=(
+        --mount=type=bind,src="$PROJ_DIR",target=/src,ro,z
+        --mount=type=volume,src="$scratch_vol",target=/workdir
+        --mount=type=volume,src=devc_pip_cache,target=/home/dev/.cache/pip,ro,z
+        --mount=type=volume,src=devc_npm_cache,target=/home/dev/.npm,ro,z
+        --mount=type=volume,src=devc_renv_cache,target=/home/dev/.cache/R/renv,ro,z
+        --mount=type=volume,src=devc_rpackages_cache,target=/home/dev/R,ro,z
+        --workdir=/workdir
+      )
+      ;;
+  esac
+}
 
 ensure_running_container() {
-  # Start the per-repo container if not running, with a minimal trusted profile.
-  if ! podman container exists "${CNAME}${MODE}"; then
-    :
+  local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
+  if container_running "$name"; then return 0; fi
+  if container_exists "$name"; then
+    # Start previously created container
+    podman start "$name" >/dev/null
+    return 0
   fi
-  if [[ "$(podman inspect -f '{{.State.Running}}' "${CNAME}${MODE}" 2>/dev/null || echo false)" != "true" ]]; then
-    podman run -d --name "${CNAME}${MODE}" \
-      --userns=keep-id --user "1000":"1000" \
-      --cap-drop=ALL --security-opt=no-new-privileges \
-      --pids-limit="$PIDS_LIMIT" --memory="$MEM_LIMIT" \
-      --mount=type=bind,src="$PROJ_DIR",target=/workspace,rw,z \      --userns=keep-id --user "1000":"1000" \
-      --cap-drop=ALL --security-opt=no-new-privileges \
-      --pids-limit="$PIDS_LIMIT" --memory="$MEM_LIMIT" \
-      --mount=type=volume,src=devc_pip_cache,target=/home/dev/.cache/pip,z$MOUNTSUFFIX \
-      --mount=type=volume,src=devc_npm_cache,target=/home/dev/.npm,z$MOUNTSUFFIX \
-      --mount=type=volume,src=devc_renv_cache,target=/home/dev/.cache/R/renv,z$MOUNTSUFFIX \
-      --mount=type=volume,src=devc_rpackages_cache,target=/home/dev/R,z$MOUNTSUFFIX \
-      --workdir=$WORKDIR \
-      --ipc=private --uts=private --cgroupns=private \
-      "$IMAGE" sleep infinity
-  fi
+  local -a args=()
+  build_run_args "$mode" args
+  case "$mode" in
+    review|quarantine)
+      podman run -d --name "$name" \
+        "${args[@]}" \
+        "$IMAGE" bash -lc 'set -e; rsync -a --delete /src/ /workdir/; sleep infinity'
+      ;;
+    *)
+      podman run -d --name "$name" \
+        "${args[@]}" \
+        "$IMAGE" sleep infinity
+      ;;
+  esac
 }
 
-shell_trusted() {
-  ensure_running_container
-  podman exec -it "${CNAME}${MODE}" bash -lc 'exec bash -l'
+exec_shell_in_container() {
+  local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
+  podman exec -it "$name" bash -lc 'exec bash -l'
 }
 
-shell_review_common() {
-  # Read-only source, writable scratch volume; copy on entry.
-  local mode="$1"  # "review" or "quarantine"
-  local net_args=()
-  if [[ "$mode" == "quarantine" ]]; then
-    net_args+=(--network none)
-  fi
-
-  local scratch_vol="devc_scratch_$(hash_short "$PROJ_DIR")"
-  podman volume exists "$scratch_vol" || podman volume create "$scratch_vol"
-
-  podman run --rm -it --name "$CNAME-$mode" \
-    --userns=keep-id --user "1000":"1000" \
-    --cap-drop=ALL --security-opt=no-new-privileges \
-    --pids-limit="$PIDS_LIMIT" --memory="$MEM_LIMIT" \
-    --mount=type=bind,src="$PROJ_DIR",target=/src,ro,z \
-    --mount=type=volume,src="$scratch_vol",target=/work \
-    --mount=type=volume,src=devc_pip_cache,target=/home/dev/.cache/pip,ro,z \
-    --mount=type=volume,src=devc_npm_cache,target=/home/dev/.npm,ro,z \
-    --mount=type=volume,src=devc_renv_cache,target=/home/dev/.cache/R/renv,ro,z \
-    --mount=type=volume,src=devc_rpackages_cache,target=/home/dev/R,ro,z \
-    --workdir=/work \
-    --ipc=private --uts=private --cgroupns=private \
-    "${net_args[@]}" \
-    "$IMAGE" bash -lc 'set -e; rsync -a --delete /src/ /work/; cd /work; exec bash -l'
+exec_run_in_container() {
+  local mode="$1"; shift
+  local name; name="$(container_name_for_mode "$mode")"
+  podman exec -it "$name" bash -lc "$*"
 }
 
-run_in_container() {
-  ensure_running_container
-  podman exec -it "$CNAME" bash -lc "$*"
+one_off_shell() {
+  local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
+  local -a args=()
+  build_run_args "$mode" args
+  case "$mode" in
+    review|quarantine)
+      podman run --rm -it --name "$name" \
+        "${args[@]}" \
+        "$IMAGE" bash -lc 'set -e; rsync -a --delete /src/ /workdir/; cd /workdir; exec bash -l'
+      ;;
+    *)
+      podman run --rm -it --name "$name" \
+        "${args[@]}" \
+        "$IMAGE" bash -lc 'exec bash -l'
+      ;;
+  esac
 }
 
-stop_container() {
-  if podman container exists "$CNAME${MODE}"; then
-    podman stop "$CNAME${MODE}" >/dev/null || true
-    podman rm "$CNAME${MODE}" >/dev/null || true
-  fi
+one_off_run() {
+  local mode="$1"; shift
+  local name; name="$(container_name_for_mode "$mode")"
+  local -a args=()
+  build_run_args "$mode" args
+  case "$mode" in
+    review|quarantine)
+      podman run --rm -it --name "$name" \
+        "${args[@]}" \
+        "$IMAGE" bash -lc "set -e; rsync -a --delete /src/ /workdir/; cd /workdir; $*"
+      ;;
+    *)
+      podman run --rm -it --name "$name" \
+        "${args[@]}" \
+        "$IMAGE" bash -lc "$*"
+      ;;
+  esac
 }
 
-status_container() {
-  if podman container exists "$CNAME"; then
-    podman ps --filter "name=$CNAME" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+status_one() {
+  local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
+  if container_exists "$name"; then
+    podman ps -a --filter "name=$name" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
   else
-    echo "No container present for $PROJ_DIR ($CNAME)."
+    echo "$name\t<absent>\t$IMAGE"
   fi
 }
 
-cmd="${1:-shell}"
-shift || true
+# Validate contradictory options
+if [[ "$ONE_OFF" -eq 1 && ( "$COMMAND" == "start" || "$COMMAND" == "stop" || "$COMMAND" == "status" ) ]]; then
+  echo "--one-off is only valid with 'shell' or 'run'." >&2
+  exit 2
+fi
 
-case "$cmd" in
-  shell)            shell_trusted ;;
-  review-shell)     shell_review_common "review" ;;
-  quarantine-shell) shell_review_common "quarantine" ;;
-  run)              run_in_container "$*" ;;
-  stop)             stop_container ;;
-  status)           status_container ;;
-  *)
-    echo "Unknown command: $cmd
-Usage:
-  devc [--image IMG] shell|review-shell|quarantine-shell|run CMD...|stop|status" >&2
-    exit 1
-  ;;
+case "$COMMAND" in
+  status)
+    if [[ -z "${MODE:-}" ]]; then
+      for m in install work review quarantine; do
+        status_one "$m"
+      done
+    else
+      status_one "$MODE"
+    fi
+    ;;
+  start)
+    ensure_running_container "$MODE"
+    ;;
+  stop)
+    name="$(container_name_for_mode "$MODE")"
+    if container_exists "$name"; then
+      podman stop "$name" >/dev/null || true
+      podman rm "$name" >/dev/null || true
+    fi
+    ;;
+  shell)
+    name="$(container_name_for_mode "$MODE")"
+    if container_running "$name"; then
+      exec_shell_in_container "$MODE"
+    else
+      if [[ "$ONE_OFF" -eq 1 ]]; then
+        one_off_shell "$MODE"
+      else
+        ensure_running_container "$MODE"
+        exec_shell_in_container "$MODE"
+      fi
+    fi
+    ;;
+  run)
+    if [[ ${#CMD_ARGS[@]} -eq 0 ]]; then
+      echo "Missing command to run." >&2
+      usage_short
+      exit 2
+    fi
+    name="$(container_name_for_mode "$MODE")"
+    if container_running "$name"; then
+      exec_run_in_container "$MODE" "${CMD_ARGS[@]}"
+    else
+      if [[ "$ONE_OFF" -eq 1 ]]; then
+        one_off_run "$MODE" "${CMD_ARGS[@]}"
+      else
+        ensure_running_container "$MODE"
+        exec_run_in_container "$MODE" "${CMD_ARGS[@]}"
+      fi
+    fi
+    ;;
 esac
 
