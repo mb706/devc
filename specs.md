@@ -6,7 +6,7 @@
 devc [options...] [command] [mode]  <command-args...>
 ```
 
-where `[mode]` is one of `quarantine`, `review`, `work`, `install`; and `[command]` is one of `start`, `stop`, `pause`, `restart`, `sync`, `status`, `shell`, and `run`. `[options...]` are optionally any of `--image|-i [imagename]`, `--projdir|-p [project directory]`, `--cwd|-d [working directory]`, `--one-off|-1`, `--help|-h`.
+where `[mode]` is one of `quarantine`, `review`, `work`, `install`; and `[command]` is one of `start`, `stop`, `pause`, `restart`, `sync`, `status`, `shell`, `cursor`, and `run`. `[options...]` are optionally any of `--image|-i [imagename]`, `--projdir|-p [project directory]`, `--cwd|-d [working directory]`, `--one-off|-1`, `--help|-h`.
 
 ## Modes
 
@@ -27,6 +27,7 @@ The `--name` of the container should be determined by the project name, director
 - `start` should ensure that the container is running in the background, basically with `sleep infinity`. If it is already started, `quarantine` / `review` should not re-rsync.
 - `stop` should stop and delete the container.
 - `shell` should start the container and start interactive shell in the container
+- `cursor` should ensure the container is running and open a Cursor window attached to the container. In `install` mode it should open a new window without a folder opened, to avoid automatically reading project files; in other modes it should open the `/workspace` folder. This requires the `cursor` CLI to be available on the host.
 - `run` should run a given shell command that is given in `<command args...>`.
 - `pause` should stop the container without deleting it
 - `restart` should be equivalent to `stop` and then `start`, i.e. stop the container, delete it, then start it again.
