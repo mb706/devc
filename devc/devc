@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Podman dev container wrapper (refactored)
 # UI: devc [options...] [command] [mode] <command-args...>
-#   commands: start | stop | pause | restart | sync | status | shell | run
+#   commands: start | stop | pause | restart | sync | status | shell | cursor | run
 #   modes:    install | work | review | quarantine
 #   options:  --image|-i IMG  --projdir|-p DIR  --cwd|-d DIR  --one-off|-1  --help|-h
 
@@ -11,10 +11,22 @@ IMAGE_DEFAULT="devc/base:latest"
 MEM_LIMIT="${DEVC_MEM_LIMIT:-16g}"
 PIDS_LIMIT="${DEVC_PIDS_LIMIT:-2048}"
 REVIEW_PRELUDE='rsync -a --delete /src/ /workspace/ 2>/tmp/rsync.log || echo "Warning: rsync failed" >&2;'
-REVIEW_PRELUDE_EXIT_ON_ERROR='rsync -a --delete /src/ /workspace/ 2>/tmp/rsync.log || (echo "Warning: rsync failed" >&2; exit 1)'
+REVIEW_PRELUDE_EXIT_ON_ERROR='rsync -a --delete /src/ /workspace/ 2>/tmp/rsync.log || (echo "rsync failed for workspace" >&2; exit 1)'
+CONFIG_PRELUDE_RSYNC='for entry in "$@"; do
+  src="${entry#*:}"
+  dst="${src%-cache}"
+  rsync -a --delete "$src" "$dst" ||  (echo "rsync failed for $src" >&2; exit 1)
+done;'
+CONFIG_PRELUDE_LINK='for entry in "$@"; do
+  src="${entry#*:}"
+  dst="${src%-cache}"
+  rm -rf -- "$dst" || (echo "rm failed for $dst" >&2; exit 1)
+  ln -s -- "$src" "$dst" || (echo "ln -s failed for $src" >&2; exit 1)
+done;'
 
 abs_path() { perl -MCwd=abs_path -e 'print abs_path(shift)' "$1"; }
 hash_short() { printf "%s" "$1" | sha256sum | cut -c1-12; }
+to_hex() { local s="$1"; if command -v xxd >/dev/null 2>&1; then printf '%s' "$s" | xxd -p -c 0; elif command -v hexdump >/dev/null 2>&1; then printf '%s' "$s" | hexdump -v -e '/1 "%02x"'; else printf '%s' "$s" | od -An -tx1 | tr -d ' \n'; fi }
 
 usage_short() {
   echo "Usage: devc [options...] [command] [mode] <command-args...>" >&2
@@ -34,6 +46,7 @@ Commands:
   sync       Re-run rsync to refresh /workspace (review/quarantine only)
   status     Show container status; with [mode] show only that container
   shell      Start container and open interactive shell
+  cursor     Ensure container is running and open Cursor attached to it
   run        Run a shell command inside the container
 
 Modes:
@@ -53,6 +66,7 @@ Notes:
   - For 'status', [mode] is optional; otherwise [mode] is required.
   - Final PWD must be the project directory or a subdirectory thereof.
   - 'sync' works only for review|quarantine and reruns rsync to refresh /workspace.
+  - 'cursor' requires the 'cursor' CLI on the host and opens /workspace.
 EOF
 }
 
@@ -171,9 +185,9 @@ if [[ -z "$COMMAND" ]]; then
   exit 2
 fi
 
-ALLOWED_COMMANDS=(start stop pause restart sync status shell run)
+ALLOWED_COMMANDS=(start stop pause restart sync status shell cursor run)
 case " $COMMAND " in
-  " start "|" stop "|" pause "|" restart "|" sync "|" status "|" shell "|" run ") ;;
+  " start "|" stop "|" pause "|" restart "|" sync "|" status "|" shell "|" cursor "|" run ") ;;
   *)
     echo "Unknown command: $COMMAND" >&2
     usage_short
@@ -245,7 +259,7 @@ ensure_scratch_volume() {
 
 ensure_cache_volumes() {
   local entry src
-  for entry in "${CACHE_VOLUMES[@]}"; do
+  for entry in "${CACHE_VOLUMES[@]}" "${CONFIG_VOLUMES[@]}"; do
     src="${entry%%:*}"
     podman volume exists "$src" || podman volume create "$src" >/dev/null
   done
@@ -258,6 +272,11 @@ CACHE_VOLUMES=(
   "devc_renv_cache:/home/dev/.cache/R/renv"
   "devc_rpackages_cache:/home/dev/R"
 )
+CONFIG_VOLUMES=(
+  "devc_cursor_dir:/home/dev/.cursor-server-cache"
+  "devc_claude_dir:/home/dev/.claude-cache"
+  "devc_config_dir:/home/dev/.config-cache"
+)
 
 add_cache_mounts() {
   local rwmode="$1"  # ro|rw
@@ -265,9 +284,9 @@ add_cache_mounts() {
   local -n __arr_ref="$out_var"
   local entry src target
   ensure_cache_volumes
-  for entry in "${CACHE_VOLUMES[@]}"; do
+  for entry in "${CACHE_VOLUMES[@]}" "${CONFIG_VOLUMES[@]}"; do
     src="${entry%%:*}"; target="${entry#*:}"
-    __arr_ref+=( --mount=type=volume,src="$src",target="$target",${rwmode},z )
+    __arr_ref+=( --mount=type=volume,src="$src",target="$target",${rwmode},relabel=shared )
   done
 }
 
@@ -335,9 +354,14 @@ ensure_running_container() {
   local -a args=()
   build_run_args "$mode" args
   # Always create containers with a simple long-running command
-  podman run -d --name "$name" \
+  podman run -d --init --name "$name" \
     "${args[@]}" \
     "$IMAGE" sleep infinity
+  if [[ "$mode" == "install" ]]; then
+    podman exec "$name" bash -lc "$CONFIG_PRELUDE_LINK" _ "${CONFIG_VOLUMES[@]}"
+  else
+    podman exec "$name" bash -lc "$CONFIG_PRELUDE_RSYNC" _ "${CONFIG_VOLUMES[@]}"
+  fi
   # For review/quarantine, perform initial one-time rsync into scratch volume
   case "$mode" in
     review|quarantine)
@@ -389,12 +413,19 @@ one_off_shell() {
       # cannot --workdir to target dir because it may not exist before REVIEW_PRELUDE.
       podman run --rm -it --name "$one_off_name" \
         "${args[@]}" \
-        "$IMAGE" bash -lc "$REVIEW_PRELUDE cd $(printf %q "$target"); exec bash -l"
+        "$IMAGE" bash -lc "$REVIEW_PRELUDE $CONFIG_PRELUDE_RSYNC cd $(printf %q "$target"); exec bash -l" _ "${CONFIG_VOLUMES[@]}"
+      ;;
+    install)
+      # link configs
+      # also
+      podman run --rm -it --workdir "$target" --name "$one_off_name" \
+        "${args[@]}" \
+        "$IMAGE" bash -lc "$CONFIG_PRELUDE_LINK exec bash -l" _ "${CONFIG_VOLUMES[@]}"
       ;;
     *)
       podman run --rm -it --workdir "$target" --name "$one_off_name" \
         "${args[@]}" \
-        "$IMAGE" bash -l
+        "$IMAGE" bash -lc "$CONFIG_PRELUDE_RSYNC exec bash -l" _ "${CONFIG_VOLUMES[@]}"
       ;;
   esac
 }
@@ -413,14 +444,15 @@ one_off_run() {
   case "$mode" in
     review|quarantine)
       # cannot --workdir to target dir because it may not exist before REVIEW_PRELUDE.
+      # we always link, one-off commands don't get to modify config files in non-install-modes
       podman run --rm -it --name "$name" \
         "${args[@]}" \
-        "$IMAGE" bash -lc "$REVIEW_PRELUDE_EXIT_ON_ERROR cd $(printf %q "$target"); $cmd"
+        "$IMAGE" bash -lc "$REVIEW_PRELUDE_EXIT_ON_ERROR $CONFIG_PRELUDE_LINK cd $(printf %q "$target"); $cmd"
       ;;
     *)
       podman run --rm -it --workdir "$target" --name "$name" \
         "${args[@]}" \
-        "$IMAGE" bash -lc "$cmd"
+        "$IMAGE" bash -lc "$CONFIG_PRELUDE_LINK $cmd"
       ;;
   esac
 }
@@ -435,7 +467,7 @@ status_one() {
 }
 
 # Validate contradictory options
-if [[ "$ONE_OFF" -eq 1 && ( "$COMMAND" == "start" || "$COMMAND" == "stop" || "$COMMAND" == "pause" || "$COMMAND" == "restart" || "$COMMAND" == "sync" || "$COMMAND" == "status" ) ]]; then
+if [[ "$ONE_OFF" -eq 1 && ( "$COMMAND" == "start" || "$COMMAND" == "stop" || "$COMMAND" == "pause" || "$COMMAND" == "restart" || "$COMMAND" == "sync" || "$COMMAND" == "status" || "$COMMAND" == "cursor" ) ]]; then
   echo "--one-off is only valid with 'shell' or 'run'." >&2
   exit 2
 fi
@@ -450,7 +482,7 @@ case "$COMMAND" in
       exit 2
     fi
     ;;
-  start|stop|pause|restart|sync|shell)
+  start|stop|pause|restart|sync|shell|cursor)
     if (( ${#ARGS[@]} > 2 )); then
       extras=("${ARGS[@]:2}")
       echo "Unexpected arguments for '$COMMAND': ${extras[*]}" >&2
@@ -521,6 +553,22 @@ case "$COMMAND" in
     else
       ensure_running_container "$MODE"
       exec_shell_in_container "$MODE"
+    fi
+    ;;
+  cursor)
+    # Ensure container is running, then open Cursor attached-container to /workspace
+    ensure_running_container "$MODE"
+    name="$(container_name_for_mode "$MODE")"
+    hex_name="$(to_hex "$name")"
+    if ! command -v cursor >/dev/null 2>&1; then
+      echo "Error: 'cursor' CLI not found on host PATH." >&2
+      echo "Install Cursor CLI and try again." >&2
+      exit 1
+    fi
+    if [[ "$MODE" == "install" ]]; then
+      cursor --new-window --file-uri "vscode-remote://attached-container+${hex_name}/"
+    else
+      cursor --folder-uri "vscode-remote://attached-container+${hex_name}/workspace"
     fi
     ;;
   run)
