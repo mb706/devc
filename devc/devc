@@ -222,6 +222,22 @@ container_running() {
 }
 scratch_vol_name() { echo "devc_scratch_$(hash_short "$PROJ_DIR")"; }
 
+# Prevent launching additional 'install' containers if any are already running
+ensure_no_install_running() {
+  local exclude_name="${1:-}"
+  local running
+  running="$(podman ps --format '{{.Names}}' | grep -E '^devc-.*-install($|-)' || true)"
+  if [[ -n "$exclude_name" ]]; then
+    running="$(printf '%s\n' "$running" | grep -v -x "$exclude_name" || true)"
+  fi
+  if [[ -n "$running" ]]; then
+    echo "Error: Refusing to launch 'install' mode container while another 'install' container is running:" >&2
+    echo "  $(printf '%s' "$running" | tr '\n' ' ')" >&2
+    echo "Only one install-mode container may run at a time due to shared cache volumes." >&2
+    exit 1
+  fi
+}
+
 ensure_scratch_volume() {
   local vol; vol="$(scratch_vol_name)"
   podman volume exists "$vol" || podman volume create "$vol" >/dev/null
@@ -308,6 +324,10 @@ build_run_args() {
 ensure_running_container() {
   local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
   if container_running "$name"; then return 0; fi
+  # Prevent multiple concurrent 'install' containers across projects
+  if [[ "$mode" == "install" ]]; then
+    ensure_no_install_running "$name"
+  fi
   if container_exists "$name"; then
     podman start "$name" >/dev/null
     return 0
@@ -357,6 +377,10 @@ exec_run_in_container() {
 one_off_shell() {
   local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
   local one_off_name="${name}-oneoff-$$"
+  # Prevent one-off launch if any install container is already running
+  if [[ "$mode" == "install" ]]; then
+    ensure_no_install_running
+  fi
   local -a args=()
   build_run_args "$mode" args
   local target; container_target_dir "$mode" target
@@ -378,6 +402,10 @@ one_off_shell() {
 one_off_run() {
   local mode="$1"; shift
   local name; name="$(container_name_for_mode "$mode")-oneoff-$$"
+  # Prevent one-off launch if any install container is already running
+  if [[ "$mode" == "install" ]]; then
+    ensure_no_install_running
+  fi
   local -a args=()
   build_run_args "$mode" args
   local cmd; cmd="$(join_cmd "$@")"
