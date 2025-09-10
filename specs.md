@@ -45,6 +45,25 @@ The other options:
 - `--help` should give some informative help message. If `--help` is given, everything else should be ignored, and it should be possible to do `--help` without any other arguments.
 - if no args are given, or if the given arguments are wrong or contradictory, a short message should be printed, indicating how the command should be executed.
 
+## Caches and configuration
+
+- Standard language caches should be persisted via named volumes (e.g. pip, npm, R/renv, R packages).
+- Common configuration directories should be provided via volumes (e.g. `~/.config`, Cursor server settings, Claude code settings).
+- In `install` mode, these volumes are mounted read-write and configuration paths should be linked so changes persist to the volumes.
+- In other modes, these volumes are mounted read-only. Configuration files are rsynced into the home directory on container creation/entry so that config-changes can still be written (but will be container-local).
+
+## Environment variables
+
+- `DEVC_MEM_LIMIT` overrides the default memory limit (default: `16g`).
+- `DEVC_PIDS_LIMIT` overrides the default pids limit (default: `2048`).
+
+## Image selection
+
+- If `pyproject.toml` or `requirements.txt` exists, the default image should be `devc/python-base:latest` ("python").
+- If `renv.lock` or `DESCRIPTION` exists, the default image should be `devc/r-base:latest` ("R").
+- If `package.json` or `Cargo.toml` exists, the default image should be `devc/rust-base:latest` ("rust").
+- Otherwise, the default image should be `devc/base:latest` (overridable with `--image`).
+
 ## Possible Extensions
 
 - `--verbose|-v` argument that logs important info (e.g. which image is used, which paths are used etc). Maybe with extra levels (multiple `-v`) where more info is logged, or where `podman` is also invoked in verbose mode
