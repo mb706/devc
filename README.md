@@ -2,6 +2,8 @@
 
 This is mostly experimental and probably not useful yet.
 
+Run `devc --help` for help.
+
 Build the required container using
 
 ```sh
