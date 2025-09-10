@@ -43,3 +43,8 @@ The other options:
 - `--image` works as currently already: if it is not given, the present heuristic is used to choose between images, I will extend this later.
 - `--help` should give some informative help message. If `--help` is given, everything else should be ignored, and it should be possible to do `--help` without any other arguments.
 - if no args are given, or if the given arguments are wrong or contradictory, a short message should be printed, indicating how the command should be executed.
+
+## Possible Extensions
+
+- `--verbose|-v` argument that logs important info (e.g. which image is used, which paths are used etc). Maybe with extra levels (multiple `-v`) where more info is logged, or where `podman` is also invoked in verbose mode
+- `--sudo` mode for `run` / `shell` for installing system dependencies.
