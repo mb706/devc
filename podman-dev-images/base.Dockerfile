@@ -1,8 +1,5 @@
 FROM ubuntu:24.04
 
-# Optional: safer shell defaults for RUN lines with pipes
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Base tools

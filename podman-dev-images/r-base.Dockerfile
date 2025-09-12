@@ -1,9 +1,6 @@
 ARG TAG=latest
 FROM rocker/r-ver:${TAG}
 
-# Optional: safer shell defaults for RUN lines with pipes
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Base tools
