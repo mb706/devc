@@ -15,7 +15,7 @@ REVIEW_PRELUDE_EXIT_ON_ERROR='rsync -a --delete /src/ /workspace/ 2>/tmp/rsync.l
 CONFIG_PRELUDE_RSYNC='for entry in "$@"; do
   src="${entry#*:}"
   dst="${src%-cache}"
-  rsync -a --delete "$src" "$dst" ||  (echo "rsync failed for $src" >&2; exit 1)
+  rsync -a --delete "$src/" "$dst" ||  (echo "rsync failed for $src" >&2; exit 1)
 done;'
 CONFIG_PRELUDE_LINK='for entry in "$@"; do
   src="${entry#*:}"
@@ -276,6 +276,7 @@ CONFIG_VOLUMES=(
   "devc_cursor_dir:/home/dev/.cursor-server-cache"
   "devc_claude_dir:/home/dev/.claude-cache"
   "devc_config_dir:/home/dev/.config-cache"
+  "devc_codex_dir:/home/dev/.codex-cache"
 )
 
 add_cache_mounts() {

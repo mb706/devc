@@ -37,7 +37,11 @@ RUN ARCH=$(dpkg --print-architecture) \
  && sudo dpkg -i "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" \
  && rm "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb"
 
+ARG CLAUDE_CODE_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+
+ARG CODEX_VERSION=latest
+RUN npm install -g @openai/codex@${CODEX_VERSION}
 
 # Non-root default user (id doesn't have to match host; we will map with keep-id)
 RUN userdel -r ubuntu 2>/dev/null || true \
@@ -45,7 +49,7 @@ RUN userdel -r ubuntu 2>/dev/null || true \
  && groupadd -g 1000 dev \
  && useradd -m -u 1000 -g 1000 -s /bin/bash dev
 
-COPY .zshrc .gitconfig .gitignore_global /home/dev/ 
+COPY .zshrc .gitconfig .gitignore_global /home/dev/
 
 WORKDIR /workspace
 ENV SHELL=/bin/zsh
