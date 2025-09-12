@@ -4,12 +4,11 @@ FROM rocker/r-ver:${TAG}
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl wget git openssh-client gnupg gnupg2 \
+    ca-certificates curl wget git openssh-client gnupg \
     build-essential pkg-config \
     python3 python3-venv python3-pip \
-    nodejs npm \
     ripgrep jq unzip zip rsync less vim nano \
-    procps sudo fzf zsh man-db gh aggregate jq \
+    procps sudo fzf zsh man-db gh aggregate \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ARG NODE_MAJOR=20
