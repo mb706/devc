@@ -42,7 +42,7 @@ The other options:
 
 - `--cwd` should be evaluated first: if it is given, we switch the current working directory to there
 - `--projdir` should then be evaluated: if it is not given, use the git rev-parse mechanism that we already have and fall back to the (possibly changed by `--cwd`) PWD. If projdir is given as a relative path, it is evaluated relative to before the PWD was changed by `--cwd`. The final PWD must *always* the project dir, or a subdirectory, i.e. reachable from the project directory without leaving the project directory.
-- `--image` works as currently already: if it is not given, the present heuristic is used to choose between images, I will extend this later.
+- `--image` works as currently already and takes precedence over project config: if it is not given, `devc` first looks for an image in the project `.devc` file (see below), otherwise the heuristic is used to choose between images.
 - `--help` should give some informative help message. If `--help` is given, everything else should be ignored, and it should be possible to do `--help` without any other arguments.
 - if no args are given, or if the given arguments are wrong or contradictory, a short message should be printed, indicating how the command should be executed.
 
@@ -89,6 +89,19 @@ devc env list trusted    # just trusted
 ```
 
 ## Image selection
+
+- Project config: if `$PROJ_DIR/.devc` exists, it is parsed as simple `key=value` pairs. The only accepted key for now is `image`. When present, `image=...` sets the image for the project and overrides auto-detection (but is still overridden by `--image`). Example:
+
+  ```ini
+  # .devc
+  image=devc/r-base:latest
+  ```
+
+- Precedence (highest → lowest):
+  - `--image` CLI option
+  - `.devc` file `image=...`
+  - auto-detected language-specific defaults
+  - global default `devc/base:latest`
 
 - If `pyproject.toml` or `requirements.txt` exists, the default image should be `devc/python-base:latest` ("python").
 - If `renv.lock` or `DESCRIPTION` exists, the default image should be `devc/r-base:latest` ("R").

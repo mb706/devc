@@ -27,6 +27,8 @@ done;'
 abs_path() { perl -MCwd=abs_path -e 'print abs_path(shift)' "$1"; }
 hash_short() { printf "%s" "$1" | sha256sum | cut -c1-12; }
 to_hex() { local s="$1"; if command -v xxd >/dev/null 2>&1; then printf '%s' "$s" | xxd -p -c 0; elif command -v hexdump >/dev/null 2>&1; then printf '%s' "$s" | hexdump -v -e '/1 "%02x"'; else printf '%s' "$s" | od -An -tx1 | tr -d ' \n'; fi }
+# Trim leading/trailing ASCII whitespace from a string (uses sed)
+trim_ws() { printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
 
 usage_short() {
   echo "Usage: devc [options...] [command] [mode] <command-args...>" >&2
@@ -178,7 +180,38 @@ detect_image() {
     echo "$IMAGE_DEFAULT"
   fi
 }
-IMAGE="${OPT_IMAGE:-$(detect_image)}"
+
+# Read optional project config file ($PROJ_DIR/.devc) with key=value pairs.
+# Currently supported key(s):
+#   - image: overrides auto-detected image, but not the --image CLI option.
+CFG_IMAGE=""
+if [[ -f "$PROJ_DIR/.devc" ]]; then
+  while IFS= read -r __line || [[ -n "$__line" ]]; do
+    # Strip inline comments and trim
+    __line="${__line%%#*}"
+    __line="$(trim_ws "$__line")"
+    [[ -z "$__line" ]] && continue
+    # Split key=value (first '='); allow spaces around '='
+    __key="$(trim_ws "${__line%%=*}")"
+    __val="$(trim_ws "${__line#*=}")"
+    case "$__key" in
+      image) CFG_IMAGE="$__val" ;;
+      *) ;; # ignore unknown keys for forward-compatibility
+    esac
+  done < "$PROJ_DIR/.devc"
+fi
+
+# Final image resolution precedence:
+#   1) CLI --image (OPT_IMAGE)
+#   2) .devc: image=...
+#   3) auto-detected
+if [[ -n "$OPT_IMAGE" ]]; then
+  IMAGE="$OPT_IMAGE"
+elif [[ -n "$CFG_IMAGE" ]]; then
+  IMAGE="$CFG_IMAGE"
+else
+  IMAGE="$(detect_image)"
+fi
 
 # Positional parsing: [command] [mode] <command-args...>
 COMMAND="${ARGS[0]:-}"
