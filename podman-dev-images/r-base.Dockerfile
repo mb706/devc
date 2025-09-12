@@ -1,8 +1,12 @@
 ARG TAG=latest
-
 FROM rocker/r-ver:${TAG}
 
+# Optional: safer shell defaults for RUN lines with pipes
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Base tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl wget git openssh-client gnupg \
     build-essential pkg-config \
@@ -24,37 +28,42 @@ RUN mkdir -p /etc/apt/keyrings \
  && mkdir -p /usr/local/share/npm-global
 
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
-ENV PATH=$PATH:/usr/local/share/npm-global/bin
+ENV PATH=/usr/local/share/npm-global/bin:$PATH
 
+# Enable corepack (ships with Node >= 16)
 RUN corepack enable
 
 # Sanity check (visible in build logs)
 RUN node --version && npm --version
 
-# from claude code dockerfile
+# git-delta
 ARG GIT_DELTA_VERSION=0.18.2
 RUN ARCH=$(dpkg --print-architecture) \
- && wget "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" \
- && sudo dpkg -i "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" \
- && rm "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb"
+ && wget -O /tmp/git-delta.deb \
+      "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" \
+ && dpkg -i /tmp/git-delta.deb \
+ && rm /tmp/git-delta.deb
 
+# Global npm CLIs
 ARG CLAUDE_CODE_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 ARG CODEX_VERSION=latest
 RUN npm install -g @openai/codex@${CODEX_VERSION}
 
-# Non-root default user (id doesn't have to match host; we will map with keep-id)
+# Non-root default user
 RUN groupadd -g 1000 dev \
- && useradd -m -u 1000 -g 1000 -s /bin/bash dev
+ && useradd -m -u 1000 -g 1000 -s /bin/zsh dev
 
-COPY .zshrc .gitconfig .gitignore_global /home/dev/
+# Dotfiles (ensure correct ownership)
+COPY --chown=dev:dev .zshrc .gitconfig .gitignore_global /home/dev/
 
 WORKDIR /workspace
-ENV SHELL=/bin/zsh
-ENV EDITOR=vim
-ENV VISUAL=vim
-ENV DEVCONTAINER=true
-ENV DISABLE_AUTOUPDATER=1
-ENV CLAUDE_CONFIG_DIR=/home/dev/.claude
+ENV SHELL=/bin/zsh \
+    EDITOR=vim \
+    VISUAL=vim \
+    DEVCONTAINER=true \
+    DISABLE_AUTOUPDATER=1 \
+    CLAUDE_CONFIG_DIR=/home/dev/.claude
+
 USER dev
