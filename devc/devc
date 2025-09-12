@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Podman dev container wrapper (refactored)
 # UI: devc [options...] [command] [mode] <command-args...>
-#   commands: start | stop | pause | restart | sync | status | shell | cursor | run
+#   commands: start | stop | pause | restart | sync | status | shell | cursor | run | env
 #   modes:    install | work | review | quarantine
 #   options:  --image|-i IMG  --projdir|-p DIR  --cwd|-d DIR  --one-off|-1  --help|-h
 
@@ -48,6 +48,7 @@ Commands:
   shell      Start container and open interactive shell
   cursor     Ensure container is running and open Cursor attached to it
   run        Run a shell command inside the container
+  env        Manage environment variables used for containers (host-stored)
 
 Modes:
   install    Cache volumes read-write; workdir /home/dev; project mounted rw
@@ -67,6 +68,7 @@ Notes:
   - Final PWD must be the project directory or a subdirectory thereof.
   - 'sync' works only for review|quarantine and reruns rsync to refresh /workspace.
   - 'cursor' requires the 'cursor' CLI on the host and opens /workspace.
+  - 'env' does not start containers. See 'devc env --help' for usage.
 EOF
 }
 
@@ -185,9 +187,9 @@ if [[ -z "$COMMAND" ]]; then
   exit 2
 fi
 
-ALLOWED_COMMANDS=(start stop pause restart sync status shell cursor run)
+ALLOWED_COMMANDS=(start stop pause restart sync status shell cursor run env)
 case " $COMMAND " in
-  " start "|" stop "|" pause "|" restart "|" sync "|" status "|" shell "|" cursor "|" run ") ;;
+  " start "|" stop "|" pause "|" restart "|" sync "|" status "|" shell "|" cursor "|" run "|" env ") ;;
   *)
     echo "Unknown command: $COMMAND" >&2
     usage_short
@@ -204,7 +206,7 @@ is_valid_mode() {
   esac
 }
 
-if [[ "$COMMAND" != "status" ]]; then
+if [[ "$COMMAND" != "status" && "$COMMAND" != "env" ]]; then
   if [[ -z "$MODE" ]]; then
     echo "Missing mode. Expected one of: install|work|review|quarantine" >&2
     usage_short
@@ -235,6 +237,33 @@ container_running() {
   [[ "$(podman inspect -f '{{.State.Running}}' "$1" 2>/dev/null || echo false)" == "true" ]]
 }
 scratch_vol_name() { echo "devc_scratch_$(hash_short "$PROJ_DIR")"; }
+
+# Environment management (host-side storage)
+state_base_dir() {
+  if [[ -n "${XDG_STATE_HOME:-}" ]]; then echo "$XDG_STATE_HOME"; else echo "$HOME/.local/state"; fi
+}
+env_store_dir() {
+  local base; base="$(state_base_dir)/devc/env"
+  mkdir -p "$base" 2>/dev/null || true
+  chmod 700 "$base" 2>/dev/null || true
+  printf '%s' "$base"
+}
+known_trustlevels() { printf '%s\n' trusted untrusted; }
+env_file_for_trust() {
+  local trust="$1"
+  local base_name; base_name="$(basename "$PROJ_DIR")"
+  local hash; hash="$(hash_short "$PROJ_DIR")"
+  printf '%s/env-%s-%s-%s' "$(env_store_dir)" "$base_name" "$hash" "$trust"
+}
+trust_for_mode() {
+  case "$1" in
+    work|install)   echo trusted ;;
+    review|quarantine) echo untrusted ;;
+    *) echo untrusted ;;
+  esac
+}
+validate_var_name() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; }
+ensure_secure_file() { local f="$1"; touch "$f"; chmod 600 "$f" 2>/dev/null || true; }
 
 # Prevent launching additional 'install' containers if any are already running
 ensure_no_install_running() {
@@ -339,6 +368,12 @@ build_run_args() {
       add_cache_mounts ro "$out_var"
       ;;
   esac
+  # Add env-file for the trust level of this mode, if present
+  local trust; trust="$(trust_for_mode "$mode")"
+  local envf; envf="$(env_file_for_trust "$trust")"
+  if [[ -f "$envf" ]]; then
+    __arr_ref+=( --env-file "$envf" )
+  fi
 }
 
 ensure_running_container() {
@@ -498,9 +533,91 @@ case "$COMMAND" in
       exit 2
     fi
     ;;
+  env)
+    : # subcommand-specific validation later
+    ;;
 esac
 
 case "$COMMAND" in
+  env)
+    # Subcommands: add <trust|all> VAR=VALUE | del <trust|all> VAR | list [<trust|all>]
+    subcmd="${ARGS[1]:-}"
+    case "$subcmd" in
+      -h|--help|"")
+        cat <<'EOENV'
+Usage:
+  devc env add <trust|all> VAR=VALUE   Add or update variable
+  devc env del <trust|all> VAR         Remove variable
+  devc env list [<trust|all>]          List variables (default: all)
+
+Notes:
+  - trust levels: trusted (work/install), untrusted (review/quarantine), or all.
+  - Values are stored per project at: $(XDG_STATE_HOME or ~/.local/state)/devc/env
+  - Changes apply to new containers; restart existing containers to pick them up.
+EOENV
+        exit 0
+        ;;
+      add)
+        tl="${ARGS[2]:-}"
+        kv="${ARGS[3]:-}"
+        if [[ -z "$tl" || -z "$kv" ]]; then echo "Usage: devc env add <trust|all> VAR=VALUE" >&2; exit 2; fi
+        if [[ "$kv" != *=* ]]; then echo "Expected VAR=VALUE" >&2; exit 2; fi
+        var="${kv%%=*}"; val="${kv#*=}"
+        if ! validate_var_name "$var"; then echo "Invalid variable name: $var" >&2; exit 2; fi
+        mapfile -t tls < <(
+          if [[ "$tl" == all ]]; then known_trustlevels; else printf '%s\n' "$tl"; fi
+        )
+        for t in "${tls[@]}"; do
+          f="$(env_file_for_trust "$t")"; ensure_secure_file "$f"
+          # Replace any existing entry for VAR, then append new
+          tmp="${f}.tmp.$$"
+          { grep -E -v "^${var}=" "$f" 2>/dev/null || true; echo "${var}=${val}"; } > "$tmp"
+          mv "$tmp" "$f"
+          chmod 600 "$f" 2>/dev/null || true
+          echo "[$t] set $var"
+        done
+        ;;
+      del)
+        tl="${ARGS[2]:-}"; var="${ARGS[3]:-}"
+        if [[ -z "$tl" || -z "$var" ]]; then echo "Usage: devc env del <trust|all> VAR" >&2; exit 2; fi
+        if ! validate_var_name "$var"; then echo "Invalid variable name: $var" >&2; exit 2; fi
+        mapfile -t tls < <(
+          if [[ "$tl" == all ]]; then known_trustlevels; else printf '%s\n' "$tl"; fi
+        )
+        for t in "${tls[@]}"; do
+          f="$(env_file_for_trust "$t")"
+          if [[ -f "$f" ]]; then
+            tmp="${f}.tmp.$$"
+            grep -E -v "^${var}=" "$f" > "$tmp" || true
+            mv "$tmp" "$f"
+            chmod 600 "$f" 2>/dev/null || true
+            echo "[$t] removed $var"
+          else
+            echo "[$t] no env file; nothing to remove" >&2
+          fi
+        done
+        ;;
+      list)
+        tl="${ARGS[2]:-all}"
+        mapfile -t tls < <(
+          if [[ "$tl" == all ]]; then known_trustlevels; else printf '%s\n' "$tl"; fi
+        )
+        for t in "${tls[@]}"; do
+          f="$(env_file_for_trust "$t")"
+          echo "${t}:"
+          if [[ -f "$f" ]]; then
+            sed -e 's/^/  /' "$f"
+          else
+            echo "  <empty>"
+          fi
+        done
+        ;;
+      *)
+        echo "Unknown 'env' subcommand: $subcmd" >&2
+        exit 2
+        ;;
+    esac
+    ;;
   status)
     if [[ -z "${MODE:-}" ]]; then
       for m in install work review quarantine; do
@@ -582,4 +699,3 @@ case "$COMMAND" in
     fi
     ;;
 esac
-

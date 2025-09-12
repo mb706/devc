@@ -6,7 +6,7 @@
 devc [options...] [command] [mode]  <command-args...>
 ```
 
-where `[mode]` is one of `quarantine`, `review`, `work`, `install`; and `[command]` is one of `start`, `stop`, `pause`, `restart`, `sync`, `status`, `shell`, `cursor`, and `run`. `[options...]` are optionally any of `--image|-i [imagename]`, `--projdir|-p [project directory]`, `--cwd|-d [working directory]`, `--one-off|-1`, `--help|-h`.
+where `[mode]` is one of `quarantine`, `review`, `work`, `install`; and `[command]` is one of `start`, `stop`, `pause`, `restart`, `sync`, `status`, `shell`, `cursor`, `run`, and `env`. `[options...]` are optionally any of `--image|-i [imagename]`, `--projdir|-p [project directory]`, `--cwd|-d [working directory]`, `--one-off|-1`, `--help|-h`.
 
 ## Modes
 
@@ -32,6 +32,7 @@ The `--name` of the container should be determined by the project name, director
 - `pause` should stop the container without deleting it
 - `restart` should be equivalent to `stop` and then `start`, i.e. stop the container, delete it, then start it again.
 - `sync`: synchronize with `rsync` in `quarantine` / `review` mode.
+- `env`: manage environment variables that are injected into containers (see below). This command does not start containers and does not take a `[mode]` argument.
 
 for `shell` and `run` only, there is the option `--one-off`: it should basically do podman run `--rm` instead of `-d` (and use a different name so that it does not conflict with running containers).
 
@@ -56,6 +57,36 @@ The other options:
 
 - `DEVC_MEM_LIMIT` overrides the default memory limit (default: `16g`).
 - `DEVC_PIDS_LIMIT` overrides the default pids limit (default: `2048`).
+
+### Managed container environment
+
+`devc` can persist per-project environment variables on the host and inject them into containers at startup. This is useful for tokens like `GH_TOKEN`.
+
+- Storage location: `${XDG_STATE_HOME:-$HOME/.local/state}/devc/env/`.
+- File naming: `env-$(basename "$PROJ_DIR")-$(hash_short "$PROJ_DIR")-<trustlevel>`.
+- Trust levels:
+  - `trusted` → used for `install` and `work` containers.
+  - `untrusted` → used for `review` and `quarantine` containers.
+  - `all` → convenience target that applies to both (future-proof for more levels).
+- File contents: simple `KEY=VALUE` lines; permissions are set restrictive (0600). Lines are replaced on `add` when the same `KEY` exists.
+- Applying changes: updates are picked up by newly started or one-off containers. Restart existing containers to apply changes.
+
+Usage:
+
+```sh
+# Add/replace a variable
+devc env add trusted GH_TOKEN=ghp_XXXX
+devc env add untrusted FOO=bar
+devc env add all MY_FLAG=1
+
+# Remove a variable
+devc env del trusted GH_TOKEN
+devc env del all MY_FLAG
+
+# List variables
+devc env list            # both trust levels
+devc env list trusted    # just trusted
+```
 
 ## Image selection
 
