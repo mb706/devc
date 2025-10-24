@@ -48,12 +48,23 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 ARG CODEX_VERSION=latest
 RUN npm install -g @openai/codex@${CODEX_VERSION}
 
+# Additional packages for R dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl-dev libcurl4-openssl-dev zlib1g-dev libfontconfig1-dev \
+    libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev \
+    libtiff5-dev libjpeg-dev libxml2-dev libeigen3-dev cmake \
+    libgit2-dev libx11-dev pandoc \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # Non-root default user
 RUN groupadd -g 1000 dev \
  && useradd -m -u 1000 -g 1000 -s /bin/zsh dev
 
 # Dotfiles (ensure correct ownership)
 COPY --chown=dev:dev .zshrc .gitconfig .gitignore_global /home/dev/
+
+RUN mkdir -p /home/dev/.cache/R \
+ && chown dev:dev /home/dev/.cache/R
 
 WORKDIR /workspace
 ENV SHELL=/bin/zsh \
