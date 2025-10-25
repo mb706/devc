@@ -169,7 +169,7 @@ CNAME="devc-$(basename "$PROJ_DIR")-$(hash_short "$PROJ_DIR")"
 # Detect image if not overridden
 detect_image() {
   if [[ -f "$PROJ_DIR/pyproject.toml" || -f "$PROJ_DIR/requirements.txt" ]]; then
-    echo "devc/base:latest"
+    echo "devc/python-base:latest"
   elif [[ -f "$PROJ_DIR/renv.lock" || -f "$PROJ_DIR/DESCRIPTION" ]]; then
     echo "devc/r-base:latest"
   elif [[ -f "$PROJ_DIR/package.json" ]]; then
@@ -340,6 +340,9 @@ CONFIG_VOLUMES=(
   "devc_claude_dir:/home/dev/.claude-cache"
   "devc_config_dir:/home/dev/.config-cache"
   "devc_codex_dir:/home/dev/.codex-cache"
+  "devc_uv_cache:/home/dev/.cache/uv-cache"
+  "devc_precommit_cache:/home/dev/.cache/pre-commit-cache"
+  "devc_local:/home/dev/.local-cache"
 )
 
 add_cache_mounts() {
