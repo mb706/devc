@@ -7,10 +7,3 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 ENV PATH=/home/dev/.local/bin:$PATH \
     UV_LINK_MODE=copy
 
-USER root
-
-RUN mkdir -p /home/dev/.cache \
- && chown dev:dev /home/dev/.cache
-
-USER dev
-

@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv python3-pip \
     ripgrep jq unzip zip rsync less vim nano \
     procps sudo fzf zsh man-db gh aggregate \
+    tmux \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ARG NODE_MAJOR=20
@@ -58,10 +59,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Non-root default user
 RUN groupadd -g 1000 dev \
- && useradd -m -u 1000 -g 1000 -s /bin/zsh dev
+ && useradd -m -u 1000 -g 1000 -s /bin/zsh dev \
+ && mkdir -p /home/dev/.cache \
+ && chown dev:dev /home/dev/.cache
+
 
 # Dotfiles (ensure correct ownership)
-COPY --chown=dev:dev .zshrc .gitconfig .gitignore_global /home/dev/
+COPY --chown=dev:dev .zshrc .gitconfig .gitignore_global .tmux.conf /home/dev/
 
 RUN mkdir -p /home/dev/.cache/R \
  && chown dev:dev /home/dev/.cache/R
