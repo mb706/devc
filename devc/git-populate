@@ -1,0 +1,77 @@
+#!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
+
+print_usage() {
+  cat <<'USAGE'
+Usage: git-populate <remote> [target_folder]
+
+Create a bare clone of <remote> as hub.git inside target_folder and
+rename the default remote from 'origin' to 'github'.
+USAGE
+}
+
+infer_default_dir() {
+  local remote_url="$1"
+  local trimmed="${remote_url%/}"
+  local path_part
+
+  # scp-like syntax: user@host:path/to/repo(.git)
+  if [[ "$trimmed" =~ ^[^:/]+@[^:/]+: ]]; then
+    path_part="${trimmed#*:}"
+  # URL with scheme (e.g., https://, ssh://, git://, file://)
+  elif [[ "$trimmed" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]]; then
+    path_part="${trimmed#*://}"
+    # Drop authority segment (host[:port])
+    path_part="${path_part#*/}"
+  else
+    # Local path or other formats
+    path_part="$trimmed"
+  fi
+
+  local base="${path_part##*/}"
+  base="${base%.git}"
+
+  if [[ -z "$base" || "$base" == "." || "$base" == "/" ]]; then
+    echo "Failed to infer target directory name from remote: $remote_url" >&2
+    return 2
+  fi
+
+  printf '%s\n' "$base"
+}
+
+if [[ "${1-}" == "-h" || "${1-}" == "--help" ]]; then
+  print_usage
+  exit 0
+fi
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "git is required but was not found in PATH" >&2
+  exit 127
+fi
+
+if [[ $# < 1 || $# > 2 ]]; then
+  print_usage
+  exit 64
+fi
+
+remote_url="$1"
+target_dir="${2-}"
+
+if [[ -z "${target_dir}" ]]; then
+  target_dir="$(infer_default_dir "$remote_url")"
+fi
+
+mkdir -p "$target_dir"
+cd "$target_dir"
+
+if [[ -e "hub.git" ]]; then
+  echo "Target already exists: $PWD/hub.git" >&2
+  exit 73
+fi
+
+git clone --bare "$remote_url" hub.git
+git -C hub.git remote rename origin upstream
+
+echo "Created bare repository at: $PWD/hub.git"
+echo "Remote 'origin' renamed to 'upstream'."
