@@ -1,0 +1,97 @@
+#!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
+
+print_usage() {
+  cat <<'USAGE'
+Usage: git-supercheckout <branch>
+
+Clone ./hub.git into a sibling directory named <branch>, repoint origin to
+../hub.git, and switch to <branch> (creating/tracking as needed).
+USAGE
+}
+
+if [[ "${1-}" == "-h" || "${1-}" == "--help" ]]; then
+  print_usage
+  exit 0
+fi
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "git is required but was not found in PATH" >&2
+  exit 127
+fi
+
+if [[ $# -ne 1 ]]; then
+  print_usage
+  exit 64
+fi
+
+branch_name="$1"
+
+# 1) Ensure hub.git exists and is a bare repository
+if [[ ! -d "hub.git" ]]; then
+  echo "Missing ./hub.git directory. Run git-populate first." >&2
+  exit 66
+fi
+
+if ! bare_flag=$(git -C hub.git rev-parse --is-bare-repository 2>/dev/null); then
+  echo "./hub.git is not a git repository." >&2
+  exit 67
+fi
+
+if [[ "$bare_flag" != "true" ]]; then
+  echo "./hub.git is not a bare repository." >&2
+  exit 67
+fi
+
+# 2) Abort if directory already exists
+if [[ -e "$branch_name" ]]; then
+  echo "Target already exists: $PWD/$branch_name" >&2
+  exit 73
+fi
+
+# 3) Clone and set remote to relative path, then switch to the branch
+created_dir=""
+cleanup_on_error() {
+  if [[ -n "$created_dir" && -d "$created_dir" ]]; then
+    rm -rf -- "$created_dir"
+  fi
+}
+
+git clone hub.git "$branch_name"
+created_dir="$branch_name"
+
+if ! git -C "$branch_name" remote set-url origin ../hub.git; then
+  cleanup_on_error
+  echo "Failed to set remote origin to ../hub.git" >&2
+  exit 1
+fi
+
+# Attempt the switch logic with fallbacks.
+#
+# 1) git switch <branch>
+# 2) else: fetch and create tracking from origin/<branch>
+# 3) else: create new local branch and push --set-upstream
+set +e
+(
+  git -C "$branch_name" switch "$branch_name" 2>/dev/null ||
+  (
+    git -C "$branch_name" fetch -q origin "$branch_name" &&
+    git -C "$branch_name" switch -c "$branch_name" --track "origin/$branch_name" 2>/dev/null
+  ) ||
+  (
+    git -C "$branch_name" switch -c "$branch_name" &&
+    git -C "$branch_name" push --set-upstream origin "$branch_name"
+  )
+)
+rc=$?
+set -e
+
+if [[ $rc -ne 0 ]]; then
+  cleanup_on_error
+  echo "Failed to switch to branch '$branch_name'" >&2
+  exit $rc
+fi
+
+echo "Checked out branch '$branch_name' at: $PWD/$branch_name"
+
