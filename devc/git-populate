@@ -62,6 +62,13 @@ if [[ -z "${target_dir}" ]]; then
   target_dir="$(infer_default_dir "$remote_url")" || exit $?
 fi
 
+# Disallow using the current directory as target
+trimmed_target_dir="${target_dir%/}"
+if [[ "$trimmed_target_dir" == "." ]]; then
+  echo "Target folder cannot be '.'" >&2
+  exit 64
+fi
+
 mkdir -p "$target_dir"
 cd "$target_dir"
 
