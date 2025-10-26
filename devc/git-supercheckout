@@ -57,6 +57,7 @@ cleanup_on_error() {
     rm -rf -- "$created_dir"
   fi
 }
+trap cleanup_on_error EXIT
 
 git clone hub.git "$branch_name"
 created_dir="$branch_name"
@@ -93,5 +94,6 @@ if [[ $rc -ne 0 ]]; then
   exit $rc
 fi
 
+trap - EXIT
 echo "Checked out branch '$branch_name' at: $PWD/$branch_name"
 
