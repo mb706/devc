@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv python3-pip \
     ripgrep jq unzip zip rsync less vim nano \
     procps sudo fzf zsh man-db gh aggregate \
-    tmux \
+    tmux htop parallel \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ARG NODE_MAJOR=20

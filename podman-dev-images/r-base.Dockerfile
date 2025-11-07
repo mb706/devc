@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv python3-pip \
     ripgrep jq unzip zip rsync less vim nano \
     procps sudo fzf zsh man-db gh aggregate \
-    tmux \
+    tmux htop parallel \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ARG NODE_MAJOR=20
@@ -54,7 +54,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev libcurl4-openssl-dev zlib1g-dev libfontconfig1-dev \
     libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev \
     libtiff5-dev libjpeg-dev libxml2-dev libeigen3-dev cmake \
-    libgit2-dev libx11-dev pandoc \
+    libgit2-dev libx11-dev pandoc libglpk-dev \
+    libudunits2-dev libhiredis-dev libproj-dev libprotobuf-dev \
+    libgdal-dev \
+    tidy texlive texlive-latex-extra texlive-fonts-extra qpdf \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Non-root default user
@@ -65,7 +68,7 @@ RUN groupadd -g 1000 dev \
 
 
 # Dotfiles (ensure correct ownership)
-COPY --chown=dev:dev .zshrc .gitconfig .gitignore_global .tmux.conf /home/dev/
+COPY --chown=dev:dev .zshrc .gitconfig .gitignore_global .tmux.conf r-tools /home/dev/
 
 RUN mkdir -p /home/dev/.cache/R \
  && chown dev:dev /home/dev/.cache/R
@@ -76,6 +79,8 @@ ENV SHELL=/bin/zsh \
     VISUAL=vim \
     DEVCONTAINER=true \
     DISABLE_AUTOUPDATER=1 \
-    CLAUDE_CONFIG_DIR=/home/dev/.claude
+    CLAUDE_CONFIG_DIR=/home/dev/.claude \
+    R_LIBS= \
+    R_LIBS_SITE=/usr/local/lib/R/site-library:/usr/local/lib/R/library
 
 USER dev
