@@ -333,6 +333,7 @@ CACHE_VOLUMES=(
   "devc_npm_cache:/home/dev/.npm"
   "devc_renv_cache:/home/dev/.cache/R/renv"
   "devc_virtualenv_cache:/home/dev/.virtualenvs"
+  "devc_conda:/home/dev/conda"
 )
 CONFIG_VOLUMES=(
   "devc_cursor_dir:/home/dev/.cursor-server-cache"

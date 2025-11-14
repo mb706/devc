@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv python3-pip \
     ripgrep jq unzip zip rsync less vim nano \
     procps sudo fzf zsh man-db gh aggregate \
-    tmux htop parallel \
+    tmux htop parallel tini \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ARG NODE_MAJOR=20
@@ -60,6 +60,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tidy texlive texlive-latex-extra texlive-fonts-extra qpdf \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Miniforge
+ARG MINIFORGE_VERSION=24.7.1-0
+RUN if [ "${MINIFORGE_VERSION}" = "latest" ]; then \
+      path="latest/download"; \
+    else \
+      path="download/${MINIFORGE_VERSION}"; \
+    fi \
+ && curl -fsSL -o /tmp/miniforge.sh \
+      "https://github.com/conda-forge/miniforge/releases/${path}/Miniforge3-${MINIFORGE_VERSION}-Linux-$(uname -m).sh" \
+ && bash /tmp/miniforge.sh -b -p /opt/conda \
+ && rm -f /tmp/miniforge.sh \
+ && /opt/conda/bin/conda clean -afy \
+ && /opt/conda/bin/conda install -n base -y mamba \
+ && /opt/conda/bin/conda clean -afy \
+ && chown -R root:root /opt/conda && chmod -R 755 /opt/conda
+
+# System-wide Conda config: put envs and pkgs on a single persistent mount
+RUN mkdir -p /etc/conda \
+ && printf '%s\n' \
+    'channels:' \
+    '  - conda-forge' \
+    'channel_priority: strict' \
+    'auto_update_conda: false' \
+    'auto_activate_base: false' \
+    'envs_dirs:' \
+    '  - /home/dev/conda/envs' \
+    'pkgs_dirs:' \
+    '  - /home/dev/conda/pkgs' \
+    > /etc/conda/condarc \
+ && echo '. /opt/conda/etc/profile.d/conda.sh' >> /etc/bash.bashrc
+# Make Conda available in every interactive shell without touching user dotfiles
+ 
+
+
 # Non-root default user
 RUN groupadd -g 1000 dev \
  && useradd -m -u 1000 -g 1000 -s /bin/zsh dev \
@@ -71,7 +105,8 @@ RUN groupadd -g 1000 dev \
 COPY --chown=dev:dev .zshrc .gitconfig .gitignore_global .tmux.conf r-tools /home/dev/
 
 RUN mkdir -p /home/dev/.cache/R \
- && chown dev:dev /home/dev/.cache/R
+ && chown dev:dev /home/dev/.cache/R \
+ && echo '. /opt/conda/etc/profile.d/conda.sh'>> /home/dev/.zshrc
 
 WORKDIR /workspace
 ENV SHELL=/bin/zsh \
