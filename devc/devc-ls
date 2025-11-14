@@ -39,24 +39,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+print_header() {
+  local header="$1"
+  if [[ $NO_HEADER -eq 0 ]]; then
+    printf '%s\n' "$header"
+  fi
+}
+
+emit_images() {
+  local format="$1"
+  podman images \
+    --filter label=com.mb706.project=devc \
+    --format "$format" | \
+    sed 's|^localhost/||'
+}
+
 if [[ $CSV -eq 1 ]]; then
-  {
-    if [[ $NO_HEADER -eq 0 ]]; then
-      printf 'image,created_at,age,containers\n'
-    fi
-    podman images \
-      --filter label=com.mb706.project=devc \
-      --format '{{.Repository}}:{{.Tag}},{{.CreatedAt}},{{.CreatedSince}},{{.Containers}}' | \
-      sed 's|^localhost/||'
-  }
+  print_header 'image,created_at,age,containers'
+  emit_images '{{.Repository}}:{{.Tag}},{{.CreatedAt}},{{.CreatedSince}},{{.Containers}}'
 else
   {
-    if [[ $NO_HEADER -eq 0 ]]; then
-      printf 'IMAGE\tCREATED AT\tAGE\tCONTAINERS\n'
-    fi
-    podman images \
-      --filter label=com.mb706.project=devc \
-      --format '{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}\t{{.CreatedSince}}\t{{.Containers}}' | \
-      sed 's|^localhost/||'
+    print_header $'IMAGE\tCREATED AT\tAGE\tCONTAINERS'
+    emit_images '{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}\t{{.CreatedSince}}\t{{.Containers}}'
   } | column -t -s $'\t'
 fi
