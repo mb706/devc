@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: devc-ls
+
+Shows Podman images labeled with com.mb706.project=devc.
+EOF
+}
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: no arguments supported." >&2
+      usage
+      exit 64
+      ;;
+  esac
+fi
+
+{
+  printf 'IMAGE\tCREATED AT\tAGE\tCONTAINERS\n'
+  podman images \
+    --filter label=com.mb706.project=devc \
+    --format '{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}\t{{.CreatedSince}}\t{{.Containers}}' | \
+    sed 's|^localhost/||'
+} | column -t -s $'\t'

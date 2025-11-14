@@ -71,4 +71,5 @@ podman build "${podman_args[@]}" \
   -f "$dockerfile" \
   --build-arg "TAG=${image_tag}" \
   -t "devc/${image_name}:${image_tag}" \
-  "$REPO_ROOT"
+  --label com.mb706.project=devc \
+  "${REPO_ROOT}/podman-dev-images"
