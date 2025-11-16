@@ -57,7 +57,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgit2-dev libx11-dev pandoc libglpk-dev \
     libudunits2-dev libhiredis-dev libproj-dev libprotobuf-dev \
     libgdal-dev \
-    tidy texlive texlive-latex-extra texlive-fonts-extra qpdf \
+    tidy texlive texlive-latex-extra texlive-fonts-extra texlive-xetex qpdf \
+    latexmk texlive-extra-utils texlive-bibtex-extra biber \
+    texlive-lang-european texlive-lang-german texlive-lang-english lmodern texlive-science \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Miniforge
