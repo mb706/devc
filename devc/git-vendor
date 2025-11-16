@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+#
+# git-vendor: create or update a vendored Git submodule at a specific tag/branch/commit,
+# using shallow clones/fetches.
+#
+# Usage:
+#   git-vendor [--tag TAG | --branch BRANCH | --commit COMMIT] <remote-url> <target>
+#
+#   <target> ending with "/" is treated as a base directory; the final name is inferred
+#   from <remote-url> the same way "git clone" does (strip trailing ".git").
+#
+#   Examples:
+#     git-vendor https://github.com/mlr-org/mlr3 vendored/
+#     git-vendor --tag v0.10.0 https://github.com/mlr-org/mlr3pipelines vendored/
+#     git-vendor --commit deadbeef1234... https://github.com/foo/bar vendored/bar-current
+#
+# This script:
+#   - Adds a submodule if it does not exist yet (shallow).
+#   - Otherwise verifies that an existing submodule at <target> points to the same repo
+#     and updates it.
+#   - Checks out the requested tag/branch/commit (detached HEAD).
+#   - Configures the submodule to stay shallow via .gitmodules.
+#   - Does NOT run "git add" or "git commit".
+#
+
+set -euo pipefail
+IFS=$'\n\t'
+
+die() {
+  echo "git-vendor: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: git-vendor [--tag TAG | --branch BRANCH | --commit COMMIT] <remote-url> <target>
+
+  --tag TAG       Use the commit pointed to by TAG.
+  --branch BRANCH Use the tip of BRANCH.
+  --commit SHA    Use the given commit SHA.
+  (Only one of --tag/--branch/--commit may be given.)
+
+  <target> ending with "/" is treated as a base directory; the final directory
+  name is inferred from the remote URL like "git clone" does. Otherwise <target>
+  is used as-is.
+
+Examples:
+  git-vendor https://github.com/mlr-org/mlr3 vendored/
+  git-vendor --tag v0.10.0 https://github.com/mlr-org/mlr3pipelines vendored/
+  git-vendor --commit deadbeef... https://github.com/foo/bar vendored/bar-current
+EOF
+}
+
+# Normalize URLs for loose equality (trim trailing "/" and ".git").
+normalize_url() {
+  local u="$1"
+  u="${u%/}"
+  u="${u%.git}"
+  printf '%s\n' "$u"
+}
+
+# Find submodule "name" given its path, based on .gitmodules.
+# Prints the name to stdout on success.
+find_submodule_name_by_path() {
+  local path="$1"
+  local key value
+
+  if [ ! -f .gitmodules ]; then
+    return 1
+  fi
+
+  while read -r key value; do
+    if [ "$value" = "$path" ]; then
+      key=${key#submodule.}
+      key=${key%.path}
+      printf '%s\n' "$key"
+      return 0
+    fi
+  done < <(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null || true)
+
+  return 1
+}
+
+# Determine the default branch of a remote by consulting its HEAD symref.
+get_default_branch() {
+  local url="$1"
+  local line ref dummy
+
+  if ! line=$(git ls-remote --symref "$url" HEAD 2>/dev/null | sed -n '1p'); then
+    return 1
+  fi
+
+  # Expected format: "ref: refs/heads/main HEAD"
+  read -r dummy ref dummy <<<"$line" || return 1
+
+  case "$ref" in
+    refs/heads/*)
+      printf '%s\n' "${ref#refs/heads/}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Ensure shallow config for a submodule in .gitmodules and sync to local config.
+ensure_shallow_config() {
+  local name="$1"
+  local path="$2"
+
+  git config -f .gitmodules "submodule.${name}.shallow" true
+  git submodule sync -- "$path" >/dev/null 2>&1 || true
+}
+
+# --- Parse arguments --------------------------------------------------------
+
+ref_type=""   # "tag" | "branch" | "commit" | "default"
+ref_value=""
+remote=""
+target=""
+
+if [ "$#" -eq 0 ]; then
+  usage
+  exit 1
+fi
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --tag)
+      [ -n "$ref_type" ] && die "only one of --tag/--branch/--commit may be specified"
+      [ "$#" -lt 2 ] && die "--tag requires an argument"
+      ref_type="tag"
+      ref_value="$2"
+      shift 2
+      ;;
+    --tag=*)
+      [ -n "$ref_type" ] && die "only one of --tag/--branch/--commit may be specified"
+      ref_type="tag"
+      ref_value="${1#--tag=}"
+      shift
+      ;;
+    --branch)
+      [ -n "$ref_type" ] && die "only one of --tag/--branch/--commit may be specified"
+      [ "$#" -lt 2 ] && die "--branch requires an argument"
+      ref_type="branch"
+      ref_value="$2"
+      shift 2
+      ;;
+    --branch=*)
+      [ -n "$ref_type" ] && die "only one of --tag/--branch/--commit may be specified"
+      ref_type="branch"
+      ref_value="${1#--branch=}"
+      shift
+      ;;
+    --commit)
+      [ -n "$ref_type" ] && die "only one of --tag/--branch/--commit may be specified"
+      [ "$#" -lt 2 ] && die "--commit requires an argument"
+      ref_type="commit"
+      ref_value="$2"
+      shift 2
+      ;;
+    --commit=*)
+      [ -n "$ref_type" ] && die "only one of --tag/--branch/--commit may be specified"
+      ref_type="commit"
+      ref_value="${1#--commit=}"
+      shift
+      ;;
+    --*)
+      die "unknown option: $1"
+      ;;
+    *)
+      if [ -z "$remote" ]; then
+        remote="$1"
+      elif [ -z "$target" ]; then
+        target="$1"
+      else
+        die "unexpected extra argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+[ -n "$remote" ] || die "remote URL is required"
+[ -n "$target" ] || die "target directory is required"
+
+# If no explicit ref given, use the remote's default branch.
+if [ -z "$ref_type" ]; then
+  ref_type="default"
+fi
+
+# Ensure we are inside a Git repository and move to its root.
+if ! GIT_TOP=$(git rev-parse --show-toplevel 2>/dev/null); then
+  die "must be run inside a Git repository"
+fi
+cd "$GIT_TOP"
+
+# Resolve final path from target and remote.
+case "$target" in
+  */)
+    base="${target%/}"
+    name="$(basename "$remote")"
+    name="${name%.git}"
+    [ -n "$name" ] || die "unable to infer directory name from remote URL: $remote"
+    path="${base}/${name}"
+    ;;
+  *)
+    path="$target"
+    ;;
+esac
+
+# Strip leading "./" for cleanliness.
+path="${path#./}"
+
+case "$path" in
+  /*)
+    die "target path must be relative to the repository root (got '$path')"
+    ;;
+esac
+
+# If ref_type is "default", resolve actual default branch name first.
+if [ "$ref_type" = "default" ]; then
+  if ! ref_value=$(get_default_branch "$remote"); then
+    die "could not determine default branch for '$remote'"
+  fi
+  ref_type="branch"
+fi
+
+# --- Determine whether the submodule already exists ------------------------
+
+submodule_name=""
+if submodule_name=$(find_submodule_name_by_path "$path"); then
+  : # found
+else
+  submodule_name=""
+fi
+
+# If it is already registered in .gitmodules, verify URL compatibility.
+if [ -n "$submodule_name" ]; then
+  expected_url=$(git config -f .gitmodules "submodule.${submodule_name}.url" 2>/dev/null || true)
+  [ -n "$expected_url" ] || die "submodule '$submodule_name' has no URL in .gitmodules"
+
+  norm_remote=$(normalize_url "$remote")
+  norm_expected=$(normalize_url "$expected_url")
+
+  if [ "$norm_remote" != "$norm_expected" ]; then
+    die "target '$path' is already a submodule '$submodule_name' with URL '$expected_url', not '$remote'"
+  fi
+fi
+
+existing_worktree=false
+
+if [ -d "$path" ]; then
+  # Directory exists.
+  if [ -z "$submodule_name" ]; then
+    die "target path '$path' exists but is not a registered submodule"
+  fi
+
+  if ! git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "target path '$path' exists but is not a Git working tree"
+  fi
+
+  existing_worktree=true
+else
+  # Directory does not exist.
+  if [ -n "$submodule_name" ]; then
+    # Registered but not initialized.
+    echo "git-vendor: initializing existing submodule '$path'..." >&2
+    git submodule update --init --depth 1 -- "$path"
+    existing_worktree=true
+  else
+    existing_worktree=false
+    # New submodule: use path as its name.
+    submodule_name="$path"
+  fi
+fi
+
+# --- Create or update the submodule ----------------------------------------
+
+if [ "$existing_worktree" = false ]; then
+  # New submodule.
+  echo "git-vendor: adding submodule '$path' from '$remote' ($ref_type '$ref_value')" >&2
+
+  case "$ref_type" in
+    tag)
+      git submodule add --depth 1 "$remote" "$path"
+      git -C "$path" fetch --depth 1 origin tag "$ref_value"
+      git -C "$path" checkout --detach "${ref_value}^{}"
+      git config -f .gitmodules --unset "submodule.${submodule_name}.branch" 2>/dev/null || true
+      ;;
+    commit)
+      git submodule add --depth 1 "$remote" "$path"
+      git -C "$path" fetch --depth 1 origin "$ref_value"
+      git -C "$path" checkout --detach "$ref_value"
+      git config -f .gitmodules --unset "submodule.${submodule_name}.branch" 2>/dev/null || true
+      ;;
+    branch)
+      git submodule add --depth 1 -b "$ref_value" "$remote" "$path"
+      # Ensure we are at the remote branch tip and detached.
+      git -C "$path" fetch --depth 1 origin "$ref_value"
+      git -C "$path" checkout --detach "origin/${ref_value}"
+      git config -f .gitmodules "submodule.${submodule_name}.branch" "$ref_value"
+      ;;
+    *)
+      die "internal error: unexpected ref_type '$ref_type'"
+      ;;
+  esac
+
+  ensure_shallow_config "$submodule_name" "$path"
+
+else
+  # Existing submodule: update it.
+  echo "git-vendor: updating existing submodule '$path' ($ref_type '$ref_value')" >&2
+
+  # Ensure the local submodule config (origin URL, etc.) matches .gitmodules.
+  git submodule sync -- "$path" >/dev/null 2>&1 || true
+
+  case "$ref_type" in
+    tag)
+      git -C "$path" fetch --depth 1 origin tag "$ref_value"
+      git -C "$path" checkout --detach "${ref_value}^{}"
+      git config -f .gitmodules --unset "submodule.${submodule_name}.branch" 2>/dev/null || true
+      ;;
+    commit)
+      git -C "$path" fetch --depth 1 origin "$ref_value"
+      git -C "$path" checkout --detach "$ref_value"
+      git config -f .gitmodules --unset "submodule.${submodule_name}.branch" 2>/dev/null || true
+      ;;
+    branch)
+      git -C "$path" fetch --depth 1 origin "$ref_value"
+      git -C "$path" checkout --detach "origin/${ref_value}"
+      git config -f .gitmodules "submodule.${submodule_name}.branch" "$ref_value"
+      ;;
+    *)
+      die "internal error: unexpected ref_type '$ref_type'"
+      ;;
+  esac
+
+  ensure_shallow_config "$submodule_name" "$path"
+fi
+
+echo "git-vendor: done. Remember to 'git add .gitmodules \"$path\"' and commit if desired." >&2

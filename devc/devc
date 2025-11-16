@@ -414,6 +414,8 @@ build_run_args() {
   fi
 }
 
+PODMAN_INTERACTIVE_ARGS="--detach-keys ctrl-q,ctrl-q"
+
 ensure_running_container() {
   local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
   if container_running "$name"; then return 0; fi
@@ -448,7 +450,7 @@ exec_shell_in_container() {
   local mode="$1"; local name; name="$(container_name_for_mode "$mode")"
   local target
   container_target_dir "$mode" target
-  podman exec -it --workdir "$target" "$name" bash -l
+  podman exec -it $PODMAN_INTERACTIVE_ARGS --workdir "$target" "$name" bash -l
 }
 
 join_cmd() {
@@ -469,7 +471,7 @@ exec_run_in_container() {
   local name; name="$(container_name_for_mode "$mode")"
   local cmd; cmd="$(join_cmd "$@")"
   local target; container_target_dir "$mode" target
-  podman exec -it --workdir "$target" "$name" bash -lc "$cmd"
+  podman exec -it $PODMAN_INTERACTIVE_ARGS --workdir "$target" "$name" bash -lc "$cmd"
 }
 
 one_off_shell() {
@@ -485,19 +487,19 @@ one_off_shell() {
   case "$mode" in
     review|quarantine)
       # cannot --workdir to target dir because it may not exist before REVIEW_PRELUDE.
-      podman run --rm -it --name "$one_off_name" \
+      podman run --rm -it $PODMAN_INTERACTIVE_ARGS --name "$one_off_name" \
         "${args[@]}" \
         "$IMAGE" bash -lc "$REVIEW_PRELUDE $CONFIG_PRELUDE_RSYNC cd $(printf %q "$target"); exec bash -l" _ "${CONFIG_VOLUMES[@]}"
       ;;
     install)
       # link configs
       # also
-      podman run --rm -it --workdir "$target" --name "$one_off_name" \
+      podman run --rm -it $PODMAN_INTERACTIVE_ARGS --workdir "$target" --name "$one_off_name" \
         "${args[@]}" \
         "$IMAGE" bash -lc "$CONFIG_PRELUDE_LINK exec bash -l" _ "${CONFIG_VOLUMES[@]}"
       ;;
     *)
-      podman run --rm -it --workdir "$target" --name "$one_off_name" \
+      podman run --rm -it $PODMAN_INTERACTIVE_ARGS --workdir "$target" --name "$one_off_name" \
         "${args[@]}" \
         "$IMAGE" bash -lc "$CONFIG_PRELUDE_RSYNC exec bash -l" _ "${CONFIG_VOLUMES[@]}"
       ;;
