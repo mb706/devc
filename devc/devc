@@ -331,7 +331,6 @@ ensure_cache_volumes() {
 CACHE_VOLUMES=(
   "devc_pip_cache:/home/dev/.cache/pip"
   "devc_npm_cache:/home/dev/.npm"
-  "devc_renv_cache:/home/dev/.cache/R/renv"
   "devc_virtualenv_cache:/home/dev/.virtualenvs"
   "devc_conda:/home/dev/conda"
 )
@@ -344,6 +343,7 @@ CONFIG_VOLUMES=(
   "devc_precommit_cache:/home/dev/.cache/pre-commit-cache"
   "devc_local:/home/dev/.local-cache"
   "devc_rpackages_cache:/home/dev/R-cache"
+  "devc_renv_cache:/home/dev/.cache/R-cache"
 )
 
 add_cache_mounts() {
