@@ -9,7 +9,7 @@ set -euo pipefail
 
 IMAGE_DEFAULT="devc/base:latest"
 MEM_LIMIT="${DEVC_MEM_LIMIT:-16g}"
-PIDS_LIMIT="${DEVC_PIDS_LIMIT:-2048}"
+PIDS_LIMIT="${DEVC_PIDS_LIMIT:-20480}"
 REVIEW_PRELUDE='rsync -a --delete /src/ /workspace/ 2>/tmp/rsync.log || echo "Warning: rsync failed" >&2;'
 REVIEW_PRELUDE_EXIT_ON_ERROR='rsync -a --delete /src/ /workspace/ 2>/tmp/rsync.log || (echo "rsync failed for workspace" >&2; exit 1)'
 CONFIG_PRELUDE_RSYNC='for entry in "$@"; do

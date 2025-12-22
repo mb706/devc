@@ -65,12 +65,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Miniforge
 ARG MINIFORGE_VERSION=24.7.1-0
 RUN if [ "${MINIFORGE_VERSION}" = "latest" ]; then \
-      path="latest/download"; \
+      pathx="latest/download"; \
     else \
-      path="download/${MINIFORGE_VERSION}"; \
+      pathx="download/${MINIFORGE_VERSION}"; \
     fi \
  && curl -fsSL -o /tmp/miniforge.sh \
-      "https://github.com/conda-forge/miniforge/releases/${path}/Miniforge3-${MINIFORGE_VERSION}-Linux-$(uname -m).sh" \
+      "https://github.com/conda-forge/miniforge/releases/${pathx}/Miniforge3-${MINIFORGE_VERSION}-Linux-$(uname -m).sh" \
  && bash /tmp/miniforge.sh -b -p /opt/conda \
  && rm -f /tmp/miniforge.sh \
  && /opt/conda/bin/conda clean -afy \
@@ -93,7 +93,52 @@ RUN mkdir -p /etc/conda \
     > /etc/conda/condarc \
  && echo '. /opt/conda/etc/profile.d/conda.sh' >> /etc/bash.bashrc
 # Make Conda available in every interactive shell without touching user dotfiles
- 
+
+ARG HQ_VERSION=latest
+RUN case "$(uname -m)" in \
+      x86_64)  arch="amd64" ;; \
+      aarch64) arch="arm64" ;; \
+      ppc64le) arch="ppc64le" ;; \
+      *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac \
+ && case "$arch" in \
+      amd64)  asset_arch="x64" ;; \
+      arm64)  asset_arch="arm64" ;; \
+      ppc64le) asset_arch="ppc64" ;; \
+      *) echo "Unsupported TARGETARCH: $arch" >&2; exit 1 ;; \
+    esac \
+ && repo="It4innovations/hyperqueue" \
+ && if [ "$HQ_VERSION" = "latest" ]; then \
+      api="https://api.github.com/repos/${repo}/releases/latest"; \
+    else \
+      v="${HQ_VERSION#v}" \
+   && api="https://api.github.com/repos/${repo}/releases/tags/v${v}"; \
+    fi \
+ && json="$(curl -fsSL --retry 5 --retry-connrefused --retry-delay 2 "$api")" \
+ && url="$(printf '%s' "$json" | jq -r --arg a "linux-${asset_arch}" \
+        '.assets[]\
+         | select(.name | startswith("hq-"))\
+         | select(.name | contains($a))\
+         | select(.name | endswith(".tar.gz"))\
+         | .browser_download_url' \
+      | head -n1)" \
+ && [ -n "$url" ] \
+ && curl -fsSL --retry 5 --retry-connrefused --retry-delay 2 "$url" -o /tmp/hq.tar.gz \
+ && sha_url="$(printf '%s' "$json" | jq -r --arg n "$(basename "$url")" \
+        '.assets[]\
+         | select(.name == ($n + ".sha256"))\
+         | .browser_download_url' \
+      | head -n1)" \
+ && if [ -n "$sha_url" ]; then \
+      curl -fsSL --retry 5 --retry-connrefused --retry-delay 2 "$sha_url" -o /tmp/hq.sha256 \
+   && expected="$(awk '{print $1}' /tmp/hq.sha256)" \
+   && echo "${expected}  /tmp/hq.tar.gz" | sha256sum -c -; \
+    fi \
+ && mkdir -p /tmp/hq-extract \
+ && tar -xzf /tmp/hq.tar.gz -C /tmp/hq-extract \
+ && install -m 0755 /tmp/hq-extract/hq /usr/local/bin/hq \
+ && rm -rf /tmp/hq.tar.gz /tmp/hq.sha256 /tmp/hq-extract \
+ && hq --version
 
 
 # Non-root default user
