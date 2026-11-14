@@ -1,0 +1,16 @@
+# Global devc settings. Every key is optional; the values shown are the
+# defaults unless noted.
+
+projects_root = "~/devc"       # where project directories live: <projects_root>/<realm>/<project>
+state_dir = ""                 # empty: ~/.local/share/devc; --state-dir and DEVC_STATE_DIR win
+engine = "podman"
+default_env = "base"           # used by projects that set neither env nor image (default: none)
+
+[box]
+memory = "16g"
+pids = 4096
+shell = ""                     # empty: first of zsh, bash, sh present in the image
+
+# Hubs this machine reports to (phase 2). None by default.
+# [[hubs]]
+# url = "https://hub.example.org"

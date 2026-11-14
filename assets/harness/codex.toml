@@ -1,0 +1,55 @@
+# Built-in harness manifest for the OpenAI Codex CLI. A file
+# <config>/harness/codex.toml replaces it entirely.
+id = "codex"
+display = "Codex"
+bin = "codex"
+
+[install]
+method = "script"
+url = "https://chatgpt.com/codex/install.sh"
+args = []
+env = { }
+exe = "home/packages/standalone/current/bin/codex"
+needs = []
+version_cmd = ["--version"]
+
+[home]
+strategy = "shared"
+dir = ".codex"
+env = { CODEX_HOME = "/home/dev/.codex" }
+shared = []
+per_box = ["app-server-daemon", "app-server-control", "ipc", "tmp"]
+
+[auth]
+method = "shared-home"
+login = ["codex", "login", "--device-auth"]
+status = ["codex", "login", "status"]
+env = ""
+secret = ""
+
+[baseline.settings]
+path = "/etc/codex/config.toml"
+format = "toml"
+template = "codex-config.toml.tmpl"
+
+[env]
+
+[launch]
+args = []
+resume = ["resume", "{id}"]
+
+[status]
+osc7501 = true
+
+[hooks]
+kind = "codex"
+
+[input]
+adapter = "paste"
+submit_key = "Tab"
+
+[memory]
+kind = ""
+
+[transcripts]
+globs = ["sessions/**/rollout-*.jsonl*"]

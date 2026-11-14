@@ -1,0 +1,9 @@
+# A small glibc image that satisfies the devc image contract (spec 6.5):
+# sh, git and an OpenSSH client. Everything else devc needs comes from the
+# toolbox.
+FROM docker.io/library/debian:trixie-slim
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      git openssh-client ca-certificates less procps \
+ && rm -rf /var/lib/apt/lists/*

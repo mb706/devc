@@ -1,0 +1,52 @@
+# A project with data zones; it shows every section of project.toml.
+upstream = ""                  # git URL, optional
+env = "base"                   # name under envs/; exactly one of env and image, unless default_env is set
+image = ""
+build_from_repo = ""           # optional Containerfile path inside the repository (opt-in, image content only)
+harnesses = ["claude"]
+memory_group = "demo-shared"   # default: the project name
+default_branch = "main"
+
+[git]
+forward = []                   # glob patterns of branches forwarded to the upstream automatically
+protected = ["main"]           # relay branches the box may not update
+branch_prefix = ""             # overrides the realm's
+
+[grants]
+ssh = []
+secrets = []
+github = "relay"               # relay | none | token:<secret-name>
+
+[data]
+root = "data"
+inputs = ["raw"]               # paths relative to root
+work = ["scratch"]
+sealed = ["results"]
+
+[data.savepoints]
+driver = "auto"                # auto | reflink | restic | borg | none
+before_session = false
+keep = 10
+
+[data.remotes.cluster1]
+host = "cluster1"              # SSH host alias
+path = "/scratch/demo/analysis"
+pull = ["results"]
+push = ["raw"]
+
+[network]
+level = ""                     # overrides the realm default
+
+[capabilities]
+gpu = false
+nested = false
+kvm = false
+
+[box]
+memory = "8g"
+pids = 0                       # 0: the global default
+ports = [8888]
+
+[[mounts]]
+project = "hello"              # another project in the same realm
+mode = "ro"                    # ro | rw

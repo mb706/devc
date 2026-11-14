@@ -1,0 +1,4 @@
+description = "A second realm, isolated from demo"
+
+[network]
+default = "none"

@@ -1,0 +1,6 @@
+# Uses a plain image instead of an env.
+image = "docker.io/library/debian:trixie-slim"
+harnesses = ["codex"]
+
+[network]
+level = "open"

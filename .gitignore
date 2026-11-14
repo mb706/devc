@@ -24,3 +24,6 @@
 *.out
 *.pdf
 .RDataTmp
+
+# devc v2 build output
+/bin/

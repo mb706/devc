@@ -1,0 +1,374 @@
+// Package paths is the only place that knows the host layout of spec section
+// 5 and the fixed in-box paths of plan 3.1.
+//
+// Security rules: getters accept only names that have already passed
+// internal/names (rule 4); an unvalidated name reaching a getter is a
+// programming error and panics rather than producing a path outside the
+// layout. Getters never create anything; Ensure creates private directories.
+package paths
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/mb706/devc/internal/names"
+)
+
+// Environment variables that override the roots.
+const (
+	EnvConfigDir  = "DEVC_CONFIG_DIR"
+	EnvStateDir   = "DEVC_STATE_DIR"
+	EnvRuntimeDir = "DEVC_RUNTIME_DIR"
+)
+
+// DefaultProjectsRoot is used when config.toml does not set projects_root.
+const DefaultProjectsRoot = "~/devc"
+
+// Options are the inputs to Resolve. Empty fields fall back to the next source.
+type Options struct {
+	// Explicit values from command-line flags.
+	ConfigDir  string
+	StateDir   string
+	RuntimeDir string
+	// Getenv defaults to os.Getenv.
+	Getenv func(string) string
+	// Home defaults to os.UserHomeDir.
+	Home string
+	// Cwd is used to make relative overrides absolute; defaults to os.Getwd.
+	Cwd string
+}
+
+// Paths answers layout questions. Construct it with Resolve and finish it
+// with WithGlobal once config.toml has been read.
+type Paths struct {
+	home         string
+	configDir    string
+	stateDir     string
+	stateFixed   bool // set by flag or environment; config.toml cannot change it
+	runtimeDir   string
+	runtimeErr   error
+	projectsRoot string
+}
+
+// Resolve determines the config, state and runtime roots: explicit flag,
+// then environment variable, then default. The runtime root is allowed to be
+// unresolvable here; RuntimeDir reports the error to callers that need it.
+func Resolve(o Options) (*Paths, error) {
+	getenv := o.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	home := o.Home
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("cannot determine the home directory: %w (set HOME)", err)
+		}
+		home = h
+	}
+	if !filepath.IsAbs(home) {
+		return nil, fmt.Errorf("home directory %q is not absolute", home)
+	}
+	cwd := o.Cwd
+	abs := func(what, p string) (string, error) {
+		if filepath.IsAbs(p) {
+			return filepath.Clean(p), nil
+		}
+		if cwd == "" {
+			c, err := os.Getwd()
+			if err != nil {
+				return "", fmt.Errorf("making %s %q absolute: %w", what, p, err)
+			}
+			cwd = c
+		}
+		return filepath.Join(cwd, p), nil
+	}
+
+	p := &Paths{home: filepath.Clean(home)}
+	var err error
+
+	switch {
+	case o.ConfigDir != "":
+		p.configDir, err = abs("config directory", o.ConfigDir)
+	case getenv(EnvConfigDir) != "":
+		p.configDir, err = abs(EnvConfigDir, getenv(EnvConfigDir))
+	default:
+		p.configDir = filepath.Join(p.home, ".config", "devc")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	switch {
+	case o.StateDir != "":
+		p.stateDir, err = abs("state directory", o.StateDir)
+		p.stateFixed = true
+	case getenv(EnvStateDir) != "":
+		p.stateDir, err = abs(EnvStateDir, getenv(EnvStateDir))
+		p.stateFixed = true
+	default:
+		p.stateDir = filepath.Join(p.home, ".local", "share", "devc")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	switch {
+	case o.RuntimeDir != "":
+		p.runtimeDir, err = abs("runtime directory", o.RuntimeDir)
+	case getenv(EnvRuntimeDir) != "":
+		p.runtimeDir, err = abs(EnvRuntimeDir, getenv(EnvRuntimeDir))
+	default:
+		xdg := getenv("XDG_RUNTIME_DIR")
+		switch {
+		case xdg == "":
+			p.runtimeErr = errors.New("XDG_RUNTIME_DIR is not set: log in through a session that provides it (systemd-logind), or set " + EnvRuntimeDir)
+		case !filepath.IsAbs(xdg):
+			p.runtimeErr = fmt.Errorf("XDG_RUNTIME_DIR %q is not an absolute path: fix the environment or set %s", xdg, EnvRuntimeDir)
+		default:
+			p.runtimeDir = filepath.Join(xdg, "devc")
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	p.projectsRoot, err = ExpandHome(DefaultProjectsRoot, p.home)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// WithGlobal returns a copy with the settings of config.toml applied:
+// state_dir (only if neither flag nor environment set the state root) and
+// projects_root. Empty values keep the current setting.
+func (p *Paths) WithGlobal(stateDir, projectsRoot string) (*Paths, error) {
+	q := *p
+	if stateDir != "" && !p.stateFixed {
+		d, err := ExpandHome(stateDir, p.home)
+		if err != nil {
+			return nil, fmt.Errorf("state_dir: %w", err)
+		}
+		q.stateDir = d
+	}
+	if projectsRoot != "" {
+		d, err := ExpandHome(projectsRoot, p.home)
+		if err != nil {
+			return nil, fmt.Errorf("projects_root: %w", err)
+		}
+		q.projectsRoot = d
+	}
+	return &q, nil
+}
+
+// ExpandHome expands a leading "~" or "~/" and requires the result to be
+// absolute. "~user" is not supported.
+func ExpandHome(p, home string) (string, error) {
+	switch {
+	case p == "~":
+		p = home
+	case strings.HasPrefix(p, "~/"):
+		p = filepath.Join(home, p[2:])
+	case strings.HasPrefix(p, "~"):
+		return "", fmt.Errorf("%q: only \"~\" and \"~/…\" are expanded, not \"~user\"", p)
+	}
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("%q must be an absolute path or start with \"~/\"", p)
+	}
+	return filepath.Clean(p), nil
+}
+
+// Home is the user's home directory.
+func (p *Paths) Home() string { return p.home }
+
+// --- Configuration (trusted, host-only) ---
+
+func (p *Paths) ConfigDir() string  { return p.configDir }
+func (p *Paths) ConfigFile() string { return filepath.Join(p.configDir, "config.toml") }
+func (p *Paths) BaselineRoot() string {
+	return filepath.Join(p.configDir, "baseline")
+}
+func (p *Paths) BaselineDir(harness string) string {
+	return filepath.Join(p.BaselineRoot(), must(names.KindHarness, harness))
+}
+func (p *Paths) DotfilesDir() string    { return filepath.Join(p.configDir, "dotfiles") }
+func (p *Paths) UserHarnessDir() string { return filepath.Join(p.configDir, "harness") }
+func (p *Paths) UserHarnessFile(id string) string {
+	return filepath.Join(p.UserHarnessDir(), must(names.KindHarness, id)+".toml")
+}
+func (p *Paths) EnvsDir() string { return filepath.Join(p.configDir, "envs") }
+func (p *Paths) EnvDir(env string) string {
+	return filepath.Join(p.EnvsDir(), must(names.KindEnv, env))
+}
+func (p *Paths) EnvContainerfile(env string) string {
+	return filepath.Join(p.EnvDir(env), "Containerfile")
+}
+func (p *Paths) EnvFile(env string) string { return filepath.Join(p.EnvDir(env), "env.toml") }
+func (p *Paths) RealmsDir() string         { return filepath.Join(p.configDir, "realms") }
+func (p *Paths) RealmDir(realm string) string {
+	return filepath.Join(p.RealmsDir(), must(names.KindRealm, realm))
+}
+func (p *Paths) RealmFile(realm string) string {
+	return filepath.Join(p.RealmDir(realm), "realm.toml")
+}
+func (p *Paths) ProjectDefsDir(realm string) string {
+	return filepath.Join(p.RealmDir(realm), "projects")
+}
+func (p *Paths) ProjectDefDir(r names.ProjectRef) string {
+	return filepath.Join(p.ProjectDefsDir(r.Realm), must(names.KindProject, r.Project))
+}
+func (p *Paths) ProjectFile(r names.ProjectRef) string {
+	return filepath.Join(p.ProjectDefDir(r), "project.toml")
+}
+
+// --- State ---
+
+func (p *Paths) StateDir() string   { return p.stateDir }
+func (p *Paths) DurableDir() string { return filepath.Join(p.stateDir, "durable") }
+func (p *Paths) DurableRealmDir(realm string) string {
+	return filepath.Join(p.DurableDir(), "realms", must(names.KindRealm, realm))
+}
+func (p *Paths) HarnessStateDir(realm, harness string) string {
+	return filepath.Join(p.DurableRealmDir(realm), "harness", must(names.KindHarness, harness))
+}
+func (p *Paths) ContextDir(realm string) string {
+	return filepath.Join(p.DurableRealmDir(realm), "context")
+}
+func (p *Paths) RelayDir(realm string) string {
+	return filepath.Join(p.DurableRealmDir(realm), "relay")
+}
+func (p *Paths) RelayRepo(r names.ProjectRef) string {
+	return filepath.Join(p.RelayDir(r.Realm), must(names.KindProject, r.Project)+".git")
+}
+func (p *Paths) JournalDir(r names.ProjectRef) string {
+	return filepath.Join(p.DurableRealmDir(r.Realm), "journal", must(names.KindProject, r.Project))
+}
+func (p *Paths) JournalFile(r names.ProjectRef, session string) string {
+	if !names.ValidSessionID(session) {
+		panic(fmt.Sprintf("paths: unvalidated session ID %q", session))
+	}
+	return filepath.Join(p.JournalDir(r), session+".jsonl")
+}
+func (p *Paths) SecretsDir(realm string) string {
+	return filepath.Join(p.DurableRealmDir(realm), "secrets")
+}
+func (p *Paths) NodeDir() string  { return filepath.Join(p.DurableDir(), "node") }
+func (p *Paths) LocalDir() string { return filepath.Join(p.stateDir, "local") }
+func (p *Paths) BoxLocalDir(r names.ProjectRef) string {
+	return filepath.Join(p.LocalDir(), "boxes", must(names.KindRealm, r.Realm), must(names.KindProject, r.Project))
+}
+
+// BoxHomeDir is mounted at /home/dev.
+func (p *Paths) BoxHomeDir(r names.ProjectRef) string {
+	return filepath.Join(p.BoxLocalDir(r), "home")
+}
+
+// BoxEtcDir holds the files rendered for /etc/devc and the harness baselines.
+func (p *Paths) BoxEtcDir(r names.ProjectRef) string {
+	return filepath.Join(p.BoxLocalDir(r), "etc")
+}
+func (p *Paths) SavepointsDir() string { return filepath.Join(p.LocalDir(), "savepoints") }
+func (p *Paths) CacheDir() string      { return filepath.Join(p.stateDir, "cache") }
+func (p *Paths) RealmPkgCacheDir(realm string) string {
+	return filepath.Join(p.CacheDir(), "realms", must(names.KindRealm, realm), "pkg")
+}
+func (p *Paths) ToolboxDir() string { return filepath.Join(p.stateDir, "toolbox") }
+
+// --- Projects (box-writable below <realm>/<project>) ---
+
+func (p *Paths) ProjectsRoot() string { return p.projectsRoot }
+
+// HostProjectDir is the box-writable project directory. Host code must not
+// run tools in it or walk it (README rule 2).
+func (p *Paths) HostProjectDir(r names.ProjectRef) string {
+	return filepath.Join(p.projectsRoot, must(names.KindRealm, r.Realm), must(names.KindProject, r.Project))
+}
+
+// --- Runtime ---
+
+// RuntimeDir is the root for sockets and spools. It fails when no runtime
+// directory can be determined.
+func (p *Paths) RuntimeDir() (string, error) {
+	if p.runtimeErr != nil {
+		return "", p.runtimeErr
+	}
+	return p.runtimeDir, nil
+}
+
+// BoxRuntimeDir is mounted at /run/devc in the box and is box-writable.
+func (p *Paths) BoxRuntimeDir(boxID string) (string, error) {
+	if !names.ValidBoxID(boxID) {
+		panic(fmt.Sprintf("paths: invalid box ID %q", boxID))
+	}
+	rt, err := p.RuntimeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(rt, boxID), nil
+}
+
+// SpoolDir is where the box writes event files; read it only through safefs.
+func (p *Paths) SpoolDir(boxID string) (string, error) {
+	d, err := p.BoxRuntimeDir(boxID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "spool"), nil
+}
+
+func must(kind, name string) string {
+	if !names.Valid(name) {
+		panic(fmt.Sprintf("paths: unvalidated %s name %q", kind, name))
+	}
+	return name
+}
+
+// Ensure creates dir with mode 0700 (and any missing parents below the root
+// that contains it). dir must lie within the state, runtime or config root;
+// parents above the root are created with mode 0755. An existing dir is left
+// as it is, but it must be a directory and not a symlink.
+func (p *Paths) Ensure(dir string) error {
+	dir = filepath.Clean(dir)
+	var root string
+	for _, r := range []string{p.stateDir, p.runtimeDir, p.configDir} {
+		if r != "" && within(r, dir) {
+			root = r
+			break
+		}
+	}
+	if root == "" {
+		return fmt.Errorf("refusing to create %s: it is outside the devc state, runtime and config directories", dir)
+	}
+	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(root), err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s exists and is not a directory", dir)
+	}
+	return nil
+}
+
+// within reports whether p equals root or lies below it (lexically).
+func within(root, p string) bool {
+	if p == root {
+		return true
+	}
+	return strings.HasPrefix(p, strings.TrimSuffix(root, "/")+"/")
+}
+
+// Within reports whether path lies at or below root, comparing cleaned paths
+// lexically.
+func Within(root, path string) bool {
+	return within(filepath.Clean(root), filepath.Clean(path))
+}

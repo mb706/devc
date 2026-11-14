@@ -1,0 +1,176 @@
+{
+  "host": {
+    "arch": "amd64",
+    "buildahVersion": "1.43.2",
+    "cgroupManager": "systemd",
+    "cgroupVersion": "v2",
+    "cgroupControllers": [
+      "cpu",
+      "memory",
+      "pids"
+    ],
+    "conmon": {
+      "package": "Unknown",
+      "path": "/home/user/.local/opt/workstation-tools/bin/conmon",
+      "version": "conmon version 2.2.1, commit: "
+    },
+    "cpus": 12,
+    "cpuUtilization": {
+      "userPercent": 2.87,
+      "systemPercent": 0.42,
+      "idlePercent": 96.71
+    },
+    "databaseBackend": "sqlite",
+    "distribution": {
+      "distribution": "ubuntu",
+      "version": "24.04",
+      "codename": "noble"
+    },
+    "eventLogger": "file",
+    "freeLocks": 2048,
+    "hostname": "workstation",
+    "idMappings": {
+      "gidmap": [
+        {
+          "container_id": 0,
+          "host_id": 1001,
+          "size": 1
+        },
+        {
+          "container_id": 1,
+          "host_id": 165536,
+          "size": 65536
+        }
+      ],
+      "uidmap": [
+        {
+          "container_id": 0,
+          "host_id": 1001,
+          "size": 1
+        },
+        {
+          "container_id": 1,
+          "host_id": 165536,
+          "size": 65536
+        }
+      ]
+    },
+    "kernel": "6.8.0-147-generic",
+    "logDriver": "k8s-file",
+    "memFree": 5195669504,
+    "memTotal": 67425955840,
+    "networkBackend": "netavark",
+    "networkBackendInfo": {
+      "backend": "netavark",
+      "version": "netavark 2.1.0",
+      "package": "Unknown",
+      "path": "/home/user/.local/opt/workstation-tools/lib/podman/netavark",
+      "dns": {
+        "version": "aardvark-dns 1.4.0",
+        "package": "aardvark-dns_1.4.0-5_amd64",
+        "path": "/usr/lib/podman/aardvark-dns"
+      },
+      "defaultNetwork": "podman"
+    },
+    "ociRuntime": {
+      "name": "runc",
+      "package": "Unknown",
+      "path": "/home/user/.local/opt/workstation-tools/bin/runc",
+      "version": "runc version 1.4.3\ncommit: a6ad58b-dirty\nspec: 1.3.0\ngo: go1.26.4\nlibseccomp: 2.6.1"
+    },
+    "os": "linux",
+    "remoteSocket": {
+      "path": "/run/user/1001/podman/podman.sock",
+      "exists": true
+    },
+    "rootlessNetworkCmd": "slirp4netns",
+    "serviceIsRemote": false,
+    "security": {
+      "apparmorEnabled": false,
+      "capabilities": "CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID,CAP_SYS_CHROOT",
+      "rootless": true,
+      "seccompEnabled": true,
+      "seccompProfilePath": "/home/user/.local/opt/workstation-tools/share/containers/seccomp.json",
+      "selinuxEnabled": false
+    },
+    "slirp4netns": {
+      "executable": "/home/user/.local/opt/workstation-tools/bin/slirp4netns",
+      "package": "Unknown",
+      "version": "slirp4netns version 1.1.8\ncommit: d361001f495417b880f20329121e3aa431a8f90f\nlibslirp: 4.4.0\nSLIRP_CONFIG_VERSION_MAX: 3\nlibseccomp: 2.6.1"
+    },
+    "pasta": {
+      "executable": "/usr/bin/pasta",
+      "package": "passt_0.0~git20240220.1e6f92b-1_amd64",
+      "version": "pasta unknown version\nCopyright Red Hat\nGNU General Public License, version 2 or later\n  \u003chttps://www.gnu.org/licenses/old-licenses/gpl-2.0.html\u003e\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n"
+    },
+    "swapFree": 8583090176,
+    "swapTotal": 8585736192,
+    "uptime": "218h 41m 5.00s (Approximately 9.08 days)",
+    "variant": "",
+    "linkmode": "dynamic"
+  },
+  "store": {
+    "configFile": "/home/user/.config/containers/storage.conf",
+    "containerStore": {
+      "number": 0,
+      "paused": 0,
+      "running": 0,
+      "stopped": 0
+    },
+    "graphDriverName": "overlay",
+    "graphOptions": {
+      "overlay.mount_program": {
+  "Executable": "/home/user/.local/opt/workstation-tools/bin/fuse-overlayfs",
+  "Package": "Unknown",
+  "Version": "fusermount3 version: 3.14.0\nfuse-overlayfs: version 1.17\nFUSE library version 3.18.2\nusing FUSE kernel interface version 7.45"
+}
+    },
+    "graphRoot": "/home/user/.local/share/containers/storage",
+    "graphRootAllocated": 622415683584,
+    "graphRootUsed": 336036601856,
+    "graphStatus": {
+      "Backing Filesystem": "extfs",
+      "Native Overlay Diff": "false",
+      "Supports d_type": "true",
+      "Supports shifting": "true",
+      "Supports volatile": "true",
+      "Using metacopy": "false"
+    },
+    "imageCopyTmpDir": "/var/tmp",
+    "imageStore": {
+      "number": 2
+    },
+    "runRoot": "/run/user/1001/containers",
+    "volumePath": "/home/user/.local/share/containers/storage/volumes",
+    "transientStore": false
+  },
+  "registries": {
+    
+  },
+  "plugins": {
+    "volume": [
+      "local"
+    ],
+    "network": [
+      "bridge",
+      "macvlan",
+      "ipvlan"
+    ],
+    "log": [
+      "k8s-file",
+      "none",
+      "passthrough"
+    ],
+    "authorization": null
+  },
+  "version": {
+    "APIVersion": "5.8.3",
+    "Version": "5.8.3",
+    "GoVersion": "go1.26.4",
+    "GitCommit": "4c5bc0d9c9efca735189b7cdc0df32ad01f2aea5-dirty",
+    "BuiltTime": "Sun Jul  5 21:48:59 2026",
+    "Built": 1783288139,
+    "OsArch": "linux/amd64",
+    "Os": "linux"
+  }
+}

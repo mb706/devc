@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Development driver for devc: runs the Go toolchain in a container so the
+# host needs no Go installation. See docs/dev/README.md.
+set -euo pipefail
+
+# Toolchain image, pinned by exact tag. Update deliberately and record the
+# change in docs/dev/STATUS.md.
+GO_IMAGE="docker.io/library/golang:1.27.4"
+
+ENGINE="${DEVC_ENGINE:-podman}"
+CACHE="${DEVC_DEV_CACHE:-$HOME/.cache/devc-dev}"
+MODULE="github.com/mb706/devc"
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+cd "$REPO"
+
+usage() {
+	cat <<'EOF'
+usage: ./dev <command> [args...]
+
+  build              build bin/devc for the host architecture
+  build-all          build bin/devc-linux-amd64 and bin/devc-linux-arm64
+  test [args...]     unit tests (default ./...); extra args go to `go test`
+  itest [flags...]   build bin/devc and bin/itest, run integration tests on the host
+  vet                go vet ./... (including integration-tagged files)
+  fmt                gofmt -l -w on the tree
+  tidy               go mod tidy
+  go [args...]       run an arbitrary go command in the toolchain container
+  shell              interactive shell in the toolchain container
+
+Environment: DEVC_ENGINE (default podman), DEVC_DEV_CACHE (default ~/.cache/devc-dev).
+EOF
+}
+
+version() {
+	git -C "$REPO" describe --tags --always --dirty 2>/dev/null || echo unknown
+}
+
+ldflags() {
+	printf -- '-s -w -X %s/internal/version.Version=%s' "$MODULE" "$(version)"
+}
+
+# run_in_container [engine run options...] -- command [args...]
+run_in_container() {
+	local opts=()
+	while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+		opts+=("$1")
+		shift
+	done
+	[ "$#" -gt 0 ] && shift
+	mkdir -p "$CACHE/mod" "$CACHE/build"
+	local tty=()
+	if [ -t 0 ] && [ -t 1 ]; then
+		tty=(-t)
+	fi
+	# Root inside a rootless container is the invoking user on the host, so
+	# files written to /src stay owned by the developer. The container is a
+	# build tool, not a sandbox: label=disable keeps it working on SELinux hosts.
+	"$ENGINE" run --rm -i "${tty[@]}" \
+		--security-opt label=disable \
+		-v "$REPO:/src" -w /src \
+		-v "$CACHE/mod:/go/pkg/mod" \
+		-v "$CACHE/build:/root/.cache/go-build" \
+		-e CGO_ENABLED=0 \
+		-e GOTOOLCHAIN=local \
+		-e GOFLAGS=-buildvcs=false \
+		"${opts[@]}" \
+		"$GO_IMAGE" "$@"
+}
+
+go_in_container() {
+	run_in_container -- go "$@"
+}
+
+has_package_arg() {
+	local a
+	for a in "$@"; do
+		case "$a" in
+		./* | ../* | . | "$MODULE"*) return 0 ;;
+		esac
+	done
+	return 1
+}
+
+cmd="${1:-}"
+[ "$#" -gt 0 ] && shift
+
+case "$cmd" in
+build)
+	mkdir -p bin
+	go_in_container build -trimpath -ldflags "$(ldflags)" -o bin/devc ./cmd/devc
+	;;
+build-all)
+	mkdir -p bin
+	for arch in amd64 arm64; do
+		run_in_container -e GOOS=linux -e GOARCH="$arch" -- \
+			go build -trimpath -ldflags "$(ldflags)" -o "bin/devc-linux-$arch" ./cmd/devc
+	done
+	;;
+test)
+	if has_package_arg "$@"; then
+		go_in_container test "$@"
+	else
+		go_in_container test "$@" ./...
+	fi
+	;;
+itest)
+	mkdir -p bin
+	# Always rebuild both binaries: the build cache makes this cheap, and a
+	# stale bin/devc would silently test old code.
+	run_in_container -- sh -c '
+		set -e
+		go build -trimpath -ldflags "$1" -o bin/devc ./cmd/devc
+		go test -c -tags integration -o bin/itest ./test/integration
+	' sh "$(ldflags)"
+	# Translate `go test` style flags (-v, -run X) into test-binary flags.
+	args=()
+	for a in "$@"; do
+		case "$a" in
+		-test.*) args+=("$a") ;;
+		--*) args+=("-test.${a#--}") ;;
+		-*) args+=("-test.${a#-}") ;;
+		*) args+=("$a") ;;
+		esac
+	done
+	cd "$REPO/test/integration"
+	DEVC_BIN="$REPO/bin/devc" DEVC_REPO_ROOT="$REPO" "$REPO/bin/itest" "${args[@]}"
+	;;
+vet)
+	go_in_container vet -tags integration ./...
+	;;
+fmt)
+	run_in_container -- gofmt -l -w .
+	;;
+tidy)
+	go_in_container mod tidy
+	;;
+go)
+	go_in_container "$@"
+	;;
+shell)
+	run_in_container -- bash
+	;;
+"" | -h | --help | help)
+	usage
+	;;
+*)
+	echo "dev: unknown command: $cmd" >&2
+	usage >&2
+	exit 2
+	;;
+esac

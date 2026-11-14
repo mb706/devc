@@ -1,0 +1,42 @@
+[
+  {
+    "AutoRemove": false,
+    "Command": [
+      "sleep",
+      "60"
+    ],
+    "CreatedAt": "Less than a second ago",
+    "CIDFile": "",
+    "Exited": false,
+    "ExitedAt": -62135596800,
+    "ExitCode": 0,
+    "ExposedPorts": null,
+    "Id": "1d7c9ac5d36d044cb1943ef06c3f041a19a6ce2236d65b208b5fc6af637467e1",
+    "Image": "docker.io/library/golang:1.27.4",
+    "ImageID": "35d05408c49f8e41e965288fb845b7e17f2e7a5d02338c90bbba22757e6470e5",
+    "IsInfra": false,
+    "Labels": {
+      "devc.project": "hello",
+      "devc.realm": "demo",
+      "devc.test": "1"
+    },
+    "Mounts": [],
+    "Names": [
+      "devc-c01-probe"
+    ],
+    "Namespaces": {
+      
+    },
+    "Networks": [],
+    "Pid": 1142054,
+    "Pod": "",
+    "PodName": "",
+    "Ports": null,
+    "Restarts": 0,
+    "Size": null,
+    "StartedAt": 1794697468,
+    "State": "running",
+    "Status": "Up Less than a second",
+    "Created": 1794697468
+  }
+]

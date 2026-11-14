@@ -1,0 +1,64 @@
+# Built-in harness manifest for Claude Code. A file <config>/harness/claude.toml
+# replaces it entirely.
+id = "claude"
+display = "Claude Code"
+bin = "claude"                 # the command users type; a shim with this name is created
+
+[install]
+method = "script"              # script | none
+url = "https://claude.ai/install.sh"
+args = []
+env = { }
+exe = "home/.local/bin/claude" # real executable, relative to the harness directory in the toolbox
+needs = []                     # toolbox components, for example ["node"]
+version_cmd = ["--version"]
+
+[home]
+strategy = "private"           # private | shared
+dir = ".claude"                # relative to /home/dev
+env = { CLAUDE_CONFIG_DIR = "/home/dev/.claude" }
+shared = ["projects"]          # private strategy: subdirectories mounted from realm state
+per_box = []                   # shared strategy: subdirectories kept per box
+
+[[home.seed]]
+path = ".claude.json"          # relative to dir
+template = "claude.json.tmpl"
+when = "missing"               # missing | always
+
+[auth]
+method = "env-token"           # env-token | shared-home | api-key | none
+login = ["claude", "setup-token"]
+status = ["claude", "auth", "status"]
+env = "CLAUDE_CODE_OAUTH_TOKEN"
+secret = "claude-token"
+
+[baseline.settings]
+path = "/etc/claude-code/managed-settings.json"
+format = "json"                # json | toml
+template = "claude-managed-settings.json.tmpl"
+
+[baseline.instructions]
+path = "/etc/claude-code/CLAUDE.md"
+
+[env]
+DISABLE_UPDATES = "1"
+
+[launch]
+args = []
+resume = ["--resume", "{id}"]
+
+[status]
+osc7501 = true
+
+[hooks]
+kind = "claude"
+
+[input]
+adapter = "paste"              # paste | mod | app-server | extension
+submit_key = "Enter"
+
+[memory]
+kind = "claude-auto-memory"    # empty when the harness has no memory directory setting
+
+[transcripts]
+globs = ["projects/*/*.jsonl"]

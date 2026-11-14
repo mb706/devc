@@ -32,3 +32,17 @@ Things that could not be verified during autonomous development, and work delibe
 ## Deferred work
 
 (Chunks append here.)
+
+### From C01
+
+| Item | Needs |
+|---|---|
+| `doctor` SELinux branch (`matchpathcon`, `semanage` hint) is tested only with fakes | a Fedora machine, enforcing |
+| `doctor` reflink-supported branch and `ReflinkProbe` success | XFS or btrfs storage |
+| `doctor` KVM accessible branch | hardware with KVM |
+| `doctor apparmor-userns` warns on this host because the conda-installed podman is not covered by a profile, yet rootless podman works; whether the hint profile is ever needed here is unverified | root access to load a profile, or a host where podman fails without one |
+| `doctor linger` with lingering enabled, on a real host (only the fake branch is tested) | `loginctl enable-linger` (root) |
+| `safefs` behaviour when openat2 is missing (`ErrUnsupported`) | a kernel older than 5.6 |
+| `safefs.List` with `DT_UNKNOWN` entries (fstatat fallback) | a filesystem without d_type |
+| `bin/devc-linux-arm64` is built but never run | an arm64 machine |
+| Codex manifest values (`exe` path, `/etc/codex/config.toml` as the baseline location, per-box directory names) are taken from the work order, not checked against an installed Codex | a Codex install (no login needed) |
