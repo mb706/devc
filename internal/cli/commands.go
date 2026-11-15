@@ -194,7 +194,7 @@ func newRealmCmd(a *app) *cobra.Command {
 		},
 	}
 	ls.Flags().BoolVar(&asJSON, "json", false, "print JSON")
-	return group("realm", "Manage realms", false, ls)
+	return group("realm", "Manage realms", false, ls, newRealmAddCmd(a))
 }
 
 type projectRow struct {
@@ -263,7 +263,7 @@ func newProjectCmd(a *app) *cobra.Command {
 	}
 	ls.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	ls.Flags().StringVar(&realm, "realm", "", "only list projects of this realm")
-	return group("project", "Manage projects", false, ls)
+	return group("project", "Manage projects", false, append([]*cobra.Command{ls}, newProjectGitCmds(a)...)...)
 }
 
 func table(w io.Writer, headers ...string) *tabwriter.Writer {

@@ -134,3 +134,17 @@ Other checks and deferred work:
 | Journals are never rotated or pruned; diff snapshots leave unreachable objects in the context repository (`gc.auto = 0`, no `git gc`) | a retention design (with C17 state sync) |
 | The context container on SELinux hosts mounts the context directory and the toolbox without relabelling, like the other auxiliary containers | a Fedora machine, enforcing |
 | Text fields in `devc ps --json` and the journal are box-written; devc escapes control characters for terminals, but other consumers must treat them as untrusted | document for users (C07) |
+
+### From C05
+
+| Item | Needs |
+|---|---|
+| Claude Code's `WorktreeCreate`/`WorktreeRemove` hooks in the baseline call `devc box worktree-hook create|remove`. Assumed hook input: `name` (or `worktree_name`) for create, `worktree_path` (or `path`, or `name`) for remove; create prints the absolute path on stdout. Unverified: the field names, that the printed path is used, and how a failure (non-zero exit) is reported | a Claude session in a box using `--worktree` |
+| Upstream operations attached to a terminal (SSH passphrase prompts, credential helpers) are exercised only without a terminal (`GIT_TERMINAL_PROMPT=0`) against `file://` upstreams | a real SSH/HTTPS remote with credentials, interactively |
+| `devc service install|uninstall|status` is tested against a temporary unit directory with a fake systemctl; the units were never installed or run by a real systemd user manager | a manual `devc service install` on a workstation (and `loginctl enable-linger` for runs while logged out) |
+| Box images with old git: the box side uses `git worktree list --porcelain` (with `prunable`, git ≥ 2.31), `git checkout -b … --track`, `ls-files -z`, `update-index -z --stdin`; tested only with Debian bookworm's git 2.39 | an image with an older git, or a minimum version in the image contract |
+| The stub `git-remote-devc` answers `fetch` with nothing; git normally skips the call because every object is already present. A box whose refs/remotes/origin/* point at objects it does not have (deleted packs) would fail its fetch with a confusing message | C10's real transport |
+| `devc pull` on a stopped box updates the relay only; the box sees github/* and new tags at the next `devc pull` with the box running (bank reflects only origin/*) | a decision (reflect everything at `up`?) |
+| Relay tags are refs/tags = the upstream as last fetched; `pull` does not prune deleted upstream tags (it prunes deleted branches) | nothing |
+| Relay garbage: `gc.auto = 0`, nothing ever runs `git gc` on relays, and bank refs are never pruned | a retention design (with C17) |
+| A bank applies at most 1000 changed branches and 1000 new tags (the rest wait for the next bank); a box can still make the fetch itself large | a size limit on fetched packs, if needed |

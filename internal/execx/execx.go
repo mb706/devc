@@ -43,7 +43,10 @@ type Cmd struct {
 	// set it to a box-writable directory.
 	Dir string
 	// Env holds "KEY=value" additions to the inherited environment.
-	Env   []string
+	Env []string
+	// Unset removes variables from the inherited environment before Env is
+	// added; an entry ending in "*" removes every variable with that prefix.
+	Unset []string
 	Stdin io.Reader
 	// Stdout and Stderr redirect the output of Interactive (default: the
 	// process's own). Run ignores them and captures instead.
@@ -138,6 +141,29 @@ type Real struct{}
 
 var _ Runner = Real{}
 
+// Environ returns base without the variables named in c.Unset.
+func (c Cmd) Environ(base []string) []string {
+	if len(c.Unset) == 0 {
+		return base
+	}
+	out := make([]string, 0, len(base))
+	for _, kv := range base {
+		name, _, _ := strings.Cut(kv, "=")
+		drop := false
+		for _, u := range c.Unset {
+			if p, ok := strings.CutSuffix(u, "*"); ok {
+				drop = drop || strings.HasPrefix(name, p)
+			} else {
+				drop = drop || name == u
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
 // WorkDir is the directory c runs in: c.Dir, or "/" when it is empty.
 func (c Cmd) WorkDir() string {
 	if c.Dir == "" {
@@ -149,8 +175,8 @@ func (c Cmd) WorkDir() string {
 func (Real) command(ctx context.Context, c Cmd) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.Dir = c.WorkDir()
-	if len(c.Env) > 0 {
-		cmd.Env = append(os.Environ(), c.Env...)
+	if len(c.Env) > 0 || len(c.Unset) > 0 {
+		cmd.Env = append(c.Environ(os.Environ()), c.Env...)
 	}
 	// Ask politely first; WaitDelay escalates to SIGKILL.
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }

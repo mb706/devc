@@ -184,3 +184,17 @@ func TestCmdString(t *testing.T) {
 		t.Errorf("String = %s", got)
 	}
 }
+
+func TestUnset(t *testing.T) {
+	c := Cmd{Unset: []string{"GIT_*", "HOME"}}
+	got := c.Environ([]string{"GIT_DIR=/x", "GIT_WORK_TREE=/y", "HOME=/h", "HOMER=s", "PATH=/bin", "XGIT_DIR=z"})
+	if strings.Join(got, " ") != "HOMER=s PATH=/bin XGIT_DIR=z" {
+		t.Errorf("%q", got)
+	}
+	t.Setenv("DEVC_TEST_UNSET", "visible")
+	res, err := Real{}.Run(context.Background(), Cmd{Name: "sh", Args: []string{"-c", "echo ${DEVC_TEST_UNSET:-gone} $EXTRA"},
+		Unset: []string{"DEVC_TEST_*"}, Env: []string{"EXTRA=added"}})
+	if err != nil || strings.TrimSpace(string(res.Stdout)) != "gone added" {
+		t.Errorf("%q %v", res.Stdout, err)
+	}
+}

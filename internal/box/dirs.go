@@ -157,6 +157,9 @@ func writeEtc(p *paths.Paths, r *config.Resolved, version string, homeMounts []s
 		Shell:       r.Box.Shell,
 		DevcVersion: version,
 		HomeMounts:  homeMounts,
+		// For worktrees created in the box (the harness worktree hook).
+		BranchPrefix: r.Git.BranchPrefix,
+		DataRoot:     r.Data.Root,
 	}
 	b, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {

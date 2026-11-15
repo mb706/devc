@@ -57,6 +57,9 @@ func InBoxRepoDir(r names.ProjectRef) string {
 	return path.Join(InBoxProjectDir(r), ".repo")
 }
 
+// MainWorktree is the name of the worktree created with the repository.
+const MainWorktree = "main"
+
 // InBoxWorktree is the checkout of a worktree ("main" or a task).
 func InBoxWorktree(r names.ProjectRef, worktree string) string {
 	return path.Join(InBoxProjectDir(r), must(names.KindWorktree, worktree))

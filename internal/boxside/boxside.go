@@ -4,9 +4,12 @@
 // the identity fix run by `devc up`, the login shell used by `devc sh`, the
 // harness launcher (which registers each session), the hook receiver that
 // turns harness hooks into spool events, the session commands that create,
-// list and stop tmux windows, and a self-test of the hardening. Two workers
-// run outside boxes: rm-worker in the helper container and the context
-// worker in the context container (internal/ctxrepo).
+// list and stop tmux windows, a self-test of the hardening, and the git
+// work that must happen in the box (snapshot commits, worktrees, the
+// repository report, the worktree hook and the stub remote helper
+// git-remote-devc). Two workers run outside boxes: rm-worker in the helper
+// container and the context worker in the context container
+// (internal/ctxrepo).
 //
 // Security rules: code here runs in the box and trusts nothing the box can
 // write. It reads its own description only from /etc/devc, which the host
@@ -18,7 +21,8 @@
 // never prints and never fails. tmux runs with argument vectors and an
 // environment without per-session variables (internal/tmux). The context
 // worker walks a box-written tree through safefs and never lets git look
-// at it.
+// at it. The git commands here run box git on the box's own repository;
+// their JSON reports are decoded strictly and validated by the host.
 package boxside
 
 import (
@@ -56,6 +60,10 @@ type Info struct {
 	// HomeMounts are the top-level entries of the home that exist only as
 	// mount points (.cache, harness homes); they do not make a home "used".
 	HomeMounts []string `json:"home_mounts,omitempty"`
+	// BranchPrefix is put before the name of a task worktree's branch;
+	// DataRoot is the data directory beside main/, never a worktree name.
+	BranchPrefix string `json:"branch_prefix,omitempty"`
+	DataRoot     string `json:"data_root,omitempty"`
 }
 
 // InfoSchema is the current version of box.json.

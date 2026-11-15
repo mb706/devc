@@ -1,6 +1,6 @@
 // Command devc is the single devc binary. It dispatches on the name it was
 // invoked under: "devc" runs the CLI; "git-remote-devc" is the git remote
-// helper (filled in by a later chunk); any other name is a harness shim in a
+// helper for devc:: remotes in boxes; any other name is a harness shim in a
 // box (/opt/devc/shims/<bin> links to devc) and runs the launcher.
 package main
 
@@ -39,9 +39,10 @@ func route(name string) role {
 	return roleShim
 }
 
-// launcher runs a harness shim; tests replace it.
+// launcher runs a harness shim or the remote helper; tests replace it.
 type launcher interface {
 	launch(name string, args []string) int
+	remoteHelper(args []string) int
 }
 
 func dispatch(name string, args []string, l launcher) int {
@@ -49,8 +50,7 @@ func dispatch(name string, args []string, l launcher) int {
 	case roleCLI:
 		return cli.Run()
 	case roleRemoteHelper:
-		fmt.Fprintln(os.Stderr, "git-remote-devc: not implemented")
-		return 2
+		return l.remoteHelper(args)
 	}
 	return l.launch(name, args)
 }
@@ -60,6 +60,12 @@ func dispatch(name string, args []string, l launcher) int {
 type shim struct {
 	root   string
 	stderr io.Writer
+}
+
+// remoteHelper serves git's remote-helper protocol on stdin and stdout
+// (the C05 stub; git runs it in the box for devc:: URLs).
+func (s shim) remoteHelper(args []string) int {
+	return boxside.RemoteHelper(args, os.Stdin, os.Stdout, s.stderr, boxside.ExecGit)
 }
 
 func (s shim) launch(name string, args []string) int {

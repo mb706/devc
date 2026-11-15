@@ -18,6 +18,11 @@ func (r *recorder) launch(name string, args []string) int {
 	return 42
 }
 
+func (r *recorder) remoteHelper(args []string) int {
+	r.name, r.args = "git-remote-devc", args
+	return 7
+}
+
 func TestRoute(t *testing.T) {
 	for name, want := range map[string]role{
 		"devc": roleCLI, "devc-linux-amd64": roleCLI, "git-remote-devc": roleRemoteHelper,
@@ -31,7 +36,7 @@ func TestRoute(t *testing.T) {
 	if code := dispatch("claude", []string{"-p", "hi"}, r); code != 42 || r.name != "claude" || strings.Join(r.args, " ") != "-p hi" {
 		t.Errorf("shim dispatch: %d %+v", code, r)
 	}
-	if code := dispatch("git-remote-devc", nil, r); code != 2 {
+	if code := dispatch("git-remote-devc", []string{"origin", "devc::r/p"}, r); code != 7 || r.name != "git-remote-devc" || len(r.args) != 2 {
 		t.Errorf("git-remote-devc: %d", code)
 	}
 }

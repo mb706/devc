@@ -317,6 +317,10 @@ func (p *Paths) BoxHarnessDir(r names.ProjectRef, harness string) string {
 	return filepath.Join(p.BoxLocalDir(r), "harness", must(names.KindHarness, harness))
 }
 
+// NoHooksDir is an empty directory owned by devc. Every host git command
+// uses it as core.hooksPath, so no hook ever runs on the host.
+func (p *Paths) NoHooksDir() string { return filepath.Join(p.LocalDir(), "git", "no-hooks") }
+
 // TmpDir is for short-lived host directories (temporary homes for logins).
 func (p *Paths) TmpDir() string        { return filepath.Join(p.LocalDir(), "tmp") }
 func (p *Paths) SavepointsDir() string { return filepath.Join(p.LocalDir(), "savepoints") }

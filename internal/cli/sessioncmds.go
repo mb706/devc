@@ -21,6 +21,7 @@ import (
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/ctxrepo"
 	"github.com/mb706/devc/internal/engine"
+	"github.com/mb706/devc/internal/gitx"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/proto"
@@ -589,6 +590,18 @@ func (a *app) startSession(cmd *cobra.Command, id string, refArgs, harnessArgs [
 	if _, err := os.Stat(filepath.Join(e.cfg.Paths.BoxEtcDir(ref), "harness", id+".json")); err != nil {
 		return fmt.Errorf("%s was started before %s was installed: restart it with 'devc down %s', then try again", name, id, ref)
 	}
+	// A task worktree is created first when it does not exist (C05). A
+	// project without a relay has no repository to make one from; its
+	// sessions start in the project directory as before.
+	if worktree != paths.MainWorktree && (&gitx.Relay{Dir: e.cfg.Paths.RelayRepo(ref)}).Exists() {
+		dir, created, err := a.worktreeNew(ctx, e, ref, worktree, "")
+		if err != nil {
+			return fmt.Errorf("creating the worktree %s: %w", worktree, err)
+		}
+		if created {
+			fmt.Fprintf(a.stderr, "devc: created the worktree %s\n", dir)
+		}
+	}
 	sid := names.NewSessionID()
 	boxArgs := []string{paths.InBoxHelper, "box", "session", "start", "--id", sid, "--harness", id, "--worktree", worktree}
 	if detach || !a.isTerminal() {
@@ -717,11 +730,19 @@ func newContextCmd(a *app) *cobra.Command {
 		defer cancel()
 		return fn(ctx, repo, realm)
 	}
+	var commitAll bool
 	commit := &cobra.Command{
-		Use:   "commit [realm]",
+		Use:   "commit [realm] [--all]",
 		Short: "Commit a realm's context repository if anything changed",
+		Long:  "Commit a realm's context repository if anything changed. --all commits every realm's and prints only commits and problems (the banking timer runs it).",
 		Args:  maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if commitAll {
+				if len(args) > 0 {
+					return usageErrorf("give a realm or --all, not both")
+				}
+				return a.contextCommitAll(cmd)
+			}
 			return with(cmd, args, func(ctx context.Context, repo *ctxrepo.Repo, realm string) error {
 				res, err := repo.Commit(ctx, realm, "devc context commit")
 				for _, s := range res.Skipped {
@@ -739,6 +760,7 @@ func newContextCmd(a *app) *cobra.Command {
 			})
 		},
 	}
+	commit.Flags().BoolVar(&commitAll, "all", false, "commit every realm's context repository")
 	var n int
 	log := &cobra.Command{
 		Use:   "log [realm] [-n N]",
@@ -778,4 +800,41 @@ func newContextCmd(a *app) *cobra.Command {
 		},
 	}
 	return group("context", "Inspect and commit the realms' context repositories (notes and memory)", false, commit, log, diff)
+}
+
+// contextCommitAll commits the context repository of every realm that has
+// one, printing only commits and problems.
+func (a *app) contextCommitAll(cmd *cobra.Command) error {
+	c, probs, err := a.load()
+	if err != nil {
+		return err
+	}
+	a.warnProblems(probs)
+	repo, err := a.ctxRepo(c, a.engine(c))
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Minute)
+	defer cancel()
+	failed := false
+	for _, r := range c.Realms() {
+		if _, err := os.Stat(c.Paths.ContextDir(r.Name)); err != nil {
+			continue // no box of this realm has run yet
+		}
+		res, err := repo.Commit(ctx, r.Name, "devc context commit")
+		for _, s := range res.Skipped {
+			fmt.Fprintf(a.stderr, "devc: %s: %s\n", r.Name, s)
+		}
+		switch {
+		case err != nil:
+			fmt.Fprintf(a.stderr, "devc: %s: %s\n", r.Name, errText(err))
+			failed = true
+		case res.Commit != "":
+			fmt.Fprintf(a.stdout, "%s: committed %s\n", r.Name, res.Commit)
+		}
+	}
+	if failed {
+		return exitCode(1)
+	}
+	return nil
 }

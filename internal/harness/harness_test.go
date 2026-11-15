@@ -205,6 +205,13 @@ func TestClaudeSettingsMerge(t *testing.T) {
 			t.Errorf("hook %s: %+v", ev, groups)
 		}
 	}
+	// Worktree hooks (C05) redirect Claude Code's --worktree to devc's layout.
+	for kind, ev := range map[string]string{"create": "WorktreeCreate", "remove": "WorktreeRemove"} {
+		groups := s.Hooks[ev]
+		if len(groups) != 1 || len(groups[0].Hooks) != 1 || groups[0].Hooks[0].Command != "/opt/devc/bin/devc box worktree-hook "+kind {
+			t.Errorf("hook %s: %+v", ev, groups)
+		}
+	}
 	if len(s.Hooks["Stop"]) != 2 || s.Hooks["Stop"][0].Hooks[0].Command != "notify-send done" {
 		t.Errorf("the user's Stop hook was not kept first: %+v", s.Hooks["Stop"])
 	}

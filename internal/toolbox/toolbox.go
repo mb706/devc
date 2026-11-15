@@ -9,6 +9,7 @@
 //	devc/<id>/devc          one copy per devc build, <id> = <version>-<sha256[:12]>
 //	devc/current -> <id>
 //	bin/devc -> ../devc/current/devc
+//	bin/git-remote-devc -> ../devc/current/devc   (the git remote helper)
 //	helper-rootfs/bin/devc  hard link to (or copy of) the current binary; nothing else
 //	seccomp.json            the box profile (seccomp.go)
 //	tmux/, bin/tmux, terminfo/   the static tmux (tmux.go)
@@ -118,6 +119,9 @@ func (t *Toolbox) Sync(exe, version string) (SyncResult, error) {
 	for _, l := range []struct{ path, target string }{
 		{filepath.Join(t.devcDir(), "current"), res.ID},
 		{filepath.Join(t.BinDir(), "devc"), "../devc/current/devc"},
+		// git finds the remote helper for devc:: URLs on the box's PATH;
+		// devc dispatches on the name.
+		{filepath.Join(t.BinDir(), "git-remote-devc"), "../devc/current/devc"},
 	} {
 		changed, err := symlinkAtomic(l.target, l.path)
 		if err != nil {

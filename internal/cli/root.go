@@ -53,6 +53,8 @@ type app struct {
 	executable func() (string, error)
 	getwd      func() (string, error)
 	isTerminal func() bool
+	// stdoutIsTerminal decides on colors and the pager (log, diff).
+	stdoutIsTerminal func() bool
 	// args are the raw command-line arguments; harness commands are
 	// registered before cobra parses them.
 	args []string
@@ -109,7 +111,7 @@ func display(c *config.Config, file string) string {
 // Main runs the CLI and returns the process exit status.
 func Main(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
 	a := &app{stdout: stdout, stderr: stderr, stdin: os.Stdin, getenv: getenv, runner: execx.Real{},
-		executable: os.Executable, getwd: os.Getwd, isTerminal: stdinIsTerminal}
+		executable: os.Executable, getwd: os.Getwd, isTerminal: stdinIsTerminal, stdoutIsTerminal: stdoutIsTerminal}
 	return a.main(args)
 }
 
@@ -194,6 +196,7 @@ func newRoot(a *app) *cobra.Command {
 	root.AddCommand(newLifecycleCmds(a)...)
 	root.AddCommand(newHarnessCmds(a)...)
 	root.AddCommand(newSessionCmds(a)...)
+	root.AddCommand(newGitCmds(a)...)
 	existing := map[string]bool{"help": true}
 	for _, c := range root.Commands() {
 		existing[c.Name()] = true

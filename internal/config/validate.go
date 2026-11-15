@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -605,6 +606,17 @@ func validateProject(c *Config, p *Project, ps *problems) {
 		}
 		k.enum(key+".mode", m.Mode, mountModes)
 	}
+}
+
+// CheckUpstream applies the rules of a project's upstream key to u, for
+// URLs found elsewhere (an adopted clone's origin).
+func CheckUpstream(u string) error {
+	ps := &problems{}
+	checkUpstream(checker{ps: ps}, u)
+	if len(ps.list) > 0 {
+		return errors.New(ps.list[0].Message)
+	}
+	return nil
 }
 
 func checkUpstream(k checker, u string) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
+	"github.com/mb706/devc/internal/gitx"
 	"github.com/mb706/devc/internal/harness"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/secrets"
@@ -28,6 +29,7 @@ const lifecycleTimeout = 3 * time.Hour
 type boxEnv struct {
 	cfg *config.Config
 	mgr *box.Manager
+	git *gitx.Service
 }
 
 func (a *app) boxEnv() (*boxEnv, error) {
@@ -46,12 +48,13 @@ func (a *app) boxEnv() (*boxEnv, error) {
 	m.Contributors = append(m.Contributors, hooks)
 	m.Preparers = append(m.Preparers, hooks)
 	m.Cleaners = append(m.Cleaners, hooks)
-	e := &boxEnv{cfg: c, mgr: m}
+	e := &boxEnv{cfg: c, mgr: m, git: a.gitService(c, m.Engine)}
 	repo, err := a.ctxRepo(c, m.Engine)
 	if err != nil {
 		return nil, err
 	}
-	m.StopHooks = append(m.StopHooks, &sessionHooks{a: a, e: e, repo: repo})
+	// down and rm bank before they stop a box (work order C05 section 4).
+	m.StopHooks = append(m.StopHooks, &sessionHooks{a: a, e: e, repo: repo}, &bankHook{a: a, e: e})
 	return e, nil
 }
 
@@ -95,6 +98,11 @@ func stdinIsTerminal() bool {
 	return err == nil
 }
 
+func stdoutIsTerminal() bool {
+	_, err := unix.IoctlGetTermios(int(os.Stdout.Fd()), unix.TCGETS)
+	return err == nil
+}
+
 func newLifecycleCmds(a *app) []*cobra.Command {
 	var upRecreate, upBuild bool
 	up := &cobra.Command{
@@ -106,6 +114,9 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 		Args: maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.withBox(cmd, args, func(ctx context.Context, e *boxEnv, ref names.ProjectRef) error {
+				if err := a.requireRelay(e, ref); err != nil {
+					return err
+				}
 				return e.mgr.Up(ctx, ref, box.UpOptions{Recreate: upRecreate, Build: upBuild})
 			})
 		},
