@@ -189,6 +189,9 @@ func (w *boxWorker) serveStream(ctx context.Context, st *yamux.Stream, handlers 
 		case proto.MethodHostGate:
 			w.serveGate(ctx, st, br, m)
 			return
+		case proto.MethodHostGitHub:
+			w.serveGitHub(ctx, st, m)
+			return
 		}
 	}
 	rest := io.MultiReader(bytes.NewReader(append(line, '\n')), br)

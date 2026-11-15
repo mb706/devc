@@ -27,3 +27,9 @@ secret = ""                    # overrides the secret name
 
 [sync]
 hub = true
+
+# A GitHub App you own, for projects with grants.github = "app" (see the guide).
+# [github.app]
+# app_id = 123456              # the App's numeric ID
+# key_secret = "github-app-key" # realm secret holding the App's private key: devc secret set demo github-app-key < key.pem
+# installation_id = 0          # optional; without it the installation is looked up for each repository

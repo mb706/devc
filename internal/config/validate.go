@@ -546,6 +546,7 @@ func validateRealm(c *Config, r *Realm, ps *problems) {
 	k := checker{file: r.File, ps: ps}
 	k.enum("network.default", r.Network.Default, networkLevels)
 	k.netAllowlist("network.allowlist", r.Network.Allowlist)
+	validateRealmGitHub(k, r.GitHub)
 	if r.SELinux.Level != "" && !selinuxRE.MatchString(r.SELinux.Level) {
 		k.bad("selinux.level", "%q does not match s0 or s0:cN[,cN…], for example s0:c100,c200", r.SELinux.Level)
 	}
@@ -662,13 +663,11 @@ func validateProject(c *Config, p *Project, ps *problems) {
 		k.name(idx("grants.secrets", i), names.KindSecret, s)
 	}
 	k.noDuplicates("grants.secrets", p.Grants.Secrets)
-	switch gh := p.Grants.GitHub; {
-	case gh == "relay", gh == "none":
-	case strings.HasPrefix(gh, "token:"):
-		k.name("grants.github", names.KindSecret, strings.TrimPrefix(gh, "token:"))
-	default:
-		k.bad("grants.github", "%q must be \"relay\", \"none\" or \"token:<secret-name>\"", gh)
+	var app *GitHubApp
+	if realm, ok := c.realms[p.Realm]; ok {
+		app = realm.GitHub.App
 	}
+	validateGitHub(k, p.Grants, app)
 
 	validateData(k, &p.Data)
 

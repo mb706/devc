@@ -259,6 +259,8 @@ type Resolved struct {
 	Requests     Requests     `toml:"requests" json:"requests"`
 	// SecretsDelivery is the global secrets.delivery.
 	SecretsDelivery string `toml:"secrets_delivery" json:"secrets_delivery"`
+	// GitHubApp is the realm's [github.app] (work order C15).
+	GitHubApp *GitHubApp `toml:"github_app,omitempty" json:"github_app,omitempty"`
 }
 
 type ResolvedHarness struct {
@@ -334,7 +336,9 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 			MaxPushSize:  sizeOr(p.Git.MaxPushSize, DefaultMaxPushSize),
 			RelayQuota:   sizeOr(p.Git.RelayQuota, DefaultRelayQuota),
 		},
-		Grants: Grants{SSH: nonNil(p.Grants.SSH), SSHAllow: cloneLists(p.Grants.SSHAllow), Secrets: nonNil(p.Grants.Secrets), GitHub: p.Grants.GitHub},
+		Grants: Grants{SSH: nonNil(p.Grants.SSH), SSHAllow: cloneLists(p.Grants.SSHAllow), Secrets: nonNil(p.Grants.Secrets), GitHub: p.Grants.GitHub,
+			GitHubRead: nonNil(p.Grants.GitHubRead), GitHubToken: p.Grants.GitHubToken},
+		GitHubApp: realm.GitHub.App,
 		Data: ResolvedData{
 			Enabled:    len(p.Data.Inputs)+len(p.Data.Work)+len(p.Data.Sealed) > 0,
 			Root:       p.Data.Root,

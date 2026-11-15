@@ -16,6 +16,9 @@ const (
 	RequestNet       = "net"
 	RequestGrant     = "grant"
 	RequestPR        = "pr"
+	// RequestComment asks for a comment on a pull request or issue of the
+	// project's GitHub repository (work order C15).
+	RequestComment = "comment"
 )
 
 // Risk classes (plan 3.11): low-risk requests may be approved from
@@ -30,14 +33,14 @@ func RequestRisk(kind string) string {
 	switch kind {
 	case RequestSeal, RequestSavepoint, RequestNote:
 		return RiskLow
-	case RequestPackage, RequestNet, RequestGrant, RequestPR:
+	case RequestPackage, RequestNet, RequestGrant, RequestPR, RequestComment:
 		return RiskHigh
 	}
 	return ""
 }
 
 // RequestKinds lists every kind.
-var RequestKinds = []string{RequestSeal, RequestSavepoint, RequestNote, RequestPackage, RequestNet, RequestGrant, RequestPR}
+var RequestKinds = []string{RequestSeal, RequestSavepoint, RequestNote, RequestPackage, RequestNet, RequestGrant, RequestPR, RequestComment}
 
 // DefaultAutoRequests are the kinds approved automatically unless a
 // project's [requests] auto says otherwise.
@@ -89,10 +92,14 @@ type RequestParams struct {
 	For    string `json:"for,omitempty"`
 	// grant: ssh or secret, and Name
 	Grant string `json:"grant,omitempty"`
-	// pr
+	// pr: title, body, branch, and optionally the base branch and draft;
+	// comment: number and body
 	Title  string `json:"title,omitempty"`
 	Body   string `json:"body,omitempty"`
 	Branch string `json:"branch,omitempty"`
+	Base   string `json:"base,omitempty"`
+	Draft  bool   `json:"draft,omitempty"`
+	Number int64  `json:"number,omitempty"`
 }
 
 // Request is a stored request.

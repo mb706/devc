@@ -291,6 +291,11 @@ func (w *boxWorker) acceptStreams(ctx context.Context, sess *yamux.Session) {
 		proto.MethodHostSecret: func(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 			return w.d.secret(ctx, w.ref, w.containerID, params)
 		},
+		// The project's GitHub token, for projects that grant one (work
+		// order C15).
+		proto.MethodHostGitHubToken: func(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
+			return w.d.githubToken(ctx, w.ref, w.containerID, params)
+		},
 	}
 	notify := map[string]proto.NotifyHandler{
 		proto.MethodHostHint: func(_ context.Context, _ *proto.Conn, params json.RawMessage) {

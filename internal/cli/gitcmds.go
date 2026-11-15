@@ -473,6 +473,10 @@ func (a *app) projectBox(ctx context.Context, e *boxEnv, ref names.ProjectRef, d
 	if err := e.git.InitBox(ctx, p, def); err != nil {
 		return err
 	}
+	// The remote github and the credential helper of the token modes (C15).
+	if err := a.configureGitHub(ctx, e, ref); err != nil {
+		fmt.Fprintf(a.stderr, "devc: warning: %s\n", errText(err))
+	}
 	// The new main worktree gets its link to the data root (C06).
 	if p.Resolved.Data.Enabled {
 		dp, err := data.ProjectOf(e.cfg.Paths, p.Resolved)
@@ -751,13 +755,7 @@ func (a *app) push(cmd *cobra.Command, args []string, o gitx.PushOptions) error 
 		o.Branches = []string{b}
 	}
 	if a.isTerminal() {
-		in := bufio.NewReader(a.stdinReader())
-		o.Confirm = func(prompt string) bool {
-			fmt.Fprint(a.stderr, prompt)
-			line, _ := in.ReadString('\n')
-			ans := strings.ToLower(strings.TrimSpace(line))
-			return ans == "y" || ans == "yes"
-		}
+		o.Confirm = a.confirmFunc()
 		o.Color = a.stdoutTerminal()
 	}
 	err = e.git.Push(ctx, p, o)
@@ -766,6 +764,17 @@ func (a *app) push(cmd *cobra.Command, args []string, o gitx.PushOptions) error 
 		return exitCode(1)
 	}
 	return err
+}
+
+// confirmFunc asks a yes/no question on the terminal (push confirmations).
+func (a *app) confirmFunc() func(string) bool {
+	in := bufio.NewReader(a.stdinReader())
+	return func(prompt string) bool {
+		fmt.Fprint(a.stderr, prompt)
+		line, _ := in.ReadString('\n')
+		ans := strings.ToLower(strings.TrimSpace(line))
+		return ans == "y" || ans == "yes"
+	}
 }
 
 // display runs log or diff and shows the result, through the pager when

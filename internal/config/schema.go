@@ -111,6 +111,22 @@ type Realm struct {
 	SELinux     RealmSELinux               `toml:"selinux" json:"selinux"`
 	Harness     map[string]HarnessOverride `toml:"harness" json:"harness,omitempty"`
 	Sync        RealmSync                  `toml:"sync" json:"sync"`
+	GitHub      RealmGitHub                `toml:"github" json:"github"`
+}
+
+// RealmGitHub is [github] of a realm.
+type RealmGitHub struct {
+	App *GitHubApp `toml:"app" json:"app,omitempty"`
+}
+
+// GitHubApp is [github.app]: the GitHub App whose installation tokens
+// projects of mode "app" receive. KeySecret names the realm secret that
+// holds the App's private key (PEM); without InstallationID the
+// installation is looked up for each repository.
+type GitHubApp struct {
+	AppID          int64  `toml:"app_id" json:"app_id"`
+	KeySecret      string `toml:"key_secret" json:"key_secret"`
+	InstallationID int64  `toml:"installation_id" json:"installation_id,omitempty"`
 }
 
 type RealmGit struct {
@@ -201,12 +217,34 @@ type Requests struct {
 // Grants are what a project's box may use beyond itself. SSH lists host
 // aliases reachable through the SSH gate, each "<host>" (full use of the
 // account) or "<host>:ro" (only the commands listed for it in SSHAllow).
+//
+// GitHub selects what the box holds for GitHub (work order C15): "relay"
+// (the default) and "none" give it nothing, "token:<secret>" a stored token,
+// "app" installation tokens of the realm's GitHub App restricted by
+// GitHubToken. GitHubRead lists further repositories ("owner/repo") the
+// read-only facade serves besides the project's own.
 type Grants struct {
-	SSH      []string            `toml:"ssh" json:"ssh"`
-	SSHAllow map[string][]string `toml:"ssh_allow" json:"ssh_allow,omitempty"`
-	Secrets  []string            `toml:"secrets" json:"secrets"`
-	GitHub   string              `toml:"github" json:"github"`
+	SSH         []string            `toml:"ssh" json:"ssh"`
+	SSHAllow    map[string][]string `toml:"ssh_allow" json:"ssh_allow,omitempty"`
+	Secrets     []string            `toml:"secrets" json:"secrets"`
+	GitHub      string              `toml:"github" json:"github"`
+	GitHubRead  []string            `toml:"github_read" json:"github_read"`
+	GitHubToken *GitHubToken        `toml:"github_token" json:"github_token,omitempty"`
 }
+
+// GitHubToken is [grants.github_token]: the permissions of the
+// installation tokens of mode "app".
+type GitHubToken struct {
+	Permissions map[string]string `toml:"permissions" json:"permissions"`
+}
+
+// GitHub token modes (grants.github).
+const (
+	GitHubModeRelay   = "relay"
+	GitHubModeNone    = "none"
+	GitHubModeApp     = "app"
+	GitHubTokenPrefix = "token:"
+)
 
 type Data struct {
 	Root       string            `toml:"root" json:"root"`

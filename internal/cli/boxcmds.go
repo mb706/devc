@@ -67,6 +67,9 @@ func (a *app) boxEnv() (*boxEnv, error) {
 	// Network exceptions still valid go back into a box that has just
 	// passed its readiness checks and the canary (work order C13).
 	m.StartHooks = append(m.StartHooks, box.NetExceptionHook{Manager: m})
+	// The box repository's remote github and credential helper follow
+	// grants.github, which is a capability of the start (work order C15).
+	m.StartHooks = append(m.StartHooks, githubHook{a: a, e: e})
 	repo, err := a.ctxRepo(c, m.Engine)
 	if err != nil {
 		return nil, err

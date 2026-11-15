@@ -35,9 +35,11 @@ const (
 	MaxTitle    = 256
 	MaxBody     = 8000
 	MaxPackages = 32
-	MinFor      = time.Minute
-	MaxFor      = 7 * 24 * time.Hour
-	DefaultFor  = time.Hour
+	// MaxNumber bounds a pull request or issue number.
+	MaxNumber  = 1 << 53
+	MinFor     = time.Minute
+	MaxFor     = 7 * 24 * time.Hour
+	DefaultFor = time.Hour
 	// Expiry is how long a request may stay pending.
 	Expiry = 7 * 24 * time.Hour
 )
@@ -72,6 +74,7 @@ func fields(p *proto.RequestParams) []field {
 		{"manager", p.Manager != ""}, {"packages", p.Packages != nil},
 		{"target", p.Target != ""}, {"for", p.For != ""}, {"grant", p.Grant != ""},
 		{"title", p.Title != ""}, {"body", p.Body != ""}, {"branch", p.Branch != ""},
+		{"base", p.Base != ""}, {"draft", p.Draft}, {"number", p.Number != 0},
 	}
 }
 
@@ -83,7 +86,8 @@ var kindFields = map[string][]string{
 	proto.RequestPackage:   {"manager", "packages"},
 	proto.RequestNet:       {"target", "for"},
 	proto.RequestGrant:     {"grant", "name"},
-	proto.RequestPR:        {"title", "body", "branch"},
+	proto.RequestPR:        {"title", "body", "branch", "base", "draft"},
+	proto.RequestComment:   {"number", "body"},
 }
 
 // Validate checks a request from a box and returns it normalised (a net
@@ -175,10 +179,20 @@ func Validate(p proto.RequestParams) (proto.RequestParams, error) {
 		if err := checkText("body", p.Body, MaxBody, true, false); err != nil {
 			return p, err
 		}
-		if p.Branch != "" {
-			if err := names.CheckRef(p.Branch); err != nil {
-				return p, invalid("branch %q: %v", proto.Printable(proto.Truncate(p.Branch, 80)), err)
+		for _, b := range []struct{ what, name string }{{"branch", p.Branch}, {"base", p.Base}} {
+			if b.name == "" {
+				continue
 			}
+			if err := names.CheckRef(b.name); err != nil {
+				return p, invalid("%s %q: %v", b.what, proto.Printable(proto.Truncate(b.name, 80)), err)
+			}
+		}
+	case proto.RequestComment:
+		if p.Number <= 0 || p.Number > MaxNumber {
+			return p, invalid("a comment needs the number of a pull request or issue")
+		}
+		if err := checkText("body", p.Body, MaxBody, true, true); err != nil {
+			return p, err
 		}
 	}
 	return p, nil
@@ -282,8 +296,17 @@ func Summary(p proto.RequestParams) string {
 	case proto.RequestPR:
 		s = "pull request: " + p.Title
 		if p.Branch != "" {
-			s += " (" + p.Branch + ")"
+			s += " (" + p.Branch
+			if p.Base != "" {
+				s += " into " + p.Base
+			}
+			s += ")"
 		}
+		if p.Draft {
+			s += " [draft]"
+		}
+	case proto.RequestComment:
+		s = fmt.Sprintf("comment on #%d: %s", p.Number, p.Body)
 	default:
 		s = p.Kind
 	}

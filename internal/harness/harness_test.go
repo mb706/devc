@@ -361,6 +361,48 @@ func TestInstructions(t *testing.T) {
 	if !strings.Contains(other, "- Network: the internet is reachable") || strings.Contains(other, "REALM DEMO") {
 		t.Errorf("other/tools:\n%s", other)
 	}
+	if strings.Contains(got, "- GitHub:") {
+		t.Errorf("a project without an upstream got a GitHub paragraph:\n%s", got)
+	}
+}
+
+// TestGitHubSentence: the sandbox description names the facade, says
+// whether the box holds a token, and how to ask for a pull request (work
+// order C15).
+func TestGitHubSentence(t *testing.T) {
+	e := setup(t, nil)
+	r := e.resolved(t, "demo/hello")
+	r.Upstream = "git@github.com:acme/app.git"
+	r.Grants.GitHubRead = []string{"acme/lib"}
+	got, err := Instructions(e.cfg, r, e.manifest(t, "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"- GitHub: `devc gh` reads acme/app (and, with `--repo`, acme/lib) through the host, read-only",
+		"`devc gh run view <id> [--log] [--failed]`", "The real `gh` has no credential in this box",
+		"`devc request pr --title <title> [--body <text>] [--branch <branch>]`", "`devc request comment <number> --body <text>`"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	r.Grants.GitHub = "app"
+	got, _ = Instructions(e.cfg, r, e.manifest(t, "claude"))
+	if !strings.Contains(got, "Sessions get a GitHub token as `GH_TOKEN`") || !strings.Contains(got, "expires within an hour") || strings.Contains(got, "no credential in this box") {
+		t.Errorf("app mode:\n%s", got)
+	}
+	r.Grants.GitHub = "token:pat"
+	got, _ = Instructions(e.cfg, r, e.manifest(t, "claude"))
+	if !strings.Contains(got, "`git push github <branch>`") || strings.Contains(got, "expires within an hour") {
+		t.Errorf("token mode:\n%s", got)
+	}
+	m := e.manifest(t, "claude")
+	if l := Describe(r, m, config.ResolvedHarness{ID: "claude", Bin: "claude"}, "/opt/x"); !l.GitHubToken {
+		t.Error("the launch description of a token mode does not ask for the token")
+	}
+	r.Grants.GitHub = "relay"
+	if l := Describe(r, m, config.ResolvedHarness{ID: "claude", Bin: "claude"}, "/opt/x"); l.GitHubToken {
+		t.Error("the launch description of relay mode asks for a token")
+	}
 }
 
 func TestRenderSeed(t *testing.T) {

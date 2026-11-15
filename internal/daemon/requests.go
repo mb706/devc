@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -528,7 +529,23 @@ func requestCommands(ref names.ProjectRef, req proto.Request) ([][]string, strin
 	case proto.RequestGrant:
 		return nil, "not available yet: grants are changed in project.toml by the user for now"
 	case proto.RequestPR:
-		return nil, "not available yet: pull requests arrive with the GitHub facade (C15); ask the user to push and open it"
+		// The same command the user runs (work order C15): it banks, pushes
+		// the branch to the upstream (the approval is the confirmation) and
+		// opens the pull request. Box-chosen text goes in --flag=value form
+		// and after "--", so nothing becomes an option.
+		if p.Branch == "" {
+			return nil, "the request names no branch"
+		}
+		args := []string{"pr", "create", "--yes", "--branch=" + p.Branch, "--title=" + p.Title, "--body=" + p.Body}
+		if p.Base != "" {
+			args = append(args, "--base="+p.Base)
+		}
+		if p.Draft {
+			args = append(args, "--draft")
+		}
+		return [][]string{append(args, "--", ref.String())}, ""
+	case proto.RequestComment:
+		return [][]string{{"pr", "comment", "--body=" + p.Body, "--", ref.String(), strconv.FormatInt(p.Number, 10)}}, ""
 	}
 	return nil, "unknown request kind"
 }

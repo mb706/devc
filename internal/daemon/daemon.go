@@ -46,6 +46,7 @@ import (
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/flock"
+	"github.com/mb706/devc/internal/github"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/paths"
@@ -127,6 +128,9 @@ type Options struct {
 	ProxyExempt []netip.AddrPort
 	// RouterListen overrides router.listen of config.toml (tests).
 	RouterListen string
+	// GitHub are the GitHub base URLs (DEVC_GITHUB_API, DEVC_GITHUB_URL;
+	// zero: github.com's), work order C15.
+	GitHub github.Endpoints
 }
 
 // env is one loaded configuration and what is built from it.
@@ -174,6 +178,12 @@ type Daemon struct {
 	netLogs   map[names.ProjectRef]*netpolicy.NetLog
 	hostAddrs hostAddrCache
 	router    *router
+
+	// GitHub (github.go): installation tokens and the per-project budget of
+	// facade reads.
+	minter   *github.Minter
+	ghReads  *readBudget
+	ghTokens *readBudget
 }
 
 // boxInfo is what the last box-watch pass saw of a configured project.
@@ -233,11 +243,23 @@ func New(o Options) (*Daemon, error) {
 	if o.ProcDir == "" {
 		o.ProcDir = "/proc"
 	}
+	if o.GitHub.API == nil || o.GitHub.Web == nil {
+		def := github.DefaultEndpoints()
+		if o.GitHub.API == nil {
+			o.GitHub.API = def.API
+		}
+		if o.GitHub.Web == nil {
+			o.GitHub.Web = def.Web
+		}
+	}
 	host, _ := os.Hostname()
 	instance := newInstance()
 	d := &Daemon{o: o, log: o.Log, version: o.Version, instance: instance, started: time.Now().UTC(), machine: host,
 		procDir: o.ProcDir, runtime: rt, boxes: map[names.ProjectRef]*boxInfo{}, windows: map[names.ProjectRef]map[string]string{},
 		warnings: map[names.ProjectRef]*pendingWarn{}, hub: newHub(o.Log, instance), fetchLimit: newRateLimit(fetchThroughEvery)}
+	d.minter = &github.Minter{}
+	d.ghReads = newReadBudget(ghReadsPerMinute)
+	d.ghTokens = newReadBudget(ghTokensPerMinute)
 	d.requests = newRequestService(d)
 	d.hubs = newHubManager(d)
 	d.term = newTermManager(d)

@@ -4,6 +4,9 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/mb706/devc/internal/github"
+	"github.com/mb706/devc/internal/names"
 )
 
 // SSHReadOnlySuffix marks a grants.ssh entry as the read-only profile
@@ -61,6 +64,88 @@ func (g Grants) SSHGrantFor(host string) (SSHGrant, bool) {
 // SSHAllowed returns the command names allowed on a read-only host.
 func (g Grants) SSHAllowed(host string) []string {
 	return slices.Clone(g.SSHAllow[host])
+}
+
+// GitHubTokenMode reports whether grants.github hands the box a token
+// ("app" or "token:<secret>").
+func (g Grants) GitHubTokenMode() bool {
+	return g.GitHub == GitHubModeApp || strings.HasPrefix(g.GitHub, GitHubTokenPrefix)
+}
+
+// GitHubTokenSecret is the secret of mode "token:<secret>", else "".
+func (g Grants) GitHubTokenSecret() string {
+	s, _ := strings.CutPrefix(g.GitHub, GitHubTokenPrefix)
+	if s == g.GitHub {
+		return ""
+	}
+	return s
+}
+
+// GitHubPermissions are the permissions of mode "app": [grants.github_token]
+// or, without that table, contents and metadata read.
+func (g Grants) GitHubPermissions() map[string]string {
+	if g.GitHubToken == nil || g.GitHubToken.Permissions == nil {
+		return github.DefaultPermissions()
+	}
+	out := make(map[string]string, len(g.GitHubToken.Permissions))
+	for k, v := range g.GitHubToken.Permissions {
+		out[k] = v
+	}
+	return out
+}
+
+// validateGitHub checks the GitHub keys of [grants]; app is the realm's
+// [github.app].
+func validateGitHub(k checker, g Grants, app *GitHubApp) {
+	switch gh := g.GitHub; {
+	case gh == GitHubModeRelay, gh == GitHubModeNone:
+	case gh == GitHubModeApp:
+		if app == nil {
+			k.bad("grants.github", "\"app\" needs [github.app] with app_id and key_secret in the realm's realm.toml")
+		}
+	case strings.HasPrefix(gh, GitHubTokenPrefix):
+		k.name("grants.github", names.KindSecret, strings.TrimPrefix(gh, GitHubTokenPrefix))
+	default:
+		k.bad("grants.github", "%q must be \"relay\", \"none\", \"app\" or \"token:<secret-name>\"", gh)
+	}
+	if g.GitHubToken != nil {
+		if g.GitHub != GitHubModeApp {
+			k.bad("grants.github_token", "applies only to grants.github = \"app\"")
+		}
+		if len(g.GitHubToken.Permissions) == 0 {
+			k.bad("grants.github_token.permissions", "name at least one permission, such as contents = \"read\"")
+		}
+		for _, name := range sortedKeys(g.GitHubToken.Permissions) {
+			if err := github.CheckPermission(name, g.GitHubToken.Permissions[name]); err != nil {
+				k.bad("grants.github_token.permissions."+name, "%v", err)
+			}
+		}
+	}
+	for i, s := range g.GitHubRead {
+		if _, err := github.ParseRepoName(s); err != nil {
+			k.bad(idx("grants.github_read", i), "%v", err)
+		}
+	}
+	k.noDuplicates("grants.github_read", g.GitHubRead)
+}
+
+// validateRealmGitHub checks [github] of a realm.
+func validateRealmGitHub(k checker, g RealmGitHub) {
+	a := g.App
+	if a == nil {
+		return
+	}
+	if a.AppID <= 0 {
+		k.bad("github.app.app_id", "set the App's numeric ID (shown on the App's settings page)")
+	}
+	if a.KeySecret == "" {
+		k.bad("github.app.key_secret", "name the realm secret that holds the App's private key ('devc secret set <realm> <name> < key.pem')")
+	} else {
+		k.name("github.app.key_secret", names.KindSecret, a.KeySecret)
+	}
+	if a.InstallationID < 0 {
+		k.bad("github.app.installation_id", "must be a positive number, or left out to look the installation up")
+	}
 }
 
 // validateGrants checks [grants] of a project.

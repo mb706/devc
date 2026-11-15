@@ -28,10 +28,12 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/mb706/devc/internal/config"
+	"github.com/mb706/devc/internal/github"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/paths"
@@ -55,6 +57,11 @@ type Capabilities struct {
 	// allowlist entries in canonical form (level allowlist only).
 	Network   string   `json:"network,omitempty"`
 	Allowlist []string `json:"allowlist,omitempty"`
+	// GitHub is grants.github (work order C15); GitHubPermissions the
+	// permissions of mode "app"; GitHubRead grants.github_read.
+	GitHub            string            `json:"github,omitempty"`
+	GitHubPermissions map[string]string `json:"github_permissions,omitempty"`
+	GitHubRead        []string          `json:"github_read,omitempty"`
 }
 
 // GrantedSecrets lists the secrets a project may receive: its granted
@@ -76,7 +83,11 @@ func CapabilitiesOf(r *config.Resolved, containerID string, now time.Time) Capab
 		allow[h] = slices.Clone(l)
 	}
 	c := Capabilities{V: 1, ContainerID: containerID, Recorded: now.UTC(), Secrets: GrantedSecrets(r),
-		SSH: slices.Clone(r.Grants.SSH), SSHAllow: allow, Network: r.Network}
+		SSH: slices.Clone(r.Grants.SSH), SSHAllow: allow, Network: r.Network,
+		GitHub: r.Grants.GitHub, GitHubRead: slices.Clone(r.Grants.GitHubRead)}
+	if r.Grants.GitHub == config.GitHubModeApp {
+		c.GitHubPermissions = r.Grants.GitHubPermissions()
+	}
 	if r.Network == netpolicy.Allowlist {
 		// Validated with the configuration; an entry that does not parse
 		// is simply not recorded, so it is never allowed.
@@ -208,4 +219,40 @@ func (c *Capabilities) SSHGrant(r *config.Resolved, host string) (config.SSHGran
 		allow = r.Grants.SSHAllowed(host)
 	}
 	return g, allow, true
+}
+
+// ErrNoGitHubToken: the box holds no GitHub token, now or since its start.
+var ErrNoGitHubToken = errors.New("no GitHub token for this box")
+
+// GitHubToken is the token mode in force for the box (work order C15):
+// grants.github was "app" or "token:<secret>" at its start and is the same
+// now. For "app" the permissions are those granted then and now, each at
+// the lower level.
+func (c *Capabilities) GitHubToken(r *config.Resolved) (string, map[string]string, error) {
+	switch {
+	case !r.Grants.GitHubTokenMode():
+		return "", nil, fmt.Errorf("%w: grants.github is %q", ErrNoGitHubToken, r.Grants.GitHub)
+	case c.GitHub != r.Grants.GitHub:
+		return "", nil, fmt.Errorf("%w: grants.github changed to %q after the box started with %q", ErrNoGitHubToken, r.Grants.GitHub, c.GitHub)
+	}
+	if r.Grants.GitHub != config.GitHubModeApp {
+		return r.Grants.GitHub, nil, nil
+	}
+	perms := github.IntersectPermissions(c.GitHubPermissions, r.Grants.GitHubPermissions())
+	if len(perms) == 0 {
+		return "", nil, fmt.Errorf("%w: the permissions granted at the start and now have nothing in common", ErrNoGitHubToken)
+	}
+	return r.Grants.GitHub, perms, nil
+}
+
+// GitHubReadRepos lists the further repositories the read facade serves the box:
+// listed in grants.github_read at its start and now.
+func (c *Capabilities) GitHubReadRepos(r *config.Resolved) []string {
+	var out []string
+	for _, s := range r.Grants.GitHubRead {
+		if slices.ContainsFunc(c.GitHubRead, func(o string) bool { return strings.EqualFold(o, s) }) {
+			out = append(out, s)
+		}
+	}
+	return out
 }

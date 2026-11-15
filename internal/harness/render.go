@@ -32,6 +32,7 @@ import (
 
 	"github.com/mb706/devc/assets"
 	"github.com/mb706/devc/internal/config"
+	"github.com/mb706/devc/internal/github"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/paths"
@@ -70,6 +71,20 @@ type Data struct {
 	AutoSeal     bool
 	// SSH is set when the project has SSH grants (work order C10b).
 	SSH *SSHFacts
+	// GitHub is set for projects with an upstream (work order C15).
+	GitHub *GitHubFacts
+}
+
+// GitHubFacts describes what a box can do with GitHub.
+type GitHubFacts struct {
+	// Repo is the repository on github.com, when the upstream names one;
+	// Read the further repositories of grants.github_read.
+	Repo string
+	Read []string
+	// Token is set in the token modes; Minted for App tokens, which expire
+	// within an hour.
+	Token  bool
+	Minted bool
 }
 
 // SSHFacts describes the hosts a box reaches through the SSH gate.
@@ -137,6 +152,13 @@ func NewData(r *config.Resolved, m *config.Harness) Data {
 			}
 		}
 		d.SSH = f
+	}
+	if r.Upstream != "" || r.Grants.GitHubTokenMode() {
+		f := &GitHubFacts{Read: append([]string{}, r.Grants.GitHubRead...), Token: r.Grants.GitHubTokenMode(), Minted: r.Grants.GitHub == config.GitHubModeApp}
+		if repo, err := github.ParseRepo(r.Upstream, github.DefaultEndpoints().Web); err == nil {
+			f.Repo = repo.String()
+		}
+		d.GitHub = f
 	}
 	if r.Data.Enabled {
 		join := func(ps []string) []string {

@@ -305,6 +305,51 @@ func TestCapabilities(t *testing.T) {
 	}
 }
 
+// TestGitHubCapabilities: token modes and grants.github_read follow the
+// start record (work order C15).
+func TestGitHubCapabilities(t *testing.T) {
+	app := func(perms map[string]string, read ...string) *config.Resolved {
+		g := config.Grants{GitHub: "app", GitHubRead: read}
+		if perms != nil {
+			g.GitHubToken = &config.GitHubToken{Permissions: perms}
+		}
+		return &config.Resolved{Grants: g}
+	}
+	c := CapabilitiesOf(app(map[string]string{"contents": "write", "pull_requests": "write"}, "acme/lib", "acme/doc"), "cid", time.Now())
+	mode, perms, err := c.GitHubToken(app(map[string]string{"contents": "read", "pull_requests": "write", "issues": "write"}))
+	if err != nil || mode != "app" || len(perms) != 2 || perms["contents"] != "read" || perms["pull_requests"] != "write" {
+		t.Errorf("app: %q %v %v", mode, perms, err)
+	}
+	if _, _, err := c.GitHubToken(app(map[string]string{"issues": "write"})); !errors.Is(err, ErrNoGitHubToken) {
+		t.Errorf("nothing in common: %v", err)
+	}
+	if _, _, err := c.GitHubToken(&config.Resolved{Grants: config.Grants{GitHub: "token:pat"}}); !errors.Is(err, ErrNoGitHubToken) {
+		t.Errorf("mode changed: %v", err)
+	}
+	if _, _, err := c.GitHubToken(&config.Resolved{Grants: config.Grants{GitHub: "relay"}}); !errors.Is(err, ErrNoGitHubToken) {
+		t.Errorf("relay now: %v", err)
+	}
+	// The default permissions when the table is absent.
+	d := CapabilitiesOf(app(nil), "cid", time.Now())
+	if _, perms, err := d.GitHubToken(app(nil)); err != nil || len(perms) != 2 || perms["metadata"] != "read" {
+		t.Errorf("defaults: %v %v", perms, err)
+	}
+	tok := CapabilitiesOf(&config.Resolved{Grants: config.Grants{GitHub: "token:pat"}}, "cid", time.Now())
+	if mode, perms, err := tok.GitHubToken(&config.Resolved{Grants: config.Grants{GitHub: "token:pat"}}); err != nil || mode != "token:pat" || perms != nil {
+		t.Errorf("token: %q %v %v", mode, perms, err)
+	}
+	if _, _, err := tok.GitHubToken(&config.Resolved{Grants: config.Grants{GitHub: "token:other"}}); !errors.Is(err, ErrNoGitHubToken) {
+		t.Errorf("another secret: %v", err)
+	}
+	relay := CapabilitiesOf(&config.Resolved{Grants: config.Grants{GitHub: "relay"}}, "cid", time.Now())
+	if _, _, err := relay.GitHubToken(app(nil)); !errors.Is(err, ErrNoGitHubToken) {
+		t.Errorf("app granted after a relay start: %v", err)
+	}
+	if got := c.GitHubReadRepos(app(nil, "ACME/lib", "acme/new")); !slices.Equal(got, []string{"ACME/lib"}) {
+		t.Errorf("github_read: %q", got)
+	}
+}
+
 func TestUpStartsStoppedBox(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()

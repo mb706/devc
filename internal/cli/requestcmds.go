@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,18 +106,44 @@ func newRequestCmd(a *app) *cobra.Command {
 			return send(cmd, proto.RequestParams{Kind: proto.RequestGrant, Grant: args[0], Name: args[1]})
 		},
 	}
-	var prTitle, prBody, prBranch string
+	var prTitle, prBody, prBranch, prBase string
+	var prDraft bool
 	pr := &cobra.Command{
-		Use:   "pr --title <title> [--body <body>] [--branch <branch>]",
-		Short: "Ask for a pull request to be opened (high risk)",
-		Args:  noArgs,
+		Use:   "pr --title <title> [--body <body>] [--branch <branch>] [--base <branch>] [--draft]",
+		Short: "Ask for a branch to be pushed to GitHub and a pull request opened (high risk)",
+		Long: "Ask the user to publish a branch: once approved on the host, devc banks the box, pushes the branch to the " +
+			"upstream and opens the pull request; 'devc request status <id>' then shows its URL. Without --branch the " +
+			"branch checked out in the current directory is meant.",
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return send(cmd, proto.RequestParams{Kind: proto.RequestPR, Title: prTitle, Body: prBody, Branch: prBranch})
+			if prBranch == "" {
+				prBranch = currentBranch(cmd.Context())
+				if prBranch == "" {
+					return usageErrorf("name the branch with --branch (the current directory has no branch checked out)")
+				}
+			}
+			return send(cmd, proto.RequestParams{Kind: proto.RequestPR, Title: prTitle, Body: prBody, Branch: prBranch, Base: prBase, Draft: prDraft})
 		},
 	}
 	pr.Flags().StringVar(&prTitle, "title", "", "title")
 	pr.Flags().StringVar(&prBody, "body", "", "description")
 	pr.Flags().StringVar(&prBranch, "branch", "", "branch (default: the current one)")
+	pr.Flags().StringVar(&prBase, "base", "", "the branch to merge into (default: the project's default branch)")
+	pr.Flags().BoolVar(&prDraft, "draft", false, "open it as a draft")
+	var commentBody string
+	comment := &cobra.Command{
+		Use:   "comment <number> --body <text>",
+		Short: "Ask for a comment on a pull request or issue of the project's GitHub repository (high risk)",
+		Args:  requestArgs(1, "comment <number> --body <text>"),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			n, err := strconv.ParseInt(strings.TrimPrefix(args[0], "#"), 10, 64)
+			if err != nil || n <= 0 {
+				return usageErrorf("%q is not a pull request or issue number", printableArg(args[0]))
+			}
+			return send(cmd, proto.RequestParams{Kind: proto.RequestComment, Number: n, Body: commentBody})
+		},
+	}
+	comment.Flags().StringVar(&commentBody, "body", "", "the comment")
 
 	var wait bool
 	status := &cobra.Command{
@@ -162,12 +190,24 @@ func newRequestCmd(a *app) *cobra.Command {
 	status.Flags().BoolVar(&wait, "wait", false, "wait until the request is final")
 
 	cmd := group("request", "Ask the user for something outside this box (inside a box)", false,
-		seal, savepoint, note, pkg, netCmd, grant, pr, status)
+		seal, savepoint, note, pkg, netCmd, grant, pr, comment, status)
 	cmd.Long = "Requests are how an agent asks for something it cannot do in its box: seal a finished run, take a " +
-		"savepoint, install a package, open the network, grant access, open a pull request, or just leave a note. " +
+		"savepoint, install a package, open the network, grant access, open a pull request or comment on one, or just leave a note. " +
 		"Each prints a request ID; nothing happens until the user (or, for low-risk kinds, the project's settings) " +
 		"approves it. Runs only inside a box."
 	return cmd
+}
+
+// currentBranch is the branch checked out in the working directory (box
+// git, run by the agent's own user), or "".
+func currentBranch(ctx context.Context) string {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "symbolic-ref", "--quiet", "--short", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // boxPath resolves a seal path that exists in the box (relative to the

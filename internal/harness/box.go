@@ -50,6 +50,7 @@ func Describe(r *config.Resolved, m *config.Harness, rh config.ResolvedHarness, 
 	if r.SecretsDelivery == config.DeliveryDaemon {
 		l.Delivery = boxside.DeliveryDaemon
 	}
+	l.GitHubToken = r.Grants.GitHubTokenMode()
 	if rh.AuthMethod == "env-token" || rh.AuthMethod == "api-key" {
 		l.Auth.Env, l.Auth.Secret = rh.AuthEnv, rh.Secret
 		if rh.Secret != "" {

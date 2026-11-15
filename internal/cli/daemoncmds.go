@@ -22,6 +22,7 @@ import (
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/daemon"
 	"github.com/mb706/devc/internal/engine"
+	"github.com/mb706/devc/internal/github"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/proto"
@@ -119,6 +120,10 @@ func newDaemonCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			ghEndpoints, err := github.EndpointsFromEnv(a.getenv)
+			if err != nil {
+				return err
+			}
 			if resolve != nil || exempt != nil {
 				log.Warn("test settings of the allowlist proxy are in force (--test-resolve, --test-exempt)")
 			}
@@ -144,6 +149,7 @@ func newDaemonCmd(a *app) *cobra.Command {
 				Resolve:              resolve,
 				ProxyExempt:          exempt,
 				RouterListen:         routerListen,
+				GitHub:               ghEndpoints,
 			})
 			if err != nil {
 				return err

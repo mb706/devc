@@ -637,10 +637,19 @@ func TestRequestCommands(t *testing.T) {
 			t.Errorf("%s: %q", m, steps)
 		}
 	}
-	for _, k := range []string{"grant", "pr"} {
-		if steps, msg := requestCommands(hello, proto.Request{Kind: k}); steps != nil || !strings.Contains(msg, "not available yet") {
-			t.Errorf("%s: %q %q", k, steps, msg)
-		}
+	if steps, msg := requestCommands(hello, proto.Request{Kind: "grant"}); steps != nil || !strings.Contains(msg, "not available yet") {
+		t.Errorf("grant: %q %q", steps, msg)
+	}
+	if steps, msg := requestCommands(hello, proto.Request{Kind: "pr", Params: proto.RequestParams{Title: "t"}}); steps != nil || !strings.Contains(msg, "no branch") {
+		t.Errorf("pr without a branch: %q %q", steps, msg)
+	}
+	steps, _ = requestCommands(hello, proto.Request{Kind: "pr", Params: proto.RequestParams{Title: "--yes", Body: "-x\ny", Branch: "feat/a", Base: "dev", Draft: true}})
+	if len(steps) != 1 || strings.Join(steps[0], "|") != "pr|create|--yes|--branch=feat/a|--title=--yes|--body=-x\ny|--base=dev|--draft|--|demo/hello" {
+		t.Errorf("pr: %q", steps)
+	}
+	steps, _ = requestCommands(hello, proto.Request{Kind: "comment", Params: proto.RequestParams{Number: 12, Body: "--help"}})
+	if len(steps) != 1 || strings.Join(steps[0], "|") != "pr|comment|--body=--help|--|demo/hello|12" {
+		t.Errorf("comment: %q", steps)
 	}
 	steps, _ = requestCommands(hello, proto.Request{ID: "r0123456789abcdefghij", Kind: "net", Params: proto.RequestParams{Target: "host:5432", For: "30m0s"}})
 	if len(steps) != 1 || strings.Join(steps[0], " ") != "net allow --request r0123456789abcdefghij --for 30m0s -- host:5432 demo/hello" {

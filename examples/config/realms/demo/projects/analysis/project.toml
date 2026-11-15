@@ -18,7 +18,12 @@ relay_quota = "20g"            # a push that would make the relay larger is refu
 [grants]
 ssh = []                       # SSH host aliases reachable through the gate (devc ssh login <host>): "host" = full use of the account, "host:ro" = only [grants.ssh_allow]
 secrets = []
-github = "relay"               # relay | none | token:<secret-name>
+github = "relay"               # what the box holds for GitHub: relay (nothing; git goes through the relay) | none (the same) |
+                               # app (short-lived tokens of the realm's [github.app]) | token:<secret-name> (a stored token)
+github_read = []               # further repositories "owner/repo" that `devc gh` in the box may read besides the project's own
+
+# [grants.github_token]        # mode app only: the token's permissions (default contents and metadata read; workflows is refused)
+# permissions = { contents = "write", pull_requests = "write", issues = "read" }
 
 [grants.ssh_allow]             # per read-only host, the commands (first words) it may run, for example cluster1 = ["squeue", "sinfo", "ls"]
 

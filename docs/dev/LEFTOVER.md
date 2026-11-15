@@ -370,3 +370,17 @@ Other checks and deferred work:
 | **SELinux**: the helper containers and the host staging directory get no new labels; not checked on an SELinux host | a run on Fedora |
 | **A pull trusts the remote's rsync.** The host's rsync writes only into the staging directory, but a hostile rsync on the remote (a cluster where an agent with a gate grant replaced it, say) could try receiver bugs such as CVE-2024-12087 to write elsewhere as the user; spec 14.5 already treats such a cluster as the user's own | keeping rsync current on the host (3.4.0 or a patched distribution package); the guide could say so |
 | **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/data/ ./internal/boxside/` in the toolchain image with cgo |
+
+### From C15
+
+| Item | Needs |
+|---|---|
+| **Nothing was tried against GitHub itself.** The REST paths, headers (`Accept`, `X-GitHub-Api-Version: 2022-11-28`, bearer tokens), the shapes of the answers devc reads (`number`, `html_url`, the jobs list, the installation, `token`/`expires_at`), job log redirects and the error format come from the documentation and were exercised only against the fake API of the integration tests | a run with a real token and a throwaway repository: `devc gh …` of every kind, `devc pr create`, `devc pr comment` |
+| **The App's JWT carries the App ID as a number in `iss`**, the classic documented form; GitHub now also documents the client ID (a string). Not checked against GitHub, nor whether the installation lookup `GET /repos/{owner}/{repo}/installation` is the best one for organisation-owned repositories | a real App (creation and installation as described in the guide) |
+| **Rulesets, App creation and installation** are described in the guide as steps for the user and were not walked through | a GitHub account |
+| **`gh auth token --hostname <host>` as the fallback credential** was never run (the tests always use the realm secret and put a stub `gh` first in PATH that records any call); GitHub Enterprise hosts were not considered beyond the base URLs | a machine with `gh` logged in |
+| **`password_expiry_utc`** is printed by the credential helper for minted tokens; git before 2.41 ignores it, later versions use it to drop an expired credential. Only git 2.43 (host) and the box image's git were used | nothing |
+| **Rate limits**: the facade allows 120 reads and 120 token requests per minute per project; GitHub's own limits (5000 per hour for the user's token, separate budgets per installation) are shared with the user's other tools and were not measured | nothing, or tuning after real use |
+| **`grants.github_read` repositories are matched by name only**; a repository renamed or transferred on GitHub keeps whatever the configuration says | nothing |
+| **Existing boxes**: a box started before C15 has no `github` field in its capability record, so token modes refuse until it is restarted; its repository gets the remote `github` and the helper at the next start or `devc project init` | a restart per box |
+| **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/github/ ./internal/daemon/` in the toolchain image with cgo |

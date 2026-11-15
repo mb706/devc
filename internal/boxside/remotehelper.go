@@ -250,12 +250,19 @@ func (a agentRelay) Open(service, session string) (RelayConn, error) {
 // and returns the stream for the bytes that follow it. An error that is a
 // *proto.Error carries the host's answer.
 func openAgentStream(addr, method string, p any, answerTimeout time.Duration) (*relayConn, error) {
+	c, _, err := openAgentStreamResult(addr, method, p, answerTimeout)
+	return c, err
+}
+
+// openAgentStreamResult is openAgentStream that also returns the result of
+// the host's answer.
+func openAgentStreamResult(addr, method string, p any, answerTimeout time.Duration) (*relayConn, json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var d net.Dialer
 	c, err := d.DialContext(ctx, "unix", addr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	uc := c.(*net.UnixConn)
 	params, _ := json.Marshal(p)
@@ -263,25 +270,25 @@ func openAgentStream(addr, method string, p any, answerTimeout time.Duration) (*
 	_ = uc.SetDeadline(time.Now().Add(answerTimeout))
 	if _, err := uc.Write(append(req, '\n')); err != nil {
 		uc.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	br := bufio.NewReaderSize(uc, 64<<10)
 	line, err := proto.ReadLine(br, proto.MaxMessage)
 	if err != nil {
 		uc.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	m, kind, err := proto.ParseMessage(line)
 	if err != nil || kind != proto.KindResponse {
 		uc.Close()
-		return nil, fmt.Errorf("invalid answer from the host")
+		return nil, nil, fmt.Errorf("invalid answer from the host")
 	}
 	if m.Error != nil {
 		uc.Close()
-		return nil, m.Error
+		return nil, nil, m.Error
 	}
 	_ = uc.SetDeadline(time.Time{})
-	return &relayConn{UnixConn: uc, r: br}, nil
+	return &relayConn{UnixConn: uc, r: br}, m.Result, nil
 }
 
 type relayConn struct {

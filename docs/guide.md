@@ -62,7 +62,7 @@ create or start a box refuses while that project's configuration has a
 problem.
 
 Some keys are accepted for features that are not available yet and have no
-effect: `grants.github`, `[sync]`. `build_from_repo` and
+effect: `[sync]`. `build_from_repo` and
 `capabilities.nested` are refused with a message.
 
 State lives in `~/.local/share/devc` (`--state-dir`, `DEVC_STATE_DIR` or
@@ -246,7 +246,8 @@ devc request package apt libpq-dev       # high risk
 devc request net pypi.org:443 --for 2h   # high risk: a network exception
 devc request net host:5432               # high risk: a service on the host
 devc request grant ssh cluster1          # high risk (not available yet)
-devc request pr --title "Fix parser"     # high risk (not available yet)
+devc request pr --title "Fix parser"     # high risk: push the current branch and open a pull request
+devc request comment 42 --body "CI is green again"   # high risk: comment on #42
 devc request status <id> --wait
 ```
 
@@ -266,8 +267,9 @@ High-risk requests can be approved only with the CLI on this machine, never
 from a hub. Pending requests expire after seven days. An approved package
 request runs the manager's install command through `devc root`, so it is
 recorded in the env's root log; an approved network request runs `devc net
-allow` (see [Network](#network-levels-exceptions-and-port-forwarding)).
-Requests need the daemon; without it, `devc request` tells the agent to ask
+allow` (see [Network](#network-levels-exceptions-and-port-forwarding)); an
+approved pull request runs `devc pr create --yes` and a comment `devc pr
+comment` (see [GitHub](#github)). Requests need the daemon; without it, `devc request` tells the agent to ask
 you directly.
 
 ### Hubs
@@ -438,6 +440,133 @@ configuration ignored. The project directory itself is box-writable: do not
 run git, build tools or editors on it from the host (see
 [What is protected](#what-is-protected-and-what-is-not)). Host git reports
 "not a git repository" there on purpose.
+
+## GitHub
+
+By default a box holds no GitHub credential: git goes through the relay, and
+everything else GitHub offers reaches the box through the daemon, which uses
+**your own credential**: the realm secret `github-token` (`devc secret set
+<realm> github-token`, a fine-grained or classic token), otherwise whatever
+`gh auth token` prints when `gh` is installed and logged in. That credential
+never enters a box: not in a response, a message, a log the box can read or
+an environment. The project's repository comes from its `upstream`
+(`https://github.com/owner/repo`, `git@github.com:owner/repo.git`, with or
+without `.git`); for projects elsewhere every command below says "not a
+GitHub project".
+
+**Reading, in the box.** `devc gh` is read-only and covers the project's own
+repository plus those listed in `grants.github_read = ["owner/repo", …]`
+(with `--repo`):
+
+```sh
+devc gh pr list [--state open|closed|all] [--limit n]
+devc gh pr view 12 [--comments] [--diff]
+devc gh issue list / devc gh issue view 7 [--comments]
+devc gh run list [--branch feature/x]
+devc gh run view 123456 [--log] [--failed]     # logs: the last 5 MiB
+devc gh api repos/owner/repo/commits?per_page=5   # a raw GET, JSON as received
+```
+
+The daemon builds every request itself: a box names an operation, a number or
+a path below `repos/<owner>/<repo>/`, never a URL, a method (only GET) or a
+header; paths with `..`, empty segments, percent-encoding or another
+repository are refused before anything leaves the daemon. Answers are passed
+on as GitHub sent them, up to 5 MiB (logs keep their end and say what was
+cut); `--json` prints the JSON, otherwise a short readable form. GraphQL is
+not offered. At most 120 reads a minute per project. `grants.github_read`
+is a grant like the others: a repository added while the box runs is served
+after the box is brought up again.
+
+**Pull requests and comments, from the host.**
+
+```sh
+devc pr create demo/app --branch feature/x [--title t] [--body b | --body-file f] [--base main] [--draft] [--yes]
+devc pr comment demo/app 12 --body "Looks good"
+```
+
+`pr create` banks, pushes the branch to the upstream exactly as `devc push`
+does (it shows what the upstream lacks and asks, unless `--yes`), then opens
+the pull request and prints its URL. The title defaults to the subject of the
+branch's newest commit, the base to the project's default branch. Both refuse
+while the project's configuration has problems. An agent asks for the same
+with `devc request pr` (its current branch unless `--branch`) or `devc
+request comment <n> --body …`; both are high-risk requests, approved only
+with `devc requests approve` on this machine, and an approved pull request
+request publishes the branch: the approval is the confirmation.
+
+**Tokens in the box (optional).** `grants.github` chooses what the box holds:
+
+| Mode | In the box |
+|---|---|
+| `relay` (default), `none` | nothing |
+| `token:<secret>` | the realm secret `<secret>`, a token you created (a fine-grained personal access token for the one repository) |
+| `app` | installation tokens of a GitHub App you own, for the one repository, valid for an hour |
+
+In both token modes the box's repository gets a second remote, `github`, at
+the upstream's HTTPS URL, and devc's git credential helper (`devc box
+git-credential`) for the GitHub host, so `git push github <branch>` goes to
+GitHub directly while `origin` is still the relay; sessions get the token as
+`GH_TOKEN`, so the real `gh` works. The helper and the launcher ask the
+daemon each time, so git always gets a current token; **a long-running
+process keeps the `GH_TOKEN` it started with, for at most an hour** with an
+App. The token never lives in a file of the box. The mode is a capability of
+the box's start: changing it takes effect after `devc down` and `devc up`
+(removing it stops tokens at once). Token delivery needs the daemon.
+
+The App mode needs, in `realm.toml`:
+
+```toml
+[github.app]
+app_id = 123456
+key_secret = "github-app-key"   # devc secret set <realm> github-app-key < app.private-key.pem
+installation_id = 7890123       # optional: otherwise looked up for each repository
+```
+
+and optionally, per project, the token's permissions (default `contents` and
+`metadata` read; `workflows` is always refused):
+
+```toml
+[grants]
+github = "app"
+
+[grants.github_token]
+permissions = { contents = "write", pull_requests = "write", issues = "read" }
+```
+
+devc signs a short JWT with the App's key (RS256), mints a token restricted to
+the project's repository and these permissions, and reuses it until five
+minutes before it expires.
+
+**The trade-off.** With a token in the box, the relay's ratchet no longer
+covers what that token can do: the agent can push to any branch the token
+reaches, rewrite or delete branches on GitHub, and act on issues and pull
+requests within its permissions. Protect the default branch (and release
+branches) on GitHub with a ruleset, give the token only the permissions the
+task needs, and prefer the default mode, where nothing reaches GitHub without
+you.
+
+**Setting up the App** (once, on github.com):
+
+1. Settings → Developer settings → GitHub Apps → New GitHub App (for an
+   organisation: the organisation's settings, so the App belongs to it).
+   Name it, set any homepage URL, untick "Webhook → Active".
+2. Repository permissions: the most any project will ask for, for example
+   Contents read and write, Pull requests read and write, Issues read,
+   Metadata read. Leave Workflows at "No access". "Where can this GitHub App
+   be installed?": "Only on this account".
+3. Create it, note the App ID, and under "Private keys" generate a key; store
+   the downloaded `.pem` with `devc secret set <realm> github-app-key <
+   file.pem` and delete the download.
+4. "Install App" on your account or organisation, for all repositories or
+   the ones your projects use. The installation's ID is the number at the end
+   of its settings URL (optional in `realm.toml`).
+5. On each repository: Settings → Rules → Rulesets → New branch ruleset,
+   target the default branch, restrict deletions, block force pushes and
+   require a pull request; add yourself (not the App) as a bypass actor if
+   you push directly.
+
+Nothing in devc has been tried against GitHub itself; the tests use a fake
+API and git server.
 
 ## Data: zones, sealing, savepoints
 
@@ -920,6 +1049,10 @@ everything that matters outside it, but it is not a virtual machine.
   to a process of that box; what arrives on it is bounded and checked.
 - Banked commits, sealed data, session journals and notes commits are kept
   where the box cannot change them.
+- Your GitHub credential stays on the host: `devc gh` reads through the
+  daemon with requests it builds itself (GET only, the project's repositories
+  only), and pull requests and comments a box asks for wait for your
+  approval on this machine.
 - At level `internet`, the box cannot reach the host, the LAN or other private
   addresses, and a box whose rules are missing does not start. At level
   `allowlist`, it has no network interface at all; the host's proxy decides
@@ -934,7 +1067,9 @@ everything that matters outside it, but it is not a virtual machine.
   anything it can read, including the harness credential, to any internet
   host. Use `none` for work that must not leave the machine.
 - **The harness credential** is visible to the agent; so is every secret
-  granted to the project.
+  granted to the project, and the GitHub token of `grants.github = "app"` or
+  `"token:…"`, which can do on GitHub whatever its permissions allow, beyond
+  the relay's branch rules (protect branches with a ruleset).
 - **Within a realm**, boxes share harness state, memory and the package cache;
   one box can influence the others. Use separate realms for work that must
   stay apart.

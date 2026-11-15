@@ -61,6 +61,10 @@ type Launch struct {
 	// asked from the daemon at launch instead of read from SecretsDir
 	// (secrets.delivery, work order C10a).
 	Delivery string `json:"delivery,omitempty"`
+	// GitHubToken is set when the project grants a GitHub token
+	// (grants.github "app" or "token:<secret>", work order C15): the
+	// launcher asks the daemon for it at every start and exports GH_TOKEN.
+	GitHubToken bool `json:"github_token,omitempty"`
 }
 
 // DeliveryDaemon is Launch.Delivery for secrets served by the daemon.
@@ -264,6 +268,9 @@ type LaunchEnv struct {
 	// FetchSecret asks the daemon for a secret (Delivery "daemon"; nil:
 	// through the box agent).
 	FetchSecret func(name string) (string, error)
+	// FetchGitHubToken asks the daemon for the project's GitHub token (nil:
+	// through the box agent).
+	FetchGitHubToken func() (proto.GitHubTokenReply, error)
 }
 
 // Prepared is the result of PrepareLaunch: what exec receives.
@@ -333,6 +340,10 @@ func PrepareLaunch(l *Launch, userArgs []string, e LaunchEnv) (*Prepared, error)
 		}
 	}
 
+	if l.GitHubToken {
+		addGitHubToken(l, env, e)
+	}
+
 	argv := append([]string{l.Bin}, l.Args...)
 	argv = append(argv, userArgs...)
 	// A harness that reports its status through OSC 7501 runs under the
@@ -392,6 +403,29 @@ func addDaemonSecrets(l *Launch, env *envList, e LaunchEnv) {
 		if v, ok := get(s.Name, "the granted secret "+s.Name); ok {
 			env.set(s.Env, v)
 		}
+	}
+}
+
+// GitHubTokenEnv is the variable the GitHub token is exported as (gh reads
+// it; git uses the credential helper instead).
+const GitHubTokenEnv = "GH_TOKEN"
+
+// addGitHubToken asks the daemon for the project's GitHub token. A session
+// keeps the token it started with; minted tokens last at most an hour.
+func addGitHubToken(l *Launch, env *envList, e LaunchEnv) {
+	fetch := e.FetchGitHubToken
+	if fetch == nil {
+		fetch = func() (proto.GitHubTokenReply, error) { return FetchGitHubToken(AgentAbstract) }
+	}
+	r, err := fetch()
+	var pe *proto.Error
+	switch {
+	case err == nil:
+		env.set(GitHubTokenEnv, r.Token)
+	case errors.As(err, &pe) && pe.Code != proto.CodeHostUnavailable:
+		fmt.Fprintf(e.Stderr, "devc: %s starts without a GitHub token: %s\n", l.Display, proto.Printable(pe.Message))
+	default:
+		fmt.Fprintf(e.Stderr, "devc: %s starts without a GitHub token: the devc daemon is not reachable from this box (start it on the host with 'devc daemon' or 'devc service install')\n", l.Display)
 	}
 }
 

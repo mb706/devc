@@ -32,6 +32,8 @@ func TestValidate(t *testing.T) {
 		{Kind: "grant", Grant: "secret", Name: "API_TOKEN"},
 		{Kind: "pr", Title: "Fix the parser"},
 		{Kind: "pr", Title: "Fix", Body: "Long\ndescription", Branch: "feature/x"},
+		{Kind: "pr", Title: "Fix", Branch: "feature/x", Base: "release/1", Draft: true},
+		{Kind: "comment", Number: 12, Body: "CI fails on\nthe parser"},
 		{Kind: "note", Text: "hi", Session: names.NewSessionID()},
 	}
 	for _, p := range good {
@@ -105,6 +107,15 @@ func TestValidate(t *testing.T) {
 		{Kind: "pr", Title: "ok", Branch: "-evil"},
 		{Kind: "pr", Title: "ok", Branch: "a..b"},
 		{Kind: "pr", Title: "ok", Path: "x"},
+		{Kind: "pr", Title: "ok", Base: "-x"},
+		{Kind: "pr", Title: "ok", Number: 3},
+		{Kind: "comment", Body: "no number"},
+		{Kind: "comment", Number: -1, Body: "x"},
+		{Kind: "comment", Number: 1},
+		{Kind: "comment", Number: 1, Body: "bell\a"},
+		{Kind: "comment", Number: 1, Body: strings.Repeat("b", MaxBody+1)},
+		{Kind: "comment", Number: 1, Body: "x", Title: "t"},
+		{Kind: "comment", Number: 1, Body: "x", Draft: true},
 	}
 	for _, p := range bad {
 		if _, err := Validate(p); err == nil || !errors.Is(err, ErrInvalid) {
@@ -114,7 +125,7 @@ func TestValidate(t *testing.T) {
 }
 
 func TestRisk(t *testing.T) {
-	for kind, risk := range map[string]string{"seal": "low", "savepoint": "low", "note": "low", "package": "high", "net": "high", "grant": "high", "pr": "high", "x": ""} {
+	for kind, risk := range map[string]string{"seal": "low", "savepoint": "low", "note": "low", "package": "high", "net": "high", "grant": "high", "pr": "high", "comment": "high", "x": ""} {
 		if got := proto.RequestRisk(kind); got != risk {
 			t.Errorf("risk of %s = %q", kind, got)
 		}

@@ -174,6 +174,7 @@ export function describeRequest(r) {
     case 'net': return `Network access to ${p.target}${p.for ? ' for ' + p.for : ''}`;
     case 'grant': return `Grant ${p.grant}${p.name ? ' ' + p.name : ''}`;
     case 'pr': return `Pull request "${p.title}"${p.branch ? ' from ' + p.branch : ''}`;
+    case 'comment': return `Comment on #${p.number}: ${p.body}`;
   }
   return r.kind;
 }
