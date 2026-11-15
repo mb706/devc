@@ -248,12 +248,15 @@ type Resolved struct {
 	Grants        Grants            `toml:"grants" json:"grants"`
 	Data          ResolvedData      `toml:"data" json:"data"`
 	Network       string            `toml:"network" json:"network"`
-	SELinuxLevel  string            `toml:"selinux_level" json:"selinux_level"`
-	Capabilities  Capabilities      `toml:"capabilities" json:"capabilities"`
-	Box           ResolvedBox       `toml:"box" json:"box"`
-	Mounts        []Mount           `toml:"mounts" json:"mounts"`
-	SyncHub       bool              `toml:"sync_hub" json:"sync_hub"`
-	Requests      Requests          `toml:"requests" json:"requests"`
+	// NetAllowlist is the realm's and the project's [network.allowlist]
+	// together, without duplicates.
+	NetAllowlist NetAllowlist `toml:"network_allowlist" json:"network_allowlist"`
+	SELinuxLevel string       `toml:"selinux_level" json:"selinux_level"`
+	Capabilities Capabilities `toml:"capabilities" json:"capabilities"`
+	Box          ResolvedBox  `toml:"box" json:"box"`
+	Mounts       []Mount      `toml:"mounts" json:"mounts"`
+	SyncHub      bool         `toml:"sync_hub" json:"sync_hub"`
+	Requests     Requests     `toml:"requests" json:"requests"`
 	// SecretsDelivery is the global secrets.delivery.
 	SecretsDelivery string `toml:"secrets_delivery" json:"secrets_delivery"`
 }
@@ -341,7 +344,11 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 			Savepoints: p.Data.Savepoints,
 			Remotes:    p.Data.Remotes,
 		},
-		Network:      firstNonEmpty(p.Network.Level, realm.Network.Default),
+		Network: firstNonEmpty(p.Network.Level, realm.Network.Default),
+		NetAllowlist: NetAllowlist{
+			Domains: union(realm.Network.Allowlist.Domains, p.Network.Allowlist.Domains),
+			Presets: union(realm.Network.Allowlist.Presets, p.Network.Allowlist.Presets),
+		},
 		SELinuxLevel: realm.SELinux.Level,
 		Capabilities: p.Capabilities,
 		Box: ResolvedBox{
@@ -393,6 +400,7 @@ type GlobalView struct {
 	SELinux      GlobalSELinux `toml:"selinux" json:"selinux"`
 	Secrets      GlobalSecrets `toml:"secrets" json:"secrets"`
 	Hubs         []Hub         `toml:"hubs" json:"hubs"`
+	Router       GlobalRouter  `toml:"router" json:"router"`
 }
 
 // View returns the global view. An unresolvable runtime directory is shown
@@ -414,7 +422,21 @@ func (c *Config) View() GlobalView {
 		SELinux:      c.Global.SELinux,
 		Secrets:      c.Global.Secrets,
 		Hubs:         hubs,
+		Router:       c.Global.Router,
 	}
+}
+
+// union returns the elements of a then those of b that are new, never nil.
+func union(a, b []string) []string {
+	out := []string{}
+	for _, l := range [][]string{a, b} {
+		for _, v := range l {
+			if !slices.Contains(out, v) {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
 }
 
 func firstNonEmpty(vs ...string) string {

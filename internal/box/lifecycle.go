@@ -801,6 +801,11 @@ func (m *Manager) Remove(ctx context.Context, ref names.ProjectRef, home bool) e
 	if err := m.cleanup(ctx, ref); err != nil {
 		return err
 	}
+	// Exceptions belong to the box; down and a recreation keep them, rm
+	// does not.
+	if err := m.removeExceptions(ref); err != nil {
+		return err
+	}
 	if !home {
 		return nil
 	}

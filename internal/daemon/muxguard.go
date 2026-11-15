@@ -22,18 +22,32 @@ import (
 )
 
 // Budgets of one box channel, all in one place.
+//
+// Since C13 a box of level allowlist reaches the network only through
+// host.proxy streams, one per TCP connection, and host exceptions add
+// host.dial streams. A package installation opens dozens of connections
+// (pip and uv keep about ten to fifty open; npm up to fifteen per host;
+// apt one, kept alive), and a script fetching URLs one by one opens a few
+// per second. The box agent holds at most boxside.DefaultMaxRelays relays
+// at once and opens at most half of muxMaxOpens relay streams per window,
+// so ordinary use stays inside these budgets with room for in-box clients,
+// hints and the host's own streams; only an agent that ignores its limits
+// gets the channel closed.
 const (
 	// muxWindow is the time window of the rate budgets.
 	muxWindow = 10 * time.Second
 	// muxMaxOpens bounds the streams the box opens per window (every
-	// in-box client and every hint opens one).
-	muxMaxOpens = 256
+	// in-box client, every hint and every relayed connection opens one).
+	muxMaxOpens = 1024
 	// muxMaxControl bounds the ping and go-away frames the box sends per
 	// window (its keepalive sends one ping every 30 s).
 	muxMaxControl = 32
 	// muxMaxStreams bounds the streams open or half-closed at once, opened
-	// by either side: each holds up to a 256 KiB receive window.
-	muxMaxStreams = 128
+	// by either side: each holds up to a 256 KiB receive window, so a box
+	// can make the daemon buffer at most 48 MiB. It covers maxBoxStreams
+	// requests and maxRelayStreams relays with room for the host's streams
+	// and for streams that are closing.
+	muxMaxStreams = 192
 )
 
 // Frame layout of yamux (spec.md of hashicorp/yamux): version, type,

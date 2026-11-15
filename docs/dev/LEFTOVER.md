@@ -336,3 +336,20 @@ Other checks and deferred work:
 | **Hand-over can notify twice**: a state that reached both hubs is pending on the second; if the first hub published it and then went away, the second publishes it too when it becomes notifier (by design: a duplicate rather than a loss). Pending records of a hub that never becomes notifier stay until their state ends | nothing |
 | **Limits are this chunk's choices**: refresh 64 MiB and 2 minutes, resync queue 256 with 4 workers, 20,000 held events, body deadline 10 s, 64 requests without login, 8 logins waiting for hashing, backward pages of 1 MiB with 64 reads and 16 MiB, notification retries from 30 s to 15 min, clears given up after 7 days, 1,000 events per open session in the app | measuring real hubs |
 | **A pending command is polled every 10 s** (receipt, wait 0) while its machine is online until it is final; a send queued behind a long turn is polled for as long as the turn runs | nothing, or a longer interval |
+
+### From C13
+
+| Item | Needs |
+|---|---|
+| **Whether each real harness honours the proxy variables is unverified.** Claude Code (Node.js), Codex (Rust), pi, Cursor CLI and OpenCode were not run at level allowlist; `NODE_USE_ENV_PROXY=1` only helps Node.js 24 and later, older Node programs that do not read the variables themselves reach nothing | a box of level allowlist with each harness logged in (presets `anthropic`, `openai`) |
+| **Tools that ignore the proxy variables have no network at level allowlist, by design** (raw sockets, DNS lookups, `ssh` without a gate grant, programs with their own proxy settings) | nothing; documented in the guide and the sandbox description |
+| **The presets are hand-written** from the tools' documentation and were not checked against real installs (pip, uv, npm, apt, CRAN mirrors, GitHub release downloads); a preset that misses a name shows up as a refusal in `devc net log --denied` | running each tool once behind the proxy |
+| **Domain fronting through CONNECT** cannot be detected: TLS is relayed unchanged, so a server that answers for many names can be asked, inside TLS, for a name that is not on the allowlist | TLS interception, which devc does not do |
+| **IPv6-only upstreams** are unreachable through the proxy (IPv4 only, like C07's rules) | IPv6 private-range rules, if wanted |
+| **Cookies across local URLs**: pages at `*.localhost` share the parent name, so one box's page could set cookies for another project's local URL | nothing, or one router port per project |
+| **The proxy log has no session**; the field exists | the agent mapping a connection to a process and its `DEVC_SESSION`, if wanted |
+| **The router listens only on the address of `router.listen` at daemon start**; a change needs a daemon restart | a listener that follows reloads, if wanted |
+| **Channel budgets were raised by reasoning, not measurement** (1024 new streams per 10 s, 192 streams; agent: 64 relays, 512 relay streams per 10 s); a tool opening more than about 50 connections a second through the proxy gets connections closed by the agent, not the channel | measuring package managers behind the proxy |
+| **Exceptions on boxes started before C13**: `lan` needs a restart (old rules have no `lan4`); host exceptions need a restart (the old agent does not know `box.listen`) | a restart per box |
+| **SELinux**: the proxy, the relays and the router add no file or socket a box can reach; not checked on an SELinux host | a run on Fedora |
+| **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/netpolicy/ ./internal/daemon/ ./internal/boxside/` in the toolchain image with cgo |

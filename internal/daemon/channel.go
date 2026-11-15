@@ -44,20 +44,31 @@ type boxWorker struct {
 	// hint wakes the ingester (host.hint).
 	hint chan struct{}
 
-	mu      sync.Mutex
-	state   string
-	detail  string
-	since   time.Time
-	helper  string
-	sess    *yamux.Session
-	ctrl    *proto.Conn
+	mu     sync.Mutex
+	state  string
+	detail string
+	since  time.Time
+	helper string
+	sess   *yamux.Session
+	ctrl   *proto.Conn
+	// pending bounds the streams whose first line has not arrived yet;
+	// streams the requests and git or gate streams being served.
+	pending chan struct{}
 	streams chan struct{}
+	// relays bounds the raw relay streams (host.proxy, host.dial); dials
+	// are the host.dial connections, ended when their exception ends;
+	// netPorts the host-exception ports the agent last took.
+	relays    chan struct{}
+	dials     map[*dialRelay]bool
+	netPorts  []int
+	netSynced bool
 }
 
 func (d *Daemon) startWorker(ref names.ProjectRef, containerID string) *boxWorker {
 	ctx, cancel := context.WithCancel(d.ctx)
 	w := &boxWorker{d: d, ref: ref, containerID: containerID, cancel: cancel, done: make(chan struct{}),
-		hint: make(chan struct{}, 1), state: proto.ChannelConnecting, since: time.Now(), streams: make(chan struct{}, maxBoxStreams)}
+		hint: make(chan struct{}, 1), state: proto.ChannelConnecting, since: time.Now(), streams: make(chan struct{}, maxBoxStreams),
+		pending: make(chan struct{}, maxBoxStreams+maxRelayStreams), relays: make(chan struct{}, maxRelayStreams)}
 	var wg sync.WaitGroup
 	wg.Add(2)
 	d.goSafe("channel "+ref.String(), func() { defer wg.Done(); w.channelLoop(ctx) })
@@ -182,7 +193,7 @@ func (w *boxWorker) connect(ctx context.Context) error {
 		return fmt.Errorf("%w: %v", errRefused, err)
 	}
 	cfg := yamux.DefaultConfig()
-	cfg.AcceptBacklog = maxBoxStreams
+	cfg.AcceptBacklog = maxBoxStreams + maxRelayStreams
 	cfg.StreamOpenTimeout = 15 * time.Second
 	cfg.StreamCloseTimeout = time.Minute
 	cfg.LogOutput = io.Discard
@@ -234,6 +245,8 @@ func (w *boxWorker) connect(ctx context.Context) error {
 	}()
 	w.wake()
 	w.d.goSafe("streams "+w.ref.String(), func() { w.acceptStreams(ctx, sess) })
+	// Host exceptions: the agent's listeners follow the record (C13).
+	w.d.goSafe("net "+w.ref.String(), func() { w.netLoop(ctx, sess) })
 	select {
 	case <-ctx.Done():
 	case <-sess.CloseChan():
@@ -293,7 +306,7 @@ func (w *boxWorker) acceptStreams(ctx context.Context, sess *yamux.Session) {
 			return
 		}
 		select {
-		case w.streams <- struct{}{}:
+		case w.pending <- struct{}{}:
 		default:
 			_ = st.Close() // too many at once
 			continue

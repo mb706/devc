@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/netpolicy"
@@ -123,7 +125,20 @@ func (a *app) forward(cmd *cobra.Command, refArgs []string, port, hostPort int, 
 	if detach {
 		return a.detachForward(e, ref, name, ln.(*net.TCPListener), port, bind, addr.Port)
 	}
+	// A record, so that 'devc forward ls' shows the forward and the
+	// daemon's router serves the port while it runs.
+	if reg, err := a.forwardRegistry(e); err == nil {
+		if st, err := (netpolicy.ProcFS{}).StartTime("self"); err == nil {
+			id := netpolicy.NewForwardID()
+			rec := netpolicy.Record{ID: id, Ref: ref.String(), Container: name, BoxPort: port, Bind: bind, HostPort: addr.Port,
+				PID: os.Getpid(), Started: time.Now().UTC().Truncate(time.Second), ProcStart: st}
+			if reg.Save(rec) == nil {
+				defer func() { _ = reg.Remove(id, os.Getpid()) }()
+			}
+		}
+	}
 	fmt.Fprintf(a.stdout, "forwarding %s to port %d in %s; press Ctrl-C to stop\n", addr, port, name)
+	a.printLocalURL(cmd.Context(), e, ref, port)
 	sctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := fwd.Serve(sctx, ln); errors.Is(err, netpolicy.ErrBoxGone) {
@@ -215,7 +230,36 @@ func (a *app) detachForward(e *boxEnv, ref names.ProjectRef, name string, ln *ne
 	_ = c.Process.Release()
 	fmt.Fprintf(a.stdout, "forwarding %s to port %d in %s in the background (forward %s; stop it with 'devc forward stop %s')\n",
 		net.JoinHostPort(bind, strconv.Itoa(hostPort)), port, name, id, id)
+	a.printLocalURL(context.Background(), e, ref, port)
 	return nil
+}
+
+// LocalURL is the router's URL of a box port, or "" when the router is
+// switched off.
+func LocalURL(c *config.Config, ref names.ProjectRef, port int) string {
+	l := c.Global.Router.Listen
+	ap, err := netip.ParseAddrPort(l)
+	if l == config.RouterOff || err != nil {
+		return ""
+	}
+	return fmt.Sprintf("http://%d.%s.%s.localhost:%d/", port, ref.Project, ref.Realm, ap.Port())
+}
+
+// printLocalURL prints the local URL of a forwarded port (work order C13).
+func (a *app) printLocalURL(ctx context.Context, e *boxEnv, ref names.ProjectRef, port int) {
+	u := LocalURL(e.cfg, ref, port)
+	if u == "" {
+		return
+	}
+	note := "served by the devc daemon while the forward runs"
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if cl, err := a.daemonClient(cctx, e.cfg, nil); err == nil {
+		cl.Close()
+	} else {
+		note = "the devc daemon serves it once it runs"
+	}
+	fmt.Fprintf(a.stdout, "local URL: %s (%s)\n", u, note)
 }
 
 // newForwardServeCmd is the background side of `devc forward --detach`.

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
@@ -132,22 +133,53 @@ func (in *Installer) Install(ctx context.Context, f Facts) error {
 // Verify checks that devc's table, set, chain and sentinel are present in
 // the namespace.
 func (in *Installer) Verify(ctx context.Context, namespace string) error {
+	_, err := in.verify(ctx, namespace)
+	return err
+}
+
+// verify is Verify returning the table's listing.
+func (in *Installer) verify(ctx context.Context, namespace string) (string, error) {
 	nsenter, nft, err := in.tools()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := checkNamespace(namespace); err != nil {
-		return err
+		return "", err
 	}
 	res, err := in.Engine.Unshare(ctx, []string{nsenter, "--net=" + namespace, nft, "list", "table", "inet", Table}, nil)
 	if err != nil {
-		return fmt.Errorf("the network rules are not in place: %w", err)
+		return "", fmt.Errorf("the network rules are not in place: %w", err)
 	}
 	out := string(res.Stdout)
 	for _, want := range []string{"set " + AllowSet + " ", "chain " + Chain + " ", SentinelAddr.String()} {
 		if !strings.Contains(out, want) {
-			return fmt.Errorf("the network rules are not in place: %q missing from table inet %s", strings.TrimSpace(want), Table)
+			return "", fmt.Errorf("the network rules are not in place: %q missing from table inet %s", strings.TrimSpace(want), Table)
 		}
+	}
+	return out, nil
+}
+
+// ApplyExceptions makes the exception sets in the namespace of a running
+// box of level internet match list at now (ExceptionScript). The caller has
+// checked that the namespace is the one devc bound the box's readiness to
+// (finding B1); the rules themselves are verified here first. Adding and
+// removing set elements changes neither the namespace nor the box's main
+// process, so the binding and the readiness checks stay valid.
+func (in *Installer) ApplyExceptions(ctx context.Context, namespace string, list []Exception, now time.Time) error {
+	out, err := in.verify(ctx, namespace)
+	if err != nil {
+		return err
+	}
+	script, err := ExceptionScript(list, now, strings.Contains(out, "set "+LANSet+" "))
+	if err != nil {
+		return err
+	}
+	nsenter, nft, err := in.tools()
+	if err != nil {
+		return err
+	}
+	if res, err := in.Engine.Unshare(ctx, []string{nsenter, "--net=" + namespace, nft, "-f", "-"}, strings.NewReader(script)); err != nil {
+		return fmt.Errorf("applying the network exceptions: %w%s", err, tail(res))
 	}
 	return nil
 }

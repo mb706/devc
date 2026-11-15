@@ -262,6 +262,71 @@ func (f *Forwarder) relay(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// Dial opens one connection to the forwarded port in the box, for callers
+// that relay on the host (the daemon's local-URL router): a socket pair
+// whose one end becomes the dial process's standard input and output, as
+// relay does with an accepted connection. The process runs until the
+// connection is closed or ctx ends.
+func (f *Forwarder) Dial(ctx context.Context) (net.Conn, error) {
+	if f.Box == nil || f.Box.PID <= 0 || f.Box.UserNS == nil || f.Box.NetNS == nil || f.Port <= 0 || f.Port > 65535 || f.Nsenter == "" || f.Exe == "" {
+		return nil, errors.New("dial: incomplete settings")
+	}
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+	local := os.NewFile(uintptr(fds[0]), "dial-local")
+	remote := os.NewFile(uintptr(fds[1]), "dial-remote")
+	conn, err := net.FileConn(local)
+	local.Close()
+	if err != nil {
+		remote.Close()
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+	pctx, cancel := context.WithCancel(ctx)
+	stderr := f.Log
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	go func() {
+		defer cancel()
+		defer remote.Close()
+		code, err := f.Runner.Interactive(pctx, execx.Cmd{
+			Name: f.Nsenter, Args: f.DialArgs(), Dir: "/",
+			Env:   []string{"DEVC_BOX=1"},
+			Stdin: remote, Stdout: remote, Stderr: stderr,
+			ExtraFiles: []*os.File{f.Box.UserNS, f.Box.NetNS},
+		})
+		switch {
+		case err != nil && pctx.Err() == nil:
+			f.logf("connection to port %d in %s: %v", f.Port, f.Container, err)
+		case err == nil && code != 0:
+			f.logf("connection to port %d in %s ended with status %d", f.Port, f.Container, code)
+		}
+	}()
+	return &dialConn{Conn: conn, cancel: cancel}, nil
+}
+
+// dialConn ends its dial process when it is closed.
+type dialConn struct {
+	net.Conn
+	cancel context.CancelFunc
+}
+
+func (c *dialConn) Close() error {
+	err := c.Conn.Close()
+	c.cancel()
+	return err
+}
+
+// CloseWrite half-closes the connection.
+func (c *dialConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.Close()
+}
+
 // Listen opens the host side of a forward on bind (an IP address) and
 // port. When the port is taken and was not given explicitly, a free port
 // is chosen instead.

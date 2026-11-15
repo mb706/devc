@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +33,10 @@ type Record struct {
 	HostPort  int       `json:"host_port"`
 	PID       int       `json:"pid"`
 	Started   time.Time `json:"started"`
+	// ProcStart is the start time of the process (field 22 of its stat
+	// file) for a forward in the foreground, whose command line does not
+	// name the ID (work order C13: the router routes forwarded ports).
+	ProcStart uint64 `json:"proc_start,omitempty"`
 }
 
 var forwardIDRE = regexp.MustCompile(`^f[0-9a-f]{6}$`)
@@ -201,8 +206,9 @@ func (r *Registry) Remove(id string, pid int) error {
 }
 
 // ProcessAlive reports whether the record's process exists and is the
-// detached forward it describes: its command line must name the forward
-// ID, so a reused PID is not mistaken for it.
+// forward it describes: a detached forward's command line must name the
+// forward ID, a foreground forward's process must have the recorded start
+// time, so a reused PID is not mistaken for it.
 func ProcessAlive(rec Record) bool {
 	if err := syscall.Kill(rec.PID, 0); err != nil && !errors.Is(err, syscall.EPERM) {
 		return false
@@ -212,6 +218,10 @@ func ProcessAlive(rec Record) bool {
 		return false
 	}
 	args := strings.Split(string(b), "\x00")
+	if rec.ProcStart != 0 {
+		st, err := ProcFS{}.StartTime(strconv.Itoa(rec.PID))
+		return err == nil && st == rec.ProcStart && slices.Contains(args, "forward")
+	}
 	return containsSeq(args, "forward", "serve") && containsSeq(args, "--id", rec.ID)
 }
 

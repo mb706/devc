@@ -15,7 +15,22 @@ type Global struct {
 	Secrets      GlobalSecrets  `toml:"secrets" json:"secrets"`
 	Hubs         []Hub          `toml:"hubs" json:"hubs"`
 	Terminal     GlobalTerminal `toml:"terminal" json:"terminal"`
+	Router       GlobalRouter   `toml:"router" json:"router"`
 }
+
+// GlobalRouter is the daemon's router for local URLs (work order C13):
+// http://<port>.<project>.<realm>.localhost:<port of Listen> reaches a
+// listed port inside the project's box. Listen is a loopback address and
+// port, or "off".
+type GlobalRouter struct {
+	Listen string `toml:"listen" json:"listen"`
+}
+
+// RouterOff switches the router off.
+const RouterOff = "off"
+
+// DefaultRouterListen is where the router listens by default.
+const DefaultRouterListen = "127.0.0.1:7480"
 
 // GlobalTerminal governs the web app's terminal view of sessions (work
 // order C12). Control lets a hub's web app type into a session's terminal;
@@ -78,6 +93,7 @@ func defaultGlobal() Global {
 		Box:          GlobalBox{Memory: "16g", Pids: 4096},
 		SELinux:      GlobalSELinux{Mode: SELinuxLabels},
 		Secrets:      GlobalSecrets{Delivery: DeliveryFiles},
+		Router:       GlobalRouter{Listen: DefaultRouterListen},
 	}
 }
 
@@ -101,7 +117,18 @@ type RealmGit struct {
 }
 
 type RealmNetwork struct {
-	Default string `toml:"default" json:"default"`
+	Default   string       `toml:"default" json:"default"`
+	Allowlist NetAllowlist `toml:"allowlist" json:"allowlist"`
+}
+
+// NetAllowlist is [network.allowlist] of a realm or project: what boxes of
+// level allowlist may reach through the host's proxy. Domains are host
+// names or "*.suffix" patterns, each optionally with ":port" (without a
+// port 80 and 443 are allowed); Presets name built-in lists
+// (netpolicy.Presets). A project's list is added to its realm's.
+type NetAllowlist struct {
+	Domains []string `toml:"domains" json:"domains"`
+	Presets []string `toml:"presets" json:"presets"`
 }
 
 type RealmSELinux struct {
@@ -201,7 +228,8 @@ type Remote struct {
 }
 
 type ProjectNetwork struct {
-	Level string `toml:"level" json:"level"`
+	Level     string       `toml:"level" json:"level"`
+	Allowlist NetAllowlist `toml:"allowlist" json:"allowlist"`
 }
 
 type Capabilities struct {

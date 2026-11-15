@@ -94,10 +94,17 @@ type DataFacts struct {
 }
 
 var networkSentences = map[string]string{
-	"none":      "there is no network access.",
-	"allowlist": "only an allowlist of hosts is reachable; ask the user if you need another one.",
-	"internet":  "the internet is reachable, but the host, its local network and other private addresses are not. DNS works; IPv6 is off. To serve something to the user, listen on 127.0.0.1 in the box and ask the user to run `devc forward <port>`.",
-	"open":      "the network is not restricted: the host's local network and services are reachable too.",
+	"none": "there is no network access.",
+	"allowlist": "only the hosts on this project's allowlist are reachable, through a proxy that the host runs at http://127.0.0.1:3128 " +
+		"(HTTP_PROXY and HTTPS_PROXY point to it). The box has no other network: programs that ignore the proxy variables reach nothing, " +
+		"there is no DNS, and nothing at all is reachable while the devc daemon on the host is not running. The proxy refuses IP addresses " +
+		"and names that resolve to private addresses. If the task needs another host, run `devc request net <name>:<port>` and wait for the user. " +
+		"To serve something to the user, listen on 127.0.0.1 in the box and ask the user to run `devc forward <port>`.",
+	"internet": "the internet is reachable, but the host, its local network and other private addresses are not. DNS works; IPv6 is off. " +
+		"If the task needs a LAN host or a service on the host, run `devc request net <address>:<port>` or `devc request net host:<port>` " +
+		"(the host's service then appears at 127.0.0.1:<port> in the box) and wait for the user. " +
+		"To serve something to the user, listen on 127.0.0.1 in the box and ask the user to run `devc forward <port>`.",
+	"open": "the network is not restricted: the host's local network and services are reachable too.",
 }
 
 // NewData collects the template data of a project and harness.

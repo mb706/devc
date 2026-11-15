@@ -213,11 +213,20 @@ func TestRequests(t *testing.T) {
 	if got := r.waitRequest(t, fail.ID); got.Status != proto.RequestFailed || !strings.Contains(got.Result, "no such package") {
 		t.Errorf("failed request: %+v", got)
 	}
-	// Kinds that are not available yet are stored and answer so.
+	// A network request runs `devc net allow` with the request as origin
+	// (work order C13); kinds that are not available yet answer so.
 	netReq, _ := r.request(t, proto.RequestParams{Kind: "net", Target: "example.org:443"})
 	c.Call(context.Background(), proto.MethodRequestsDecide, proto.DecideParams{ID: netReq.ID, Approve: true}, &dec)
-	if got := r.waitRequest(t, netReq.ID); got.Status != proto.RequestFailed || !strings.Contains(got.Result, "not available yet") {
+	if got := r.waitRequest(t, netReq.ID); got.Status != proto.RequestDone {
 		t.Errorf("net: %+v", got)
+	}
+	if !r.runner.Called("/fake/devc", "--config-dir", "/cfg", "net", "allow", "--request", netReq.ID, "--for", "1h0m0s", "--", "example.org:443", "demo/hello") {
+		t.Errorf("net request ran %v", r.runner.Calls())
+	}
+	grantReq, _ := r.request(t, proto.RequestParams{Kind: "grant", Grant: "ssh", Name: "c1"})
+	c.Call(context.Background(), proto.MethodRequestsDecide, proto.DecideParams{ID: grantReq.ID, Approve: true}, &dec)
+	if got := r.waitRequest(t, grantReq.ID); got.Status != proto.RequestFailed || !strings.Contains(got.Result, "not available yet") {
+		t.Errorf("grant: %+v", got)
 	}
 
 	// Hostile requests are refused and stored nowhere.
@@ -628,10 +637,14 @@ func TestRequestCommands(t *testing.T) {
 			t.Errorf("%s: %q", m, steps)
 		}
 	}
-	for _, k := range []string{"net", "grant", "pr"} {
+	for _, k := range []string{"grant", "pr"} {
 		if steps, msg := requestCommands(hello, proto.Request{Kind: k}); steps != nil || !strings.Contains(msg, "not available yet") {
 			t.Errorf("%s: %q %q", k, steps, msg)
 		}
+	}
+	steps, _ = requestCommands(hello, proto.Request{ID: "r0123456789abcdefghij", Kind: "net", Params: proto.RequestParams{Target: "host:5432", For: "30m0s"}})
+	if len(steps) != 1 || strings.Join(steps[0], " ") != "net allow --request r0123456789abcdefghij --for 30m0s -- host:5432 demo/hello" {
+		t.Errorf("net: %q", steps)
 	}
 }
 

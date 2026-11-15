@@ -70,6 +70,11 @@ func newBoxCmd(a *app) *cobra.Command {
 					return boxside.LiveSessions(env)
 				})
 				ao.Input = &boxside.Input{Tmux: env.Tmux, TmuxStdin: boxside.ExecTmuxStdin(os.Environ())}
+				// Level allowlist: the proxy address relays to the host
+				// (work order C13).
+				if info != nil && info.Network == netpolicy.Allowlist {
+					ao.Proxy = netpolicy.ProxyAddr
+				}
 				boxside.RunAgent(ctx, ao)
 			}
 			return boxside.Init(ctx, o)

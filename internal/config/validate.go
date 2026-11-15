@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
 	"net/url"
 	"path"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/proto"
 )
 
@@ -253,6 +255,28 @@ func validateGlobal(c *Config, ps *problems) {
 		}
 		seenHubs[norm] = true
 	}
+	if l := g.Router.Listen; l != RouterOff {
+		ap, err := netip.ParseAddrPort(l)
+		if err != nil || !ap.Addr().Unmap().IsLoopback() || ap.Port() == 0 {
+			k.bad("router.listen", "%q must be a loopback address with a port (such as %s) or %q: the router has no authentication and must not be reachable from the network", l, DefaultRouterListen, RouterOff)
+		}
+	}
+}
+
+// netAllowlist checks [network.allowlist] of a realm or project.
+func (k checker) netAllowlist(key string, a NetAllowlist) {
+	for i, d := range a.Domains {
+		if _, err := netpolicy.ParseEntry(d); err != nil {
+			k.bad(idx(key+".domains", i), "%v", err)
+		}
+	}
+	k.noDuplicates(key+".domains", a.Domains)
+	for i, p := range a.Presets {
+		if _, ok := netpolicy.Presets[p]; !ok {
+			k.bad(idx(key+".presets", i), "unknown preset %q (known: %s)", p, strings.Join(netpolicy.PresetNames(), ", "))
+		}
+	}
+	k.noDuplicates(key+".presets", a.Presets)
 }
 
 func validateHarness(h *Harness, ps *problems) {
@@ -518,6 +542,7 @@ func validateEnv(e *Env, ps *problems) {
 func validateRealm(c *Config, r *Realm, ps *problems) {
 	k := checker{file: r.File, ps: ps}
 	k.enum("network.default", r.Network.Default, networkLevels)
+	k.netAllowlist("network.allowlist", r.Network.Allowlist)
 	if r.SELinux.Level != "" && !selinuxRE.MatchString(r.SELinux.Level) {
 		k.bad("selinux.level", "%q does not match s0 or s0:cN[,cN…], for example s0:c100,c200", r.SELinux.Level)
 	}
@@ -647,6 +672,7 @@ func validateProject(c *Config, p *Project, ps *problems) {
 	if p.Network.Level != "" {
 		k.enum("network.level", p.Network.Level, networkLevels)
 	}
+	k.netAllowlist("network.allowlist", p.Network.Allowlist)
 	if p.Box.Memory != "" {
 		k.memory("box.memory", p.Box.Memory)
 	}

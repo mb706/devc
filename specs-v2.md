@@ -75,10 +75,11 @@ One static Go binary, `devc`, in several roles:
 - **Hub** (`devc hub serve`). Phase 2.
 - **In-box helper**, the same binary mounted from the toolbox: init, launcher, status wrapper, hook receiver, git remote helper.
 
-Plus two kinds of auxiliary container:
+Plus one kind of auxiliary container:
 
 - **Helper container**: started from a bare directory containing only the static binary, with one project mounted and no network. Used for sealing, savepoints and moving received data **[tested]**.
-- **Gateway container** per realm, for network policy. Phase 3.
+
+Network policy needs no container of its own (section 11).
 
 ```
 phone: browser + ntfy app
@@ -86,7 +87,7 @@ phone: browser + ntfy app
         ▼
 hub (server): inbox, web app, ntfy, archive
         ▲ outbound TLS from each machine
-machine daemon: journal, relay, gate, forwards
+machine daemon: journal, relay, gate, forwards, proxy
         │ channel opened from the host side
 box: tmux → launcher → claude | codex | pi
 ```
@@ -354,16 +355,16 @@ Service logins (section 17) and cloud credentials through `credential_process`.
 | Level | Meaning |
 |---|---|
 | `none` | no network |
-| `allowlist` | listed domains only, through a proxy |
+| `allowlist` | listed domains only, through a proxy on the host; the box has no network interface besides loopback |
 | `internet` | internet, but no LAN, no host services, no link-local or metadata addresses. **Default.** |
 | `open` | Podman's default networking |
 
-- **Phase 1**: `internet` is implemented by firewall rules that the host installs into the box's network namespace before the first process starts **[tested]**. They do not survive a restart done outside devc, so `devc up` always reapplies them and checks from inside that a private address is unreachable.
-- **Phase 3**: boxes sit on an internal network per realm, and a gateway container forwards and filters. This fails closed. `allowlist` adds a domain-filtering proxy with no resolver in the box.
-- **Exceptions**: `devc net allow <box> <host:port | lan | host:port-on-host> --for <duration>` adds a firewall entry with built-in expiry.
-- **Ports**: `devc forward <port>` listens on host loopback and dials `127.0.0.1:<port>` inside the box's network namespace **[tested by the research pass]**. It reaches services bound to loopback and needs nothing in the image. Later, the daemon serves `http://<port>.<project>.<realm>.localhost`.
+- **`internet`**: firewall rules that the host installs into the box's network namespace before the first process starts **[tested]**. They do not survive a restart done outside devc; readiness is bound to the filtered namespace and that start, so such a box stops again, and `devc up` always reapplies the rules and checks from inside that a private address is unreachable.
+- **`allowlist`**: the box is created with `--network none`, so it fails closed. The box agent listens on `127.0.0.1:3128` in the box (the proxy variables point there) and relays every connection, unparsed, over the box channel to the machine daemon. The daemon is the proxy (`CONNECT` and plain HTTP with absolute URLs): only names on the project's allowlist (exact or `*.suffix`, ports 80 and 443 unless an entry names another; built-in presets for common services), never IP literals; it resolves names itself and connects only to public addresses, checking the address it actually connects to, so neither a name that resolves to a private address nor one that changes between check and connect reaches the LAN or the host. Every decision is logged. Without the daemon the box has no network at all **[tested]**. The allowlist in the configuration is part of what a box was started with; growing it needs the box to be brought up again.
+- **Exceptions**: `devc net allow <host:port | lan | host:<port>> [box] --for <duration>`, granted while the box runs and only from the host (the CLI, or an approved request, which is high risk). At level `internet`, a LAN host and port, or the LAN as a whole (not the host itself), becomes a timed element of an nftables set in the box's namespace: it expires in the kernel without any process and is applied again by `devc up` while still valid. `host:<port>` is a service on the host's loopback: the box agent listens on that port in the box and relays over the channel, and the daemon connects only while the exception is in force (every level; needs the daemon). At level `allowlist` an exception for a name adds it to that box's allowlist for its duration **[tested]**.
+- **Ports**: `devc forward <port>` listens on host loopback and dials `127.0.0.1:<port>` inside the box's network namespace **[tested]**. It reaches services bound to loopback and needs nothing in the image. While the daemon runs, it also serves `http://<port>.<project>.<realm>.localhost:7480` for ports listed in the project's `box.ports` or currently forwarded, WebSockets included **[tested]**.
 
-IPv6 is disabled in boxes.
+There is no gateway container and no network of devc's own: the box channel carries what crosses the boundary. IPv6 is disabled in boxes.
 
 ## 12. Sessions
 
@@ -502,7 +503,7 @@ Checked by `devc doctor`; `--fix` prints or applies the root commands.
    - `internet` network level by host-applied rules, `forward`.
    - *Done when* v1 can be retired on one machine, a box can be recreated without losing login or history, and a test suite run from inside a box fails to destroy sealed data, rewrite banked commits, reach the LAN or read another realm.
 2. **Interface.** Machine daemon, hub, web app, ntfy; status wrapper and structured input; SSH gate; relay reachable from inside the box; requests.
-3. **Workflow.** Gateway network levels and exceptions; data sync and manifest; GitHub read facade and host commands; optional App tokens; published skills; dependency-source helper.
+3. **Workflow.** The `allowlist` level and network exceptions; data sync and manifest; GitHub read facade and host commands; optional App tokens; published skills; dependency-source helper.
 4. **Later.**
    - *Second hub.*
    - *Service logins*: for services that offer only a password login, a separate container holds the password, performs the login, and exposes an authenticated, filtered proxy to boxes.

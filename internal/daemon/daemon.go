@@ -33,6 +33,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,7 @@ import (
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/flock"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/secrets"
@@ -117,6 +119,14 @@ type Options struct {
 	// gate-exec (work order C10b).
 	SSHD      string
 	SSHConfig string
+	// Resolve replaces the system resolver of the allowlist proxy, and
+	// ProxyExempt lists addresses the proxy treats as public. Only tests
+	// set them (hidden flags of devc daemon), to reach a local server
+	// without the internet; nothing in the configuration does.
+	Resolve     func(ctx context.Context, host string) ([]netip.Addr, error)
+	ProxyExempt []netip.AddrPort
+	// RouterListen overrides router.listen of config.toml (tests).
+	RouterListen string
 }
 
 // env is one loaded configuration and what is built from it.
@@ -158,6 +168,12 @@ type Daemon struct {
 	term       *termManager
 	wtCache    worktreeCache
 	wg         sync.WaitGroup
+
+	// The network services (netproxy.go, router.go).
+	netMu     sync.Mutex
+	netLogs   map[names.ProjectRef]*netpolicy.NetLog
+	hostAddrs hostAddrCache
+	router    *router
 }
 
 // boxInfo is what the last box-watch pass saw of a configured project.
@@ -296,6 +312,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.requests.recoverInterrupted(d.ctx)
 	d.requests.expireAll(d.ctx)
 	d.requests.start()
+	d.startRouter()
 	d.log.Info("daemon started", "version", d.version, "instance", d.instance, "socket", sock)
 	d.goSafe("api", func() { d.serveAPI(ln) })
 	d.goSafe("watch", d.watchLoop)
@@ -307,6 +324,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.log.Info("daemon stopping")
 	ln.Close()
 	d.turns.stop()
+	if d.router != nil {
+		d.router.stop()
+	}
 	d.hub.closeAll(context.Background())
 	d.term.closeAll()
 	d.mu.Lock()
@@ -477,6 +497,7 @@ func (d *Daemon) watchOnce(ctx context.Context) error {
 			if bi.worker != nil && bi.worker.containerID != c.ID {
 				bi.worker.stop()
 				bi.worker = nil
+				d.forgetRoute(ref)
 			}
 			if bi.worker == nil {
 				bi.worker = d.startWorker(ref, c.ID)
@@ -484,6 +505,7 @@ func (d *Daemon) watchOnce(ctx context.Context) error {
 		} else if bi.worker != nil {
 			bi.worker.stop()
 			bi.worker = nil
+			d.forgetRoute(ref)
 		}
 	}
 	for ref, bi := range d.boxes {
@@ -495,6 +517,14 @@ func (d *Daemon) watchOnce(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// forgetRoute drops the router's pin of a box that stopped or was
+// replaced.
+func (d *Daemon) forgetRoute(ref names.ProjectRef) {
+	if d.router != nil {
+		d.router.forget(ref)
+	}
 }
 
 func (d *Daemon) worker(ref names.ProjectRef) *boxWorker {

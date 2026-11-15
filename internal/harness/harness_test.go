@@ -625,9 +625,16 @@ func TestSandboxSSH(t *testing.T) {
 func TestNetworkSentence(t *testing.T) {
 	e := setup(t, nil)
 	r := e.resolved(t, "demo/hello")
+	// allowlist (work order C13): names the proxy, the failure mode
+	// without the daemon, and how to ask for another host.
 	r.Network = "allowlist"
-	if d := NewData(r, e.manifest(t, "claude")); strings.Contains(d.NetworkSentence, "only") || !strings.Contains(d.NetworkSentence, "not restricted") {
+	if d := NewData(r, e.manifest(t, "claude")); !strings.Contains(d.NetworkSentence, "http://127.0.0.1:3128") ||
+		!strings.Contains(d.NetworkSentence, "daemon on the host is not running") || !strings.Contains(d.NetworkSentence, "devc request net <name>:<port>") {
 		t.Errorf("allowlist: %q", d.NetworkSentence)
+	}
+	r.Network = "wide"
+	if d := NewData(r, e.manifest(t, "claude")); !strings.Contains(d.NetworkSentence, "not restricted") {
+		t.Errorf("an unknown level: %q", d.NetworkSentence)
 	}
 	r.Network = "internet"
 	if d := NewData(r, e.manifest(t, "claude")); !strings.Contains(d.NetworkSentence, "the internet is reachable") || !strings.Contains(d.NetworkSentence, "private addresses are not") {

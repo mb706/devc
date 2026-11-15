@@ -116,7 +116,27 @@ func RepoRoot(t *testing.T) string {
 	}
 }
 
-var projectsRootRE = regexp.MustCompile(`(?m)^projects_root\s*=.*$`)
+var (
+	projectsRootRE = regexp.MustCompile(`(?m)^projects_root\s*=.*$`)
+	routerListenRE = regexp.MustCompile(`(?m)^listen\s*=\s*"127\.0\.0\.1:7480".*$`)
+)
+
+// SetRouter makes the environment's daemon serve local URLs on addr.
+func (e *Env) SetRouter(addr string) {
+	e.t.Helper()
+	cfg := filepath.Join(e.ConfigDir, "config.toml")
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	re := regexp.MustCompile(`(?m)^listen\s*=\s*"off"$`)
+	if !re.Match(data) {
+		e.t.Fatal("config.toml has no router setting to replace")
+	}
+	if err := os.WriteFile(cfg, re.ReplaceAll(data, []byte(`listen = "`+addr+`"`)), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+}
 
 // New creates an environment from examples/config. Everything lives in
 // t.TempDir(), except the runtime directory, which is below
@@ -196,6 +216,9 @@ func NewNoDaemon(t *testing.T) *Env {
 	} else {
 		data = append([]byte(line+"\n"), data...)
 	}
+	// Test daemons run no router for local URLs unless a test asks for
+	// one (SetRouter): the default port belongs to the user's own daemon.
+	data = routerListenRE.ReplaceAll(data, []byte(`listen = "off"`))
 	if err := os.WriteFile(cfg, data, 0o644); err != nil {
 		t.Fatal(err)
 	}

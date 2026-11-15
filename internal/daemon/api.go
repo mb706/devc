@@ -48,6 +48,8 @@ func (d *Daemon) handlers() map[string]proto.Handler {
 
 		proto.MethodHubsStatus: d.apiHubs,
 
+		proto.MethodNetSync: d.apiNetSync,
+
 		proto.MethodProjectsList:  d.apiProjects,
 		proto.MethodChangesGet:    d.apiChanges,
 		proto.MethodTerminalOpen:  d.term.open,

@@ -24,6 +24,11 @@ delivery = "files"             # files: written to each box's tmpfs /run/devc-se
 control = false                # true: a hub's web app may type into session terminals
                                # (the hub must allow it too); false: it only observes
 
+[router]
+listen = "127.0.0.1:7480"      # local URLs http://<port>.<project>.<realm>.localhost:7480
+                               # for listed or forwarded box ports, served by the daemon;
+                               # a loopback address only, or "off"
+
 # Hubs this machine reports to, in order of preference (the first connected
 # one sends notifications). None by default; 'devc join' adds an entry and
 # stores the hub's credentials, 'devc leave' removes both.

@@ -68,6 +68,8 @@ type rig struct {
 	local  string // the agent's in-box socket
 	// logw receives the daemon's log when set.
 	logw io.Writer
+	// tweak adjusts the options before the daemon starts.
+	tweak func(*Options)
 }
 
 func newRig(t *testing.T) *rig {
@@ -141,7 +143,11 @@ func (r *rig) options() Options {
 
 func (r *rig) start() {
 	r.t.Helper()
-	d, err := New(r.options())
+	o := r.options()
+	if r.tweak != nil {
+		r.tweak(&o)
+	}
+	d, err := New(o)
 	if err != nil {
 		r.t.Fatal(err)
 	}

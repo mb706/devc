@@ -232,11 +232,19 @@ func TestSpecRejects(t *testing.T) {
 	if _, err := BuildSpec(in); err == nil {
 		t.Error("unknown network level accepted")
 	}
-	// A level without enforcement fails closed (finding A5).
+	// Level allowlist: no network besides loopback, the proxy in the
+	// environment (work order C13).
 	in = baseInputs(t, baseResolved())
 	in.Resolved.Network = "allowlist"
-	if _, err := BuildSpec(in); err == nil || !strings.Contains(err.Error(), "not available yet") {
-		t.Errorf("network allowlist: %v", err)
+	if s, err := BuildSpec(in); err != nil || s.NetRules || !slices.Equal(s.Network, []string{"--network", "none"}) {
+		t.Errorf("network allowlist: %+v, %v", s, err)
+	} else {
+		args := strings.Join(s.Args(), " ")
+		for _, want := range []string{"--network none", "--env HTTPS_PROXY=http://127.0.0.1:3128", "--env http_proxy=http://127.0.0.1:3128", "--env NO_PROXY=127.0.0.1,localhost", "--env NODE_USE_ENV_PROXY=1"} {
+			if !strings.Contains(args, want) {
+				t.Errorf("allowlist arguments lack %q: %s", want, args)
+			}
+		}
 	}
 	// Nested containers are not implemented (finding C2).
 	in = baseInputs(t, baseResolved())

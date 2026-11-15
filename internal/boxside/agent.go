@@ -63,6 +63,12 @@ type AgentOptions struct {
 	AcceptHost func(*unix.Ucred) error
 	// MaxClients bounds concurrent in-box clients (default 32).
 	MaxClients int
+	// Proxy is the loopback address on which the agent relays connections
+	// to the host's allowlist proxy (level allowlist; empty: none).
+	Proxy string
+	// MaxRelays bounds relayed TCP connections at once
+	// (DefaultMaxRelays).
+	MaxRelays int
 	// Retry is the pause after a listener failed (default 5 s).
 	Retry time.Duration
 }
@@ -78,6 +84,13 @@ type Agent struct {
 	mu sync.Mutex
 	// host is the current host session (nil without one).
 	host *yamux.Session
+	// relays bounds the relayed TCP connections; limiter the relay streams
+	// per window (netrelay.go).
+	relays  chan struct{}
+	limiter *relayLimiter
+	// listeners are the host-exception ports (box.listen).
+	lmu       sync.Mutex
+	listeners map[int]net.Listener
 }
 
 // HostPeer accepts a peer that the kernel reports with PID 0: a process
@@ -104,12 +117,21 @@ func RunAgent(ctx context.Context, o AgentOptions) {
 	if o.Log == nil {
 		o.Log = io.Discard
 	}
-	a := &Agent{o: o}
+	if o.MaxRelays <= 0 {
+		o.MaxRelays = DefaultMaxRelays
+	}
+	a := &Agent{o: o, relays: make(chan struct{}, o.MaxRelays), limiter: &relayLimiter{now: time.Now, max: relayOpens},
+		listeners: map[int]net.Listener{}}
 	var wg sync.WaitGroup
 	wg.Add(2)
 	a.goSafe("host listener", func() { defer wg.Done(); a.hostLoop(ctx) })
 	a.goSafe("local listener", func() { defer wg.Done(); a.localLoop(ctx) })
+	if o.Proxy != "" {
+		wg.Add(1)
+		a.goSafe("proxy listener", func() { defer wg.Done(); a.proxyLoop(ctx) })
+	}
 	wg.Wait()
+	a.closeListeners()
 	a.setHost(nil)
 }
 
@@ -279,6 +301,7 @@ func (a *Agent) serveHost(ctx context.Context, s *yamux.Session) {
 		proto.MethodBoxClients:  a.inputHandler(proto.MethodBoxClients),
 		proto.MethodBoxPaste:    a.inputHandler(proto.MethodBoxPaste),
 		proto.MethodBoxKeys:     a.inputHandler(proto.MethodBoxKeys),
+		proto.MethodBoxListen:   a.handleListen(ctx),
 	}
 	for {
 		st, err := s.AcceptStreamWithContext(ctx)

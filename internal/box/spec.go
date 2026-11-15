@@ -285,6 +285,12 @@ func BuildSpec(in Inputs, contribs ...Contributor) (*Spec, error) {
 			return nil, err
 		}
 	}
+	// Level allowlist: the proxy variables (netpolicy.ProxyEnv).
+	for _, e := range net.Env {
+		if err := s.AddEnv(e[0], e[1]); err != nil {
+			return nil, err
+		}
+	}
 
 	p := in.Paths
 	mounts := []Mount{{Source: p.HostProjectDir(ref), Target: paths.InBoxProjectDir(ref)}}

@@ -45,6 +45,10 @@ auto = ["seal", "savepoint", "note"]   # low-risk request kinds approved without
 [network]
 level = ""                     # overrides the realm default
 
+[network.allowlist]            # added to the realm's list (level allowlist only)
+presets = []
+domains = []
+
 [capabilities]
 gpu = false
 nested = false
@@ -53,7 +57,7 @@ kvm = false
 [box]
 memory = "8g"
 pids = 0                       # 0: the global default
-ports = [8888]
+ports = [8888]                 # served at http://8888.analysis.demo.localhost:7480 by the daemon
 
 [[mounts]]
 project = "hello"              # another project in the same realm

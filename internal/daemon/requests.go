@@ -522,7 +522,9 @@ func requestCommands(ref names.ProjectRef, req proto.Request) ([][]string, strin
 		}
 		return steps, ""
 	case proto.RequestNet:
-		return nil, "not available yet: network exceptions arrive with the gateway (C13); ask the user to run 'devc forward' or change the network level"
+		// The same command the user runs (work order C13); the request ID
+		// becomes the exception's origin.
+		return [][]string{{"net", "allow", "--request", req.ID, "--for", p.For, "--", p.Target, ref.String()}}, ""
 	case proto.RequestGrant:
 		return nil, "not available yet: grants are changed in project.toml by the user for now"
 	case proto.RequestPR:

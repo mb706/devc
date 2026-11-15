@@ -1131,13 +1131,98 @@ func TestInternetLevel(t *testing.T) {
 			t.Errorf("engine calls %v, rules %q", r.eng.Log, r.rules)
 		}
 	})
-	// allowlist is refused before anything is created.
+	// Exceptions: put back after a start (after the canary), applied to a
+	// running box without disturbing its readiness, kept by down, dropped
+	// by rm (work order C13).
+	t.Run("exceptions", func(t *testing.T) {
+		r := newRig(t)
+		var scripts []string
+		orig := r.eng.UnshareFunc
+		r.eng.UnshareFunc = func(args []string, stdin string) (execx.Result, error) {
+			if strings.HasPrefix(stdin, "flush set") {
+				scripts = append(scripts, stdin)
+				return execx.Result{}, nil
+			}
+			return orig(args, stdin)
+		}
+		r.m.StartHooks = append(r.m.StartHooks, NetExceptionHook{Manager: r.m})
+		now := time.Now()
+		later := now.Add(time.Hour)
+		file := r.m.Config.Paths.BoxNetExceptionsFile(hello)
+		list := []netpolicy.Exception{
+			{ID: "x000001", Kind: netpolicy.KindAddr, Host: "192.168.1.10", Port: 22, Addrs: []netip.Addr{netip.MustParseAddr("192.168.1.10")}, Created: now, Until: &later, Origin: "cli"},
+			{ID: "x000002", Kind: netpolicy.KindLAN, Created: now, Origin: "cli"},
+		}
+		if err := netpolicy.WriteExceptions(file, list, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatalf("up: %v\n%s", err, r.out)
+		}
+		if len(scripts) != 1 || !strings.Contains(scripts[0], "192.168.1.10 . 22 timeout") || !strings.Contains(scripts[0], "add element inet devc lan4 { 10.0.0.0/8,") {
+			t.Fatalf("scripts after up: %q", scripts)
+		}
+		// The canary ran before the exceptions went in.
+		if n := len(r.eng.Execs); n < 2 || r.eng.Execs[n-1].Cmd[2] != "net-canary" {
+			t.Errorf("the canary did not run last: %+v", r.eng.Execs)
+		}
+		r.eng.Log, r.out = nil, &bytes.Buffer{}
+		r.m.Out = r.out
+		if applied, err := r.m.SyncExceptions(ctx, hello); !applied || err != nil || len(scripts) != 2 {
+			t.Fatalf("sync: %v %v %q", applied, err, scripts)
+		}
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil || len(r.eng.Log) != 0 || !strings.Contains(r.out.String(), "already running") {
+			t.Fatalf("up after an exception: %v %v\n%s", err, r.eng.Log, r.out)
+		}
+		if err := r.m.Down(ctx, hello); err != nil {
+			t.Fatal(err)
+		}
+		if applied, err := r.m.SyncExceptions(ctx, hello); applied || err != nil {
+			t.Errorf("sync on a stopped box: %v %v", applied, err)
+		}
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil || len(scripts) != 3 {
+			t.Fatalf("up again: %v %q", err, scripts)
+		}
+		if err := r.m.Remove(ctx, hello, false); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := netpolicy.ReadExceptions(file); got != nil {
+			t.Errorf("rm kept the exceptions: %v", got)
+		}
+	})
+	// allowlist: no rules (there is no interface to filter), no canary;
+	// the capability record names the level and the entries in force.
 	t.Run("allowlist", func(t *testing.T) {
 		r := newRig(t)
-		r.writeConfig("realms/demo/projects/hello/project.toml", "[network]\nlevel = \"allowlist\"\n")
+		r.writeConfig("realms/demo/projects/hello/project.toml", "[network]\nlevel = \"allowlist\"\n[network.allowlist]\npresets = [\"pypi\"]\ndomains = [\"git.example.org:8443\"]\n")
 		r.load()
-		if err := r.m.Up(ctx, hello, UpOptions{}); err == nil || !strings.Contains(err.Error(), "not available yet") || len(r.eng.Containers) != 0 {
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
 			t.Fatalf("up: %v", err)
+		}
+		if slices.Contains(r.verbs(), "init") || len(r.eng.Unshares) != 0 || len(r.eng.Execs) != 1 {
+			t.Errorf("engine calls %v, unshares %v, execs %d", r.eng.Log, r.eng.Unshares, len(r.eng.Execs))
+		}
+		c, err := ReadCapabilities(r.m.Config.Paths, hello)
+		if err != nil || c.Network != "allowlist" || !slices.Equal(c.Allowlist, []string{"pypi.org", "files.pythonhosted.org", "git.example.org:8443"}) {
+			t.Fatalf("capabilities %+v, %v", c, err)
+		}
+		res, _ := r.m.Config.Resolved(hello)
+		l, err := c.ProxyAllowlist(res)
+		if err != nil || len(l) != 3 {
+			t.Errorf("proxy allowlist %v, %v", l, err)
+		}
+		// An entry added after the start is not served until the box is
+		// brought up again; one removed is gone at once.
+		res.NetAllowlist.Domains = []string{"new.example.org"}
+		if l, _ := c.ProxyAllowlist(res); !slices.Equal(l.Strings(), []string{"pypi.org", "files.pythonhosted.org"}) {
+			t.Errorf("after a change: %v", l.Strings())
+		}
+		res.Network = "internet"
+		if _, err := c.ProxyAllowlist(res); err == nil {
+			t.Error("the proxy served a box whose configuration is no longer allowlist")
+		}
+		if lvl, running, err := r.m.RunningLevel(ctx, hello); lvl != "allowlist" || !running || err != nil {
+			t.Errorf("running level %q %v %v", lvl, running, err)
 		}
 	})
 	// Levels none and open need no rules and no canary.

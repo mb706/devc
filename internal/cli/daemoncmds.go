@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -69,6 +71,8 @@ func parseLevel(s string) (slog.Level, error) {
 func newDaemonCmd(a *app) *cobra.Command {
 	var level string
 	var housekeeping, reconcile time.Duration
+	var testResolve, testExempt []string
+	var routerListen string
 	cmd := &cobra.Command{
 		Use:   "daemon [--log-level level]",
 		Short: "Run the machine daemon in the foreground",
@@ -111,6 +115,13 @@ func newDaemonCmd(a *app) *cobra.Command {
 				return err
 			}
 			log := slog.New(slog.NewTextHandler(a.stderr, &slog.HandlerOptions{Level: lvl}))
+			resolve, exempt, err := testNetFlags(testResolve, testExempt)
+			if err != nil {
+				return err
+			}
+			if resolve != nil || exempt != nil {
+				log.Warn("test settings of the allowlist proxy are in force (--test-resolve, --test-exempt)")
+			}
 			d, err := daemon.New(daemon.Options{
 				Paths: p,
 				Load: func() (*config.Config, []config.Problem) {
@@ -130,6 +141,9 @@ func newDaemonCmd(a *app) *cobra.Command {
 				HousekeepingInterval: housekeeping,
 				ReconcileInterval:    reconcile,
 				SSHConfig:            sshConfig,
+				Resolve:              resolve,
+				ProxyExempt:          exempt,
+				RouterListen:         routerListen,
 			})
 			if err != nil {
 				return err
@@ -144,6 +158,14 @@ func newDaemonCmd(a *app) *cobra.Command {
 	cmd.Flags().DurationVar(&reconcile, "reconcile-interval", 0, "interval of session reconciliation (tests)")
 	_ = cmd.Flags().MarkHidden("housekeeping-interval")
 	_ = cmd.Flags().MarkHidden("reconcile-interval")
+	// Tests of the allowlist proxy reach a local server without the
+	// internet: names resolved as given, and one address treated as public.
+	cmd.Flags().StringArrayVar(&testResolve, "test-resolve", nil, "resolve <name>=<ipv4> for the allowlist proxy (tests)")
+	cmd.Flags().StringArrayVar(&testExempt, "test-exempt", nil, "treat <ipv4>:<port> as a public address in the allowlist proxy (tests)")
+	cmd.Flags().StringVar(&routerListen, "router-listen", "", "address of the router for local URLs, overriding router.listen (tests)")
+	_ = cmd.Flags().MarkHidden("test-resolve")
+	_ = cmd.Flags().MarkHidden("test-exempt")
+	_ = cmd.Flags().MarkHidden("router-listen")
 
 	var statusJSON bool
 	status := &cobra.Command{
@@ -651,4 +673,37 @@ func eventSummary(ev *proto.Event) string {
 		return d.ID + " " + d.Status + ": " + d.Summary
 	}
 	return ""
+}
+
+// testNetFlags parses the daemon's test settings of the allowlist proxy:
+// a resolver that knows only the given names, and addresses treated as
+// public. Without the flags both are nil and the proxy uses the system
+// resolver and treats no address specially.
+func testNetFlags(resolve, exempt []string) (func(context.Context, string) ([]netip.Addr, error), []netip.AddrPort, error) {
+	var out []netip.AddrPort
+	for _, s := range exempt {
+		ap, err := netip.ParseAddrPort(s)
+		if err != nil || !ap.Addr().Is4() {
+			return nil, nil, usageErrorf("--test-exempt %q: use <ipv4>:<port>", s)
+		}
+		out = append(out, ap)
+	}
+	if len(resolve) == 0 {
+		return nil, out, nil
+	}
+	names := map[string][]netip.Addr{}
+	for _, s := range resolve {
+		n, ip, ok := strings.Cut(s, "=")
+		a, err := netip.ParseAddr(ip)
+		if !ok || err != nil || !a.Is4() {
+			return nil, nil, usageErrorf("--test-resolve %q: use <name>=<ipv4>", s)
+		}
+		names[strings.ToLower(n)] = append(names[strings.ToLower(n)], a)
+	}
+	return func(_ context.Context, host string) ([]netip.Addr, error) {
+		if as, ok := names[host]; ok {
+			return as, nil
+		}
+		return nil, fmt.Errorf("%s: unknown to the test resolver", host)
+	}, out, nil
 }

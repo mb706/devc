@@ -1,9 +1,10 @@
 package box
 
 // The capabilities a box was started with (finding C1-02). Secrets the
-// daemon hands out on demand and SSH hosts behind the gate are granted by
-// the configuration, but a running box keeps the isolation it was started
-// with: granting it something new while its network policy or definition
+// daemon hands out on demand, SSH hosts behind the gate and (work order
+// C13) the network level and allowlist the host's proxy serves are granted
+// by the configuration, but a running box keeps the isolation it was
+// started with: granting it something new while its network policy or definition
 // has drifted would hand the capability to a box that does not implement
 // the policy the user now expects. So every successful start records what
 // the box was started with, next to its other generated state (beside the
@@ -12,6 +13,11 @@ package box
 // removing a grant takes effect at once, adding one needs the box to be
 // brought up again. A box without a record (started before this record
 // existed, or a start that failed) gets nothing on demand.
+//
+// Network exceptions (netpolicy, `devc net allow`) are different on
+// purpose: they are granted while the box runs, by the user on the host or
+// through an approved request, and kept in their own record; nothing here
+// is changed by them.
 
 import (
 	"encoding/json"
@@ -27,6 +33,7 @@ import (
 
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/paths"
 )
 
@@ -44,6 +51,10 @@ type Capabilities struct {
 	// SSH and SSHAllow are grants.ssh and grants.ssh_allow.
 	SSH      []string            `json:"ssh"`
 	SSHAllow map[string][]string `json:"ssh_allow,omitempty"`
+	// Network is the level the box was started with; Allowlist the
+	// allowlist entries in canonical form (level allowlist only).
+	Network   string   `json:"network,omitempty"`
+	Allowlist []string `json:"allowlist,omitempty"`
 }
 
 // GrantedSecrets lists the secrets a project may receive: its granted
@@ -64,8 +75,16 @@ func CapabilitiesOf(r *config.Resolved, containerID string, now time.Time) Capab
 	for h, l := range r.Grants.SSHAllow {
 		allow[h] = slices.Clone(l)
 	}
-	return Capabilities{V: 1, ContainerID: containerID, Recorded: now.UTC(), Secrets: GrantedSecrets(r),
-		SSH: slices.Clone(r.Grants.SSH), SSHAllow: allow}
+	c := Capabilities{V: 1, ContainerID: containerID, Recorded: now.UTC(), Secrets: GrantedSecrets(r),
+		SSH: slices.Clone(r.Grants.SSH), SSHAllow: allow, Network: r.Network}
+	if r.Network == netpolicy.Allowlist {
+		// Validated with the configuration; an entry that does not parse
+		// is simply not recorded, so it is never allowed.
+		if l, err := netpolicy.Expand(r.NetAllowlist.Domains, r.NetAllowlist.Presets); err == nil {
+			c.Allowlist = l.Strings()
+		}
+	}
+	return c
 }
 
 // WriteCapabilities stores the record of ref's box (0600, replaced whole).
@@ -139,6 +158,24 @@ func ReadCapabilities(p *paths.Paths, ref names.ProjectRef) (*Capabilities, erro
 // started with it and the configuration r still grants it.
 func (c *Capabilities) AllowsSecret(r *config.Resolved, name string) bool {
 	return slices.Contains(c.Secrets, name) && slices.Contains(GrantedSecrets(r), name)
+}
+
+// ErrNotAllowlist: the box was not started at level allowlist, or the
+// configuration no longer says allowlist.
+var ErrNotAllowlist = errors.New("this box does not use the allowlist proxy")
+
+// ProxyAllowlist is the allowlist the proxy serves for the box: the box was
+// started at level allowlist and the configuration r still says so, and
+// only entries that were in force at the start and still are count.
+func (c *Capabilities) ProxyAllowlist(r *config.Resolved) (netpolicy.EntryList, error) {
+	if c.Network != netpolicy.Allowlist || r.Network != netpolicy.Allowlist {
+		return nil, ErrNotAllowlist
+	}
+	cur, err := netpolicy.Expand(r.NetAllowlist.Domains, r.NetAllowlist.Presets)
+	if err != nil {
+		return nil, err
+	}
+	return cur.Intersect(c.Allowlist), nil
 }
 
 // SSHGrant is the grant of host in force for the box: granted at its start

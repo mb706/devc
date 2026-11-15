@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/netip"
@@ -33,11 +34,14 @@ func TestBoxArgs(t *testing.T) {
 	if err != nil || !d.Rules || !slices.Equal(d.Args, []string{"--sysctl", "net.ipv6.conf.all.disable_ipv6=1", "--sysctl", "net.ipv6.conf.default.disable_ipv6=1"}) {
 		t.Errorf("internet: %+v, %v", d, err)
 	}
-	// allowlist fails closed until it exists.
-	if _, err := BoxArgs(Allowlist); err == nil || !strings.Contains(err.Error(), "not available yet") {
-		t.Errorf("allowlist: %v", err)
+	// allowlist: no network at all besides loopback, the proxy in the
+	// environment, no rules (there is no interface to filter).
+	d, err = BoxArgs(Allowlist)
+	if err != nil || d.Rules || !slices.Equal(d.Args, []string{"--network", "none"}) || !slices.Contains(d.Env, [2]string{"HTTPS_PROXY", "http://127.0.0.1:3128"}) ||
+		!slices.Contains(d.Env, [2]string{"NODE_USE_ENV_PROXY", "1"}) || !slices.Contains(d.Env, [2]string{"NO_PROXY", "127.0.0.1,localhost"}) {
+		t.Errorf("allowlist: %+v, %v", d, err)
 	}
-	if Enforced(Allowlist) || !Enforced(None) || !Enforced(Open) || !Enforced(Internet) {
+	if !Enforced(Allowlist) || !Enforced(None) || !Enforced(Open) || !Enforced(Internet) {
 		t.Error("Enforced is wrong")
 	}
 	if _, err := BoxArgs("lan"); err == nil {
@@ -63,6 +67,10 @@ table inet devc {
 		type ipv4_addr . inet_service
 		flags timeout
 	}
+	set lan4 {
+		type ipv4_addr
+		flags interval, timeout
+	}
 	chain output {
 		type filter hook output priority filter; policy accept;
 		oifname "lo" accept
@@ -70,24 +78,26 @@ table inet devc {
 		meta l4proto { tcp, udp } ip daddr . th dport @allow4 accept
 		ip daddr { 10.0.2.3, 192.168.122.1 } meta l4proto { tcp, udp } th dport 53 accept
 		ip daddr 192.0.2.1 tcp dport 9 reject with tcp reset
+		ip daddr { 192.168.122.31, 198.51.100.7, 203.0.113.5 } reject with icmp type admin-prohibited
+		ip daddr @lan4 accept
 		ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } reject with icmp type admin-prohibited
-		ip daddr { 198.51.100.7, 203.0.113.5 } reject with icmp type admin-prohibited
 	}
 }
 `
 	if got != want {
 		t.Errorf("rules:\n%s\nwant:\n%s", got, want)
 	}
-	// Without resolvers there is no DNS rule; without public host
-	// addresses no second reject rule.
-	got = Rules(nil, addrs("10.1.2.3"))
+	// Without resolvers there is no DNS rule; without host addresses no
+	// rule for them.
+	got = Rules(nil, nil)
 	if strings.Contains(got, "dport 53") || strings.Count(got, "admin-prohibited") != 1 {
 		t.Errorf("minimal rules:\n%s", got)
 	}
 	// The order is part of the contract: loopback, IPv6, exceptions, DNS,
-	// sentinel, private ranges.
-	idx := func(s string) int { return strings.Index(Rules(addrs("10.0.2.3"), nil), s) }
-	order := []string{`oifname "lo"`, "nfproto ipv6 drop", "@allow4", "dport 53", "tcp reset", "admin-prohibited"}
+	// sentinel, the host's addresses, the LAN exception set, private
+	// ranges.
+	idx := func(s string) int { return strings.Index(Rules(addrs("10.0.2.3"), addrs("192.168.1.9")), s) }
+	order := []string{`oifname "lo"`, "nfproto ipv6 drop", "@allow4", "dport 53", "tcp reset", "{ 192.168.1.9 } reject", "@lan4 accept", "0.0.0.0/8"}
 	for i := 1; i < len(order); i++ {
 		if idx(order[i-1]) < 0 || idx(order[i-1]) > idx(order[i]) {
 			t.Errorf("%q does not come before %q", order[i-1], order[i])
@@ -679,5 +689,49 @@ func TestForwarder(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("forward did not end when the box went away")
+	}
+}
+
+// TestForwarderDial checks the router's dialer: the same dial command,
+// with one end of a socket pair as standard input and output and the
+// other returned as the connection.
+func TestForwarderDial(t *testing.T) {
+	eng := engine.NewFake()
+	eng.Containers["devc-demo-hello"] = engine.ContainerInfo{Name: "devc-demo-hello", State: engine.ContainerState{Running: true, Pid: 777, Started: time.Now().UTC()}}
+	fs, _ := fakeProc(t, map[string]uint64{"777": 5000}, testBoot)
+	box, err := Pin(context.Background(), eng, "devc-demo-hello", fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+	got := make(chan execx.Cmd, 1)
+	runner := socketRunner(func(c execx.Cmd) {
+		f := c.Stdin.(*os.File)
+		buf := make([]byte, 5)
+		_, _ = io.ReadFull(f, buf)
+		_, _ = f.Write(append([]byte("echo "), buf...))
+		got <- c
+	})
+	f := &Forwarder{Runner: runner, Engine: eng, Nsenter: "/usr/bin/nsenter", Exe: "/usr/local/bin/devc", Container: "devc-demo-hello", Box: box, Port: 3000}
+	conn, err := f.Dial(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 10)
+	if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "echo hello" {
+		t.Errorf("read %q, %v", buf, err)
+	}
+	c := <-got
+	if !slices.Equal(c.Args, []string{"--user=/proc/self/fd/3", "--net=/proc/self/fd/4", "--preserve-credentials", "/usr/local/bin/devc", "box", "dial", "127.0.0.1:3000"}) ||
+		c.Dir != "/" || c.Stdin.(*os.File) != c.Stdout.(*os.File) || len(c.ExtraFiles) != 2 {
+		t.Errorf("dial command: %+v", c)
+	}
+	if _, err := (&Forwarder{}).Dial(context.Background()); err == nil {
+		t.Error("dial without settings")
 	}
 }

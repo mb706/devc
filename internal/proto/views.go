@@ -41,6 +41,18 @@ const (
 	// Box to host, work order C10b: an SSH stream to the gate (the stream
 	// carries the SSH protocol after the response line).
 	MethodHostGate = "host.gate"
+	// Box to host, work order C13: raw streams the box agent opens for a
+	// TCP connection it accepted on the box's loopback. After the request
+	// line the stream carries the connection's bytes unchanged; the host
+	// never answers with a JSON-RPC response. host.proxy goes to the
+	// allowlist proxy (which answers in HTTP), host.dial to a port on the
+	// host's loopback that a host exception allows (the stream simply
+	// closes when it does not).
+	MethodHostProxy = "host.proxy"
+	MethodHostDial  = "host.dial"
+	// Host to box, work order C13: the loopback ports on which the agent
+	// relays connections to the host (host exceptions).
+	MethodBoxListen = "box.listen"
 
 	// Commands (work order C09).
 	MethodSessionSend      = "session.send"
@@ -63,6 +75,9 @@ const (
 	// Requests (work order C10a).
 	MethodRequestsList   = "requests.list"
 	MethodRequestsDecide = "requests.decide"
+	// Network exceptions (work order C13): the CLI changed a project's
+	// record; the daemon brings the box agent's listeners up to date.
+	MethodNetSync = "net.sync"
 
 	// Notifications of a subscription.
 	NotifyEvent     = "event"
@@ -666,6 +681,64 @@ type GateParams struct {
 // GateReply acknowledges host.gate; sshd's protocol starts after it.
 type GateReply struct {
 	Host string `json:"host"`
+}
+
+// ProxyParams open a proxy stream (host.proxy); the box says nothing about
+// what it wants until the HTTP request that follows.
+type ProxyParams struct{}
+
+// DialParams open a stream to a port on the host's loopback (host.dial).
+type DialParams struct {
+	Port int `json:"port"`
+}
+
+// MaxListenPorts bounds the ports of one box.listen.
+const MaxListenPorts = 256
+
+// ListenParams are the loopback ports the box agent should relay to the
+// host, all of them: ports not listed are closed (box.listen).
+type ListenParams struct {
+	Ports []int `json:"ports"`
+}
+
+// Validate checks the ports.
+func (p ListenParams) Validate() error {
+	if len(p.Ports) > MaxListenPorts {
+		return errors.New("too many ports")
+	}
+	seen := map[int]bool{}
+	for _, n := range p.Ports {
+		if n < 1 || n > 65535 || seen[n] {
+			return errors.New("invalid or repeated port")
+		}
+		seen[n] = true
+	}
+	return nil
+}
+
+// ListenFailure is a port the agent could not listen on.
+type ListenFailure struct {
+	Port  int    `json:"port"`
+	Error string `json:"error"`
+}
+
+// ListenReply reports the ports that failed.
+type ListenReply struct {
+	Failed []ListenFailure `json:"failed,omitempty"`
+}
+
+// NetSyncParams name the project whose exceptions changed (net.sync).
+type NetSyncParams struct {
+	Ref string `json:"ref"`
+}
+
+// NetSyncResult says whether the box's channel is connected, the host
+// ports its agent now relays, and problems (ports that could not be
+// opened in the box).
+type NetSyncResult struct {
+	Connected bool     `json:"connected"`
+	Ports     []int    `json:"ports"`
+	Warnings  []string `json:"warnings,omitempty"`
 }
 
 // SecretParams ask for one secret (host.secret).

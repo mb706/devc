@@ -401,15 +401,16 @@ func TestMountsAndRealms(t *testing.T) {
 		t.Errorf("mounts: %+v", ci.Mounts)
 	}
 
-	// A network level that is not available yet fails closed (finding
-	// A5); level internet works since C07 (network_test.go).
+	// Level allowlist (C13) creates a box without any network; its proxy
+	// is covered by netc13_test.go, level internet by network_test.go.
 	e.WriteConfig("realms/"+itest.RealmA+"/projects/hello/project.toml", "[network]\nlevel = \"allowlist\"\n")
-	if res := e.Run("up", hello); res.ExitCode != 1 || !strings.Contains(res.Stderr, "not available yet") {
+	if res := e.Run("up", hello); res.ExitCode != 0 {
 		t.Errorf("up with network allowlist: %d\n%s", res.ExitCode, res.Stderr)
 	}
-	if ls(t, e)[hello].State != "absent" {
-		t.Error("a box was created with network allowlist")
+	if ci := inspect(t, hello); ci.HostConfig.NetworkMode != "none" {
+		t.Errorf("network mode of an allowlist box: %q", ci.HostConfig.NetworkMode)
 	}
+	e.MustRun("rm", hello)
 
 	// A mount naming another realm stays rejected, and up fails closed.
 	e.WriteConfig("realms/"+itest.RealmA+"/projects/hello/project.toml", "[[mounts]]\nproject = \""+tools+"\"\n")

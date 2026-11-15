@@ -6,7 +6,7 @@ reference for each command is `devc <command> --help`; host preparation is in
 
 Contents: [Concepts](#concepts) · [Configuration and state](#configuration-and-state) ·
 [Boxes](#boxes) · [Sessions](#sessions) · [Git](#git-relay-bank-pull-push) ·
-[Data](#data-zones-sealing-savepoints) · [Network](#network-levels-and-port-forwarding) ·
+[Data](#data-zones-sealing-savepoints) · [Network](#network-levels-exceptions-and-port-forwarding) ·
 [Logins and secrets](#logins-and-secrets) · [Notes and memory](#notes-and-memory) ·
 [Editors](#editors) · [What is protected](#what-is-protected-and-what-is-not)
 
@@ -62,9 +62,8 @@ create or start a box refuses while that project's configuration has a
 problem.
 
 Some keys are accepted for features that are not available yet and have no
-effect: `grants.github`, `box.ports`, `[data.remotes]`, `[sync]`.
-`build_from_repo`, `network = "allowlist"` and `capabilities.nested` are
-refused with a message.
+effect: `grants.github`, `[data.remotes]`, `[sync]`. `build_from_repo` and
+`capabilities.nested` are refused with a message.
 
 State lives in `~/.local/share/devc` (`--state-dir`, `DEVC_STATE_DIR` or
 `state_dir`): `durable/` holds what is worth backing up (relays, journals,
@@ -243,7 +242,8 @@ devc request seal results/run7           # seal a finished run
 devc request savepoint before-refactor
 devc request note "the test data looks truncated"
 devc request package apt libpq-dev       # high risk
-devc request net pypi.org:443 --for 2h   # high risk (not available yet)
+devc request net pypi.org:443 --for 2h   # high risk: a network exception
+devc request net host:5432               # high risk: a service on the host
 devc request grant ssh cluster1          # high risk (not available yet)
 devc request pr --title "Fix parser"     # high risk (not available yet)
 devc request status <id> --wait
@@ -264,8 +264,10 @@ devc requests deny <id> [--reason "…"]
 High-risk requests can be approved only with the CLI on this machine, never
 from a hub. Pending requests expire after seven days. An approved package
 request runs the manager's install command through `devc root`, so it is
-recorded in the env's root log. Requests need the daemon; without it, `devc
-request` tells the agent to ask you directly.
+recorded in the env's root log; an approved network request runs `devc net
+allow` (see [Network](#network-levels-exceptions-and-port-forwarding)).
+Requests need the daemon; without it, `devc request` tells the agent to ask
+you directly.
 
 ### Hubs
 
@@ -487,7 +489,7 @@ install restic`); `auto` picks `reflink` when a probe succeeds, else `restic`.
 one before a session starts (at most one per 30 minutes). All data
 operations run in a throwaway helper container that sees only the project.
 
-## Network levels and port forwarding
+## Network levels, exceptions and port forwarding
 
 A realm sets `network.default` in `realm.toml`; a project may override it with
 `network.level` in `project.toml`.
@@ -495,9 +497,11 @@ A realm sets `network.default` in `realm.toml`; a project may override it with
 | Level | What the box can reach |
 |---|---|
 | `internet` (default) | The internet, and the box's DNS resolver on port 53. Not the host, the LAN, link-local, carrier-grade NAT, multicast or other private addresses, and no IPv6. |
+| `allowlist` | Only the names on the project's allowlist, through a proxy that the devc daemon runs on the host. The box has no network interface besides loopback and no DNS. |
 | `none` | Nothing: the box has only a loopback interface. |
 | `open` | Everything the engine's default network reaches, including the LAN and services on the host. |
-| `allowlist` | Not available yet; `devc up` refuses it. |
+
+Exceptions (below) open more for a while; they are created on the host only.
 
 **How `internet` works.** devc creates the box with IPv6 switched off, lets
 the engine set up the box's network namespace (`podman init`), installs
@@ -539,6 +543,86 @@ home routers), that one address is reachable on port 53. The host's own
 public addresses are blocked as they are when the box starts; an address the
 host gets later is not.
 
+**How `allowlist` works.** The box is created without any network
+(`--network none`). Its environment points `HTTP_PROXY` and `HTTPS_PROXY`
+(and the lower-case forms, plus `NODE_USE_ENV_PROXY=1` for Node.js) at
+`http://127.0.0.1:3128`, where devc's agent in the box listens and relays
+every connection, unread, over the box channel to the daemon. The daemon is
+the proxy. For every request (`CONNECT host:port`, or plain HTTP with an
+absolute URL; several requests on one connection are each decided):
+
+1. the host must be a name on the allowlist; IP addresses are refused;
+2. the port must be 80 or 443, unless the entry names another;
+3. the daemon resolves the name itself and connects only to public IPv4
+   addresses: never to the private ranges of level `internet` or to an
+   address of the host, and it checks the address of the socket it actually
+   connects, so a name that resolves to a private address, or whose answer
+   changes, reaches nothing;
+4. the decision goes to `durable/realms/<realm>/netlog/<project>.jsonl`.
+
+```toml
+# realm.toml (projects add their own [network.allowlist] to it)
+[network]
+default = "allowlist"
+
+[network.allowlist]
+presets = ["anthropic", "github", "pypi"]
+domains = ["example.org", "*.cdn.example.net", "git.example.org:8443"]
+```
+
+`*.example.org` matches every name below `example.org`, not `example.org`
+itself. The presets are short explicit lists (`anthropic`, `openai`,
+`github`, `pypi`, `npm`, `cran`, `debian`), never a wildcard over a hosting
+provider; `devc config show <realm>/<project>` shows the merged list. The
+allowlist is part of what a box was started with: an entry you add needs
+`devc down` and `devc up` (or an exception, below); an entry you remove is
+refused at once.
+
+```sh
+devc net log demo/hello            # the proxy's last 50 decisions
+devc net log demo/hello --denied   # refused requests only
+```
+
+Without a running daemon the proxy does not answer, so the box has no
+network at all; when the daemon starts, the proxy works again without
+restarting the box. Programs that ignore the proxy variables have no network
+at this level. TLS is relayed unchanged, so the proxy sees the name a
+`CONNECT` asks for, not what is said inside the encrypted connection: a
+server that answers for many names can be asked for any of them.
+
+**Exceptions.** An exception opens one more thing for a while (default 2
+hours, at most 30 days, or `--for forever`):
+
+```sh
+devc net allow 192.168.1.20:5432 demo/hello            # a LAN host and port (level internet)
+devc net allow nas.local:445 demo/hello --for 30m      # names are resolved now, on the host
+devc net allow lan demo/hello --for 1h                 # the whole LAN (level internet)
+devc net allow host:5432 demo/hello                    # a service on this host's loopback (every level)
+devc net allow pkg.example.org:443 demo/hello          # at level allowlist: one more name
+devc net ls                                            # exceptions in force, with the time left
+devc net revoke x1a2b3c
+```
+
+- At level `internet`, a host and port, or `lan` (10/8, 172.16/12,
+  192.168/16 and 100.64/10, but never the host's own addresses or link-local),
+  become elements of nftables sets in the box's namespace with a timeout:
+  they expire in the kernel without any process. They vanish when the box
+  stops; `devc up` puts back those still valid, after its checks.
+- `host:<port>` makes a service listening on the host's `127.0.0.1:<port>`
+  reachable at `127.0.0.1:<port>` inside the box: devc's agent listens there
+  and relays over the box channel, and the daemon connects on the host only
+  while the exception is in force; revoking or expiry also ends open
+  connections. It needs the daemon.
+- At level `allowlist`, a name and port is added to that box's allowlist for
+  the duration; addresses and `lan` are refused there.
+
+An agent can ask for an exception with `devc request net <target> [--for 1h]`
+in the box; it is a high-risk request, approved only on this machine
+(`devc requests approve <id>`), which runs `devc net allow` for it.
+`devc net ls` and `devc ls` show an exception without expiry prominently.
+Exceptions survive `devc down` and `devc up` while valid; `devc rm` drops
+them.
+
 **Forwarding a port.** To use a server running in a box (a web app, Jupyter),
 forward its port to the host:
 
@@ -558,6 +642,16 @@ in the image. A forward ends when its box stops. A loopback port can be used
 by every user and program on the host; `--bind <address>` with a
 non-loopback address makes it reachable from the network, and devc warns
 about that.
+
+**Local URLs.** While the daemon runs, it serves
+`http://<port>.<project>.<realm>.localhost:7480/` for every port listed in
+the project's `box.ports` and every port with a running `devc forward`
+(which prints the URL), WebSockets included. Browsers and curl resolve
+`*.localhost` to the loopback address themselves. Other ports get a 404 that
+says how to allow them. The router listens on `router.listen` in
+`config.toml` (a loopback address, or `"off"`), routes only by that host
+name (a page that points its own name at 127.0.0.1 reaches nothing), and
+reaches the box the way a forward does.
 
 ## Logins and secrets
 
@@ -728,7 +822,10 @@ everything that matters outside it, but it is not a virtual machine.
 - Banked commits, sealed data, session journals and notes commits are kept
   where the box cannot change them.
 - At level `internet`, the box cannot reach the host, the LAN or other private
-  addresses, and a box whose rules are missing does not start.
+  addresses, and a box whose rules are missing does not start. At level
+  `allowlist`, it has no network interface at all; the host's proxy decides
+  every connection by name and never connects to a private address. Network
+  exceptions are created on the host only.
 
 **What devc does not protect against:**
 
@@ -748,7 +845,13 @@ everything that matters outside it, but it is not a virtual machine.
   `devc sh`, `devc run`, `devc log` and `devc diff` instead.
 - **Attached editors** (`devc cursor`, `devc code`) and **level `open`** are
   holes you open on purpose.
-- **Forwarded ports** can be used by every user and program on the host.
+- **Forwarded ports** and **local URLs** can be used by every user and program
+  on the host. Pages served at local URLs of different projects share the
+  parent name `localhost`, so a box's page could set cookies for another
+  box's local URL.
+- **The allowlist** limits where connections go, not what they carry: an
+  allowed host that relays (a paste site, a cloud storage API, a server that
+  answers for many names) can receive anything the box can read.
 - **`devc root`** gives full root inside the box; changes it makes to the
   image persist in the container.
 - **Box-written text** in `devc ps --json` and the journals is escaped for

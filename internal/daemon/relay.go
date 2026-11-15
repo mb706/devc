@@ -140,16 +140,48 @@ func (s *boxStream) Read(b []byte) (int, error) { return s.r.Read(b) }
 // the stream over for git, a host.gate request for the SSH gate; anything
 // else is JSON-RPC.
 func (w *boxWorker) serveStream(ctx context.Context, st *yamux.Stream, handlers map[string]proto.Handler, notify map[string]proto.NotifyHandler) {
-	defer func() { <-w.streams }()
+	// The stream holds a pending place until its first line has arrived;
+	// then it needs a place among the requests (maxBoxStreams) or, as a
+	// raw relay (C13), among the relays (maxRelayStreams). A burst of new
+	// connections through the proxy thus never pushes out requests, and
+	// the reverse.
 	_ = st.SetReadDeadline(time.Now().Add(firstLineTimeout))
 	br := bufio.NewReaderSize(st, 64<<10)
 	line, err := proto.ReadLine(br, proto.MaxMessage)
+	<-w.pending
 	if err != nil {
 		_ = st.Close()
 		return
 	}
 	_ = st.SetReadDeadline(time.Time{})
-	if m, kind, err := proto.ParseMessage(line); err == nil && kind == proto.KindRequest {
+	m, kind, perr := proto.ParseMessage(line)
+	if perr == nil && kind == proto.KindRequest && (m.Method == proto.MethodHostProxy || m.Method == proto.MethodHostDial) {
+		select {
+		case w.relays <- struct{}{}:
+		default:
+			if m.Method == proto.MethodHostProxy {
+				refuseBusy(st)
+			} else {
+				rawStream{st: st}.abort()
+			}
+			return
+		}
+		defer func() { <-w.relays }()
+		if m.Method == proto.MethodHostProxy {
+			w.serveProxy(ctx, st, br, m)
+		} else {
+			w.serveDial(ctx, st, br, m)
+		}
+		return
+	}
+	select {
+	case w.streams <- struct{}{}:
+		defer func() { <-w.streams }()
+	default:
+		_ = st.Close() // too many at once
+		return
+	}
+	if perr == nil && kind == proto.KindRequest {
 		switch m.Method {
 		case proto.MethodHostGit:
 			w.serveGit(ctx, st, br, m)

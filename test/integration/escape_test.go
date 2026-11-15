@@ -385,6 +385,54 @@ func validEvent(t *testing.T, sid, text string) string {
 	return string(b) + "\n"
 }
 
+// allowlistEscapes is the escape suite's group for level allowlist (work
+// order C13, item 7): the box has no interface besides loopback, and no
+// direct connection reaches a public address, the host's addresses (LAN
+// or other), or anything listening on the host's loopback; a listener on
+// all the host's addresses counts no connection.
+func allowlistEscapes(t *testing.T, e *itest.Env, ref string, loopbackPort int) {
+	t.Helper()
+	if got := runOK(t, e, ref, "sh", "-c", "ls /sys/class/net; ip -o addr 2>/dev/null | grep -v ' lo ' || true"); got != "lo" {
+		t.Errorf("interfaces of an allowlist box: %q", got)
+	}
+	ln, err := net.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan struct{}, 16)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+			accepted <- struct{}{}
+		}
+	}()
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	targets := []string{"1.1.1.1:443", "8.8.8.8:53", "93.184.215.14:80", "10.0.2.2:" + port, "169.254.169.254:80", "192.0.2.1:9",
+		"127.0.0.1:" + strconv.Itoa(loopbackPort)}
+	for _, a := range hostAddrs(t) {
+		targets = append(targets, net.JoinHostPort(a.String(), port))
+	}
+	for _, a := range targets {
+		if ok, _ := connect(e, ref, a, 10); ok {
+			t.Errorf("an allowlist box reached %s directly", a)
+		}
+	}
+	// No name resolution either: there is no resolver.
+	if res := e.Run("run", ref, "--", "getent", "hosts", "debian.org"); res.ExitCode == 0 {
+		t.Errorf("an allowlist box resolved a name: %s", res.Stdout)
+	}
+	select {
+	case <-accepted:
+		t.Error("the host accepted a connection from an allowlist box")
+	default:
+	}
+}
+
 // startServerOn runs startServer's one-line server on any address.
 func startServerOn(t *testing.T, e *itest.Env, ref, addr string, port int) {
 	t.Helper()

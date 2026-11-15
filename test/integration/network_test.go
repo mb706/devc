@@ -431,17 +431,28 @@ func TestForward(t *testing.T) {
 	}
 }
 
-// TestNetworkLevels covers item 6 and the sandbox description: allowlist
-// is refused, and the description states the level in force.
+// TestNetworkLevels covers C07's item 6 as it stands since C13: level
+// allowlist creates a box without network, an unknown level none at all.
 func TestNetworkLevels(t *testing.T) {
 	e := itest.New(t)
+	itest.EnsureBaseImage(t, e)
+	// Since C13, allowlist gives a box without any network (its proxy is
+	// covered by netc13_test.go).
 	project(e, hello, "[network]\nlevel = \"allowlist\"\n")
-	res := e.Run("up", hello)
-	if res.ExitCode != 1 || !strings.Contains(res.Stderr, "not available yet") {
+	if res := e.Run("up", hello); res.ExitCode != 0 {
 		t.Errorf("allowlist: %d\n%s", res.ExitCode, res.Stderr)
 	}
+	if ci := inspect(t, hello); ci.HostConfig.NetworkMode != "none" {
+		t.Errorf("network mode of an allowlist box: %q", ci.HostConfig.NetworkMode)
+	}
+	e.MustRun("rm", hello)
+	// An unknown level fails closed: no box.
+	project(e, hello, "[network]\nlevel = \"wide\"\n")
+	if res := e.Run("up", hello); res.ExitCode != 1 || !strings.Contains(res.Stderr, "network.level") {
+		t.Errorf("unknown level: %d\n%s", res.ExitCode, res.Stderr)
+	}
 	if ls(t, e)[hello].State != "absent" {
-		t.Error("a box was created for level allowlist")
+		t.Error("a box was created for an unknown level")
 	}
 }
 

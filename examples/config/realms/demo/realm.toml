@@ -6,10 +6,17 @@ user_email = "demo@example.org"
 branch_prefix = "agent/"       # prefix for task branches
 
 [network]
-# none | internet | open (allowlist is not available yet). internet, the
-# default, reaches the internet but not the LAN, the host or other private
-# addresses; open is the engine's unrestricted network.
+# none | allowlist | internet | open. internet, the default, reaches the
+# internet but not the LAN, the host or other private addresses; allowlist
+# reaches only the names below, through a proxy run by the devc daemon
+# (without the daemon the box has no network); open is the engine's
+# unrestricted network.
 default = "internet"
+
+[network.allowlist]            # used by boxes of level allowlist; projects add to it
+presets = []                   # built-in lists: anthropic, openai, github, pypi, npm, cran, debian
+domains = []                   # "example.org", "*.example.org", "git.example.org:8443";
+                               # without a port, 80 and 443 are allowed
 
 [selinux]
 level = ""                     # for example "s0:c100,c200"; only used on SELinux hosts

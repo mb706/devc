@@ -323,6 +323,18 @@ func (p *Paths) BoxCapabilitiesFile(r names.ProjectRef) string {
 	return filepath.Join(p.BoxLocalDir(r), "capabilities.json")
 }
 
+// BoxNetExceptionsFile holds the network exceptions granted to a
+// project's box (work order C13): beside the home, out of every box's
+// reach, kept across down and up.
+func (p *Paths) BoxNetExceptionsFile(r names.ProjectRef) string {
+	return filepath.Join(p.BoxLocalDir(r), "net-exceptions.json")
+}
+
+// NetLogFile is the allowlist proxy's log of a project.
+func (p *Paths) NetLogFile(r names.ProjectRef) string {
+	return filepath.Join(p.DurableRealmDir(r.Realm), "netlog", must(names.KindProject, r.Project)+".jsonl")
+}
+
 // BoxHomeDir is mounted at /home/dev.
 func (p *Paths) BoxHomeDir(r names.ProjectRef) string {
 	return filepath.Join(p.BoxLocalDir(r), "home")

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,6 +64,9 @@ func (a *app) boxEnv() (*boxEnv, error) {
 	m.Contributors = append(m.Contributors, dh)
 	m.Preparers = append(m.Preparers, dh)
 	m.StartHooks = append(m.StartHooks, dh)
+	// Network exceptions still valid go back into a box that has just
+	// passed its readiness checks and the canary (work order C13).
+	m.StartHooks = append(m.StartHooks, box.NetExceptionHook{Manager: m})
 	repo, err := a.ctxRepo(c, m.Engine)
 	if err != nil {
 		return nil, err
@@ -97,10 +101,28 @@ func (a *app) daemonCounts(ctx context.Context, e *boxEnv) (map[string]sessionCo
 	return counts, true
 }
 
-// lsRow is one line of `devc ls`: the box and its sessions.
+// lsRow is one line of `devc ls`: the box, its network level and
+// exceptions, and its sessions.
 type lsRow struct {
 	box.Row
-	Sessions sessionCount `json:"sessions"`
+	Network    string         `json:"network"`
+	Exceptions []exceptionRow `json:"exceptions"`
+	Sessions   sessionCount   `json:"sessions"`
+}
+
+// netColumn is the NETWORK column of `devc ls`: the level, the number of
+// exceptions in force, and a loud mark for one that never expires.
+func (r lsRow) netColumn() string {
+	s := r.Network
+	if len(r.Exceptions) > 0 {
+		s += "+" + strconv.Itoa(len(r.Exceptions))
+	}
+	for _, x := range r.Exceptions {
+		if x.Forever {
+			return s + " FOREVER"
+		}
+	}
+	return s
 }
 
 // resolveRef turns the optional ref argument into a project reference,
@@ -260,8 +282,17 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 			// the daemon when one runs (C08).
 			counts, fromDaemon := a.daemonCounts(ctx, e)
 			out := make([]lsRow, 0, len(rows))
+			now := a.now()
 			for _, r := range rows {
-				lr := lsRow{Row: r}
+				lr := lsRow{Row: r, Exceptions: []exceptionRow{}}
+				if ref, err := names.Parse(r.Ref); err == nil {
+					if res, err := e.cfg.Resolved(ref); err == nil {
+						lr.Network = res.Network
+					}
+					if xs, _ := activeExceptions(e.cfg, []names.ProjectRef{ref}, now); xs != nil {
+						lr.Exceptions = xs
+					}
+				}
 				if ref, err := names.Parse(r.Ref); err == nil && r.State != "conflict" {
 					if fromDaemon {
 						lr.Sessions = counts[r.Ref]
@@ -274,7 +305,7 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 			if lsJSON {
 				return writeJSON(a.stdout, out)
 			}
-			tw := table(a.stdout, "PROJECT", "STATE", "IMAGE", "DRIFT", "STARTED", "SESSIONS")
+			tw := table(a.stdout, "PROJECT", "STATE", "NETWORK", "IMAGE", "DRIFT", "STARTED", "SESSIONS")
 			for _, r := range out {
 				drift, started := "-", "-"
 				if r.State == "running" || r.State == "stopped" {
@@ -286,10 +317,17 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 				if r.StartedAt != nil {
 					started = r.StartedAt.Local().Format("2006-01-02 15:04")
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Ref, r.State, r.Image, drift, started, r.Sessions)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Ref, r.State, r.netColumn(), r.Image, drift, started, r.Sessions)
 			}
 			if err := tw.Flush(); err != nil {
 				return err
+			}
+			for _, r := range out {
+				for _, x := range r.Exceptions {
+					if x.Forever {
+						fmt.Fprintf(a.stderr, "devc: %s: network exception %s (%s) NEVER EXPIRES; revoke it with 'devc net revoke %s'\n", r.Ref, x.ID, x.TargetString(), x.ID)
+					}
+				}
 			}
 			for _, r := range rows {
 				if r.Note != "" {

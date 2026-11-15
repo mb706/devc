@@ -207,6 +207,26 @@ func TestResolved(t *testing.T) {
 		}
 	}
 
+	// The allowlist is the realm's and the project's together.
+	{
+		dir := copyExample(t)
+		write(t, dir, "realms/demo/realm.toml", "[network.allowlist]\npresets = [\"pypi\"]\ndomains = [\"a.example\"]\n")
+		write(t, dir, "realms/demo/projects/hello/project.toml", "[network]\nlevel = \"allowlist\"\n[network.allowlist]\npresets = [\"npm\", \"pypi\"]\ndomains = [\"b.example:8443\"]\n")
+		c, probs := load(t, dir)
+		if len(probs) != 0 {
+			t.Fatal(probs)
+		}
+		hello, _ := c.Resolved(names.ProjectRef{Realm: "demo", Project: "hello"})
+		if hello.Network != "allowlist" || !slices.Equal(hello.NetAllowlist.Presets, []string{"pypi", "npm"}) ||
+			!slices.Equal(hello.NetAllowlist.Domains, []string{"a.example", "b.example:8443"}) {
+			t.Errorf("allowlist: %+v", hello.NetAllowlist)
+		}
+		an, _ := c.Resolved(names.ProjectRef{Realm: "demo", Project: "analysis"})
+		if !slices.Equal(an.NetAllowlist.Domains, []string{"a.example"}) || c.Global.Router.Listen != "127.0.0.1:7480" {
+			t.Errorf("analysis allowlist %+v, router %q", an.NetAllowlist, c.Global.Router.Listen)
+		}
+	}
+
 	// Realm overrides of harness authentication.
 	dir := copyExample(t)
 	write(t, dir, "realms/demo/realm.toml", "[harness.claude]\nauth = \"api-key\"\nsecret = \"anthropic-key\"\n")
@@ -350,6 +370,13 @@ func TestBrokenConfigurations(t *testing.T) {
 		}, "projects/ghost/project.toml", "", "missing"},
 		{"network enum", set("realms/other/realm.toml", "[network]\ndefault = \"wide\"\n"), "realms/other/realm.toml", "network.default", "not one of none, allowlist, internet, open"},
 		{"project network enum", add(hello, "[network]\nlevel = \"lan\""), hello, "network.level", "not one of"},
+		{"allowlist address", add(hello, "[network.allowlist]\ndomains = [\"10.0.0.1\"]"), hello, "network.allowlist.domains[0]", "IP addresses are not accepted"},
+		{"allowlist wildcard", add(hello, "[network.allowlist]\ndomains = [\"*.com\"]"), hello, "network.allowlist.domains[0]", "two labels"},
+		{"allowlist port", add(hello, "[network.allowlist]\ndomains = [\"a.example:0\"]"), hello, "network.allowlist.domains[0]", "not a port number"},
+		{"allowlist preset", set("realms/other/realm.toml", "[network.allowlist]\npresets = [\"everything\"]\n"), "realms/other/realm.toml", "network.allowlist.presets[0]", "unknown preset"},
+		{"allowlist duplicate", add(hello, "[network.allowlist]\ndomains = [\"a.example\", \"a.example\"]"), hello, "network.allowlist.domains[1]", "listed twice"},
+		{"router not loopback", set("config.toml", "[router]\nlisten = \"0.0.0.0:7480\"\n"), "config.toml", "router.listen", "loopback address"},
+		{"router without port", set("config.toml", "[router]\nlisten = \"127.0.0.1\"\n"), "config.toml", "router.listen", "loopback address"},
 		{"env and image", add(hello, "env = \"base\"\nimage = \"debian\""), hello, "env", "exactly one of env and image"},
 		{"neither env nor image", set("config.toml", "default_env = \"\"\n"), hello, "env", "set env or image"},
 		{"missing env", add(hello, "env = \"nope\""), hello, "env", "env \"nope\" does not exist"},
