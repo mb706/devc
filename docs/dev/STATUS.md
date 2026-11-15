@@ -21,8 +21,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | C10b SSH gate | done | d05471b |
 | C11a Hub core | done | 5d709b4 |
 | C11b Hub access | done | c0967cb |
-| C12 Web app | in progress | |
-| Review C + C12r | pending | |
+| C12 Web app | done | 16b2604 |
+| Review C + C12r | in progress | |
 | C13 Gateway | pending | |
 | C14 Data sync | pending | |
 | C15 GitHub | pending | |
