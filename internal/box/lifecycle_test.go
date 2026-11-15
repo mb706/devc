@@ -1104,3 +1104,53 @@ func TestInternetLevel(t *testing.T) {
 		}
 	})
 }
+
+type preparerFunc func(ctx context.Context, in *Inputs, s *Spec) error
+
+func (f preparerFunc) Prepare(ctx context.Context, in *Inputs, s *Spec) error { return f(ctx, in, s) }
+
+// TestFileMount: a file mount (the SSH gate's configuration) needs a
+// regular file at its source, which is never created as a directory, and
+// may not lie inside another mount.
+func TestFileMount(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target string
+		make   func(src string) error
+		err    string
+	}{
+		{"regular file", "/etc/ssh/ssh_config.d/50-devc.conf", func(src string) error { return os.WriteFile(src, []byte("Host x\n"), 0o644) }, ""},
+		{"symlink", "/etc/ssh/ssh_config.d/50-devc.conf", func(src string) error { return os.Symlink("/etc/passwd", src) }, "not a regular file"},
+		{"directory", "/etc/ssh/ssh_config.d/50-devc.conf", func(src string) error { return os.Mkdir(src, 0o755) }, "not a regular file"},
+		{"missing", "/etc/ssh/ssh_config.d/50-devc.conf", func(string) error { return nil }, "no such file"},
+		{"nested", "/home/dev/.ssh/config", func(src string) error { return os.WriteFile(src, nil, 0o644) }, "inside the mount"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			src := filepath.Join(r.m.Config.Paths.BoxEtcDir(hello), "ssh_config")
+			r.m.Contributors = append(r.m.Contributors, ContributorFunc(func(in *Inputs, s *Spec) error {
+				return s.AddMount(Mount{Source: src, Target: tc.target, ReadOnly: true, File: true})
+			}))
+			r.m.Preparers = append(r.m.Preparers, preparerFunc(func(context.Context, *Inputs, *Spec) error { return tc.make(src) }))
+			err := r.m.Up(context.Background(), hello, UpOptions{})
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("up: %v", err)
+				}
+				if slices.Contains(r.verbs(), "create") {
+					t.Error("the box was created")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("up: %v\n%s", err, r.out)
+			}
+			if !slices.Contains(r.eng.CreateArgs[names.BoxName(hello)], "type=bind,source="+src+",destination="+tc.target+",ro") {
+				t.Errorf("create args: %q", r.eng.CreateArgs[names.BoxName(hello)])
+			}
+			if fi, err := os.Lstat(src); err != nil || !fi.Mode().IsRegular() {
+				t.Errorf("source: %v %v", fi, err)
+			}
+		})
+	}
+}

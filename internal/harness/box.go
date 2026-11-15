@@ -122,6 +122,14 @@ type BoxHooks struct {
 	AllowPersistentSecrets bool
 	// LockTimeout bounds the wait for a box lock in RefreshLaunches.
 	LockTimeout time.Duration
+	// Extra adds secrets devc generates for a box (the SSH gate's key);
+	// they are delivered as files in either delivery mode.
+	Extra []SecretSource
+}
+
+// SecretSource adds per-box secrets that devc itself generates.
+type SecretSource interface {
+	BoxSecrets(ctx context.Context, r *config.Resolved) (map[string][]byte, error)
 }
 
 var (
@@ -260,7 +268,7 @@ func (h *BoxHooks) Prepare(ctx context.Context, in *box.Inputs, s *box.Spec) err
 	if err := prune(etc, keep); err != nil {
 		return err
 	}
-	if err := h.deliverSecrets(p, r, installed, byID); err != nil {
+	if err := h.deliverSecrets(ctx, p, r, installed, byID); err != nil {
 		return err
 	}
 	h.warnTmux(p)
@@ -526,7 +534,7 @@ func NamedVersions(p *paths.Paths, id string) (map[string]bool, error) {
 
 // deliverSecrets writes the credentials of installed token harnesses and
 // the granted secrets into the box's secrets directory.
-func (h *BoxHooks) deliverSecrets(p *paths.Paths, r *config.Resolved, installed []*config.Harness, byID map[string]config.ResolvedHarness) error {
+func (h *BoxHooks) deliverSecrets(ctx context.Context, p *paths.Paths, r *config.Resolved, installed []*config.Harness, byID map[string]config.ResolvedHarness) error {
 	dir, err := p.BoxSecretsDir(r.BoxID)
 	if err != nil {
 		return err
@@ -562,6 +570,17 @@ func (h *BoxHooks) deliverSecrets(p *paths.Paths, r *config.Resolved, installed 
 		// The launcher asks the daemon (work order C10a); nothing is
 		// written, and what an earlier start delivered goes away.
 		values = map[string][]byte{}
+	}
+	// Generated secrets are files in both modes: the SSH client needs its
+	// key as a file (work order C10b).
+	for _, src := range h.Extra {
+		extra, err := src.BoxSecrets(ctx, r)
+		if err != nil {
+			return err
+		}
+		for name, v := range extra {
+			values[name] = v
+		}
 	}
 	return secrets.Deliver(p, dir, values, h.AllowPersistentSecrets)
 }

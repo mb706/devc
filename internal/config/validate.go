@@ -581,12 +581,7 @@ func validateProject(c *Config, p *Project, ps *problems) {
 	}
 	k.noDuplicates("requests.auto", p.Requests.Auto)
 
-	for i, h := range p.Grants.SSH {
-		if !hostAliasRE.MatchString(h) {
-			k.bad(idx("grants.ssh", i), "%q is not a valid SSH host alias", h)
-		}
-	}
-	k.noDuplicates("grants.ssh", p.Grants.SSH)
+	validateGrants(k, p.Grants)
 	for i, s := range p.Grants.Secrets {
 		k.name(idx("grants.secrets", i), names.KindSecret, s)
 	}

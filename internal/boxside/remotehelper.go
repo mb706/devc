@@ -242,17 +242,25 @@ func (a agentRelay) Available() bool {
 const gitAnswerTimeout = 3 * time.Minute
 
 func (a agentRelay) Open(service, session string) (RelayConn, error) {
+	return openAgentStream(a.Addr, proto.MethodHostGit, proto.GitParams{Service: service, Session: session}, gitAnswerTimeout)
+}
+
+// openAgentStream opens a stream to the host through the box agent at
+// addr with one request, waits up to answerTimeout for the host's answer,
+// and returns the stream for the bytes that follow it. An error that is a
+// *proto.Error carries the host's answer.
+func openAgentStream(addr, method string, p any, answerTimeout time.Duration) (*relayConn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var d net.Dialer
-	c, err := d.DialContext(ctx, "unix", a.Addr)
+	c, err := d.DialContext(ctx, "unix", addr)
 	if err != nil {
 		return nil, err
 	}
 	uc := c.(*net.UnixConn)
-	params, _ := json.Marshal(proto.GitParams{Service: service, Session: session})
-	req, _ := json.Marshal(&proto.RPCMessage{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: proto.MethodHostGit, Params: params})
-	_ = uc.SetDeadline(time.Now().Add(gitAnswerTimeout))
+	params, _ := json.Marshal(p)
+	req, _ := json.Marshal(&proto.RPCMessage{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: method, Params: params})
+	_ = uc.SetDeadline(time.Now().Add(answerTimeout))
 	if _, err := uc.Write(append(req, '\n')); err != nil {
 		uc.Close()
 		return nil, err

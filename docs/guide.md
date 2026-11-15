@@ -506,12 +506,60 @@ change a secret sees the change after `devc down` and `devc up`. Everything
 in the box can read the secrets granted to it.
 
 With `[secrets] delivery = "daemon"` in `config.toml`, nothing is written
-into boxes: each time a harness starts, its launcher asks the daemon for the
+into boxes (except the SSH gate's key, see below): each time a harness starts, its launcher asks the daemon for the
 harness token and the granted secrets, and the daemon answers only for names
 the project is granted. Changes take effect at the next launch. Without a
 running daemon the harness starts without them and says so. In such a box,
 `devc box secret <NAME>` prints a granted secret for programs started outside
 a harness.
+
+**SSH to other machines (the SSH gate).** A box can use an SSH connection you
+authenticated on the host, password and second factor included, without ever
+holding a credential for it:
+
+```sh
+devc ssh login cluster1 [--ttl 12h]   # ssh to cluster1 on this terminal; the connection stays as a master
+devc ssh ls [--json]                  # masters and whether they answer
+devc ssh close cluster1               # end it, and with it every box's access
+```
+
+```toml
+# project.toml
+[grants]
+ssh = ["cluster1", "login2:ro"]
+
+[grants.ssh_allow]
+login2 = ["squeue", "sinfo", "ls"]
+```
+
+`<host>` is an alias of your own SSH configuration (`~/.ssh/config`, or the
+file named by `DEVC_SSH_CONFIG`). In a box with the grant, plain
+`ssh cluster1 …`, `scp`, `sftp`, `rsync -e ssh` and `git clone cluster1:…`
+work. The box's connection ends at a gate on the host: an `sshd -i` that the
+daemon starts for each connection, which accepts only that box's key (made
+anew at every start of the box and delivered as `/run/devc-secrets/gate_key`,
+also with `delivery = "daemon"`), has every kind of forwarding switched off,
+and runs each command over your master connection; the remote shell parses
+exactly what the box typed. The master's control socket stays in
+`$XDG_RUNTIME_DIR/devc/gate/`, which no box can reach: through a control
+socket a client could ask the master for forwards into the host. Every
+session is logged in `durable/realms/<realm>/gate-log.jsonl` (time, box,
+host, command, exit status, duration). The gate needs the daemon and an
+`sshd` binary on the host (the service itself need not run); it logs in as
+your user, whose login shell runs the gate's forced command.
+
+**A grant is full use of the remote account**, with no per-command approval:
+whatever the agent runs there runs as you. `"<host>:ro"` restricts a box to
+commands whose first word is listed in `[grants.ssh_allow]` and that contain
+no shell metacharacters (`;`, `|`, `&`, `$`, backquote, `<`, `>`,
+parentheses, newline), with no interactive shell and no sftp. It is a
+convenience, not a strong boundary: an allowed command that runs programs or
+scripts (`sbatch`, `find -exec`, an editor) can still do anything the account
+can. Removing a grant from `project.toml` closes the gate for that host at
+once; a new grant needs a restart of the box (`devc up --recreate`), which
+writes `/etc/devc/ssh_config` (also mounted at
+`/etc/ssh/ssh_config.d/50-devc.conf` and included from the box's
+`~/.ssh/config`).
 
 **Harness state.** Claude Code keeps its home in the box home and shares its
 `projects` directory (session history) across the realm. Codex uses one home

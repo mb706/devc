@@ -199,6 +199,8 @@ func newRoot(a *app) *cobra.Command {
 		newRelayHookCmd(a),
 		newRequestCmd(a),
 		newRequestsCmd(a),
+		newSSHCmd(a),
+		newGateExecCmd(a),
 	)
 	root.AddCommand(newLifecycleCmds(a)...)
 	root.AddCommand(newHarnessCmds(a)...)

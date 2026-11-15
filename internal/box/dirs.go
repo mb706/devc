@@ -43,6 +43,10 @@ func DetectHost(ctx context.Context, eng engine.Engine, root string) (HostFacts,
 func prepareDirs(p *paths.Paths, s *Spec, runtimeDir string) error {
 	for _, m := range s.Mounts {
 		switch {
+		case m.File:
+			if err := checkRealFile(m.Source); err != nil {
+				return err
+			}
 		case paths.Within(p.ProjectsRoot(), m.Source):
 			if err := ensureProjectDir(p, m.Source); err != nil {
 				return err
@@ -114,6 +118,19 @@ func privateDir(dir string) error {
 	return nil
 }
 
+// checkRealFile requires a regular file (not a symlink) at a file mount's
+// source.
+func checkRealFile(p string) error {
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return fmt.Errorf("mount source %s: %w", p, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("mount source %s is not a regular file (it is a %s): refusing to mount it", p, fi.Mode().Type())
+	}
+	return nil
+}
+
 func checkRealDir(p string) error {
 	fi, err := os.Lstat(p)
 	if err != nil {
@@ -146,6 +163,11 @@ func prepareMountPoints(s *Spec) error {
 		}
 		if parent == nil {
 			continue
+		}
+		if m.File {
+			// A nested file mount would need a file, not a directory, at
+			// its mount point; no box has one.
+			return fmt.Errorf("the file mount %s lies inside the mount %s, which devc does not support", m.Target, parent.Target)
 		}
 		rel, err := filepath.Rel(parent.Target, m.Target)
 		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {

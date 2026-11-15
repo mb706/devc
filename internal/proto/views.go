@@ -37,6 +37,9 @@ const (
 	MethodHostRequest       = "host.request"
 	MethodHostRequestStatus = "host.request.status"
 	MethodHostSecret        = "host.secret"
+	// Box to host, work order C10b: an SSH stream to the gate (the stream
+	// carries the SSH protocol after the response line).
+	MethodHostGate = "host.gate"
 
 	// Commands (work order C09).
 	MethodSessionSend      = "session.send"
@@ -605,6 +608,18 @@ type GitParams struct {
 // GitReply acknowledges host.git; the service starts after it.
 type GitReply struct {
 	Service string `json:"service"`
+}
+
+// GateParams open an SSH stream to the gate for one host (host.gate). The
+// grant is that of the project the channel belongs to; after a successful
+// response line the stream is the box's SSH connection to the gate's sshd.
+type GateParams struct {
+	Host string `json:"host"`
+}
+
+// GateReply acknowledges host.gate; sshd's protocol starts after it.
+type GateReply struct {
+	Host string `json:"host"`
 }
 
 // SecretParams ask for one secret (host.secret).

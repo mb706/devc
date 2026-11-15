@@ -103,6 +103,7 @@ func newDaemonCmd(a *app) *cobra.Command {
 			if rt, err := p.RuntimeDir(); err == nil && a.getenv(paths.EnvRuntimeDir) != "" {
 				hkEnv = append(hkEnv, paths.EnvRuntimeDir+"="+rt)
 			}
+			sshConfig := a.sshConfigFile()
 			// The paths are resolved (relative overrides need the working
 			// directory); a long-running process must not keep a directory
 			// that may lie in a project (README rule 2).
@@ -128,6 +129,7 @@ func newDaemonCmd(a *app) *cobra.Command {
 				Log:                  log,
 				HousekeepingInterval: housekeeping,
 				ReconcileInterval:    reconcile,
+				SSHConfig:            sshConfig,
 			})
 			if err != nil {
 				return err

@@ -33,7 +33,7 @@ func newFixture(t *testing.T) *fixture {
 		run:   execx.NewFake(),
 		eng:   engine.NewFake(),
 		root:  t.TempDir(),
-		tools: map[string]bool{"podman": true, "git": true, "nsenter": true, "nft": true, "ssh": true, "sshd": true},
+		tools: map[string]bool{"podman": true, "git": true, "nsenter": true, "nft": true, "ssh": true, "sshd": true, "ssh-keygen": true},
 		env:   map[string]string{"XDG_RUNTIME_DIR": t.TempDir()},
 	}
 	f.eng.InfoVal.MountProgram = "/usr/bin/fuse-overlayfs"
@@ -244,7 +244,7 @@ func TestRuntimeDir(t *testing.T) {
 
 func TestTools(t *testing.T) {
 	f := newFixture(t)
-	expect(t, f.check(t, "tools"), OK, "git 2.43, nsenter, nft, ssh, sshd")
+	expect(t, f.check(t, "tools"), OK, "git 2.43, nsenter, nft, ssh, sshd, ssh-keygen")
 
 	f.tools["sshd"] = false
 	c := f.check(t, "tools")
@@ -252,6 +252,14 @@ func TestTools(t *testing.T) {
 	if !strings.Contains(c.Hint, "SSH gate") {
 		t.Errorf("hint = %q", c.Hint)
 	}
+	f.tools["sshd"] = true
+	f.tools["ssh-keygen"] = false
+	c = f.check(t, "tools")
+	expect(t, c, Warn, "ssh-keygen missing")
+	if !strings.Contains(c.Hint, "SSH gate's keys") {
+		t.Errorf("hint = %q", c.Hint)
+	}
+	f.tools["ssh-keygen"] = true
 
 	f.tools["nft"] = false
 	expect(t, f.check(t, "tools"), Fail, "nft missing")

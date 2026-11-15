@@ -326,7 +326,7 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 			Protected:    nonNil(p.Git.Protected),
 			FetchThrough: p.Git.FetchThrough,
 		},
-		Grants: Grants{SSH: nonNil(p.Grants.SSH), Secrets: nonNil(p.Grants.Secrets), GitHub: p.Grants.GitHub},
+		Grants: Grants{SSH: nonNil(p.Grants.SSH), SSHAllow: cloneLists(p.Grants.SSHAllow), Secrets: nonNil(p.Grants.Secrets), GitHub: p.Grants.GitHub},
 		Data: ResolvedData{
 			Enabled:    len(p.Data.Inputs)+len(p.Data.Work)+len(p.Data.Sealed) > 0,
 			Root:       p.Data.Root,
@@ -426,6 +426,18 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// cloneLists copies a map of lists; nil stays nil.
+func cloneLists(m map[string][]string) map[string][]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(m))
+	for k, v := range m {
+		out[k] = append([]string{}, v...)
+	}
+	return out
 }
 
 func nonNilInts(s []int) []int {

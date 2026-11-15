@@ -95,7 +95,8 @@ type boxStream struct {
 func (s *boxStream) Read(b []byte) (int, error) { return s.r.Read(b) }
 
 // serveStream serves one stream the box opened: a host.git request takes
-// the stream over for git; anything else is JSON-RPC.
+// the stream over for git, a host.gate request for the SSH gate; anything
+// else is JSON-RPC.
 func (w *boxWorker) serveStream(ctx context.Context, st *yamux.Stream, handlers map[string]proto.Handler, notify map[string]proto.NotifyHandler) {
 	defer func() { <-w.streams }()
 	_ = st.SetReadDeadline(time.Now().Add(firstLineTimeout))
@@ -106,9 +107,15 @@ func (w *boxWorker) serveStream(ctx context.Context, st *yamux.Stream, handlers 
 		return
 	}
 	_ = st.SetReadDeadline(time.Time{})
-	if m, kind, err := proto.ParseMessage(line); err == nil && kind == proto.KindRequest && m.Method == proto.MethodHostGit {
-		w.serveGit(ctx, st, br, m)
-		return
+	if m, kind, err := proto.ParseMessage(line); err == nil && kind == proto.KindRequest {
+		switch m.Method {
+		case proto.MethodHostGit:
+			w.serveGit(ctx, st, br, m)
+			return
+		case proto.MethodHostGate:
+			w.serveGate(ctx, st, br, m)
+			return
+		}
 	}
 	rest := io.MultiReader(bytes.NewReader(append(line, '\n')), br)
 	c := proto.NewConn(&boxStream{Stream: st, r: rest}, proto.Options{Handlers: handlers, Notify: notify, Context: ctx, IdleTimeout: boxStreamIdle, Log: w.d.log})

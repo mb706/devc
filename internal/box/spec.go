@@ -53,6 +53,10 @@ type Mount struct {
 	Source   string // absolute host path
 	Target   string // absolute path in the box
 	ReadOnly bool
+	// File marks a mount of a single regular file (the SSH configuration
+	// of the gate); its source must exist and is never created as a
+	// directory.
+	File bool
 }
 
 func (m Mount) arg() string {

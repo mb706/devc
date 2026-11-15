@@ -14,6 +14,7 @@ import (
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/data"
+	"github.com/mb706/devc/internal/gate"
 	"github.com/mb706/devc/internal/gitx"
 	"github.com/mb706/devc/internal/harness"
 	"github.com/mb706/devc/internal/names"
@@ -47,11 +48,14 @@ func (a *app) boxEnv() (*boxEnv, error) {
 		return nil, fmt.Errorf("locating the devc executable: %w", err)
 	}
 	m := box.NewManager(c, a.engine(c), a.runner, exe, version.Version, a.stderr)
+	// The SSH gate (work order C10b): the configuration mount, the files in
+	// /etc/devc, and the box's key, which the secrets delivery hands over.
+	gh := &gate.BoxHooks{Paths: c.Paths, Runner: a.runner}
 	hooks := &harness.BoxHooks{Config: c, Toolbox: m.Toolbox, Secrets: secrets.NewFileStore(c.Paths), Out: a.stderr,
-		AllowPersistentSecrets: a.getenv(secrets.EnvAllowPersistent) == "1"}
-	m.Contributors = append(m.Contributors, hooks)
-	m.Preparers = append(m.Preparers, hooks)
-	m.Cleaners = append(m.Cleaners, hooks)
+		AllowPersistentSecrets: a.getenv(secrets.EnvAllowPersistent) == "1", Extra: []harness.SecretSource{gh}}
+	m.Contributors = append(m.Contributors, hooks, gh)
+	m.Preparers = append(m.Preparers, gh, hooks)
+	m.Cleaners = append(m.Cleaners, hooks, gh)
 	e := &boxEnv{cfg: c, mgr: m, git: a.gitService(c, m.Engine), data: a.dataService(c, m.Engine, m.Toolbox, exe)}
 	// Data zones: input mounts, layout setup before start, worktree links
 	// after (work order C06).

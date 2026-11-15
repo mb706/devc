@@ -373,7 +373,8 @@ func checkTools(ctx context.Context, h *Host, _ *engineState) Check {
 		{"nsenter", Fail, "util-linux"},
 		{"nft", Fail, "nftables"},
 		{"ssh", Warn, "openssh-client, for pull and push over SSH"},
-		{"sshd", Warn, "openssh-server, needed for the SSH gate"},
+		{"sshd", Warn, "openssh-server, needed for the SSH gate (the service itself need not run)"},
+		{"ssh-keygen", Warn, "openssh-client, makes the SSH gate's keys"},
 	} {
 		if _, err := h.LookPath(t.name); err != nil {
 			worst(t.missing)

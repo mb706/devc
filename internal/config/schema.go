@@ -154,10 +154,14 @@ type Requests struct {
 	Auto []string `toml:"auto" json:"auto"`
 }
 
+// Grants are what a project's box may use beyond itself. SSH lists host
+// aliases reachable through the SSH gate, each "<host>" (full use of the
+// account) or "<host>:ro" (only the commands listed for it in SSHAllow).
 type Grants struct {
-	SSH     []string `toml:"ssh" json:"ssh"`
-	Secrets []string `toml:"secrets" json:"secrets"`
-	GitHub  string   `toml:"github" json:"github"`
+	SSH      []string            `toml:"ssh" json:"ssh"`
+	SSHAllow map[string][]string `toml:"ssh_allow" json:"ssh_allow,omitempty"`
+	Secrets  []string            `toml:"secrets" json:"secrets"`
+	GitHub   string              `toml:"github" json:"github"`
 }
 
 type Data struct {

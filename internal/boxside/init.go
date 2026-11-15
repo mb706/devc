@@ -31,6 +31,10 @@ type InitOptions struct {
 	// error, which stops the box.
 	CheckNetwork func(context.Context) error
 	Log          io.Writer
+	// SSHConfig is the generated SSH configuration (/etc/devc/ssh_config);
+	// when it exists, ~/.ssh/config gets an Include line for it (work
+	// order C10b). Empty skips this.
+	SSHConfig string
 	// Agent, when set, runs after the readiness marker is written, in its
 	// own goroutine, until ctx ends (the box channel, work order C08). A
 	// panic in it is logged and never ends init.
@@ -43,7 +47,7 @@ func DefaultInitOptions(log io.Writer, mountPoints []string) InitOptions {
 	if len(mountPoints) == 0 {
 		mountPoints = []string{".cache"}
 	}
-	return InitOptions{Home: "/home/dev", Dotfiles: DotfilesDir, Skel: "/etc/skel", Run: RunDir, MountPoints: mountPoints, SeedRoot: "/", Log: log}
+	return InitOptions{Home: "/home/dev", Dotfiles: DotfilesDir, Skel: "/etc/skel", Run: RunDir, MountPoints: mountPoints, SeedRoot: "/", SSHConfig: SSHConfigFile, Log: log}
 }
 
 // Init is the box's main process: it prepares the home, links the dotfiles,
@@ -74,6 +78,13 @@ func Init(ctx context.Context, o InitOptions) error {
 	if o.SeedRoot != "" {
 		for _, err := range ApplySeeds(o.SeedRoot) {
 			logf("%v", err)
+		}
+	}
+	if o.SSHConfig != "" {
+		if _, err := os.Stat(o.SSHConfig); err == nil {
+			if err := EnsureSSHInclude(o.Home); err != nil {
+				logf("%v", err)
+			}
 		}
 	}
 	spool := filepath.Join(o.Run, SpoolDirName)

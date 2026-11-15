@@ -596,6 +596,30 @@ func TestContributeRejectsNestedHomes(t *testing.T) {
 	}
 }
 
+// TestSandboxSSH: the description names the hosts of the SSH gate, the
+// read-only ones with their commands, and what to do without a master.
+func TestSandboxSSH(t *testing.T) {
+	e := setup(t, map[string]string{
+		"realms/demo/projects/hello/project.toml": "harnesses = [\"claude\"]\n[grants]\nssh = [\"c1\", \"c2:ro\", \"c3:ro\"]\n[grants.ssh_allow]\nc2 = [\"squeue\", \"ls\"]\n",
+	})
+	r := e.resolved(t, "demo/hello")
+	text, err := Instructions(e.cfg, r, e.manifest(t, "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"c1 can be reached with plain `ssh <host>`", "`scp`, `sftp`, `rsync -e ssh` and git over SSH",
+		"c2 is read-only: `ssh c2 <command>` runs only commands starting with squeue, ls", "c3 is read-only: no command is allowed on it yet.",
+		"forwarding (`-L`, `-R`, `-D`, `-A`, `-X`) are refused", "devc ssh login <host>"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
+	}
+	plain := e.resolved(t, "demo/analysis")
+	if text, _ := Instructions(e.cfg, plain, e.manifest(t, "claude")); strings.Contains(text, "SSH:") {
+		t.Errorf("a project without grants mentions SSH:\n%s", text)
+	}
+}
+
 // TestNetworkSentence: the description states the level in force, and a
 // level that is not enforced is never described as restricting anything.
 func TestNetworkSentence(t *testing.T) {

@@ -28,6 +28,15 @@ const (
 	// symlink the box plants there.
 	InBoxSecret = "/run/devc-secrets"
 	InBoxEtc    = "/etc/devc"
+	// InBoxSSHConfig is the generated SSH client configuration for the
+	// granted hosts (work order C10b); it is also mounted at
+	// InBoxSSHConfigD so the image's ssh reads it, and ~/.ssh/config
+	// includes it.
+	InBoxSSHConfig  = "/etc/devc/ssh_config"
+	InBoxSSHConfigD = "/etc/ssh/ssh_config.d/50-devc.conf"
+	// InBoxGateKnownHosts holds the gate's host key under HostKeyAlias
+	// devc-gate.
+	InBoxGateKnownHosts = "/etc/devc/gate_known_hosts"
 	// InBoxHarnessEtc holds the launch descriptions and rendered seeds.
 	InBoxHarnessEtc = "/etc/devc/harness"
 	// InBoxHarnessRoot holds the harness installations of the toolbox.

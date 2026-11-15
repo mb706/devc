@@ -81,6 +81,9 @@ type Env struct {
 	Timeout time.Duration
 	// AutoDaemon is the daemon New started in daemon mode.
 	AutoDaemon *Daemon
+	// ExtraEnv is added to the environment of every devc process the
+	// environment starts, daemons included (DEVC_SSH_CONFIG).
+	ExtraEnv []string
 }
 
 // Result of one devc invocation.
@@ -386,14 +389,14 @@ func (e *Env) environ() []string {
 			env = append(env, kv)
 		}
 	}
-	return append(env,
+	return append(append(env,
 		"DEVC_CONFIG_DIR="+e.ConfigDir,
 		"DEVC_STATE_DIR="+e.StateDir,
 		"DEVC_RUNTIME_DIR="+e.RuntimeDir,
 		"DEVC_TEST_RUN="+Nonce,
 		// Pinned downloads (restic) are fetched once and reused by every run.
 		"DEVC_DOWNLOAD_CACHE="+filepath.Join(CacheDir(), "downloads"),
-	)
+	), e.ExtraEnv...)
 }
 
 // Run runs devc with args and returns its output and exit code. It fails

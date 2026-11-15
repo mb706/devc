@@ -68,6 +68,21 @@ type Data struct {
 	// says whether seal is one of them.
 	AutoRequests []string
 	AutoSeal     bool
+	// SSH is set when the project has SSH grants (work order C10b).
+	SSH *SSHFacts
+}
+
+// SSHFacts describes the hosts a box reaches through the SSH gate.
+type SSHFacts struct {
+	// Hosts are granted fully, ReadOnly with a list of allowed commands.
+	Hosts    []string
+	ReadOnly []SSHReadOnly
+}
+
+// SSHReadOnly is one host of the read-only profile.
+type SSHReadOnly struct {
+	Host  string
+	Allow []string
 }
 
 // DataFacts describes the project's data for the sandbox description.
@@ -104,6 +119,17 @@ func NewData(r *config.Resolved, m *config.Harness) Data {
 	// enforce yet never gets a box, and is never described as restricted.
 	if !netpolicy.Enforced(r.Network) || d.NetworkSentence == "" {
 		d.NetworkSentence = "level " + r.Network + " is not enforced; assume the network is not restricted."
+	}
+	if len(r.Grants.SSH) > 0 {
+		f := &SSHFacts{}
+		for _, g := range r.Grants.SSHGrants() {
+			if g.ReadOnly {
+				f.ReadOnly = append(f.ReadOnly, SSHReadOnly{Host: g.Host, Allow: r.Grants.SSHAllowed(g.Host)})
+			} else {
+				f.Hosts = append(f.Hosts, g.Host)
+			}
+		}
+		d.SSH = f
 	}
 	if r.Data.Enabled {
 		join := func(ps []string) []string {

@@ -109,6 +109,11 @@ type Options struct {
 	// TurnBankInterval is the least time between banks after turns of one
 	// box (DefaultTurnBank).
 	TurnBankInterval time.Duration
+	// SSHD is the sshd the SSH gate starts (found in PATH and the sbin
+	// directories when empty); SSHConfig is DEVC_SSH_CONFIG, handed to
+	// gate-exec (work order C10b).
+	SSHD      string
+	SSHConfig string
 }
 
 // env is one loaded configuration and what is built from it.

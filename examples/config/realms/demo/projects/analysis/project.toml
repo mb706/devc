@@ -14,9 +14,11 @@ branch_prefix = ""             # overrides the realm's
 fetch_through = true           # git fetch in the box first fetches the upstream into the relay (at most once a minute)
 
 [grants]
-ssh = []
+ssh = []                       # SSH host aliases reachable through the gate (devc ssh login <host>): "host" = full use of the account, "host:ro" = only [grants.ssh_allow]
 secrets = []
 github = "relay"               # relay | none | token:<secret-name>
+
+[grants.ssh_allow]             # per read-only host, the commands (first words) it may run, for example cluster1 = ["squeue", "sinfo", "ls"]
 
 [data]
 root = "data"

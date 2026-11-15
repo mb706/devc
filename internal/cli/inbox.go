@@ -323,7 +323,7 @@ func newBoxCmd(a *app) *cobra.Command {
 	}
 
 	subs := []*cobra.Command{initCmd, fixIdentity, shell, selftest, probe, launch, hook, pty, agentStatus, newBoxSecretCmd(a),
-		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker, dataWorker, newBoxDialCmd(a), newBoxCanaryCmd(a), newStatxWorkerCmd(a)}
+		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker, dataWorker, newBoxDialCmd(a), newBoxCanaryCmd(a), newStatxWorkerCmd(a), newBoxGateConnectCmd(a)}
 	return group("box", "Commands that run inside a box (internal)", true, append(subs, newBoxGitCmds(a)...)...)
 }
 

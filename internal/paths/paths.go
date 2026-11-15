@@ -333,6 +333,32 @@ func (p *Paths) RequestsFile(r names.ProjectRef) string {
 	return filepath.Join(p.DurableRealmDir(r.Realm), "requests", must(names.KindProject, r.Project)+".jsonl")
 }
 
+// GateDir holds the SSH gate's host key and the public keys of the boxes
+// (work order C10b). No box mounts anything below it.
+func (p *Paths) GateDir() string { return filepath.Join(p.LocalDir(), "gate") }
+
+// GateHostKey is the private host key of the gate's sshd, one per machine;
+// its public half is GateHostKey()+".pub".
+func (p *Paths) GateHostKey() string { return filepath.Join(p.GateDir(), "host_ed25519") }
+
+// GateKeysDir holds one authorized-keys file per box with a grant.
+func (p *Paths) GateKeysDir() string { return filepath.Join(p.GateDir(), "keys") }
+
+// GateBoxKey is the authorized-keys file of one box: its public key with
+// the options restrict,pty. The private key exists only in the box's
+// secrets directory.
+func (p *Paths) GateBoxKey(boxID string) string {
+	if !names.ValidBoxID(boxID) {
+		panic(fmt.Sprintf("paths: invalid box ID %q", boxID))
+	}
+	return filepath.Join(p.GateKeysDir(), boxID+".pub")
+}
+
+// GateLog is a realm's log of the commands boxes ran through the gate.
+func (p *Paths) GateLog(realm string) string {
+	return filepath.Join(p.DurableRealmDir(realm), "gate-log.jsonl")
+}
+
 // TmpDir is for short-lived host directories (temporary homes for logins).
 func (p *Paths) TmpDir() string        { return filepath.Join(p.LocalDir(), "tmp") }
 func (p *Paths) SavepointsDir() string { return filepath.Join(p.LocalDir(), "savepoints") }
@@ -400,6 +426,19 @@ func (p *Paths) BoxSecretsDir(boxID string) (string, error) {
 		return "", err
 	}
 	return d + "-secrets", nil
+}
+
+// GateRuntimeDir holds the SSH master connections of `devc ssh login` and
+// the configuration files of running gate sshd processes. It is a sibling
+// of the box runtime directories and is never mounted into a box: through
+// a master's control socket a client can open forwards into the host's
+// namespaces.
+func (p *Paths) GateRuntimeDir() (string, error) {
+	rt, err := p.RuntimeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(rt, "gate"), nil
 }
 
 // SpoolDir is where the box writes event files; read it only through safefs.
