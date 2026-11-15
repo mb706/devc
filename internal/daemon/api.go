@@ -41,6 +41,10 @@ func (d *Daemon) handlers() map[string]proto.Handler {
 		proto.MethodSessionStart:     d.apiStart,
 		proto.MethodSessionSeen:      d.apiSeen,
 		proto.MethodCommandGet:       d.apiCommandGet,
+
+		proto.MethodRequestsList: d.apiRequests,
+		// Decisions on this socket come from this machine: origin local.
+		proto.MethodRequestsDecide: d.decideHandler(proto.OriginLocal),
 	}
 }
 

@@ -178,7 +178,11 @@ func (a *Agent) yamuxConfig() *yamux.Config {
 	cfg := yamux.DefaultConfig()
 	cfg.AcceptBacklog = 64
 	cfg.StreamOpenTimeout = 15 * time.Second
-	cfg.StreamCloseTimeout = time.Minute
+	// A relayed client half-closes its stream when it has sent everything
+	// (git push closes its side after the pack); the host may still be
+	// working for a long time (receive-pack's checks and hooks), so a
+	// half-closed stream is not torn down early.
+	cfg.StreamCloseTimeout = 35 * time.Minute
 	cfg.LogOutput = a.o.Log
 	return cfg
 }

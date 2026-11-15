@@ -47,6 +47,9 @@ func Describe(r *config.Resolved, m *config.Harness, rh config.ResolvedHarness, 
 		Input:  boxside.LaunchInput{Adapter: m.Input.Adapter, SubmitKey: m.Input.SubmitKey, QuestionWait: m.Input.Wait()},
 		Memory: m.Memory.Kind, Transcripts: nonNil(m.Transcripts.Globs),
 	}
+	if r.SecretsDelivery == config.DeliveryDaemon {
+		l.Delivery = boxside.DeliveryDaemon
+	}
 	if rh.AuthMethod == "env-token" || rh.AuthMethod == "api-key" {
 		l.Auth.Env, l.Auth.Secret = rh.AuthEnv, rh.Secret
 		if rh.Secret != "" {
@@ -554,6 +557,11 @@ func (h *BoxHooks) deliverSecrets(p *paths.Paths, r *config.Resolved, installed 
 		default:
 			return fmt.Errorf("reading the secret %s: %w", name, err)
 		}
+	}
+	if r.SecretsDelivery == config.DeliveryDaemon {
+		// The launcher asks the daemon (work order C10a); nothing is
+		// written, and what an earlier start delivered goes away.
+		values = map[string][]byte{}
 	}
 	return secrets.Deliver(p, dir, values, h.AllowPersistentSecrets)
 }

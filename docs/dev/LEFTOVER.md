@@ -226,3 +226,18 @@ Other checks and deferred work:
 | The wrapper is used only when the launcher's standard input and output are terminals (tmux windows, `devc sh`); a harness started with pipes (`claude -p … > file`) runs directly, so it never gets a pseudo-terminal it did not ask for | nothing (choice) |
 | Receipts keep the command's text until the command is final (then it is removed); they live in `local/receipts/` (0700, files 0600). A queued command older than seven days is refused at the next daemon start | nothing |
 | `session.start` (and `devc <harness> --detach --prompt`) needs a running box and does not create worktrees itself; the CLI prepares both before it asks the daemon. A missing worktree makes the session start in the project directory | C12, if the hub needs to start sessions in new worktrees |
+
+### From C10a
+
+| Item | Needs |
+|---|---|
+| **Fetch-through and forwards only tried with `file://` upstreams.** Background mode (no terminal, no askpass, `GIT_TERMINAL_PROMPT=0`) should make an SSH upstream without an agent key, or an HTTPS upstream without a stored credential, fail within the 20 s instead of asking; an `ssh-agent` key and credential helpers should keep working. A credential helper that pops up a window (or a hardware key that wants a touch) still might | a GitHub upstream over SSH (agent and no agent) and over HTTPS (helper and none) |
+| **Git over `connect` uses protocol v0.** The daemon does not pass `GIT_PROTOCOL`, so upload-pack and receive-pack advertise every visible ref (the hidden ones excluded). Fine for ordinary repositories; a relay with tens of thousands of refs makes every fetch advertise them all. Partial clones (`--filter`) are not offered | a large repository, if fetches get slow |
+| **Turn banking with real harnesses** depends on their state events (hooks or OSC 7501) going working → done or idle; only the fake harness was used | a Claude Code and a Codex session: a turn that edits without committing, then a snapshot in `refs/devc/snap/` within ~30 s |
+| **On-demand secrets with real harnesses.** Only the fake harness's env-token was delivered through `host.secret`; Claude Code (`CLAUDE_CODE_OAUTH_TOKEN`) and api-key manifests take the same path | a Claude login with `secrets.delivery = "daemon"` |
+| **Requests not carried out yet:** `net` (C13), `grant` (needs a decision how a grant is written: devc never edits `project.toml` today), `pr` (C15). They are stored and fail with "not available yet" when approved | C13, C15, a decision for grants |
+| **Hub decisions** are only exercised through a local client declaring origin `hub`; the hub transport (C11) must use the same `requests.decide` path with its own origin (`decideHandler(proto.OriginHub)`) and nothing else | C11a |
+| Old boxes keep the agent they were started with (yamux close timeout 1 minute): a push whose receive-pack checks and hooks take longer than a minute after the pack was sent breaks until the box restarts. Projects initialised before C10a lack the box's `github/*` fetch refspec and `tagOpt` until `devc project init` | nothing (upgrade note) |
+| A box can make the host store as much as it pushes (no `receive.maxInputSize`), as it already could through banking; receive-pack checks every object (`receive.fsckObjects`) | a quota decision, if needed |
+| `devc requests` without a daemon reads the logs as they are; nothing expires until the daemon runs | nothing |
+| The relay service and `host.secret` under SELinux: nothing new crosses the box boundary (the daemon spawns git on the host; the stream runs over the existing channel), but it was not tried | a Fedora machine, enforcing |

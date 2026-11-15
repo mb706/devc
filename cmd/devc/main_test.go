@@ -23,6 +23,11 @@ func (r *recorder) remoteHelper(args []string) int {
 	return 7
 }
 
+func (r *recorder) relayHook(name string, args []string) int {
+	r.name, r.args = "relay-hook "+name, args
+	return 9
+}
+
 func TestRoute(t *testing.T) {
 	for name, want := range map[string]role{
 		"devc": roleCLI, "devc-linux-amd64": roleCLI, "git-remote-devc": roleRemoteHelper,
@@ -38,6 +43,15 @@ func TestRoute(t *testing.T) {
 	}
 	if code := dispatch("git-remote-devc", []string{"origin", "devc::r/p"}, r); code != 7 || r.name != "git-remote-devc" || len(r.args) != 2 {
 		t.Errorf("git-remote-devc: %d", code)
+	}
+	// A hook name is a relay hook only with the daemon's project set.
+	t.Setenv("DEVC_RELAY_PROJECT", "")
+	if code := dispatch("update", []string{"refs/heads/x"}, r); code != 42 || r.name != "update" {
+		t.Errorf("update without the relay project: %d %+v", code, r)
+	}
+	t.Setenv("DEVC_RELAY_PROJECT", "demo/hello")
+	if code := dispatch("post-receive", nil, r); code != 9 || r.name != "relay-hook post-receive" {
+		t.Errorf("post-receive: %d %+v", code, r)
 	}
 }
 

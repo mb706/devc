@@ -39,10 +39,19 @@ func route(name string) role {
 	return roleShim
 }
 
-// launcher runs a harness shim or the remote helper; tests replace it.
+// launcher runs a harness shim, the remote helper or a relay hook; tests
+// replace it.
 type launcher interface {
 	launch(name string, args []string) int
 	remoteHelper(args []string) int
+	relayHook(name string, args []string) int
+}
+
+// relayHook reports whether devc runs as one of the relay service's hooks:
+// the hooks directory holds links named after the hooks, and the daemon
+// sets the project for receive-pack (work order C10a).
+func relayHook(name string, getenv func(string) string) bool {
+	return (name == "update" || name == "post-receive") && getenv("DEVC_RELAY_PROJECT") != ""
 }
 
 func dispatch(name string, args []string, l launcher) int {
@@ -51,6 +60,9 @@ func dispatch(name string, args []string, l launcher) int {
 		return cli.Run()
 	case roleRemoteHelper:
 		return l.remoteHelper(args)
+	}
+	if relayHook(name, os.Getenv) {
+		return l.relayHook(name, args)
 	}
 	return l.launch(name, args)
 }
@@ -63,9 +75,15 @@ type shim struct {
 }
 
 // remoteHelper serves git's remote-helper protocol on stdin and stdout
-// (the C05 stub; git runs it in the box for devc:: URLs).
+// (git runs it in the box for devc:: URLs): through the daemon when it is
+// connected, else the C05 stub.
 func (s shim) remoteHelper(args []string) int {
-	return boxside.RemoteHelper(args, os.Stdin, os.Stdout, s.stderr, boxside.ExecGit)
+	return boxside.RemoteHelperMain(args, os.Stdin, os.Stdout, s.stderr, boxside.ExecGit, boxside.DefaultRelayDialer())
+}
+
+// relayHook runs `devc relay-hook <name> args…`.
+func (s shim) relayHook(name string, args []string) int {
+	return cli.Main(append([]string{"relay-hook", name}, args...), os.Stdout, os.Stderr, os.Getenv)
 }
 
 func (s shim) launch(name string, args []string) int {

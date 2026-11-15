@@ -324,6 +324,15 @@ func (p *Paths) BoxHarnessDir(r names.ProjectRef, harness string) string {
 // uses it as core.hooksPath, so no hook ever runs on the host.
 func (p *Paths) NoHooksDir() string { return filepath.Join(p.LocalDir(), "git", "no-hooks") }
 
+// RelayHooksDir holds the relay service's hooks (links to the devc binary);
+// only receive-pack runs by the daemon for a box's push uses it.
+func (p *Paths) RelayHooksDir() string { return filepath.Join(p.LocalDir(), "git", "relay-hooks") }
+
+// RequestsFile is a project's request log (work order C10a).
+func (p *Paths) RequestsFile(r names.ProjectRef) string {
+	return filepath.Join(p.DurableRealmDir(r.Realm), "requests", must(names.KindProject, r.Project)+".jsonl")
+}
+
 // TmpDir is for short-lived host directories (temporary homes for logins).
 func (p *Paths) TmpDir() string        { return filepath.Join(p.LocalDir(), "tmp") }
 func (p *Paths) SavepointsDir() string { return filepath.Join(p.LocalDir(), "savepoints") }

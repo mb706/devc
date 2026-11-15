@@ -1,6 +1,7 @@
 package boxside
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,7 +57,14 @@ type Launch struct {
 	Memory  string            `json:"memory"`
 	// Transcripts are globs relative to Home.Dir.
 	Transcripts []string `json:"transcripts"`
+	// Delivery is "daemon" when the credential and granted secrets are
+	// asked from the daemon at launch instead of read from SecretsDir
+	// (secrets.delivery, work order C10a).
+	Delivery string `json:"delivery,omitempty"`
 }
+
+// DeliveryDaemon is Launch.Delivery for secrets served by the daemon.
+const DeliveryDaemon = "daemon"
 
 // LaunchAuth says how the credential reaches the harness.
 type LaunchAuth struct {
@@ -120,6 +128,8 @@ func (l *Launch) Validate() error {
 		return fmt.Errorf("harness %s: executable %q is not a clean absolute path", l.ID, l.Exe)
 	case !below("/home/dev", l.Home.Dir):
 		return fmt.Errorf("harness %s: home %q is not below /home/dev", l.ID, l.Home.Dir)
+	case l.Delivery != "" && l.Delivery != DeliveryDaemon:
+		return fmt.Errorf("harness %s: unknown secret delivery %q", l.ID, l.Delivery)
 	}
 	for k := range l.Env {
 		if !envNameRE.MatchString(k) {
@@ -251,6 +261,9 @@ type LaunchEnv struct {
 	// runs the status wrapper (default /opt/devc/bin/devc).
 	IsTerminal func() bool
 	Helper     string
+	// FetchSecret asks the daemon for a secret (Delivery "daemon"; nil:
+	// through the box agent).
+	FetchSecret func(name string) (string, error)
 }
 
 // Prepared is the result of PrepareLaunch: what exec receives.
@@ -293,26 +306,30 @@ func PrepareLaunch(l *Launch, userArgs []string, e LaunchEnv) (*Prepared, error)
 	env.set("DEVC_HARNESS", l.ID)
 	env.set("DEVC_LAUNCH_DEPTH", fmt.Sprint(depth+1))
 
-	for _, s := range l.Secrets {
-		if s.Env == "" {
-			continue
+	if l.Delivery == DeliveryDaemon {
+		addDaemonSecrets(l, env, e)
+	} else {
+		for _, s := range l.Secrets {
+			if s.Env == "" {
+				continue
+			}
+			v, err := readSecret(filepath.Join(e.Root, s.File))
+			if err == nil {
+				env.set(s.Env, v)
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				fmt.Fprintf(e.Stderr, "devc: cannot read the granted secret %s: %v\n", s.Name, err)
+			}
 		}
-		v, err := readSecret(filepath.Join(e.Root, s.File))
-		if err == nil {
-			env.set(s.Env, v)
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			fmt.Fprintf(e.Stderr, "devc: cannot read the granted secret %s: %v\n", s.Name, err)
-		}
-	}
-	if (l.Auth.Method == "env-token" || l.Auth.Method == "api-key") && l.Auth.Env != "" {
-		v, err := readSecret(filepath.Join(e.Root, l.Auth.File))
-		switch {
-		case err == nil:
-			env.set(l.Auth.Env, v)
-		case errors.Is(err, fs.ErrNotExist):
-			fmt.Fprintf(e.Stderr, "devc: no credential for %s in this box; run 'devc login %s %s' on the host, then 'devc up'\n", l.Display, l.Realm, l.ID)
-		default:
-			fmt.Fprintf(e.Stderr, "devc: cannot read the credential for %s: %v\n", l.Display, err)
+		if (l.Auth.Method == "env-token" || l.Auth.Method == "api-key") && l.Auth.Env != "" {
+			v, err := readSecret(filepath.Join(e.Root, l.Auth.File))
+			switch {
+			case err == nil:
+				env.set(l.Auth.Env, v)
+			case errors.Is(err, fs.ErrNotExist):
+				fmt.Fprintf(e.Stderr, "devc: no credential for %s in this box; run 'devc login %s %s' on the host, then 'devc up'\n", l.Display, l.Realm, l.ID)
+			default:
+				fmt.Fprintf(e.Stderr, "devc: cannot read the credential for %s: %v\n", l.Display, err)
+			}
 		}
 	}
 
@@ -331,6 +348,65 @@ func PrepareLaunch(l *Launch, userArgs []string, e LaunchEnv) (*Prepared, error)
 		return &Prepared{Exe: helper, Argv: wrapped, Env: env.list(), Session: session}, nil
 	}
 	return &Prepared{Exe: l.Exe, Argv: argv, Env: env.list(), Session: session}, nil
+}
+
+// addDaemonSecrets asks the daemon for the credential and the granted
+// secrets (Delivery "daemon"). Nothing is stored in the box. When the
+// daemon cannot be reached the harness starts without them and the user is
+// told how to fix it.
+func addDaemonSecrets(l *Launch, env *envList, e LaunchEnv) {
+	fetch := e.FetchSecret
+	if fetch == nil {
+		fetch = FetchSecret
+	}
+	unreachable := false
+	get := func(name, what string) (string, bool) {
+		if unreachable {
+			return "", false
+		}
+		v, err := fetch(name)
+		var pe *proto.Error
+		switch {
+		case err == nil:
+			return v, true
+		case errors.As(err, &pe) && pe.Code == proto.CodeNotFound:
+			fmt.Fprintf(e.Stderr, "devc: %s is not set on the host: %s\n", what, proto.Printable(pe.Message))
+		case errors.As(err, &pe) && pe.Code != proto.CodeHostUnavailable:
+			fmt.Fprintf(e.Stderr, "devc: the host refused %s: %s\n", what, proto.Printable(pe.Message))
+		default:
+			unreachable = true
+			fmt.Fprintf(e.Stderr, "devc: the devc daemon is not reachable from this box, so %s starts without its credential and granted secrets: "+
+				"start it on the host ('devc daemon' or 'devc service install'), or set secrets.delivery = \"files\" in config.toml and restart the box\n", l.Display)
+		}
+		return "", false
+	}
+	if (l.Auth.Method == "env-token" || l.Auth.Method == "api-key") && l.Auth.Env != "" && l.Auth.Secret != "" {
+		if v, ok := get(l.Auth.Secret, "the credential for "+l.Display); ok {
+			env.set(l.Auth.Env, v)
+		}
+	}
+	for _, s := range l.Secrets {
+		if s.Env == "" {
+			continue
+		}
+		if v, ok := get(s.Name, "the granted secret "+s.Name); ok {
+			env.set(s.Env, v)
+		}
+	}
+}
+
+// secretTimeout bounds one host.secret call at launch.
+const secretTimeout = 10 * time.Second
+
+// FetchSecret asks the daemon for a secret through the box agent.
+func FetchSecret(name string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), secretTimeout)
+	defer cancel()
+	var r proto.SecretReply
+	if err := AgentCall(ctx, proto.MethodHostSecret, proto.SecretParams{Name: name}, &r); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(r.Value, "\r\n"), nil
 }
 
 // registerSession records the start of a session: session.start with the

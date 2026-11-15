@@ -45,6 +45,7 @@ import (
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/proto"
+	"github.com/mb706/devc/internal/secrets"
 	"github.com/mb706/devc/internal/session"
 )
 
@@ -98,6 +99,16 @@ type Options struct {
 	// is the longest pause between connection attempts (30 s).
 	HelloTimeout time.Duration
 	MaxBackoff   time.Duration
+	// Global are the global flags (directories) of every devc child
+	// process: banks after turns and approved requests. They run with
+	// HousekeepingEnv too.
+	Global []string
+	// Secrets is the secret store for host.secret (default: the file store
+	// of the configuration's state directory).
+	Secrets secrets.Store
+	// TurnBankInterval is the least time between banks after turns of one
+	// box (DefaultTurnBank).
+	TurnBankInterval time.Duration
 }
 
 // env is one loaded configuration and what is built from it.
@@ -130,9 +141,12 @@ type Daemon struct {
 	windows  map[names.ProjectRef]map[string]string
 	warnings map[names.ProjectRef]*pendingWarn
 
-	hub *hub
-	cmd *commander
-	wg  sync.WaitGroup
+	hub        *hub
+	cmd        *commander
+	requests   *requestService
+	turns      *turnBanker
+	fetchLimit *rateLimit
+	wg         sync.WaitGroup
 }
 
 // boxInfo is what the last box-watch pass saw of a configured project.
@@ -188,14 +202,19 @@ func New(o Options) (*Daemon, error) {
 	def(&o.JournalPoll, DefaultJournalPoll)
 	def(&o.HelloTimeout, helloTimeout)
 	def(&o.MaxBackoff, maxBackoff)
+	def(&o.TurnBankInterval, DefaultTurnBank)
 	if o.ProcDir == "" {
 		o.ProcDir = "/proc"
 	}
 	host, _ := os.Hostname()
 	instance := newInstance()
-	return &Daemon{o: o, log: o.Log, version: o.Version, instance: instance, started: time.Now().UTC(), machine: host,
+	d := &Daemon{o: o, log: o.Log, version: o.Version, instance: instance, started: time.Now().UTC(), machine: host,
 		procDir: o.ProcDir, runtime: rt, boxes: map[names.ProjectRef]*boxInfo{}, windows: map[names.ProjectRef]map[string]string{},
-		warnings: map[names.ProjectRef]*pendingWarn{}, hub: newHub(o.Log, instance)}, nil
+		warnings: map[names.ProjectRef]*pendingWarn{}, hub: newHub(o.Log, instance), fetchLimit: newRateLimit(fetchThroughEvery)}
+	d.requests = newRequestService(d)
+	d.turns = newTurnBanker(d, o.TurnBankInterval)
+	d.hub.onTurnEnd = d.turns.turnEnded
+	return d, nil
 }
 
 // SocketPath is the daemon socket of a runtime directory.
@@ -261,6 +280,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.cmd = newCommander(d, d.current().cfg.Paths)
 	d.cmd.resume()
+	d.requests.recoverInterrupted(d.ctx)
+	d.requests.expireAll(d.ctx)
 	d.log.Info("daemon started", "version", d.version, "instance", d.instance, "socket", sock)
 	d.goSafe("api", func() { d.serveAPI(ln) })
 	d.goSafe("watch", d.watchLoop)
@@ -270,6 +291,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	<-d.ctx.Done()
 	d.log.Info("daemon stopping")
 	ln.Close()
+	d.turns.stop()
 	d.hub.closeAll(context.Background())
 	d.mu.Lock()
 	for _, b := range d.boxes {
@@ -707,6 +729,7 @@ func (d *Daemon) housekeep(ctx context.Context) {
 	if d.cmd != nil {
 		d.cmd.prune()
 	}
+	d.requests.expireAll(ctx)
 	for _, args := range d.o.Housekeeping {
 		if ctx.Err() != nil {
 			return

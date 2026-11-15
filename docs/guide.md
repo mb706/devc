@@ -229,6 +229,40 @@ vendor's release into the toolbox in a throwaway container; `devc update`
 installs newer versions; `devc harness ls` shows what is installed; `devc
 harness gc` removes old versions. In-box self-updates are switched off.
 
+### Requests from a box
+
+An agent asks for things outside its box with `devc request` (inside the
+box; the sandbox description tells it how):
+
+```sh
+devc request seal results/run7           # seal a finished run
+devc request savepoint before-refactor
+devc request note "the test data looks truncated"
+devc request package apt libpq-dev       # high risk
+devc request net pypi.org:443 --for 2h   # high risk (not available yet)
+devc request grant ssh cluster1          # high risk (not available yet)
+devc request pr --title "Fix parser"     # high risk (not available yet)
+devc request status <id> --wait
+```
+
+A request does nothing by itself. The daemon checks every field, stores the
+request in `durable/realms/<realm>/requests/<project>.jsonl` and notes it in
+the session's events. Low-risk kinds listed in the project's `[requests] auto`
+(default `["seal", "savepoint", "note"]`) are approved at once; everything
+else waits for you:
+
+```sh
+devc requests [--all] [--json]       # pending (or all) requests
+devc requests approve <id> [--wait]  # devc carries it out (seal, save, devc root …)
+devc requests deny <id> [--reason "…"]
+```
+
+High-risk requests can be approved only with the CLI on this machine, never
+from a hub. Pending requests expire after seven days. An approved package
+request runs the manager's install command through `devc root`, so it is
+recorded in the env's root log. Requests need the daemon; without it, `devc
+request` tells the agent to ask you directly.
+
 ## Git: relay, bank, pull, push
 
 Each project has a relay, a bare repository on the host. In the box, the
@@ -277,10 +311,25 @@ uncommitted work is banked, also with `--force` (which allows a dirty worktree
 or live sessions); `--discard` removes it without banking, and its uncommitted
 work is lost.
 
-**In the box**, `git fetch origin` and `git pull` work after `devc pull` has
-handed new upstream commits to the box; `git push origin` changes nothing and
-says that commits are banked by devc. Use `git commit` for work in progress
-instead of `git stash`.
+**In the box**, with the daemon running, `git push origin <branch>` and `git
+fetch origin` go to the relay through the daemon (the relay service): the
+daemon runs `git receive-pack` or `git upload-pack` on the relay of the box's
+own project, whatever URL `origin` has. A push follows the bank's rules:
+branches can be created and rewritten, deletions and protected branches are
+refused, tags can be created but not moved, `refs/devc/*` and
+`refs/remotes/*` are refused. Every pushed tip gets a bank ref at once, and
+branches matching `git.forward` are pushed on to the upstream (the push prints
+the result). Before serving a fetch, the daemon fetches the upstream into the
+relay (at most once a minute, 20 seconds at most, without prompts; turn it off
+with `git.fetch_through = false`), so `git fetch origin` brings new upstream
+commits as `origin/*` and `github/*` without `devc pull`. Without the daemon,
+`git fetch origin` does nothing new until `devc pull`, and `git push origin`
+changes nothing and says that commits are banked by devc. The daemon also
+banks a box shortly after each agent turn ends (at most every 30 seconds), so
+commits and uncommitted work reach the relay without waiting for the
+five-minute pass. Projects set up before this version need `devc project init`
+once so the box's `origin` also fetches `github/*` and tags. Use `git commit`
+for work in progress instead of `git stash`.
 
 **Pushing** is always your decision: `devc push [branch...]` banks, shows the
 commits and the diffstat the upstream lacks, and asks before it pushes (`--yes`
@@ -455,6 +504,14 @@ through `$XDG_RUNTIME_DIR`, which must be a tmpfs (devc refuses otherwise,
 unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`). A box that is running when you
 change a secret sees the change after `devc down` and `devc up`. Everything
 in the box can read the secrets granted to it.
+
+With `[secrets] delivery = "daemon"` in `config.toml`, nothing is written
+into boxes: each time a harness starts, its launcher asks the daemon for the
+harness token and the granted secrets, and the daemon answers only for names
+the project is granted. Changes take effect at the next launch. Without a
+running daemon the harness starts without them and says so. In such a box,
+`devc box secret <NAME>` prints a granted secret for programs started outside
+a harness.
 
 **Harness state.** Claude Code keeps its home in the box home and shares its
 `projects` directory (session history) across the realm. Codex uses one home

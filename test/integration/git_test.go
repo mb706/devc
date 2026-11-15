@@ -335,7 +335,10 @@ func TestGit(t *testing.T) {
 	}
 	c3 := boxSh(t, e, ref, "cd "+main+" && echo three >> a && git commit -qam c3 && git rev-parse HEAD")
 	res = e.Run("run", ref, "--", "git", "-C", main, "push", "origin", "main")
-	if res.ExitCode != 0 || !strings.Contains(res.Stderr, "banked on the host by devc") {
+	// Without a daemon the stub answers; with one (DEVC_ITEST_DAEMON=1) the
+	// push reaches the relay through the relay service (C10a).
+	stubbed := strings.Contains(res.Stderr, "banked on the host by devc")
+	if res.ExitCode != 0 || (!stubbed && (!itest.DaemonMode() || relayRefs(t, e, ref)["refs/heads/main"] != c3)) {
 		t.Errorf("git push in the box: %d\n%s", res.ExitCode, res.Stderr)
 	}
 

@@ -61,6 +61,10 @@ type Cmd struct {
 	Redact []string
 	// ExtraFiles are passed to the command as descriptors 3, 4, ….
 	ExtraFiles []*os.File
+	// Setsid starts the command in a new session, without a controlling
+	// terminal: nothing it starts (ssh, a credential helper) can prompt on
+	// the terminal devc runs in.
+	Setsid bool
 }
 
 // String renders the command for messages, with redaction applied.
@@ -204,6 +208,9 @@ func (Real) command(ctx context.Context, c Cmd) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.Dir = c.WorkDir()
 	cmd.ExtraFiles = c.ExtraFiles
+	if c.Setsid {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	}
 	if len(c.Env) > 0 || len(c.Unset) > 0 {
 		cmd.Env = append(c.Environ(os.Environ()), c.Env...)
 	}

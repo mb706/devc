@@ -150,6 +150,25 @@ func TestC09Events(t *testing.T) {
 			t.Errorf("accepted %+v", bad)
 		}
 	}
+	// Request events are the host's too (work order C10a).
+	req := RequestEvent{ID: "r0000000000aaaaaaaaaa", Kind: RequestPackage, Risk: RiskHigh, Status: RequestPending, Summary: "package (apt): jq"}
+	if _, err := ParseSpoolLine(line(TypeRequest, req), sid); err == nil || !strings.Contains(err.Error(), "host") {
+		t.Errorf("request from a spool: %v", err)
+	}
+	if _, err := ValidateData(TypeRequest, mustJSON(req)); err != nil {
+		t.Errorf("request event: %v", err)
+	}
+	for _, bad := range []RequestEvent{
+		{ID: "s0000000000aaaaaaaaaa", Kind: RequestNote, Risk: RiskLow, Status: RequestDone},
+		{ID: req.ID, Kind: RequestPackage, Risk: RiskLow, Status: RequestDone},
+		{ID: req.ID, Kind: "exec", Risk: RiskHigh, Status: RequestDone},
+		{ID: req.ID, Kind: RequestNote, Risk: RiskLow, Status: "running"},
+		{ID: req.ID, Kind: RequestNote, Risk: RiskLow, Status: RequestDone, Summary: strings.Repeat("x", MaxNoteText+100)},
+	} {
+		if _, err := ValidateData(TypeRequest, mustJSON(bad)); err == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
 }
 
 func mustJSON(v any) []byte {

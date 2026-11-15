@@ -197,12 +197,20 @@ func TestEscape(t *testing.T) {
 			e.Run("run", ref, "--", "sh", "-c", "cd "+main+" && git commit -q --allow-empty -m odd && "+push)
 		}
 		after := relayRefs(t, e, ref)
-		if len(before) != len(after) {
-			t.Errorf("relay refs changed: %d -> %d", len(before), len(after))
+		// With a daemon (DEVC_ITEST_DAEMON=1) the relay service lets a box
+		// create and move branches, which are banked at once (C10a); nothing
+		// else may change, and nothing may disappear.
+		mayMove := func(name string) bool {
+			return itest.DaemonMode() && (strings.HasPrefix(name, "refs/heads/") || strings.HasPrefix(name, "refs/devc/boxtip/"))
 		}
 		for name, v := range before {
-			if after[name] != v {
+			if after[name] != v && !(mayMove(name) && after[name] != "") {
 				t.Errorf("relay ref %s changed: %s -> %s", name, v, after[name])
+			}
+		}
+		for name := range after {
+			if before[name] == "" && !(mayMove(name) || (itest.DaemonMode() && strings.HasPrefix(name, "refs/devc/bank/"))) {
+				t.Errorf("relay ref %s appeared", name)
 			}
 		}
 		if code := runCode(e, ref, "test", "-e", relayDir(e, ref)); code == 0 {

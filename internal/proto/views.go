@@ -30,6 +30,13 @@ const (
 	MethodHostHint     = "host.hint" // notification
 	MethodHostPing     = "host.ping"
 	MethodHostQuestion = "host.question"
+	// Box to host, work order C10a: a git stream to the relay (the stream
+	// carries git's own protocol after the response line), requests and
+	// on-demand secrets.
+	MethodHostGit           = "host.git"
+	MethodHostRequest       = "host.request"
+	MethodHostRequestStatus = "host.request.status"
+	MethodHostSecret        = "host.secret"
 
 	// Commands (work order C09).
 	MethodSessionSend      = "session.send"
@@ -49,6 +56,9 @@ const (
 	MethodSessionsGet     = "sessions.get"
 	MethodEventsRead      = "events.read"
 	MethodEventsSubscribe = "events.subscribe"
+	// Requests (work order C10a).
+	MethodRequestsList   = "requests.list"
+	MethodRequestsDecide = "requests.decide"
 
 	// Notifications of a subscription.
 	NotifyEvent     = "event"
@@ -581,4 +591,28 @@ type MissedNote struct {
 type Heartbeat struct {
 	Time     time.Time `json:"time"`
 	Instance string    `json:"instance"`
+}
+
+// GitParams open a git stream to the relay of the box's project
+// (host.git): Service is "upload-pack" or "receive-pack". Session is the
+// caller's DEVC_SESSION, used only to attribute a note event. After a
+// successful response line the stream carries git's protocol both ways.
+type GitParams struct {
+	Service string `json:"service"`
+	Session string `json:"session,omitempty"`
+}
+
+// GitReply acknowledges host.git; the service starts after it.
+type GitReply struct {
+	Service string `json:"service"`
+}
+
+// SecretParams ask for one secret (host.secret).
+type SecretParams struct {
+	Name string `json:"name"`
+}
+
+// SecretReply carries a secret's value. It is never logged.
+type SecretReply struct {
+	Value string `json:"value"`
 }

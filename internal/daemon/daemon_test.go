@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -65,6 +66,8 @@ type rig struct {
 	cid    string
 	proc   string
 	local  string // the agent's in-box socket
+	// logw receives the daemon's log when set.
+	logw io.Writer
 }
 
 func newRig(t *testing.T) *rig {
@@ -118,6 +121,10 @@ func (r *rig) boxUp(running bool) {
 }
 
 func (r *rig) options() Options {
+	log := testLog()
+	if r.logw != nil {
+		log = slog.New(slog.NewTextHandler(r.logw, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
 	return Options{
 		Paths: r.p,
 		Load: func() (*config.Config, []config.Problem) {
@@ -126,7 +133,7 @@ func (r *rig) options() Options {
 		Runner: r.runner, Engine: func(*config.Config) engine.Engine { return r.eng },
 		Executable: "/fake/devc", Version: "v-test",
 		Housekeeping:  [][]string{{"bank", "--all", "--quiet"}, {"context", "commit", "--all"}},
-		Log:           testLog(),
+		Log:           log,
 		WatchInterval: 50 * time.Millisecond, ReconcileInterval: 300 * time.Millisecond, HousekeepingInterval: 200 * time.Millisecond,
 		JournalPoll: 50 * time.Millisecond, ProcDir: r.proc, HelloTimeout: 500 * time.Millisecond, MaxBackoff: 200 * time.Millisecond,
 	}

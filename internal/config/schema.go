@@ -12,8 +12,22 @@ type Global struct {
 	DefaultEnv   string        `toml:"default_env" json:"default_env"`
 	Box          GlobalBox     `toml:"box" json:"box"`
 	SELinux      GlobalSELinux `toml:"selinux" json:"selinux"`
+	Secrets      GlobalSecrets `toml:"secrets" json:"secrets"`
 	Hubs         []Hub         `toml:"hubs" json:"hubs"`
 }
+
+// GlobalSecrets says how secrets reach boxes: "files" writes them into
+// each box's tmpfs directory at devc up; "daemon" writes nothing there and
+// the launcher asks the daemon over the box channel (work order C10a).
+type GlobalSecrets struct {
+	Delivery string `toml:"delivery" json:"delivery"`
+}
+
+// Secret delivery modes.
+const (
+	DeliveryFiles  = "files"
+	DeliveryDaemon = "daemon"
+)
 
 // GlobalSELinux selects how boxes are labelled on SELinux hosts. "labels"
 // expects the file-context rule printed by `devc doctor` and mounts without
@@ -54,6 +68,7 @@ func defaultGlobal() Global {
 		Engine:       "podman",
 		Box:          GlobalBox{Memory: "16g", Pids: 4096},
 		SELinux:      GlobalSELinux{Mode: SELinuxLabels},
+		Secrets:      GlobalSecrets{Delivery: DeliveryFiles},
 	}
 }
 
@@ -121,12 +136,22 @@ type Project struct {
 	Capabilities  Capabilities   `toml:"capabilities" json:"capabilities"`
 	Box           ProjectBox     `toml:"box" json:"box"`
 	Mounts        []Mount        `toml:"mounts" json:"mounts"`
+	Requests      Requests       `toml:"requests" json:"requests"`
 }
 
 type ProjectGit struct {
 	Forward      []string `toml:"forward" json:"forward"`
 	Protected    []string `toml:"protected" json:"protected"`
 	BranchPrefix string   `toml:"branch_prefix" json:"branch_prefix"`
+	// FetchThrough fetches the upstream into the relay before the box
+	// fetches through the relay service (default true).
+	FetchThrough bool `toml:"fetch_through" json:"fetch_through"`
+}
+
+// Requests configures the requests of a project's box: Auto lists the
+// low-risk kinds approved without asking.
+type Requests struct {
+	Auto []string `toml:"auto" json:"auto"`
 }
 
 type Grants struct {
@@ -184,6 +209,8 @@ func defaultProject() Project {
 	return Project{
 		Harnesses: []string{"claude"},
 		Grants:    Grants{GitHub: "relay"},
+		Git:       ProjectGit{FetchThrough: true},
+		Requests:  Requests{Auto: []string{"seal", "savepoint", "note"}},
 		Data: Data{
 			Root:       "data",
 			Savepoints: Savepoints{Driver: "auto", Keep: 10},

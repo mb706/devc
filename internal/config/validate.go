@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/proto"
 )
 
 // Enumerations, as documented in the work order and the example files.
@@ -202,6 +203,7 @@ func validateGlobal(c *Config, ps *problems) {
 		k.command("box.shell", g.Box.Shell)
 	}
 	k.enum("selinux.mode", g.SELinux.Mode, selinuxModes)
+	k.enum("secrets.delivery", g.Secrets.Delivery, []string{DeliveryFiles, DeliveryDaemon})
 	for i, h := range g.Hubs {
 		key := idx("hubs", i) + ".url"
 		u, err := url.Parse(h.URL)
@@ -568,6 +570,16 @@ func validateProject(c *Config, p *Project, ps *problems) {
 	if p.Git.BranchPrefix != "" {
 		k.branch("git.branch_prefix", p.Git.BranchPrefix, true)
 	}
+	for i, kind := range p.Requests.Auto {
+		switch proto.RequestRisk(kind) {
+		case proto.RiskLow:
+		case proto.RiskHigh:
+			k.bad(idx("requests.auto", i), "%q is a high-risk request; only low-risk kinds (%s) can be approved automatically", kind, strings.Join(proto.DefaultAutoRequests, ", "))
+		default:
+			k.bad(idx("requests.auto", i), "%q is not a request kind (one of %s)", kind, strings.Join(proto.RequestKinds, ", "))
+		}
+	}
+	k.noDuplicates("requests.auto", p.Requests.Auto)
 
 	for i, h := range p.Grants.SSH {
 		if !hostAliasRE.MatchString(h) {

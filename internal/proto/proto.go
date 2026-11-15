@@ -56,11 +56,14 @@ const (
 	// by the host (work order C09): a box cannot claim either.
 	TypeSeen   = "seen"
 	TypeAnswer = "answer"
+	// TypeRequest records a request a box made and each change of its
+	// status (work order C10a); written only by the host.
+	TypeRequest = "request"
 )
 
 // HostOnly reports whether events of type t may only be written by the host
 // (a spool line of such a type is refused).
-func HostOnly(t string) bool { return t == TypeSeen || t == TypeAnswer }
+func HostOnly(t string) bool { return t == TypeSeen || t == TypeAnswer || t == TypeRequest }
 
 // Sources of state events: the harness's hooks, or its own OSC 7501 status
 // reports answered by the status wrapper (work order C09).
@@ -215,6 +218,15 @@ type Tool struct {
 	Summary string `json:"summary,omitempty"`
 }
 
+// RequestEvent is a request as a session's journal records it.
+type RequestEvent struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Risk    string `json:"risk"`
+	Status  string `json:"status"`
+	Summary string `json:"summary,omitempty"`
+}
+
 // Note is free text from devc itself.
 type Note struct {
 	Text string `json:"text"`
@@ -232,7 +244,7 @@ type Harness struct {
 func Known(t string) bool {
 	switch t {
 	case TypeSessionStart, TypeSessionEnd, TypeState, TypePrompt, TypeQuestion, TypeMessage, TypeTool, TypeNote, TypeHarness,
-		TypeSeen, TypeAnswer:
+		TypeSeen, TypeAnswer, TypeRequest:
 		return true
 	}
 	return false
@@ -353,6 +365,8 @@ func ValidateData(typ string, raw json.RawMessage) (json.RawMessage, error) {
 		v = &Seen{}
 	case TypeAnswer:
 		v = &Answer{}
+	case TypeRequest:
+		v = &RequestEvent{}
 	default:
 		return nil, fmt.Errorf("unknown type %q", typ)
 	}
@@ -450,6 +464,29 @@ func (d *Answer) validate() error {
 		return errors.New("invalid via")
 	}
 	return nil
+}
+
+var requestIDRE = regexp.MustCompile(`^r[0-9a-v]{20}$`)
+
+// ValidRequestID reports whether id has the form of a request ID.
+func ValidRequestID(id string) bool { return requestIDRE.MatchString(id) }
+
+func (d *RequestEvent) validate() error {
+	switch {
+	case !ValidRequestID(d.ID):
+		return errors.New("invalid id")
+	case RequestRisk(d.Kind) == "" || RequestRisk(d.Kind) != d.Risk:
+		return errors.New("invalid kind or risk")
+	case !validRequestStatus(d.Status):
+		return errors.New("invalid status")
+	case !textOK(d.Summary, MaxNoteText) || !noNUL(d.Summary):
+		return errors.New("summary too long")
+	}
+	return nil
+}
+
+func validRequestStatus(s string) bool {
+	return s == RequestPending || s == RequestApproved || FinalRequest(s)
 }
 
 func (d *Prompt) validate() error {

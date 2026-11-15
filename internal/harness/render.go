@@ -22,6 +22,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -63,6 +64,10 @@ type Data struct {
 	// an answer to a question: input.question_wait plus a minute, so the
 	// harness never kills the hook while it waits.
 	QuestionHookTimeout int
+	// AutoRequests are the request kinds approved without asking; AutoSeal
+	// says whether seal is one of them.
+	AutoRequests []string
+	AutoSeal     bool
 }
 
 // DataFacts describes the project's data for the sandbox description.
@@ -92,6 +97,8 @@ func NewData(r *config.Resolved, m *config.Harness) Data {
 		Helper: paths.InBoxHelper, Notes: paths.InBoxNotes, Memory: paths.InBoxMemory,
 		Network: r.Network, NetworkSentence: networkSentences[r.Network],
 		QuestionHookTimeout: m.Input.Wait() + 60,
+		AutoRequests:        append([]string{}, r.Requests.Auto...),
+		AutoSeal:            slices.Contains(r.Requests.Auto, "seal"),
 	}
 	// The description must match the level in force: a level devc cannot
 	// enforce yet never gets a box, and is never described as restricted.

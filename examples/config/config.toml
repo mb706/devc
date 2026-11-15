@@ -16,6 +16,10 @@ shell = ""                     # empty: first of zsh, bash, sh present in the im
 mode = "labels"                # labels: expect the file-context rule from `devc doctor`, never relabel
                                # disable: run boxes with label=disable (escape hatch; weaker isolation)
 
+[secrets]
+delivery = "files"             # files: written to each box's tmpfs /run/devc-secrets at devc up
+                               # daemon: nothing is written; harnesses ask the daemon at launch
+
 # Hubs this machine reports to (phase 2). None by default.
 # [[hubs]]
 # url = "https://hub.example.org"

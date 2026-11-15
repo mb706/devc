@@ -70,6 +70,13 @@ type Call struct {
 	Timeout time.Duration
 	// MaxOutput overrides the capture cap.
 	MaxOutput int
+	// HooksDir overrides Host.HooksDir for this call: only the relay
+	// service's receive-pack runs with devc's own relay hooks.
+	HooksDir string
+	// Env is added to the command's environment after the mode's.
+	Env []string
+	// Config holds key=value settings given as -c options for this call.
+	Config []string
 }
 
 // Host runs git on the host. It is the only way devc runs host git.
@@ -85,6 +92,11 @@ type Host struct {
 	Stderr io.Writer
 	// Init runs once before the first command (it creates HooksDir).
 	Init func() error
+	// Background makes upstream commands non-interactive whatever the
+	// terminal: no prompts from git, no askpass programs, and a new session
+	// without a controlling terminal, so ssh fails instead of asking (the
+	// daemon's fetch-through and the relay hook's forwards).
+	Background bool
 
 	once    sync.Once
 	initErr error
@@ -118,8 +130,12 @@ func (h *Host) Cmd(c Call) (execx.Cmd, error) {
 	if !filepath.IsAbs(c.Relay) || filepath.Clean(c.Relay) != c.Relay {
 		return execx.Cmd{}, fmt.Errorf("git: relay %q is not a clean absolute path", c.Relay)
 	}
-	if !filepath.IsAbs(h.HooksDir) {
-		return execx.Cmd{}, fmt.Errorf("git: hooks directory %q is not absolute", h.HooksDir)
+	hooks := h.HooksDir
+	if c.HooksDir != "" {
+		hooks = c.HooksDir
+	}
+	if !filepath.IsAbs(hooks) {
+		return execx.Cmd{}, fmt.Errorf("git: hooks directory %q is not absolute", hooks)
 	}
 	if len(c.Args) == 0 || strings.HasPrefix(c.Args[0], "-") {
 		return execx.Cmd{}, errors.New("git: no subcommand")
@@ -130,11 +146,17 @@ func (h *Host) Cmd(c Call) (execx.Cmd, error) {
 	}
 	args := []string{
 		"--git-dir=" + c.Relay,
-		"-c", "core.hooksPath=" + h.HooksDir,
+		"-c", "core.hooksPath=" + hooks,
 		"-c", "core.fsmonitor=false",
 	}
 	if c.Box {
 		args = append(args, "-c", "protocol.allow=never", "-c", "protocol.ext.allow=always")
+	}
+	for _, kv := range c.Config {
+		if k, _, ok := strings.Cut(kv, "="); !ok || k == "" || strings.HasPrefix(kv, "-") || strings.ContainsAny(kv, "\x00\n") {
+			return execx.Cmd{}, fmt.Errorf("git: invalid setting %q", kv)
+		}
+		args = append(args, "-c", kv)
 	}
 	args = append(args, c.Args[0])
 	if diffing[c.Args[0]] {
@@ -145,7 +167,12 @@ func (h *Host) Cmd(c Call) (execx.Cmd, error) {
 	switch c.Mode {
 	case Upstream:
 		cmd.Unset = repoEnv
-		if !h.Terminal {
+		switch {
+		case h.Background:
+			cmd.Unset = append(append([]string{}, repoEnv...), backgroundUnset...)
+			cmd.Env = []string{"GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never"}
+			cmd.Setsid = true
+		case !h.Terminal:
 			cmd.Env = []string{"GIT_TERMINAL_PROMPT=0"}
 		}
 		if cmd.Timeout == 0 {
@@ -164,8 +191,13 @@ func (h *Host) Cmd(c Call) (execx.Cmd, error) {
 			cmd.Timeout = transferTimeout
 		}
 	}
+	cmd.Env = append(cmd.Env, c.Env...)
 	return cmd, nil
 }
+
+// backgroundUnset are the variables that would let a background upstream
+// command ask someone: graphical askpass programs and the display they use.
+var backgroundUnset = []string{"GIT_ASKPASS", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "DISPLAY", "WAYLAND_DISPLAY"}
 
 // Run runs c and captures its standard output. An upstream command with a
 // terminal is attached to it (prompts reach the user) and only its standard
@@ -181,7 +213,7 @@ func (h *Host) Run(ctx context.Context, c Call) (execx.Result, error) {
 	if err != nil {
 		return execx.Result{}, err
 	}
-	if c.Mode != Upstream || !h.Terminal {
+	if c.Mode != Upstream || !h.Terminal || h.Background {
 		return h.Runner.Run(ctx, cmd)
 	}
 	var out bytes.Buffer
@@ -196,6 +228,26 @@ func (h *Host) Run(ctx context.Context, c Call) (execx.Result, error) {
 		return res, &GitError{Cmd: cmd.String(), Code: code}
 	}
 	return res, nil
+}
+
+// Serve runs c with its standard output and error streamed to stdout and
+// stderr instead of captured (the relay service's upload-pack and
+// receive-pack, whose standard input and output are a box's stream). It
+// runs in a new session without a controlling terminal and returns the exit
+// status; a non-zero exit is not an error.
+func (h *Host) Serve(ctx context.Context, c Call, stdout, stderr io.Writer) (int, error) {
+	if h.Init != nil {
+		h.once.Do(func() { h.initErr = h.Init() })
+		if h.initErr != nil {
+			return -1, h.initErr
+		}
+	}
+	cmd, err := h.Cmd(c)
+	if err != nil {
+		return -1, err
+	}
+	cmd.Stdout, cmd.Stderr, cmd.Setsid = stdout, stderr, true
+	return h.Runner.Interactive(ctx, cmd)
 }
 
 // GitError is a failed attached git command; its messages went to the

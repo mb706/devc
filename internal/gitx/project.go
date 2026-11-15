@@ -11,6 +11,10 @@ import (
 	"github.com/mb706/devc/internal/paths"
 )
 
+// OriginGithubRefspec is the box origin's second fetch refspec: the
+// upstream's branches as the relay last fetched them.
+const OriginGithubRefspec = "+" + GithubPrefix + "*:" + GithubPrefix + "*"
+
 // OriginURL is the box's remote.origin.url for a project.
 func OriginURL(p *Project) string { return "devc::" + p.Ref.String() }
 
@@ -116,6 +120,7 @@ func (s *Service) InitBox(ctx context.Context, p *Project, def string) error {
 		{"maintenance.auto", "false"},
 		{"remote.origin.url", OriginURL(p)},
 		{"remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"},
+		{"remote.origin.tagOpt", "--tags"},
 	}
 	if p.Resolved.Git.UserName != "" {
 		cfg = append(cfg, [2]string{"user.name", p.Resolved.Git.UserName})
@@ -127,6 +132,11 @@ func (s *Service) InitBox(ctx context.Context, p *Project, def string) error {
 		if _, err := s.boxGit(ctx, p, "/", gitDir, "config", "--replace-all", kv[0], kv[1]); err != nil {
 			return err
 		}
+	}
+	// Through the relay service (C10a) a fetch also brings the upstream's
+	// branches as github/* and the tags.
+	if _, err := s.boxGit(ctx, p, "/", gitDir, "config", "--add", "remote.origin.fetch", OriginGithubRefspec); err != nil {
+		return err
 	}
 	notes, err := s.reflect(ctx, p, true)
 	for _, n := range notes {

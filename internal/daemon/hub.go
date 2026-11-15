@@ -67,6 +67,9 @@ type hub struct {
 	instance  string
 	// changedCh is closed (and replaced) whenever a session's view changed.
 	changedCh chan struct{}
+	// onTurnEnd is told when a live session goes from working to done or
+	// idle (banking after turns); it must not block.
+	onTurnEnd func(names.ProjectRef)
 }
 
 func newHub(log *slog.Logger, instance string) *hub {
@@ -178,7 +181,12 @@ func (h *hub) tailLocked(e *sessionEntry, publish bool) {
 			if ev.Seq <= e.view.LastSeq {
 				continue
 			}
+			prev := e.view.State
 			e.view.Apply(ev)
+			if publish && ev.Type == proto.TypeState && prev == proto.StateWorking &&
+				(e.view.State == proto.StateDone || e.view.State == proto.StateIdle) && h.onTurnEnd != nil {
+				h.onTurnEnd(e.ref)
+			}
 			if ev.Type == proto.TypeSessionEnd {
 				e.ended = true
 			}

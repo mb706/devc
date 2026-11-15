@@ -259,6 +259,17 @@ func (w *boxWorker) acceptStreams(ctx context.Context, sess *yamux.Session) {
 			}
 			return w.d.cmd.questionWait(ctx, w.ref, p)
 		},
+		// Requests and secrets (work order C10a): the project is the one
+		// this channel is bound to.
+		proto.MethodHostRequest: func(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
+			return w.d.requests.create(ctx, w.ref, params)
+		},
+		proto.MethodHostRequestStatus: func(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
+			return w.d.requests.status(ctx, w.ref, params)
+		},
+		proto.MethodHostSecret: func(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
+			return w.d.secret(ctx, w.ref, params)
+		},
 	}
 	notify := map[string]proto.NotifyHandler{
 		proto.MethodHostHint: func(_ context.Context, _ *proto.Conn, params json.RawMessage) {
@@ -279,11 +290,7 @@ func (w *boxWorker) acceptStreams(ctx context.Context, sess *yamux.Session) {
 			_ = st.Close() // too many at once
 			continue
 		}
-		c := proto.NewConn(st, proto.Options{Handlers: handlers, Notify: notify, Context: ctx, IdleTimeout: boxStreamIdle, Log: w.d.log})
-		go func() {
-			<-c.Done()
-			<-w.streams
-		}()
+		go w.serveStream(ctx, st, handlers, notify)
 	}
 }
 

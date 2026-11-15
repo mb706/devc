@@ -62,3 +62,19 @@ func misbehave(mode string, c net.Conn) {
 	}
 	time.Sleep(5 * time.Second)
 }
+
+// agentCall sends one raw request line to the box agent at addr and returns
+// the first line of the answer.
+func agentCall(addr, method, params string) (string, error) {
+	c, err := net.Dial("unix", addr)
+	if err != nil {
+		return "", err
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(60 * time.Second))
+	if _, err := fmt.Fprintf(c, `{"jsonrpc":"2.0","id":1,"method":%q,"params":%s}`+"\n", method, params); err != nil {
+		return "", err
+	}
+	line, err := bufio.NewReader(c).ReadString('\n')
+	return strings.TrimSpace(line), err
+}

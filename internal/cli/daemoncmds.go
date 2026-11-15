@@ -124,6 +124,7 @@ func newDaemonCmd(a *app) *cobra.Command {
 					append(append([]string{}, global...), "context", "commit", "--all"),
 				},
 				HousekeepingEnv:      hkEnv,
+				Global:               global,
 				Log:                  log,
 				HousekeepingInterval: housekeeping,
 				ReconcileInterval:    reconcile,
@@ -613,6 +614,10 @@ func eventSummary(ev *proto.Event) string {
 		var d proto.Harness
 		_ = json.Unmarshal(ev.Data, &d)
 		return d.ID
+	case proto.TypeRequest:
+		var d proto.RequestEvent
+		_ = json.Unmarshal(ev.Data, &d)
+		return d.ID + " " + d.Status + ": " + d.Summary
 	}
 	return ""
 }

@@ -11,6 +11,7 @@ default_branch = "main"
 forward = []                   # glob patterns of branches forwarded to the upstream automatically
 protected = ["main"]           # relay branches the box may not update
 branch_prefix = ""             # overrides the realm's
+fetch_through = true           # git fetch in the box first fetches the upstream into the relay (at most once a minute)
 
 [grants]
 ssh = []
@@ -33,6 +34,9 @@ host = "cluster1"              # SSH host alias
 path = "/scratch/demo/analysis"
 pull = ["results"]
 push = ["raw"]
+
+[requests]
+auto = ["seal", "savepoint", "note"]   # low-risk request kinds approved without asking ([] for none)
 
 [network]
 level = ""                     # overrides the realm default

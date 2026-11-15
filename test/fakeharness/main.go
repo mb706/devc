@@ -8,6 +8,10 @@
 //	fakeagent --cat                  echo every input byte unchanged (raw mode)
 //	fakeagent --hostile-helper <mode> <socket> <seconds>
 //	                                 stand in for a misbehaving box agent
+//	fakeagent --agent-call <method> <params>
+//	                                 send one raw JSON-RPC request to the box
+//	                                 agent and print the answer line (a box
+//	                                 that bypasses devc's own client)
 //
 // Flags for tests (work order C09 section 7): --no-end (no session.end
 // event), --ignore-first-submit (the first submit key does nothing),
@@ -138,6 +142,14 @@ flags:
 		return code
 	case len(args) == 0:
 		return interactive(o, stdin, stdout, stderr)
+	case len(args) == 3 && args[0] == "--agent-call":
+		line, err := agentCall("@devc-agent", args[1], args[2])
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintln(stdout, line)
+		return 0
 	case len(args) == 4 && args[0] == "--hostile-helper":
 		secs, err := strconv.Atoi(args[3])
 		if err != nil {

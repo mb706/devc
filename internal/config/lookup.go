@@ -253,6 +253,9 @@ type Resolved struct {
 	Box           ResolvedBox       `toml:"box" json:"box"`
 	Mounts        []Mount           `toml:"mounts" json:"mounts"`
 	SyncHub       bool              `toml:"sync_hub" json:"sync_hub"`
+	Requests      Requests          `toml:"requests" json:"requests"`
+	// SecretsDelivery is the global secrets.delivery.
+	SecretsDelivery string `toml:"secrets_delivery" json:"secrets_delivery"`
 }
 
 type ResolvedHarness struct {
@@ -270,6 +273,7 @@ type ResolvedGit struct {
 	BranchPrefix string   `toml:"branch_prefix" json:"branch_prefix"`
 	Forward      []string `toml:"forward" json:"forward"`
 	Protected    []string `toml:"protected" json:"protected"`
+	FetchThrough bool     `toml:"fetch_through" json:"fetch_through"`
 }
 
 type ResolvedData struct {
@@ -320,6 +324,7 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 			BranchPrefix: firstNonEmpty(p.Git.BranchPrefix, realm.Git.BranchPrefix),
 			Forward:      nonNil(p.Git.Forward),
 			Protected:    nonNil(p.Git.Protected),
+			FetchThrough: p.Git.FetchThrough,
 		},
 		Grants: Grants{SSH: nonNil(p.Grants.SSH), Secrets: nonNil(p.Grants.Secrets), GitHub: p.Grants.GitHub},
 		Data: ResolvedData{
@@ -340,8 +345,11 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 			Shell:  g.Box.Shell,
 			Ports:  nonNilInts(p.Box.Ports),
 		},
-		Mounts:  p.Mounts,
-		SyncHub: realm.Sync.Hub,
+		Mounts:   p.Mounts,
+		SyncHub:  realm.Sync.Hub,
+		Requests: Requests{Auto: nonNil(p.Requests.Auto)},
+
+		SecretsDelivery: g.Secrets.Delivery,
 	}
 	if r.Env == "" && r.Image == "" {
 		r.Env = g.DefaultEnv
@@ -378,6 +386,7 @@ type GlobalView struct {
 	DefaultEnv   string        `toml:"default_env" json:"default_env"`
 	Box          GlobalBox     `toml:"box" json:"box"`
 	SELinux      GlobalSELinux `toml:"selinux" json:"selinux"`
+	Secrets      GlobalSecrets `toml:"secrets" json:"secrets"`
 	Hubs         []Hub         `toml:"hubs" json:"hubs"`
 }
 
@@ -398,6 +407,7 @@ func (c *Config) View() GlobalView {
 		DefaultEnv:   c.Global.DefaultEnv,
 		Box:          c.Global.Box,
 		SELinux:      c.Global.SELinux,
+		Secrets:      c.Global.Secrets,
 		Hubs:         hubs,
 	}
 }

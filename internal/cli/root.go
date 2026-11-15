@@ -196,6 +196,9 @@ func newRoot(a *app) *cobra.Command {
 		newInitCmd(a),
 		newEditorCmd(a, "cursor", "Cursor"),
 		newEditorCmd(a, "code", "VS Code"),
+		newRelayHookCmd(a),
+		newRequestCmd(a),
+		newRequestsCmd(a),
 	)
 	root.AddCommand(newLifecycleCmds(a)...)
 	root.AddCommand(newHarnessCmds(a)...)
