@@ -12,11 +12,18 @@
 // restore) in the helper container, the context worker in the context
 // container (internal/ctxrepo).
 //
+// Since C08, box init also runs the agent (agent.go): the box end of the
+// channel to the host's daemon, which listens on /run/devc/agent.sock for
+// the host and on the abstract socket @devc-agent for in-box clients.
+//
 // Security rules: code here runs in the box and trusts nothing the box can
 // write. It reads its own description only from /etc/devc, which the host
 // renders and mounts read-only, and it never talks to the host except
-// through files in /run/devc that the host reads with internal/safefs and
-// through the output of commands the host runs, which the host validates.
+// through files in /run/devc that the host reads with internal/safefs,
+// through the output of commands the host runs, which the host validates,
+// and through the agent's channel, which the host opens and treats as
+// hostile input. The agent accepts as the host only a peer outside the
+// box's PID namespace, and nothing it does can end box init.
 // Events are validated here as the host would validate them, so a mapping
 // bug shows up as a note rather than a refused line. The hook receiver
 // never prints and never fails. tmux runs with argument vectors and an

@@ -88,6 +88,21 @@ func NewFake() *Fake {
 
 func (f *Fake) Binary() string { return f.Bin }
 
+// Put adds or replaces a container while other goroutines may use the
+// engine.
+func (f *Fake) Put(name string, ci ContainerInfo) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Containers[name] = ci
+}
+
+// Drop removes a container while other goroutines may use the engine.
+func (f *Fake) Drop(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.Containers, name)
+}
+
 func (f *Fake) Version(context.Context) (Version, error) { return f.VersionVal, f.VersionErr }
 
 func (f *Fake) Info(context.Context) (Info, error) { return f.InfoVal, f.InfoErr }
@@ -112,7 +127,11 @@ func (f *Fake) Ps(_ context.Context, o PsOptions) ([]Container, error) {
 			}
 		}
 		if match {
-			out = append(out, Container{ID: ci.ID, Names: []string{name}, Image: ci.ImageName, ImageID: ci.Image, State: ci.State.Status, Labels: ci.Labels})
+			var started int64
+			if !ci.State.Started.IsZero() {
+				started = ci.State.Started.Unix()
+			}
+			out = append(out, Container{ID: ci.ID, Names: []string{name}, Image: ci.ImageName, ImageID: ci.Image, State: ci.State.Status, Labels: ci.Labels, StartedAt: started})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })

@@ -232,6 +232,8 @@ type Container struct {
 	Status  string            `json:"Status"`
 	Labels  map[string]string `json:"Labels"`
 	Created int64             `json:"Created"`
+	// StartedAt is the Unix time of the last start (0 if never started).
+	StartedAt int64 `json:"StartedAt"`
 }
 
 // Name is the container's first name.

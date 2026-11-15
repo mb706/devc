@@ -79,6 +79,8 @@ type Env struct {
 	ProjectsRoot string
 	// Timeout bounds each devc invocation.
 	Timeout time.Duration
+	// AutoDaemon is the daemon New started in daemon mode.
+	AutoDaemon *Daemon
 }
 
 // Result of one devc invocation.
@@ -116,8 +118,20 @@ var projectsRootRE = regexp.MustCompile(`(?m)^projects_root\s*=.*$`)
 // New creates an environment from examples/config. Everything lives in
 // t.TempDir(), except the runtime directory, which is below
 // $XDG_RUNTIME_DIR (a tmpfs: devc refuses to deliver secrets elsewhere);
-// both are removed when the test ends, also on failure.
+// both are removed when the test ends, also on failure. In daemon mode
+// (DaemonMode) a daemon runs in the environment for the whole test.
 func New(t *testing.T) *Env {
+	t.Helper()
+	e := NewNoDaemon(t)
+	if DaemonMode() {
+		e.AutoDaemon = StartDaemon(t, e)
+	}
+	return e
+}
+
+// NewNoDaemon is New without the daemon of daemon mode, for tests that
+// run daemons themselves.
+func NewNoDaemon(t *testing.T) *Env {
 	t.Helper()
 	bin := os.Getenv("DEVC_BIN")
 	if bin == "" {
@@ -389,13 +403,24 @@ func (e *Env) Run(args ...string) Result {
 	return e.RunIn(e.Repo, "", args...)
 }
 
+// RunEnv runs devc with extra environment variables.
+func (e *Env) RunEnv(env []string, args ...string) Result {
+	e.t.Helper()
+	return e.run(e.Repo, "", env, args...)
+}
+
 // RunIn runs devc in directory dir with stdin as its input.
 func (e *Env) RunIn(dir, stdin string, args ...string) Result {
+	e.t.Helper()
+	return e.run(dir, stdin, nil, args...)
+}
+
+func (e *Env) run(dir, stdin string, extra []string, args ...string) Result {
 	e.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), e.Timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, e.Bin, args...)
-	cmd.Env = e.environ()
+	cmd.Env = append(e.environ(), extra...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer

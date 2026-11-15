@@ -1,5 +1,8 @@
-// Package proto defines what boxes, the host and (from phase 2) the daemon
-// and hub exchange: session events (plan 3.6). An event is one JSON object
+// Package proto defines what boxes, the host, the daemon and (later) the
+// hub exchange: session events (plan 3.6, this file), the JSON-RPC 2.0
+// codec used on the daemon's socket and on box channel streams (rpc.go),
+// and the views, cursors, commands, receipts and method parameters of the
+// daemon's API and the box channel (views.go). An event is one JSON object
 // per line:
 //
 //	{"v":1,"seq":N,"ts":"RFC3339Nano","at":"RFC3339Nano","session":"s…","type":"…","data":{…}}

@@ -64,24 +64,33 @@ func TestUserUnitDir(t *testing.T) {
 	}
 }
 
-func TestInstallUninstall(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "systemd", "user")
-	f := execx.NewFake()
-	f.On("systemctl", "--user")
-	m := &Manager{Dir: dir, Runner: f}
-	if m.Installed() {
-		t.Fatal("installed before install")
-	}
-	if err := m.Install(context.Background(), "/usr/local/bin/devc", []string{"PATH=/usr/bin"}); err != nil {
+func TestDaemonText(t *testing.T) {
+	s, err := DaemonText("/opt/my tools/devc", []string{"PATH=/usr/bin", "DEVC_RUNTIME_DIR=/run/user/1/x"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !m.Installed() {
-		t.Fatal("not installed after install")
+	for _, want := range []string{
+		"[Service]\nType=simple\n",
+		`Environment="PATH=/usr/bin"`,
+		`Environment="DEVC_RUNTIME_DIR=/run/user/1/x"`,
+		`ExecStart="/opt/my tools/devc" daemon` + "\n",
+		"Restart=on-failure",
+		"WantedBy=default.target",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q in\n%s", want, s)
+		}
 	}
-	svc, _ := os.ReadFile(filepath.Join(dir, ServiceFile))
-	if !strings.Contains(string(svc), `ExecStart=-"/usr/local/bin/devc" bank --all --quiet`) {
-		t.Errorf("service file:\n%s", svc)
+	if _, err := DaemonText("/a\nExecStart=/bin/evil", nil); err == nil {
+		t.Error("accepted a newline in the executable")
 	}
+	if _, err := DaemonText("/usr/bin/devc", []string{"PATH=/a\nExecStart=/bin/evil"}); err == nil {
+		t.Error("accepted a newline in the environment")
+	}
+}
+
+func calls(t *testing.T, f *execx.Fake) string {
+	t.Helper()
 	var got []string
 	for _, c := range f.Calls() {
 		got = append(got, c.Name+" "+strings.Join(c.Args, " "))
@@ -89,36 +98,100 @@ func TestInstallUninstall(t *testing.T) {
 			t.Errorf("%s ran in %q", c.Name, c.Dir)
 		}
 	}
-	if strings.Join(got, "; ") != "systemctl --user daemon-reload; systemctl --user enable --now devc-bank.timer" {
-		t.Errorf("calls: %q", got)
+	return strings.Join(got, "; ")
+}
+
+// TestInstallUninstall installs the timer, replaces it by the daemon, the
+// daemon by the timer again, and uninstalls, all in a temporary directory
+// with a fake systemctl.
+func TestInstallUninstall(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "systemd", "user")
+	f := execx.NewFake()
+	f.On("systemctl", "--user")
+	m := &Manager{Dir: dir, Runner: f}
+	if m.Installed() || m.Mode() != ModeNone {
+		t.Fatal("installed before install")
 	}
-	// Reinstalling replaces the files.
-	if err := m.Install(context.Background(), "/opt/devc", nil); err != nil {
+	ctx := context.Background()
+
+	// --timer-only.
+	if err := m.InstallTimer(ctx, "/usr/local/bin/devc", []string{"PATH=/usr/bin"}); err != nil {
 		t.Fatal(err)
 	}
-	if svc, _ := os.ReadFile(filepath.Join(dir, ServiceFile)); !strings.Contains(string(svc), `"/opt/devc"`) {
-		t.Errorf("reinstall:\n%s", svc)
+	if m.Mode() != ModeTimer {
+		t.Fatalf("mode %q after InstallTimer", m.Mode())
+	}
+	svc, _ := os.ReadFile(filepath.Join(dir, ServiceFile))
+	if !strings.Contains(string(svc), `ExecStart=-"/usr/local/bin/devc" bank --all --quiet`) {
+		t.Errorf("service file:\n%s", svc)
+	}
+	if got := calls(t, f); got != "systemctl --user daemon-reload; systemctl --user enable --now devc-bank.timer" {
+		t.Errorf("calls: %q", got)
 	}
 	f.On("systemctl", "--user", "list-timers").Stdout("NEXT LEFT LAST PASSED UNIT\n")
 	f.On("systemctl", "--user", "status").Stdout("inactive\n").Exit(3)
-	if s, err := m.Status(context.Background()); err != nil || !strings.Contains(s, "UNIT") || !strings.Contains(s, "inactive") {
-		t.Errorf("status: %q %v", s, err)
+	if s, err := m.Status(ctx); err != nil || !strings.Contains(s, "UNIT") || !strings.Contains(s, "inactive") {
+		t.Errorf("timer status: %q %v", s, err)
 	}
-	if err := m.Uninstall(context.Background()); err != nil {
+
+	// The daemon replaces the timer.
+	f.Reset()
+	if err := m.Install(ctx, "/opt/devc", nil); err != nil {
+		t.Fatal(err)
+	}
+	if m.Mode() != ModeDaemon {
+		t.Fatalf("mode %q after Install", m.Mode())
+	}
+	if _, err := os.Stat(filepath.Join(dir, TimerFile)); err == nil {
+		t.Error("the timer is still there")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ServiceFile)); err == nil {
+		t.Error("the timer's service is still there")
+	}
+	d, _ := os.ReadFile(filepath.Join(dir, DaemonFile))
+	if !strings.Contains(string(d), `ExecStart="/opt/devc" daemon`) {
+		t.Errorf("daemon unit:\n%s", d)
+	}
+	if got := calls(t, f); got != "systemctl --user disable --now devc-bank.timer; systemctl --user daemon-reload; systemctl --user enable devc.service; systemctl --user restart devc.service" {
+		t.Errorf("calls: %q", got)
+	}
+	if s, err := m.Status(ctx); err != nil || !strings.Contains(s, "inactive") {
+		t.Errorf("daemon status: %q %v", s, err)
+	}
+	// Reinstalling replaces the unit and restarts the daemon.
+	if err := m.Install(ctx, "/opt/devc2", nil); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := os.ReadFile(filepath.Join(dir, DaemonFile)); !strings.Contains(string(d), `"/opt/devc2"`) {
+		t.Errorf("reinstall:\n%s", d)
+	}
+
+	// The timer replaces the daemon.
+	f.Reset()
+	if err := m.InstallTimer(ctx, "/opt/devc", nil); err != nil {
+		t.Fatal(err)
+	}
+	if m.Mode() != ModeTimer || !f.Called("systemctl", "--user", "disable", "--now", DaemonFile) {
+		t.Errorf("mode %q, calls %q", m.Mode(), calls(t, f))
+	}
+
+	if err := m.Uninstall(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if m.Installed() {
 		t.Error("installed after uninstall")
 	}
-	if _, err := os.Stat(filepath.Join(dir, TimerFile)); err == nil {
-		t.Error("timer file left behind")
+	for _, file := range []string{TimerFile, ServiceFile, DaemonFile} {
+		if _, err := os.Stat(filepath.Join(dir, file)); err == nil {
+			t.Errorf("%s left behind", file)
+		}
 	}
 	if !f.Called("systemctl", "--user", "disable", "--now", TimerFile) {
 		t.Error("the timer was not disabled")
 	}
 	// Uninstalling twice is fine; a failing systemctl does not matter then.
 	f.On("systemctl", "--user", "disable").Exit(1)
-	if err := m.Uninstall(context.Background()); err != nil {
+	if err := m.Uninstall(ctx); err != nil {
 		t.Errorf("second uninstall: %v", err)
 	}
 }

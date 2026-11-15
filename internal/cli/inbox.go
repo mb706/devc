@@ -16,6 +16,7 @@ import (
 	"github.com/mb706/devc/internal/boxside"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/netpolicy"
+	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/tmux"
 )
 
@@ -59,6 +60,16 @@ func newBoxCmd(a *app) *cobra.Command {
 			}
 			o := boxside.DefaultInitOptions(a.stderr, mounts)
 			o.CheckNetwork = boxside.NetworkCheck(info, nil, boxside.BindingFile, netpolicy.ProcFS{})
+			// The box channel (work order C08) starts once the box is
+			// ready; it logs to /run/devc/agent.log and never ends init.
+			o.Agent = func(ctx context.Context) {
+				log := boxside.OpenAgentLog(boxside.RunDir)
+				env := a.sessionEnv()
+				env.Stdout = io.Discard
+				boxside.RunAgent(ctx, boxside.DefaultAgentOptions(log, boxside.AgentHello, func() ([]boxside.Live, error) {
+					return boxside.LiveSessions(env)
+				}))
+			}
 			return boxside.Init(ctx, o)
 		},
 	}
@@ -250,7 +261,32 @@ func newBoxCmd(a *app) *cobra.Command {
 		},
 	}
 
-	subs := []*cobra.Command{initCmd, fixIdentity, shell, selftest, probe, launch, hook,
+	agentStatus := &cobra.Command{
+		Use:   "agent-status",
+		Short: "Say whether the host's daemon is connected to this box",
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := requireBox(a.getenv); err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+			defer cancel()
+			var r proto.PingReply
+			err := boxside.AgentCall(ctx, proto.MethodHostPing, nil, &r)
+			switch {
+			case err == nil:
+				fmt.Fprintf(a.stdout, "connected: the host's daemon is devc %s\n", proto.Printable(proto.Truncate(r.Version, 64)))
+				return nil
+			case proto.IsCode(err, proto.CodeHostUnavailable):
+				fmt.Fprintln(a.stdout, "not connected: no host daemon is connected to this box")
+			default:
+				fmt.Fprintf(a.stdout, "not connected: the box agent does not answer (%s); restart the box with a current devc\n", proto.Printable(err.Error()))
+			}
+			return exitCode(1)
+		},
+	}
+
+	subs := []*cobra.Command{initCmd, fixIdentity, shell, selftest, probe, launch, hook, agentStatus,
 		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker, dataWorker, newBoxDialCmd(a), newBoxCanaryCmd(a), newStatxWorkerCmd(a)}
 	return group("box", "Commands that run inside a box (internal)", true, append(subs, newBoxGitCmds(a)...)...)
 }

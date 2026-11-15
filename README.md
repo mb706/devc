@@ -82,8 +82,8 @@ runs them itself.
    `devc attach demo/myapp` returns to them.
 
 7. **Get the work out.** `devc bank demo/myapp` copies the box's commits into
-   the relay (it also happens at `devc down` and, after `devc service install`,
-   every five minutes); `devc log` and `devc diff` show them; `devc push`
+   the relay (it also happens at `devc down` and, while the daemon runs (`devc
+   service install`), every five minutes); `devc log` and `devc diff` show them; `devc push`
    pushes a branch to the upstream after showing what it would send.
 
 ## Documents

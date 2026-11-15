@@ -136,6 +136,10 @@ type BoxState struct {
 	Running   bool
 	Ready     bool
 	Container string
+	// Live, when set, asks the box for its live sessions (the daemon uses
+	// the box channel); otherwise `devc box session ps` runs through the
+	// engine.
+	Live func(context.Context) ([]Live, error)
 }
 
 // RefreshResult is what Refresh did and saw.
@@ -204,7 +208,12 @@ func (s *Store) refresh(ctx context.Context, ref names.ProjectRef, observe Obser
 		if err != nil {
 			return res, err
 		}
-		live, err := QueryLive(ctx, eng, st.Container)
+		var live []Live
+		if st.Live != nil {
+			live, err = st.Live(ctx)
+		} else {
+			live, err = QueryLive(ctx, eng, st.Container)
+		}
 		if err != nil {
 			res.Warning = err.Error()
 			return res, nil

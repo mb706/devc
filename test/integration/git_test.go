@@ -661,7 +661,8 @@ func TestBankAll(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	jfile := filepath.Join(e.StateDir, "durable", "realms", itest.RealmA, "journal", "hello", sid+".jsonl")
-	if _, err := os.Stat(jfile); err == nil {
+	// (A running daemon ingests by itself: then there is nothing to show.)
+	if _, err := os.Stat(jfile); err == nil && !itest.DaemonMode() {
 		t.Fatal("the journal exists before anything ingested")
 	}
 	e.MustRun("bank", "--all", "--quiet")

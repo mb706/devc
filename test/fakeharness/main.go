@@ -5,6 +5,14 @@
 //	fakeagent --version              print a version
 //	fakeagent [--no-end] -p '<command>'  run one command and exit
 //	fakeagent [--no-end]             print a prompt, read commands until "exit"
+//	fakeagent --hostile-helper <mode> <socket> <seconds>
+//	                                 stand in for a misbehaving box agent
+//
+// The hostile helper (work order C08, integration test 5) listens on the
+// socket for that many seconds and answers the host's daemon with garbage
+// instead of yamux (mode garbage), or with yamux and then a box.hello
+// answer above the 1 MiB line limit (oversized) or malformed JSON
+// (malformed).
 //
 // Commands: env [NAME…], say <text>, write <path> <text>, sh <command>,
 // sleep <seconds>, touch-state <relative path>, ask <question> (waits for
@@ -69,6 +77,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	case len(args) == 0:
 		return interactive(stdin, stdout, stderr)
+	case len(args) == 4 && args[0] == "--hostile-helper":
+		secs, err := strconv.Atoi(args[3])
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		if err := hostileHelper(args[1], args[2], time.Duration(secs)*time.Second); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
 	}
 	fmt.Fprintf(stderr, "usage: fakeagent [--no-end] [--version | -p <command>]\n")
 	return 2

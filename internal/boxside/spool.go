@@ -58,7 +58,15 @@ func AppendEvents(spoolDir, session string, now time.Time, ps []Payload) error {
 		f.Close()
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// The box's own spool: tell the host (work order C08). Other spool
+	// directories are tests.
+	if filepath.Clean(spoolDir) == SpoolDir {
+		hintHost(session)
+	}
+	return nil
 }
 
 func eventLine(session string, now time.Time, p Payload) ([]byte, error) {

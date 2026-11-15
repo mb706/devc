@@ -69,6 +69,30 @@ func (a *app) boxEnv() (*boxEnv, error) {
 	return e, nil
 }
 
+// daemonCounts counts the live sessions of every project through the
+// daemon; ok is false when no daemon serves this configuration.
+func (a *app) daemonCounts(ctx context.Context, e *boxEnv) (map[string]sessionCount, bool) {
+	cl, err := a.daemonClient(ctx, e.cfg, nil)
+	if err != nil {
+		return nil, false
+	}
+	defer cl.Close()
+	sums, err := a.sessionsFromDaemon(ctx, cl, allRefs(e.cfg), a.now().Add(-psWindow), true)
+	if err != nil {
+		return nil, false
+	}
+	counts := map[string]sessionCount{}
+	for i := range sums {
+		c := counts[sums[i].Ref]
+		c.Live++
+		if sums[i].NeedsYou() {
+			c.NeedsYou++
+		}
+		counts[sums[i].Ref] = c
+	}
+	return counts, true
+}
+
 // lsRow is one line of `devc ls`: the box and its sessions.
 type lsRow struct {
 	box.Row
@@ -228,12 +252,18 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 				return err
 			}
 			// Sessions of every project (work order C04 section 5); the
-			// spools are ingested and the journals reconciled first.
+			// spools are ingested and the journals reconciled first, by
+			// the daemon when one runs (C08).
+			counts, fromDaemon := a.daemonCounts(ctx, e)
 			out := make([]lsRow, 0, len(rows))
 			for _, r := range rows {
 				lr := lsRow{Row: r}
 				if ref, err := names.Parse(r.Ref); err == nil && r.State != "conflict" {
-					lr.Sessions = a.countSessions(ctx, e, ref)
+					if fromDaemon {
+						lr.Sessions = counts[r.Ref]
+					} else {
+						lr.Sessions = a.countSessions(ctx, e, ref)
+					}
 				}
 				out = append(out, lr)
 			}

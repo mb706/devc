@@ -150,6 +150,41 @@ harness runs with its permission prompts switched off: the box is the
 sandbox. Each harness also gets a generated description of the box (paths,
 network level, git and data rules) in its instructions.
 
+### The daemon
+
+`devc daemon` is an optional background process, one per machine (or per
+runtime directory); `devc service install` runs it as a systemd user service
+(`devc service status`, `devc service uninstall`). Without it everything
+works as described above. With it:
+
+- each running box has a channel to the daemon: the box listens on
+  `/run/devc/agent.sock`, the daemon connects to it, checks that the other end
+  really is a process of that box, and the hooks tell it at once when they have
+  written an event;
+- session events reach the journal within moments instead of at the next
+  `devc ps`; sessions whose box no longer runs them are marked lost every 30
+  seconds;
+- every five minutes it banks every running box and commits the context
+  repositories (what the banking timer does without a daemon);
+- `devc ps` and `devc ls` ask it instead of reading the spools themselves, and
+  `devc ps --watch` keeps the list on the screen, redrawn as events arrive;
+- `devc events <session>` prints a session's events; with `--follow` it keeps
+  printing new ones (`devc events --follow` follows every session).
+
+```sh
+devc daemon                 # run it in the foreground (--log-level debug for detail)
+devc daemon status          # is it running, and its channel to every box
+devc daemon stop
+devc service install        # run it as a systemd user service
+devc service install --timer-only   # the banking timer instead, without a daemon
+```
+
+In a box, `devc box agent-status` says whether the daemon is connected. A box
+started before the daemon existed has no agent; restart it with `devc down` and
+`devc up`. The daemon serves its API on `daemon.sock` in the runtime directory
+(mode 0600); only your own user can talk to it. Setting `DEVC_NO_DAEMON=1`
+makes a command ignore a running daemon.
+
 Harness installs: `devc harness install claude` (or `codex`) installs the
 vendor's release into the toolbox in a throwaway container; `devc update`
 installs newer versions; `devc harness ls` shows what is installed; `devc
@@ -172,7 +207,7 @@ devc pull demo/app      # fetch the upstream into the relay and hand it to the b
 devc push demo/app      # push the branch checked out in main, after showing what it sends
 devc wt new fix-login demo/app      # a task worktree with branch <prefix>fix-login
 devc wt ls demo/app / devc wt rm fix-login demo/app
-devc ingest --all       # copy session events into the durable journal (the timer does this)
+devc ingest --all       # copy session events into the durable journal (the daemon or the timer does this)
 ```
 
 **Banking** is how commits leave a box. `devc bank` takes a snapshot of
@@ -187,8 +222,10 @@ branch is not taken back by the next bank: the relay remembers the box's tip
 of every branch (`refs/devc/boxtip/<branch>`) and follows the box only when
 the box moves the branch. Banking happens on `devc bank`, before `devc down`,
 `devc rm`, `devc rebuild` and `devc up --recreate`, and every five minutes
-once you run `devc service install` (a systemd user timer, which also copies
-session events into the durable journal with `devc ingest --all`).
+while the daemon runs (`devc service install`; see "The daemon" above). On a
+machine without the daemon, `devc service install --timer-only` installs a
+systemd user timer that banks every five minutes and also copies session
+events into the durable journal with `devc ingest --all`.
 
 Banking is refused while the project's configuration has problems (see `devc
 config check`); so are `pull`, `push` and the worktree commands. `down` and
@@ -393,7 +430,8 @@ holds that project's notes and `/ctx/memory` the memory of its memory group
 (`memory_group` in `project.toml`, default the project name); Claude Code is
 pointed at it for its automatic memory. The notes are not part of the
 project's repository. devc commits the context repository when a box goes
-down, on the banking timer, and on `devc context commit [realm]`; `devc
+down, every five minutes while the daemon (or the banking timer) runs, and on
+`devc context commit [realm]`; `devc
 context log` and `devc context diff` show it. The commit is made in a
 throwaway container; symbolic links, special files and anything named like
 git metadata are left out.
@@ -442,7 +480,9 @@ everything that matters outside it, but it is not a virtual machine.
   with hooks and the box's configuration ignored; spool files and other
   box-written files are read without following links and parsed strictly;
   data operations and context commits run in throwaway containers that see
-  only the tree they work on.
+  only the tree they work on. The daemon's channel is opened from the host to
+  a socket in the box's runtime directory without following links, and only
+  to a process of that box; what arrives on it is bounded and checked.
 - Banked commits, sealed data, session journals and notes commits are kept
   where the box cannot change them.
 - At level `internet`, the box cannot reach the host, the LAN or other private

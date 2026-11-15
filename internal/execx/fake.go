@@ -160,6 +160,13 @@ func (f *Fake) Stdins() []string {
 	return slices.Clone(f.stdins)
 }
 
+// Reset forgets the recorded calls (the scripted responses stay).
+func (f *Fake) Reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls, f.stdins = nil, nil
+}
+
 // Called reports whether a command with this name and argument prefix ran.
 func (f *Fake) Called(name string, prefix ...string) bool {
 	probe := &Response{name: name, prefix: prefix}

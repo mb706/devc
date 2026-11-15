@@ -194,101 +194,109 @@ func journalSessions(p *paths.Paths, ref names.ProjectRef) ([]string, error) {
 	return out, nil
 }
 
-// Summary is a session as derived from its journal.
-type Summary struct {
-	Session string `json:"session"`
-	Ref     string `json:"ref"`
-	Realm   string `json:"realm"`
-	Project string `json:"project"`
-	Harness string `json:"harness"`
-	// Worktree is "" when the session's worktree is unknown.
-	Worktree string `json:"worktree"`
-	Cwd      string `json:"cwd"`
-	PID      int    `json:"pid,omitempty"`
-	// State is idle, working, blocked, done or error from the last state
-	// event, "ended" after session.end, "unknown" before any state event.
-	State     string          `json:"state"`
-	Kind      string          `json:"kind,omitempty"`
-	Live      bool            `json:"live"`
-	Started   time.Time       `json:"started"`
-	Ended     *time.Time      `json:"ended,omitempty"`
-	EndReason string          `json:"end_reason,omitempty"`
-	LastEvent time.Time       `json:"last_event"`
-	Question  *proto.Question `json:"question,omitempty"`
-	Message   string          `json:"message,omitempty"`
-	// HarnessSession and Transcript are the harness's own identity.
-	HarnessSession string `json:"harness_session,omitempty"`
-	Transcript     string `json:"transcript,omitempty"`
-	Events         int    `json:"events"`
-	LastSeq        int64  `json:"last_seq"`
-	// Window is the session's tmux window when the box reported it.
-	Window string `json:"window,omitempty"`
-}
-
-// NeedsYou reports whether a live session waits for the user.
-func (s *Summary) NeedsYou() bool {
-	return s.Live && (s.State == proto.StateBlocked || s.State == proto.StateDone)
-}
+// Summary is a session as derived from its journal (proto.SessionView,
+// whose daemon-only fields stay empty here).
+type Summary = proto.SessionView
 
 // Derive computes a session's summary from its journal events in order.
 // Times are the host's ingestion times (at), which a box cannot choose.
 func Derive(ref names.ProjectRef, session string, evs []proto.Event) Summary {
-	s := Summary{Session: session, Ref: ref.String(), Realm: ref.Realm, Project: ref.Project, State: "unknown", Live: true}
+	s := proto.NewSessionView(ref.Realm, ref.Project, session)
 	for i := range evs {
-		e := &evs[i]
-		at := e.AtTime()
-		if s.Events == 0 {
-			s.Started = at
-		}
-		s.Events++
-		s.LastEvent = at
-		if e.Seq > s.LastSeq {
-			s.LastSeq = e.Seq
-		}
-		if !s.Live {
-			continue // nothing after the end changes the session
-		}
-		switch e.Type {
-		case proto.TypeSessionStart:
-			var d proto.SessionStart
-			if json.Unmarshal(e.Data, &d) == nil {
-				s.Harness, s.Worktree, s.Cwd, s.PID = d.Harness, d.Worktree, d.Cwd, d.PID
-				s.Started = at
-			}
-		case proto.TypeSessionEnd:
-			var d proto.SessionEnd
-			_ = json.Unmarshal(e.Data, &d)
-			t := at
-			s.Ended, s.EndReason, s.Live, s.State, s.Kind, s.Question = &t, d.Reason, false, "ended", "", nil
-		case proto.TypeState:
-			var d proto.State
-			if json.Unmarshal(e.Data, &d) == nil {
-				s.State, s.Kind = d.State, d.Kind
-				if d.State != proto.StateBlocked {
-					s.Question = nil
-				}
-			}
-		case proto.TypeQuestion:
-			var d proto.Question
-			if json.Unmarshal(e.Data, &d) == nil {
-				s.Question = &d
-			}
-		case proto.TypePrompt:
-			s.Question = nil
-		case proto.TypeMessage:
-			var d proto.Message
-			if json.Unmarshal(e.Data, &d) == nil {
-				s.Message = d.Text
-			}
-		case proto.TypeHarness:
-			var d proto.Harness
-			if json.Unmarshal(e.Data, &d) == nil {
-				s.HarnessSession, s.Transcript = d.ID, d.Transcript
-			}
-		}
+		s.Apply(&evs[i])
 	}
 	return s
 }
+
+// ReadEvents returns the well-formed events of a session's journal in
+// order (none when it does not exist).
+func ReadEvents(p *paths.Paths, ref names.ProjectRef, session string) ([]proto.Event, error) {
+	var evs []proto.Event
+	err := readJournal(p.JournalFile(ref, session), func(e *proto.Event) { evs = append(evs, *e) })
+	return evs, err
+}
+
+// TailJournal reads the complete lines of a journal file from offset on,
+// at most max bytes, and returns the well-formed events among them and the
+// offset after the last complete line. Malformed lines (a torn write) are
+// skipped, as readJournal does; an unterminated last line is left for the
+// next call. A missing file yields nothing.
+func TailJournal(file string, offset, max int64) ([]proto.Event, int64, error) {
+	f, err := os.OpenFile(file, os.O_RDONLY|noFollow, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, offset, nil
+	}
+	if err != nil {
+		return nil, offset, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, offset, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, offset, fmt.Errorf("%s is not a regular file", file)
+	}
+	if fi.Size() < offset {
+		return nil, offset, fmt.Errorf("%s is shorter than the %d bytes already read", file, offset)
+	}
+	n := fi.Size() - offset
+	if n > max {
+		n = max
+	}
+	if n <= 0 {
+		return nil, offset, nil
+	}
+	buf := make([]byte, n)
+	got, err := f.ReadAt(buf, offset)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, offset, err
+	}
+	buf = buf[:got]
+	var evs []proto.Event
+	consumed := 0
+	for consumed < len(buf) {
+		nl := bytes.IndexByte(buf[consumed:], '\n')
+		if nl < 0 {
+			// An unterminated line: wait, unless it alone fills the read,
+			// in which case it can never be valid and is skipped.
+			if consumed == 0 && int64(len(buf)) >= max {
+				consumed = len(buf)
+			}
+			break
+		}
+		line := buf[consumed : consumed+nl]
+		consumed += nl + 1
+		var e proto.Event
+		if len(line) > maxJournalLine || json.Unmarshal(line, &e) != nil || e.Seq <= 0 || !proto.Known(e.Type) {
+			continue
+		}
+		evs = append(evs, e)
+	}
+	return evs, offset + int64(consumed), nil
+}
+
+// FindJournal returns the project among refs whose journals hold session.
+func FindJournal(p *paths.Paths, refs []names.ProjectRef, session string) (names.ProjectRef, bool) {
+	if !names.ValidSessionID(session) {
+		return names.ProjectRef{}, false
+	}
+	for _, ref := range refs {
+		if fi, err := os.Lstat(p.JournalFile(ref, session)); err == nil && fi.Mode().IsRegular() {
+			return ref, true
+		}
+	}
+	return names.ProjectRef{}, false
+}
+
+// JournalSessions lists the session IDs that have a journal in a project.
+func JournalSessions(p *paths.Paths, ref names.ProjectRef) ([]string, error) {
+	return journalSessions(p, ref)
+}
+
+// EndedBefore reports cheaply whether a journal belongs to a session that
+// ended before cutoff (see endedLongAgo).
+func EndedBefore(file string, cutoff time.Time) bool { return endedLongAgo(file, cutoff) }
 
 // ReadSummary derives the summary of one session from its journal.
 func ReadSummary(p *paths.Paths, ref names.ProjectRef, session string) (Summary, error) {

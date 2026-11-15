@@ -1,8 +1,11 @@
-// Package service installs the systemd user timer that ingests session
-// events, banks every running box and commits the realms' context
-// repositories every five minutes (work order C05 section 4, finding B3):
+// Package service installs devc's systemd user units. By default that is
+// devc.service, which runs the machine daemon (work order C08): it ingests
+// session events continuously and banks and commits every five minutes
+// itself. On machines that should not run the daemon, the banking timer of
+// work order C05 (finding B3) does the periodic part instead:
 // devc-bank.service runs `devc ingest --all --quiet`, `devc bank --all
-// --quiet` and `devc context commit --all`; devc-bank.timer starts it.
+// --quiet` and `devc context commit --all`; devc-bank.timer starts it. The
+// two modes exclude each other: installing one removes the other.
 //
 // Security rules: unit files are written only below the user's systemd
 // directory, by rename; every value placed in a unit is checked for
@@ -29,6 +32,15 @@ const (
 	Name        = "devc-bank"
 	ServiceFile = Name + ".service"
 	TimerFile   = Name + ".timer"
+	// DaemonFile runs `devc daemon`.
+	DaemonFile = "devc.service"
+)
+
+// Modes of an installation.
+const (
+	ModeNone   = ""
+	ModeDaemon = "daemon"
+	ModeTimer  = "timer"
 )
 
 // Interval is how often the timer fires.
@@ -51,9 +63,9 @@ func quote(s string, command bool) (string, error) {
 	return `"` + q + `"`, nil
 }
 
-// ServiceText renders devc-bank.service: exe is the devc binary, env the
-// variables it needs (PATH, overridden directories).
-func ServiceText(exe string, env []string) (string, error) {
+// unitHead writes the header and [Service] lines shared by both service
+// units and returns the quoted executable.
+func unitHead(b *strings.Builder, exe, description, typ string, env []string) (string, error) {
 	if !filepath.IsAbs(exe) {
 		return "", fmt.Errorf("the devc executable %q is not an absolute path", exe)
 	}
@@ -61,10 +73,9 @@ func ServiceText(exe string, env []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var b strings.Builder
 	b.WriteString("# Written by 'devc service install'; remove it with 'devc service uninstall'.\n")
-	b.WriteString("[Unit]\nDescription=devc: ingest session events, bank every running box and commit the context repositories\n\n")
-	b.WriteString("[Service]\nType=oneshot\n")
+	fmt.Fprintf(b, "[Unit]\nDescription=%s\n\n", description)
+	fmt.Fprintf(b, "[Service]\nType=%s\n", typ)
 	for _, kv := range env {
 		k, _, ok := strings.Cut(kv, "=")
 		if !ok || k == "" || strings.ContainsAny(k, " \t\"\\") {
@@ -74,7 +85,31 @@ func ServiceText(exe string, env []string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		fmt.Fprintf(&b, "Environment=%s\n", q)
+		fmt.Fprintf(b, "Environment=%s\n", q)
+	}
+	return qexe, nil
+}
+
+// DaemonText renders devc.service, which runs the daemon: exe is the devc
+// binary, env the variables it needs (PATH, overridden directories).
+func DaemonText(exe string, env []string) (string, error) {
+	var b strings.Builder
+	qexe, err := unitHead(&b, exe, "devc machine daemon: box channels, session events, banking", "simple", env)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(&b, "ExecStart=%s daemon\n", qexe)
+	b.WriteString("Restart=on-failure\nRestartSec=5s\n\n[Install]\nWantedBy=default.target\n")
+	return b.String(), nil
+}
+
+// ServiceText renders devc-bank.service: exe is the devc binary, env the
+// variables it needs (PATH, overridden directories).
+func ServiceText(exe string, env []string) (string, error) {
+	var b strings.Builder
+	qexe, err := unitHead(&b, exe, "devc: ingest session events, bank every running box and commit the context repositories", "oneshot", env)
+	if err != nil {
+		return "", err
 	}
 	// "-": a failure must not keep the next steps from running. Session
 	// events are ingested on their own first, so a bank that fails or
@@ -143,14 +178,47 @@ func writeAtomic(path string, data []byte) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// Install writes both units, reloads the user manager and enables and
-// starts the timer.
+// Install installs the daemon unit, removes the timer units if present,
+// reloads the user manager and enables and starts the daemon.
 func (m *Manager) Install(ctx context.Context, exe string, env []string) error {
+	svc, err := DaemonText(exe, env)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(m.Dir, 0o755); err != nil {
+		return err
+	}
+	if err := m.removeTimer(ctx); err != nil {
+		return err
+	}
+	if err := writeAtomic(filepath.Join(m.Dir, DaemonFile), []byte(svc)); err != nil {
+		return fmt.Errorf("writing %s: %w", DaemonFile, err)
+	}
+	if _, err := m.systemctl(ctx, "daemon-reload"); err != nil {
+		return fmt.Errorf("reloading the systemd user manager: %w", err)
+	}
+	// restart (not just start) so that a reinstall runs the new binary.
+	if _, err := m.systemctl(ctx, "enable", DaemonFile); err != nil {
+		return fmt.Errorf("enabling %s: %w", DaemonFile, err)
+	}
+	if _, err := m.systemctl(ctx, "restart", DaemonFile); err != nil {
+		return fmt.Errorf("starting %s: %w", DaemonFile, err)
+	}
+	return nil
+}
+
+// InstallTimer writes the timer units (for machines without the daemon),
+// removes the daemon unit if present, reloads the user manager and enables
+// and starts the timer.
+func (m *Manager) InstallTimer(ctx context.Context, exe string, env []string) error {
 	svc, err := ServiceText(exe, env)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(m.Dir, 0o755); err != nil {
+		return err
+	}
+	if err := m.removeDaemon(ctx); err != nil {
 		return err
 	}
 	if err := writeAtomic(filepath.Join(m.Dir, ServiceFile), []byte(svc)); err != nil {
@@ -168,41 +236,85 @@ func (m *Manager) Install(ctx context.Context, exe string, env []string) error {
 	return nil
 }
 
-// Uninstall stops and disables the timer and removes both units. Units
-// that are not installed are not an error.
-func (m *Manager) Uninstall(ctx context.Context) error {
+// removeTimer stops, disables and removes the timer units if installed.
+func (m *Manager) removeTimer(ctx context.Context) error {
+	if !exists(filepath.Join(m.Dir, TimerFile)) && !exists(filepath.Join(m.Dir, ServiceFile)) {
+		return nil
+	}
 	// disable fails when the unit is unknown; the files decide.
-	_, disableErr := m.systemctl(ctx, "disable", "--now", TimerFile)
-	removed := false
-	for _, f := range []string{TimerFile, ServiceFile} {
-		err := os.Remove(filepath.Join(m.Dir, f))
-		switch {
-		case err == nil:
-			removed = true
-		case !errors.Is(err, fs.ErrNotExist):
+	_, _ = m.systemctl(ctx, "disable", "--now", TimerFile)
+	return removeFiles(m.Dir, TimerFile, ServiceFile)
+}
+
+// removeDaemon stops, disables and removes the daemon unit if installed.
+func (m *Manager) removeDaemon(ctx context.Context) error {
+	if !exists(filepath.Join(m.Dir, DaemonFile)) {
+		return nil
+	}
+	_, _ = m.systemctl(ctx, "disable", "--now", DaemonFile)
+	return removeFiles(m.Dir, DaemonFile)
+}
+
+func exists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
+}
+
+func removeFiles(dir string, files ...string) error {
+	for _, f := range files {
+		if err := os.Remove(filepath.Join(dir, f)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
-	if !removed {
-		return nil
+	return nil
+}
+
+// Uninstall stops and disables whatever is installed and removes the unit
+// files. Units that are not installed are not an error.
+func (m *Manager) Uninstall(ctx context.Context) error {
+	mode := m.Mode()
+	if mode == ModeNone {
+		// Leftovers of a partial installation are removed quietly.
+		return removeFiles(m.Dir, DaemonFile, TimerFile, ServiceFile)
+	}
+	if err := m.removeTimer(ctx); err != nil {
+		return err
+	}
+	if err := m.removeDaemon(ctx); err != nil {
+		return err
 	}
 	if _, err := m.systemctl(ctx, "daemon-reload"); err != nil {
 		return fmt.Errorf("reloading the systemd user manager: %w", err)
 	}
-	_ = disableErr
 	return nil
 }
 
-// Installed reports whether the unit files exist.
-func (m *Manager) Installed() bool {
-	_, err1 := os.Stat(filepath.Join(m.Dir, ServiceFile))
-	_, err2 := os.Stat(filepath.Join(m.Dir, TimerFile))
-	return err1 == nil && err2 == nil
+// Mode reports what is installed: the daemon, the timer, or nothing.
+func (m *Manager) Mode() string {
+	switch {
+	case exists(filepath.Join(m.Dir, DaemonFile)):
+		return ModeDaemon
+	case exists(filepath.Join(m.Dir, ServiceFile)) && exists(filepath.Join(m.Dir, TimerFile)):
+		return ModeTimer
+	}
+	return ModeNone
 }
 
-// Status returns systemd's view of the timer and the last run.
+// Installed reports whether either mode is installed.
+func (m *Manager) Installed() bool { return m.Mode() != ModeNone }
+
+// Status returns systemd's view of what is installed.
 func (m *Manager) Status(ctx context.Context) (string, error) {
 	var b strings.Builder
+	if m.Mode() == ModeDaemon {
+		// status exits 3 for an inactive service; the output says so.
+		res, err := m.systemctl(ctx, "status", "--no-pager", "--lines=5", DaemonFile)
+		b.Write(res.Stdout)
+		if err != nil && len(res.Stdout) == 0 {
+			return b.String(), err
+		}
+		return b.String(), nil
+	}
 	res, err := m.systemctl(ctx, "list-timers", "--all", "--no-pager", TimerFile)
 	b.Write(res.Stdout)
 	if err != nil && len(res.Stdout) == 0 {

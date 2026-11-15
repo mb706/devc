@@ -136,6 +136,9 @@ type IngestReport struct {
 	Skipped int // spool entries that are not session files
 	Removed int // spool files removed after their session ended
 	Notes   int // host notes written (truncated spool files)
+	// More is set when a file held more than one run may take: another
+	// run should follow at once.
+	More bool
 }
 
 func (r *IngestReport) add(o IngestReport) {
@@ -145,6 +148,7 @@ func (r *IngestReport) add(o IngestReport) {
 	r.Skipped += o.Skipped
 	r.Removed += o.Removed
 	r.Notes += o.Notes
+	r.More = r.More || o.More
 }
 
 // spoolName returns the session of a spool file name, or "".
@@ -320,6 +324,9 @@ func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid st
 			break
 		}
 	}
+	if taken >= MaxBytesPerFile || events >= MaxEventsPerFile {
+		rep.More = true
+	}
 	if err := appendJournal(s.Paths, ref, sid, batch); err != nil {
 		rep.Events, rep.Notes = 0, 0
 		return start, rep, false, err
@@ -335,6 +342,42 @@ func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid st
 		}
 	}
 	return pos, rep, false, nil
+}
+
+// SpoolSnapshot returns the size of every session file in a box's spool,
+// read like Ingest reads them (beneath the runtime directory, no symlinks,
+// regular files only). The daemon compares snapshots to skip ingestion runs
+// when nothing changed. A missing spool yields an empty map.
+func (s *Store) SpoolSnapshot(ref names.ProjectRef) (map[string]int64, error) {
+	out := map[string]int64{}
+	rt, err := s.Paths.BoxRuntimeDir(names.BoxID(ref))
+	if err != nil {
+		return nil, err
+	}
+	root, err := safefs.OpenRoot(rt)
+	if errors.Is(err, fs.ErrNotExist) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	ents, err := root.List("spool", MaxSpoolFiles)
+	if errors.Is(err, fs.ErrNotExist) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, ent := range ents {
+		if spoolName(ent.Name) == "" || !ent.IsRegular() {
+			continue
+		}
+		if size, err := root.Size("spool/" + ent.Name); err == nil {
+			out[ent.Name] = size
+		}
+	}
+	return out, nil
 }
 
 // AppendHost appends events the host itself writes (notes, reconciliation)

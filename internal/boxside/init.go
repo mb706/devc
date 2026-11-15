@@ -31,6 +31,10 @@ type InitOptions struct {
 	// error, which stops the box.
 	CheckNetwork func(context.Context) error
 	Log          io.Writer
+	// Agent, when set, runs after the readiness marker is written, in its
+	// own goroutine, until ctx ends (the box channel, work order C08). A
+	// panic in it is logged and never ends init.
+	Agent func(context.Context)
 }
 
 // DefaultInitOptions are the paths used in a box. mountPoints comes from
@@ -78,6 +82,16 @@ func Init(ctx context.Context, o InitOptions) error {
 	}
 	if err := writeReady(filepath.Join(o.Run, ReadyFile)); err != nil {
 		return err
+	}
+	if o.Agent != nil {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logf("agent: panic: %v", r)
+				}
+			}()
+			o.Agent(ctx)
+		}()
 	}
 	<-ctx.Done()
 	return nil

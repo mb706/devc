@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -203,6 +204,20 @@ func (a *app) collect(ctx context.Context, e *boxEnv, refs []names.ProjectRef, s
 	return out, nil
 }
 
+// collectAny asks the daemon when one runs for this configuration and
+// falls back to collect silently otherwise (work order C08 section 5).
+func (a *app) collectAny(ctx context.Context, e *boxEnv, refs []names.ProjectRef, since time.Time) ([]session.Summary, error) {
+	if cl, err := a.daemonClient(ctx, e.cfg, nil); err == nil {
+		sums, err := a.sessionsFromDaemon(ctx, cl, refs, since, false)
+		cl.Close()
+		if err == nil {
+			return sums, nil
+		}
+		slog.Debug("asking the daemon failed; reading the journals", "err", err)
+	}
+	return a.collect(ctx, e, refs, since)
+}
+
 func allRefs(c *config.Config) []names.ProjectRef {
 	var refs []names.ProjectRef
 	for _, p := range c.Projects("") {
@@ -352,15 +367,19 @@ func (a *app) findSession(e *boxEnv, ref *names.ProjectRef, prefix string) (name
 }
 
 func newSessionCmds(a *app) []*cobra.Command {
-	var psAll, psJSON bool
+	var psAll, psJSON, psWatch bool
 	ps := &cobra.Command{
-		Use:   "ps [<realm>/<project>] [--all] [--json]",
+		Use:   "ps [<realm>/<project>] [--all] [--json] [--watch]",
 		Short: "List sessions and what they are doing",
 		Long: "List the sessions of one project or of all projects: live sessions and those that ended in the last " +
 			"24 hours (--all: every session). Each box's spool is ingested first, and sessions its box no longer runs " +
-			"are marked ended (lost).",
+			"are marked ended (lost); when the daemon runs, it does this and answers. --watch keeps the list on the " +
+			"screen and redraws it as events arrive (needs the daemon).",
 		Args: maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if psWatch && psJSON {
+				return usageErrorf("--watch and --json cannot be combined")
+			}
 			e, err := a.boxEnv()
 			if err != nil {
 				return err
@@ -373,13 +392,16 @@ func newSessionCmds(a *app) []*cobra.Command {
 				}
 				refs = []names.ProjectRef{ref}
 			}
+			if psWatch {
+				return a.psWatch(cmd, e, refs, psAll)
+			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
 			defer cancel()
 			since := a.now().Add(-psWindow)
 			if psAll {
 				since = time.Time{}
 			}
-			sums, err := a.collect(ctx, e, refs, since)
+			sums, err := a.collectAny(ctx, e, refs, since)
 			if err != nil {
 				return err
 			}
@@ -391,6 +413,7 @@ func newSessionCmds(a *app) []*cobra.Command {
 	}
 	ps.Flags().BoolVar(&psAll, "all", false, "include sessions that ended more than 24 hours ago")
 	ps.Flags().BoolVar(&psJSON, "json", false, "print JSON")
+	ps.Flags().BoolVar(&psWatch, "watch", false, "keep the list on the screen and redraw it on every change (needs the daemon)")
 
 	attach := &cobra.Command{
 		Use:   "attach [<realm>/<project>] [session]",
@@ -443,7 +466,7 @@ func newSessionCmds(a *app) []*cobra.Command {
 			return nil
 		},
 	}
-	return []*cobra.Command{ps, attach, stop, newIngestCmd(a), newContextCmd(a)}
+	return []*cobra.Command{ps, attach, stop, newIngestCmd(a), newContextCmd(a), newEventsCmd(a), newDaemonCmd(a)}
 }
 
 func printableTail(b []byte) string {
