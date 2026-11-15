@@ -15,6 +15,7 @@ import (
 	"github.com/mb706/devc/internal/flock"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
+	"github.com/mb706/devc/internal/secrets"
 )
 
 // maxKeyFile bounds the key files the gate reads.
@@ -26,6 +27,10 @@ type Keys struct {
 	Runner execx.Runner
 	// Keygen is the ssh-keygen executable ("ssh-keygen" when empty).
 	Keygen string
+	// AllowPersistent permits generating box keys in a runtime directory
+	// that is not memory-backed (DEVC_ALLOW_PERSISTENT_SECRETS=1, as for
+	// secret delivery).
+	AllowPersistent bool
 }
 
 func (k *Keys) keygen() string {
@@ -145,9 +150,11 @@ func HostPublicKey(p *paths.Paths) (string, error) {
 // which the caller delivers into the box's secrets directory. The public
 // key replaces the box's authorized-keys file, with restrict,pty. Every
 // start of a box gets a new key, so a copy kept from an earlier run is
-// worthless. The pair is generated on the runtime directory (a tmpfs), not
-// in the state directory, so the private key never reaches persistent
-// storage.
+// worthless. The pair is generated on the runtime directory, not in the
+// state directory, and only when that directory is memory-backed (or the
+// user accepted persistent copies), the same rule secret delivery applies,
+// checked before ssh-keygen runs (finding C1-12): the private key never
+// reaches persistent storage, not even for a moment.
 func (k *Keys) NewBoxKey(ctx context.Context, boxID string) ([]byte, error) {
 	if !names.ValidBoxID(boxID) {
 		return nil, fmt.Errorf("invalid box ID %q", boxID)
@@ -159,6 +166,11 @@ func (k *Keys) NewBoxKey(ctx context.Context, boxID string) ([]byte, error) {
 	}
 	if err := p.Ensure(rt); err != nil {
 		return nil, err
+	}
+	if !k.AllowPersistent {
+		if err := secrets.CheckMemoryFS(rt); err != nil {
+			return nil, err
+		}
 	}
 	if err := p.Ensure(p.GateKeysDir()); err != nil {
 		return nil, err

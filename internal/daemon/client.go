@@ -59,16 +59,24 @@ func (c *Client) Sessions(ctx context.Context, p proto.SessionsListParams) (prot
 		if !res.More || len(res.Sessions) == 0 {
 			return all, nil
 		}
-		p.After, p.Sync = res.Sessions[len(res.Sessions)-1].Session, false
+		last := res.Sessions[len(res.Sessions)-1]
+		p.After, p.Sync = proto.SessionKey(last.Ref, last.Session), false
 	}
 }
 
-// Events reads all events of a session with seq above from.
+// Events reads all events of a session with seq above from (the ID must
+// be unique among the daemon's sessions; EventsOf names the project).
 func (c *Client) Events(ctx context.Context, session string, from int64) (proto.EventsReadResult, error) {
+	return c.EventsOf(ctx, "", session, from)
+}
+
+// EventsOf reads all events of a session of project ref with seq above
+// from.
+func (c *Client) EventsOf(ctx context.Context, ref, session string, from int64) (proto.EventsReadResult, error) {
 	var all proto.EventsReadResult
 	for {
 		var res proto.EventsReadResult
-		if err := c.Call(ctx, proto.MethodEventsRead, proto.EventsReadParams{Session: session, From: from}, &res); err != nil {
+		if err := c.Call(ctx, proto.MethodEventsRead, proto.EventsReadParams{Session: session, Ref: ref, From: from}, &res); err != nil {
 			return all, err
 		}
 		all.Ref, all.LastSeq = res.Ref, res.LastSeq

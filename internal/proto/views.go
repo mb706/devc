@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/mb706/devc/internal/names"
@@ -271,7 +272,34 @@ type BoxView struct {
 	NeedsYou      int        `json:"needs_you"`
 }
 
-// Cursor maps a session ID to the last seq a client has of it.
+// A session is identified by its project and its ID (finding C1-01): the
+// ID alone is chosen in a box and is unique only by the daemon's
+// ownership rule. SessionKey writes the pair as "<realm>/<project>/<id>",
+// the form cursors and session filters use; a bare ID is still accepted
+// there (it then names every session with that ID).
+
+// SessionKey returns the key of a session.
+func SessionKey(ref, session string) string { return ref + "/" + session }
+
+// ParseSessionKey splits a session key, or a bare session ID (zero ref),
+// and validates both parts.
+func ParseSessionKey(s string) (ref names.ProjectRef, session string, err error) {
+	i := strings.LastIndexByte(s, '/')
+	if i < 0 {
+		if !names.ValidSessionID(s) {
+			return names.ProjectRef{}, "", errors.New("invalid session")
+		}
+		return names.ProjectRef{}, s, nil
+	}
+	ref, err = names.Parse(s[:i])
+	if err != nil || !names.ValidSessionID(s[i+1:]) {
+		return names.ProjectRef{}, "", errors.New("invalid session key")
+	}
+	return ref, s[i+1:], nil
+}
+
+// Cursor maps a session key (or, from older clients, a bare session ID) to
+// the last seq a client has of the session.
 type Cursor map[string]int64
 
 // Validate checks a cursor from a client.
@@ -279,8 +307,8 @@ func (c Cursor) Validate() error {
 	if len(c) > MaxCursor {
 		return errors.New("the cursor names too many sessions")
 	}
-	for id, seq := range c {
-		if !names.ValidSessionID(id) || seq < 0 {
+	for k, seq := range c {
+		if _, _, err := ParseSessionKey(k); err != nil || seq < 0 {
 			return errors.New("the cursor holds an invalid session or seq")
 		}
 	}
@@ -346,8 +374,9 @@ type Command struct {
 	Choice   int      `json:"choice,omitempty"`
 	Keys     []string `json:"keys,omitempty"`
 	Turn     int64    `json:"turn,omitempty"`
-	// Start: the project, harness, worktree and harness arguments of a new
-	// session.
+	// Ref is the project of the session (resolved when the command was
+	// accepted, never again: finding C1-01); for start, the project of the
+	// new session. Harness, Worktree and Args describe a new session.
 	Ref      string   `json:"ref,omitempty"`
 	Harness  string   `json:"harness,omitempty"`
 	Worktree string   `json:"worktree,omitempty"`
@@ -368,8 +397,9 @@ type Receipt struct {
 	Command string `json:"command"`
 	Kind    string `json:"kind"`
 	// Session is the session the command addresses, or the one a start
-	// command created.
+	// command created; Ref is its project (realm/project).
 	Session string `json:"session,omitempty"`
+	Ref     string `json:"ref,omitempty"`
 	Outcome string `json:"outcome"`
 	Detail  string `json:"detail,omitempty"`
 	// Adapter is the input adapter that delivered (paste, …).
@@ -383,6 +413,7 @@ type Receipt struct {
 type SendParams struct {
 	ID      string `json:"id"`
 	Session string `json:"session"`
+	Ref     string `json:"ref,omitempty"`
 	Text    string `json:"text"`
 	Mode    string `json:"mode,omitempty"`
 }
@@ -393,6 +424,7 @@ type SendParams struct {
 type AnswerParams struct {
 	ID       string `json:"id"`
 	Session  string `json:"session"`
+	Ref      string `json:"ref,omitempty"`
 	Question string `json:"question,omitempty"`
 	Choice   int    `json:"choice,omitempty"`
 	Text     string `json:"text,omitempty"`
@@ -403,12 +435,14 @@ type AnswerParams struct {
 type SessionCommandParams struct {
 	ID      string `json:"id"`
 	Session string `json:"session"`
+	Ref     string `json:"ref,omitempty"`
 }
 
 // KeysParams are the parameters of session.keys.
 type KeysParams struct {
 	ID      string   `json:"id"`
 	Session string   `json:"session"`
+	Ref     string   `json:"ref,omitempty"`
 	Keys    []string `json:"keys"`
 }
 
@@ -431,6 +465,7 @@ type StartParams struct {
 type SeenParams struct {
 	ID      string `json:"id,omitempty"`
 	Session string `json:"session"`
+	Ref     string `json:"ref,omitempty"`
 	Turn    int64  `json:"turn,omitempty"`
 }
 
@@ -508,7 +543,8 @@ type DaemonInfo struct {
 // Since are left out (zero: none are); Live keeps live sessions only. With
 // Sync the daemon first ingests and reconciles the matching boxes, as
 // `devc ps` does without a daemon. Results come in pages of at most Limit
-// sessions with IDs above After.
+// sessions after After (a session ID or key: sessions are ordered by ID,
+// then project).
 type SessionsListParams struct {
 	Realm   string    `json:"realm,omitempty"`
 	Project string    `json:"project,omitempty"`
@@ -534,8 +570,12 @@ type SessionsListResult struct {
 }
 
 // SessionsGetParams name one session and how many recent events to return.
+// Ref (realm/project) names the session's project; without it the ID must
+// be unique among the daemon's sessions. The same holds for every method
+// that names a session.
 type SessionsGetParams struct {
 	Session string `json:"session"`
+	Ref     string `json:"ref,omitempty"`
 	Events  int    `json:"events,omitempty"`
 }
 
@@ -548,6 +588,7 @@ type SessionsGetResult struct {
 // EventsReadParams ask for the events of a session with seq above From.
 type EventsReadParams struct {
 	Session string `json:"session"`
+	Ref     string `json:"ref,omitempty"`
 	From    int64  `json:"from,omitempty"`
 	Limit   int    `json:"limit,omitempty"`
 }
@@ -565,7 +606,7 @@ type EventsReadResult struct {
 // not know it sends all events, limited to sessions active within Window
 // seconds (default 30 days), unless FromNow is set, in which case existing
 // sessions the client does not know are not replayed at all. Realm,
-// Project and Sessions filter what is sent.
+// Project and Sessions (keys or bare IDs) filter what is sent.
 type SubscribeParams struct {
 	Cursor   Cursor   `json:"cursor,omitempty"`
 	Realm    string   `json:"realm,omitempty"`

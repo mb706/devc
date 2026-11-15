@@ -18,6 +18,7 @@ import (
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/proto"
+	"github.com/mb706/devc/internal/session"
 )
 
 var (
@@ -339,5 +340,150 @@ func TestSameSnapshot(t *testing.T) {
 	if sameSnapshot(a, nil) || !sameSnapshot(map[string]int64{}, map[string]int64{}) || !sameSnapshot(a, map[string]int64{"x": 1}) ||
 		sameSnapshot(a, map[string]int64{"x": 2}) || sameSnapshot(a, map[string]int64{"y": 1}) {
 		t.Error("sameSnapshot")
+	}
+}
+
+// TestSubscribeKeys: sessions are named by project and ID; a bare ID
+// stands for every session with it (finding C1-01).
+func TestSubscribeKeys(t *testing.T) {
+	h, p := hubEnv(t)
+	// r/b has a journal of sid1 too (as before ownership was recorded).
+	appendEvents(t, p, refB, sid1, 1, 2, false, time.Now())
+	h.poll(nil)
+	c := subscribe(t, h, proto.SubscribeParams{Cursor: proto.Cursor{"r/b/" + sid1: 1}, Sessions: []string{"r/b/" + sid1}})
+	c.waitFor(t, "r/b "+sid1+" 2", "caught_up")
+	c = subscribe(t, h, proto.SubscribeParams{Cursor: proto.Cursor{sid1: 2}, Sessions: []string{sid1}})
+	c.waitFor(t, "r/a "+sid1+" 3", "caught_up")
+	// A keyed cursor of a session the followed project does not have.
+	c = subscribe(t, h, proto.SubscribeParams{Cursor: proto.Cursor{"r/b/" + sid2: 1}, Sessions: []string{"r/b/" + sid2}})
+	c.waitFor(t, "missed "+sid2+" 0", "caught_up")
+	if e, amb := h.resolve(names.ProjectRef{}, sid1); e != nil || !slices.Equal(amb, []string{"r/a", "r/b"}) {
+		t.Errorf("resolve of a shared ID: %v %q", e, amb)
+	}
+	if e, amb := h.resolve(refB, sid1); e == nil || e.ref != refB || amb != nil || e.view.LastSeq != 2 {
+		t.Errorf("resolve by project: %+v %q", e, amb)
+	}
+	if e, amb := h.resolve(names.ProjectRef{}, sid3); e == nil || e.ref != refB || amb != nil {
+		t.Errorf("resolve of a unique ID: %+v %q", e, amb)
+	}
+}
+
+// TestSubscribeEndedAndCold: host events after a session's end reach live
+// views (finding C1-15); a window that reaches a cold session replays it
+// (C1-16).
+func TestSubscribeEndedAndCold(t *testing.T) {
+	h, p := hubEnv(t)
+	c := subscribe(t, h, proto.SubscribeParams{FromNow: true})
+	c.waitFor(t, "caught_up")
+	// sid2 ended an hour ago; a user marks it seen.
+	appendSeen := func(seq int64) {
+		f, _ := os.OpenFile(p.JournalFile(refA, sid2), os.O_WRONLY|os.O_APPEND, 0)
+		defer f.Close()
+		ev, _ := proto.New(sid2, proto.TypeSeen, proto.Seen{Turn: seq}, time.Now())
+		ev.Seq, ev.At = seq, time.Now().UTC().Format(time.RFC3339Nano)
+		b, _ := json.Marshal(ev)
+		f.Write(append(b, '\n'))
+	}
+	appendSeen(3)
+	h.poll(&refA)
+	c.waitFor(t, "caught_up", "r/a "+sid2+" 3")
+	if e, _ := h.lookup(keyOf(refA, sid2)); e == nil || e.view.SeenTurn != 3 || e.view.State != "ended" || e.view.Live {
+		t.Errorf("view after seen: %+v", e)
+	}
+	// The periodic poll gets there too.
+	appendSeen(4)
+	for i := 0; i < endedPollEvery; i++ {
+		h.poll(nil)
+	}
+	c.waitFor(t, "caught_up", "r/a "+sid2+" 3", "r/a "+sid2+" 4")
+
+	// sidO ended 60 days ago: replayed for a 90-day window only.
+	c = subscribe(t, h, proto.SubscribeParams{Sessions: []string{sidO}})
+	c.waitFor(t, "caught_up")
+	c = subscribe(t, h, proto.SubscribeParams{Sessions: []string{sidO}, Window: 90 * 24 * 3600})
+	c.waitFor(t, "r/a "+sidO+" 1", "r/a "+sidO+" 2", "caught_up")
+}
+
+// TestReplayFailure: a journal that cannot be read to its end during a
+// replay gets missed, never a silent catch-up (finding C1-17).
+func TestReplayFailure(t *testing.T) {
+	h, _ := hubEnv(t)
+	calls := 0
+	replayTail = func(file string, off, max int64) ([]proto.Event, int64, error) {
+		if strings.Contains(file, sid1) {
+			calls++
+			if calls > 1 {
+				return nil, off, fmt.Errorf("i/o error")
+			}
+			// The first read returns one event only.
+			evs, _, err := session.TailJournal(file, off, max)
+			if err != nil || len(evs) == 0 {
+				return evs, off, err
+			}
+			b, _ := json.Marshal(evs[0])
+			return evs[:1], off + int64(len(b)) + 1, nil
+		}
+		return session.TailJournal(file, off, max)
+	}
+	t.Cleanup(func() { replayTail = session.TailJournal })
+	c := subscribe(t, h, proto.SubscribeParams{Sessions: []string{sid1}})
+	c.waitFor(t, "r/a "+sid1+" 1", "missed "+sid1+" 1", "caught_up")
+}
+
+// TestSubscriberByteBudget: what waits for subscribers is bounded in bytes,
+// per subscriber and for all together (finding C1-08).
+func TestSubscriberByteBudget(t *testing.T) {
+	h := newHub(testLog(), "t")
+	big := []proto.Event{{Seq: 1, Data: json.RawMessage(`"` + strings.Repeat("x", 1<<20) + `"`)}}
+	newSub := func() *subscriber {
+		a, b := net.Pipe()
+		t.Cleanup(func() { a.Close(); b.Close() })
+		s := &subscriber{h: h, conn: proto.NewConn(a, proto.Options{}), queue: make(chan batch, subQueue), sent: map[sessionKey]int64{}}
+		h.subs[s] = struct{}{}
+		return s
+	}
+	// One slow subscriber: dropped before it holds more than its budget.
+	s := newSub()
+	for i := 0; i < 40 && len(h.subs) == 1; i++ {
+		h.mu.Lock()
+		h.enqueueLocked(refA, sid1, big, false)
+		h.mu.Unlock()
+		if s.queued.Load() > subQueueBytes {
+			t.Fatalf("the subscriber holds %d bytes", s.queued.Load())
+		}
+	}
+	if len(h.subs) != 0 {
+		t.Fatal("a subscriber over its byte budget was kept")
+	}
+	h.unsubscribe(s)
+	if h.queued.Load() != 0 {
+		t.Errorf("released bytes: %d left", h.queued.Load())
+	}
+	// Ten slow subscribers: the daemon-wide budget drops some of them
+	// before each reaches its own.
+	var subs []*subscriber
+	for i := 0; i < 10; i++ {
+		subs = append(subs, newSub())
+	}
+	for i := 0; i < 40 && len(h.subs) > 0; i++ {
+		h.mu.Lock()
+		h.enqueueLocked(refA, sid1, big, false)
+		h.mu.Unlock()
+		if h.queued.Load() > hubQueueBytes {
+			t.Fatalf("subscribers hold %d bytes", h.queued.Load())
+		}
+	}
+	early := 0
+	for _, s := range subs {
+		if s.queued.Load() < subQueueBytes-(2<<20) {
+			early++
+		}
+		h.unsubscribe(s)
+	}
+	if early == 0 {
+		t.Error("the daemon-wide budget dropped nobody early")
+	}
+	if h.queued.Load() != 0 {
+		t.Errorf("released bytes: %d left", h.queued.Load())
 	}
 }

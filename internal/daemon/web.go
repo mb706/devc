@@ -206,6 +206,10 @@ func (d *Daemon) apiChanges(ctx context.Context, _ *proto.Conn, params json.RawM
 	if err := proto.DecodeParams(params, &p); err != nil {
 		return nil, err
 	}
+	want, err := parseRefParam(p.Ref)
+	if err != nil {
+		return nil, err
+	}
 	if err := checkSession(p.Session); err != nil {
 		return nil, err
 	}
@@ -215,9 +219,9 @@ func (d *Daemon) apiChanges(ctx context.Context, _ *proto.Conn, params json.RawM
 	if p.Scope != proto.ScopeSnapshot && p.Scope != proto.ScopeBranch {
 		return nil, proto.Errorf(proto.CodeInvalidParams, "scope must be %s or %s", proto.ScopeSnapshot, proto.ScopeBranch)
 	}
-	v, ref, ok := d.cmd.lookup(ctx, p.Session)
-	if !ok {
-		return nil, proto.Errorf(proto.CodeNotFound, "no session %s", p.Session)
+	v, ref, reason := d.cmd.lookup(ctx, want, p.Session)
+	if reason != "" {
+		return nil, proto.Errorf(proto.CodeNotFound, "%s", reason)
 	}
 	e := d.current()
 	r, err := e.cfg.Resolved(ref)

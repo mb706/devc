@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -27,15 +28,30 @@ import (
 	"github.com/mb706/devc/internal/session"
 )
 
-// Request limits per project.
+// Request limits per project; maxOutstanding counts pending requests and
+// approved ones not finished yet (finding C1-11).
+var maxOutstanding = 100
+
 const (
-	maxPending     = 100
 	maxPerMinute   = 20
 	maxStatusWait  = 600
 	requestTimeout = 30 * time.Minute
 	maxResultText  = 2000
 	maxReasonText  = 500
 )
+
+// The executor of approved requests (finding C1-11): a few workers and a
+// bounded queue for the whole daemon. An approval needs a free place;
+// without one it is refused as busy and the request stays pending. Tests
+// shrink them.
+var (
+	requestWorkers = 2
+	requestQueue   = 32
+)
+
+// statusExpireHook runs in host.request.status between reading a request
+// and taking the lock to expire it (tests: a decision in that moment).
+var statusExpireHook func()
 
 // requestService keeps the requests of every project.
 type requestService struct {
@@ -46,11 +62,43 @@ type requestService struct {
 	// mu serialises every change of the request logs.
 	mu        sync.Mutex
 	changedCh chan struct{}
+
+	// slots holds one token per approved request waiting or running;
+	// jobs feeds the workers.
+	slots chan struct{}
+	jobs  chan requestJob
+}
+
+type requestJob struct {
+	ref names.ProjectRef
+	req proto.Request
 }
 
 func newRequestService(d *Daemon) *requestService {
-	return &requestService{d: d, store: &requests.Store{Paths: d.o.Paths}, now: time.Now, changedCh: make(chan struct{})}
+	return &requestService{d: d, store: &requests.Store{Paths: d.o.Paths}, now: time.Now, changedCh: make(chan struct{}),
+		slots: make(chan struct{}, requestWorkers+requestQueue), jobs: make(chan requestJob, requestWorkers+requestQueue)}
 }
+
+// start runs the workers (until the daemon stops).
+func (rs *requestService) start() {
+	for i := 0; i < requestWorkers; i++ {
+		rs.d.goSafe("request worker", func() {
+			for {
+				select {
+				case <-rs.d.ctx.Done():
+					return
+				case j := <-rs.jobs:
+					rs.execute(j.ref, j.req)
+					<-rs.slots
+				}
+			}
+		})
+	}
+}
+
+// full reports whether no approved request can be taken now. Places are
+// taken only under rs.mu, so a place seen free there stays free.
+func (rs *requestService) full() bool { return len(rs.slots) == cap(rs.slots) }
 
 func (rs *requestService) changed() <-chan struct{} {
 	rs.mu.Lock()
@@ -87,7 +135,8 @@ func (rs *requestService) event(ctx context.Context, ref names.ProjectRef, r *pr
 	}
 }
 
-// expireLocked marks a project's pending requests past their expiry.
+// expireLocked marks a project's pending requests past their expiry. The
+// caller holds rs.mu and read list under it, so list is current.
 func (rs *requestService) expireLocked(ctx context.Context, ref names.ProjectRef, list []proto.Request) []proto.Request {
 	now := rs.now()
 	for i := range list {
@@ -167,24 +216,34 @@ func (rs *requestService) create(ctx context.Context, ref names.ProjectRef, para
 	}
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
+	// A log that stays large after compaction takes no new requests
+	// (finding C1-10); changes to existing ones are still stored.
+	if size, err := rs.store.Size(ref); err != nil || size > requests.HardCap {
+		rs.d.log.Warn("the request log is full", "ref", ref.String(), "size", size, "err", err)
+		return nil, proto.Errorf(proto.CodeBusy, "the host's request log for %s is full: ask the user to decide or clear the open requests", ref)
+	}
 	list, err := rs.store.Load(ref)
 	if err != nil {
 		rs.d.log.Error("reading the request log", "ref", ref.String(), "err", err)
 		return nil, proto.Errorf(proto.CodeInternal, "the host could not read its request log")
 	}
 	list = rs.expireLocked(ctx, ref, list)
-	pending, recent := 0, 0
+	outstanding, recent := 0, 0
 	now := rs.now()
 	for _, q := range list {
-		if q.Status == proto.RequestPending {
-			pending++
+		if q.Status == proto.RequestPending || q.Status == proto.RequestApproved {
+			outstanding++
 		}
 		if now.Sub(q.Time) < time.Minute {
 			recent++
 		}
 	}
-	if pending >= maxPending || recent >= maxPerMinute {
+	if outstanding >= maxOutstanding || recent >= maxPerMinute {
 		return nil, proto.Errorf(proto.CodeBusy, "too many requests from %s: wait for the user to decide the pending ones", ref)
+	}
+	auto := slices.Contains(r.Requests.Auto, p.Kind) && requests.MayDecide(proto.OriginAuto, proto.RequestRisk(p.Kind)) == nil
+	if auto && p.Kind != proto.RequestNote && rs.full() {
+		return nil, proto.Errorf(proto.CodeBusy, "the host is busy carrying out other requests: try again in a while")
 	}
 	req := proto.Request{ID: requests.NewID(), Time: now.UTC(), Ref: ref.String(), Session: p.Session, Kind: p.Kind,
 		Params: p, Risk: proto.RequestRisk(p.Kind), Status: proto.RequestPending}
@@ -194,7 +253,7 @@ func (rs *requestService) create(ctx context.Context, ref names.ProjectRef, para
 		return nil, proto.Errorf(proto.CodeInternal, "the host could not store the request")
 	}
 	rs.d.log.Info("request", "ref", ref.String(), "id", req.ID, "kind", req.Kind, "risk", req.Risk)
-	if slices.Contains(r.Requests.Auto, req.Kind) && requests.MayDecide(proto.OriginAuto, req.Risk) == nil {
+	if auto {
 		if err := rs.decideLocked(ctx, ref, &req, true, "", proto.OriginAuto); err != nil {
 			rs.d.log.Warn("approving a request automatically", "request", req.ID, "err", err)
 		}
@@ -229,8 +288,16 @@ func (rs *requestService) status(ctx context.Context, ref names.ProjectRef, para
 			return nil, proto.Errorf(proto.CodeNotFound, "no request %s for this box", p.ID)
 		}
 		if requests.Expired(found, rs.now()) {
+			if statusExpireHook != nil {
+				statusExpireHook()
+			}
+			// Read again under the lock: a decision may have come in
+			// meanwhile, and only a request still pending expires
+			// (finding C1-18).
 			rs.mu.Lock()
-			rs.expireLocked(ctx, ref, []proto.Request{*found})
+			if cur, err := rs.store.Load(ref); err == nil {
+				rs.expireLocked(ctx, ref, cur)
+			}
 			rs.mu.Unlock()
 			continue
 		}
@@ -259,7 +326,9 @@ func (rs *requestService) list(ctx context.Context, p proto.RequestsListParams) 
 	for _, ref := range refs {
 		list, err := rs.store.Load(ref)
 		if err != nil {
-			return out, err
+			// One project's broken log does not hide the others' (C1-10).
+			rs.d.log.Warn("reading the request log", "ref", ref.String(), "err", err)
+			continue
 		}
 		for _, r := range rs.expireLocked(ctx, ref, list) {
 			if p.All || !proto.FinalRequest(r.Status) {
@@ -289,6 +358,9 @@ func (rs *requestService) decide(ctx context.Context, connOrigin string, p proto
 	ref, req, err := rs.store.Find(rs.d.current().refs, p.ID)
 	if err != nil {
 		if errors.Is(err, requests.ErrNotFound) {
+			if strings.Contains(err.Error(), "cannot be read") {
+				rs.d.log.Warn("looking up a request", "id", proto.Printable(p.ID), "err", err)
+			}
 			return proto.DecideResult{}, proto.Errorf(proto.CodeNotFound, "no request %s", proto.Printable(p.ID))
 		}
 		return proto.DecideResult{}, proto.Errorf(proto.CodeInvalidParams, "%s", err.Error())
@@ -328,13 +400,26 @@ func (rs *requestService) decideLocked(ctx context.Context, ref names.ProjectRef
 	if req.Kind == proto.RequestNote {
 		req.Status, req.Result = proto.RequestDone, "noted"
 	}
+	run := req.Status == proto.RequestApproved
+	if run {
+		// A place in the executor first: an approval that cannot run soon
+		// is refused and the request stays pending (finding C1-11).
+		select {
+		case rs.slots <- struct{}{}:
+		default:
+			req.Status, req.DecidedBy = proto.RequestPending, ""
+			return proto.Errorf(proto.CodeBusy, "the host is busy carrying out other requests: approve %s again in a while", req.ID)
+		}
+	}
 	if err := rs.putLocked(ctx, ref, req); err != nil {
+		if run {
+			<-rs.slots
+		}
 		return err
 	}
 	rs.d.log.Info("request approved", "request", req.ID, "origin", origin)
-	if req.Status == proto.RequestApproved {
-		r := *req
-		rs.d.goSafe("request "+r.ID, func() { rs.execute(ref, r) })
+	if run {
+		rs.jobs <- requestJob{ref: ref, req: *req}
 	}
 	return nil
 }
@@ -373,14 +458,38 @@ func (rs *requestService) execute(ref names.ProjectRef, req proto.Request) {
 	if r := []rune(result); len(r) > maxResultText {
 		result = "…" + string(r[len(r)-maxResultText:])
 	}
-	req.Status, req.Result = status, proto.PrintableText(result)
+	// The outcome replaces the request's current state only while that is
+	// still the approval this run carried out (finding C1-18).
 	rs.mu.Lock()
-	err := rs.putLocked(ctx, ref, &req)
+	err := rs.transitionLocked(ctx, ref, req.ID, proto.RequestApproved, func(cur *proto.Request) {
+		cur.Status, cur.Result = status, proto.PrintableText(result)
+	})
 	rs.mu.Unlock()
 	if err != nil {
 		rs.d.log.Error("storing a request's outcome", "request", req.ID, "err", err)
 	}
 	rs.d.log.Info("request finished", "request", req.ID, "status", status)
+}
+
+// transitionLocked changes a request from its current state, read again
+// from the log, when that state is from; otherwise nothing changes. The
+// caller holds rs.mu.
+func (rs *requestService) transitionLocked(ctx context.Context, ref names.ProjectRef, id, from string, change func(*proto.Request)) error {
+	list, err := rs.store.Load(ref)
+	if err != nil {
+		return err
+	}
+	for i := range list {
+		if list[i].ID != id {
+			continue
+		}
+		if list[i].Status != from {
+			return fmt.Errorf("request %s is %s, not %s", id, list[i].Status, from)
+		}
+		change(&list[i])
+		return rs.putLocked(ctx, ref, &list[i])
+	}
+	return fmt.Errorf("request %s is gone from the log", id)
 }
 
 // requestCommands are the devc commands (without the global flags) that

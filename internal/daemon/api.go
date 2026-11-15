@@ -155,7 +155,8 @@ func (d *Daemon) apiSessions(ctx context.Context, _ *proto.Conn, params json.Raw
 	if err := proto.DecodeParams(params, &p); err != nil {
 		return nil, err
 	}
-	if p.After != "" && !names.ValidSessionID(p.After) {
+	afterRef, afterID, err := proto.ParseSessionKey(p.After)
+	if p.After != "" && err != nil {
 		return nil, proto.Errorf(proto.CodeInvalidParams, "invalid after")
 	}
 	d.fresh()
@@ -181,7 +182,15 @@ func (d *Daemon) apiSessions(ctx context.Context, _ *proto.Conn, params json.Raw
 	}
 	limit = min(limit, maxPage)
 	views := d.hub.views(listFilter{realm: p.Realm, project: p.Project, live: p.Live, since: p.Since})
-	i := sort.Search(len(views), func(i int) bool { return views[i].Session > p.After })
+	// Sessions are ordered by ID, then project; a bare after skips every
+	// session with that ID.
+	i := sort.Search(len(views), func(i int) bool {
+		v := views[i]
+		if p.After == "" || v.Session != afterID {
+			return v.Session > afterID
+		}
+		return afterRef != (names.ProjectRef{}) && v.Ref > afterRef.String()
+	})
 	size := 0
 	res.Sessions = []proto.SessionView{}
 	for ; i < len(views); i++ {
@@ -215,17 +224,47 @@ func (d *Daemon) decorate(v *proto.SessionView) {
 	}
 }
 
+// sessionParam resolves the session a read method names: by project and
+// ID, or by an ID that is unique among the daemon's sessions (finding
+// C1-01).
+func (d *Daemon) sessionParam(refStr, sid string) (*sessionEntry, error) {
+	ref, err := parseRefParam(refStr)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSession(sid); err != nil {
+		return nil, err
+	}
+	e, amb := d.hub.resolve(ref, sid)
+	switch {
+	case amb != nil:
+		return nil, proto.Errorf(proto.CodeInvalidParams, "%s", ambiguousText(sid, amb))
+	case e == nil:
+		return nil, proto.Errorf(proto.CodeNotFound, "no session %s", sid)
+	}
+	return e, nil
+}
+
+// parseRefParam parses an optional ref parameter (zero when empty).
+func parseRefParam(s string) (names.ProjectRef, error) {
+	if s == "" {
+		return names.ProjectRef{}, nil
+	}
+	ref, err := names.Parse(s)
+	if err != nil {
+		return names.ProjectRef{}, proto.Errorf(proto.CodeInvalidParams, "invalid ref")
+	}
+	return ref, nil
+}
+
 func (d *Daemon) apiSession(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.SessionsGetParams
 	if err := proto.DecodeParams(params, &p); err != nil {
 		return nil, err
 	}
-	if !names.ValidSessionID(p.Session) {
-		return nil, proto.Errorf(proto.CodeInvalidParams, "invalid session")
-	}
-	e, ok := d.hub.lookup(p.Session)
-	if !ok {
-		return nil, proto.Errorf(proto.CodeNotFound, "no session %s", p.Session)
+	e, err := d.sessionParam(p.Ref, p.Session)
+	if err != nil {
+		return nil, err
 	}
 	n := p.Events
 	if n <= 0 {
@@ -248,12 +287,12 @@ func (d *Daemon) apiEvents(_ context.Context, _ *proto.Conn, params json.RawMess
 	if err := proto.DecodeParams(params, &p); err != nil {
 		return nil, err
 	}
-	if !names.ValidSessionID(p.Session) || p.From < 0 {
-		return nil, proto.Errorf(proto.CodeInvalidParams, "invalid session or from")
+	if p.From < 0 {
+		return nil, proto.Errorf(proto.CodeInvalidParams, "invalid from")
 	}
-	e, ok := d.hub.lookup(p.Session)
-	if !ok {
-		return nil, proto.Errorf(proto.CodeNotFound, "no session %s", p.Session)
+	e, err := d.sessionParam(p.Ref, p.Session)
+	if err != nil {
+		return nil, err
 	}
 	limit := p.Limit
 	if limit <= 0 {
@@ -303,17 +342,26 @@ func checkSession(sid string) error {
 	return nil
 }
 
-// sessionRefusal is why a command to session sid is refused at once
-// (unknown or ended), or "".
-func (d *Daemon) sessionRefusal(ctx context.Context, sid string) string {
-	v, _, ok := d.cmd.lookup(ctx, sid)
-	switch {
-	case !ok:
-		return "no session " + sid
-	case !v.Live:
-		return "the session has ended"
+// commandTarget resolves the session a command names (by project and ID,
+// or by a unique ID) and binds the command to it: cmd.Ref is set once,
+// here, and never resolved again (finding C1-01). It returns why the
+// command is refused at once (unknown, ambiguous or ended), or "", and the
+// session's view.
+func (d *Daemon) commandTarget(ctx context.Context, refStr string, cmd *proto.Command) (proto.SessionView, string, error) {
+	ref, err := parseRefParam(refStr)
+	if err != nil {
+		return proto.SessionView{}, "", err
 	}
-	return ""
+	v, found, reason := d.cmd.lookup(ctx, ref, cmd.Session)
+	switch {
+	case reason != "":
+		return v, reason, nil
+	case !v.Live:
+		cmd.Ref = found.String()
+		return v, "the session has ended", nil
+	}
+	cmd.Ref = found.String()
+	return v, "", nil
 }
 
 func (d *Daemon) apiSend(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
@@ -335,11 +383,12 @@ func (d *Daemon) apiSend(ctx context.Context, _ *proto.Conn, params json.RawMess
 	}
 	text := proto.NormalizeInputText(p.Text)
 	cmd := proto.Command{ID: p.ID, Kind: proto.CommandSend, Session: p.Session, Text: text, Mode: p.Mode}
-	refusal := ""
+	_, refusal, err := d.commandTarget(ctx, p.Ref, &cmd)
+	if err != nil {
+		return nil, err
+	}
 	if err := proto.CheckInputText(text); err != nil {
 		refusal = err.Error()
-	} else {
-		refusal = d.sessionRefusal(ctx, p.Session)
 	}
 	return d.cmd.submit(cmd, refusal)
 }
@@ -360,7 +409,10 @@ func (d *Daemon) apiAnswer(ctx context.Context, _ *proto.Conn, params json.RawMe
 	}
 	text := proto.NormalizeInputText(p.Text)
 	cmd := proto.Command{ID: p.ID, Kind: proto.CommandAnswer, Session: p.Session, Question: p.Question, Choice: p.Choice, Text: text}
-	refusal := d.sessionRefusal(ctx, p.Session)
+	v, refusal, err := d.commandTarget(ctx, p.Ref, &cmd)
+	if err != nil {
+		return nil, err
+	}
 	switch {
 	case refusal != "":
 	case (p.Choice > 0) == (text != ""):
@@ -370,7 +422,6 @@ func (d *Daemon) apiAnswer(ctx context.Context, _ *proto.Conn, params json.RawMe
 	case text != "" && proto.CheckInputText(text) != nil:
 		refusal = proto.CheckInputText(text).Error()
 	default:
-		v, _ := d.cmd.view(p.Session)
 		switch {
 		case v.Question == nil:
 			refusal = "the session has no pending question"
@@ -378,6 +429,10 @@ func (d *Daemon) apiAnswer(ctx context.Context, _ *proto.Conn, params json.RawMe
 			refusal = "the question " + p.Question + " is not pending any more"
 		case p.Choice > 0 && len(v.Question.Options) > 0 && p.Choice > len(v.Question.Options):
 			refusal = "the question has only " + strconv.Itoa(len(v.Question.Options)) + " options"
+		default:
+			// The answer is bound to the question pending now; delivery
+			// checks it again just before (finding C1-13).
+			cmd.Question = v.Question.ID
 		}
 	}
 	return d.cmd.submit(cmd, refusal)
@@ -396,7 +451,11 @@ func (d *Daemon) apiSessionCommand(kind string) proto.Handler {
 			return nil, err
 		}
 		cmd := proto.Command{ID: p.ID, Kind: kind, Session: p.Session}
-		return d.cmd.submit(cmd, d.sessionRefusal(ctx, p.Session))
+		_, refusal, err := d.commandTarget(ctx, p.Ref, &cmd)
+		if err != nil {
+			return nil, err
+		}
+		return d.cmd.submit(cmd, refusal)
 	}
 }
 
@@ -412,6 +471,10 @@ func (d *Daemon) apiKeys(ctx context.Context, _ *proto.Conn, params json.RawMess
 		return nil, err
 	}
 	cmd := proto.Command{ID: p.ID, Kind: proto.CommandKeys, Session: p.Session, Keys: p.Keys}
+	_, targetRefusal, err := d.commandTarget(ctx, p.Ref, &cmd)
+	if err != nil {
+		return nil, err
+	}
 	refusal := ""
 	if len(p.Keys) == 0 || len(p.Keys) > 32 {
 		refusal = "give between 1 and 32 keys"
@@ -424,7 +487,7 @@ func (d *Daemon) apiKeys(ctx context.Context, _ *proto.Conn, params json.RawMess
 	if refusal != "" {
 		cmd.Keys = nil
 	} else {
-		refusal = d.sessionRefusal(ctx, p.Session)
+		refusal = targetRefusal
 	}
 	return d.cmd.submit(cmd, refusal)
 }
@@ -487,16 +550,23 @@ func (d *Daemon) apiSeen(ctx context.Context, _ *proto.Conn, params json.RawMess
 	if p.Turn < 0 {
 		return nil, proto.Errorf(proto.CodeInvalidParams, "invalid turn")
 	}
+	want, err := parseRefParam(p.Ref)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	rec := proto.Receipt{Command: p.ID, Kind: proto.CommandSeen, Session: p.Session, Accepted: now, At: now, Final: true}
-	v, ref, ok := d.cmd.lookup(ctx, p.Session)
+	v, ref, reason := d.cmd.lookup(ctx, want, p.Session)
+	if reason == "" {
+		rec.Ref = ref.String()
+	}
 	turn := p.Turn
 	if turn == 0 {
 		turn = v.Turn
 	}
 	switch {
-	case !ok:
-		rec.Outcome, rec.Detail = proto.OutcomeRefused, "no session "+p.Session
+	case reason != "":
+		rec.Outcome, rec.Detail = proto.OutcomeRefused, reason
 	case v.Turn == 0:
 		rec.Outcome, rec.Detail = proto.OutcomeRefused, "the session has had no turn yet"
 	case turn > v.Turn:
@@ -512,7 +582,7 @@ func (d *Daemon) apiSeen(ctx context.Context, _ *proto.Conn, params json.RawMess
 	if p.ID == "" {
 		return rec, nil
 	}
-	r := &cmdRecord{V: 1, Seq: d.cmd.seq.Add(1), Receipt: rec, Command: proto.Command{ID: p.ID, Kind: proto.CommandSeen, Session: p.Session, Turn: turn}}
+	r := &cmdRecord{V: 1, Seq: d.cmd.seq.Add(1), Receipt: rec, Command: proto.Command{ID: p.ID, Kind: proto.CommandSeen, Session: p.Session, Ref: rec.Ref, Turn: turn}}
 	stored, _, err := d.cmd.store.create(r)
 	if err != nil {
 		return nil, err

@@ -9,12 +9,14 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
+	"github.com/mb706/devc/internal/secrets"
 )
 
 // testPaths are short private roots (the runtime directory holds sockets).
@@ -84,6 +86,14 @@ func newExecRig(t *testing.T, c *config.Config, host string) *execRig {
 	rt, err := c.Paths.GateRuntimeDir()
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The box was started with the current grants (finding C1-02).
+	if res, err := c.Resolved(hello); err == nil {
+		if _, err := box.ReadCapabilities(c.Paths, hello); err != nil {
+			if err := box.WriteCapabilities(c.Paths, hello, box.CapabilitiesOf(res, "cid", time.Now())); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	r.x = &Exec{Config: c, Client: &Client{Runner: r.f}, BoxID: names.BoxID(hello), Host: host, RuntimeDir: rt,
 		Getenv: func(k string) string { return r.env[k] }, Stdin: strings.NewReader("input"), Stdout: &bytes.Buffer{}, Stderr: &r.stderr,
@@ -259,7 +269,7 @@ func TestBoxHooks(t *testing.T) {
 	f := execx.NewFake()
 	var keygens int
 	fakeKeygen(f, &keygens)
-	h := &BoxHooks{Paths: p, Runner: f, Login: func() (string, error) { return "alice", nil }}
+	h := &BoxHooks{Paths: p, Runner: f, Login: func() (string, error) { return "alice", nil }, AllowPersistent: true}
 	r, err := c.Resolved(hello)
 	if err != nil {
 		t.Fatal(err)
@@ -385,6 +395,22 @@ func TestServerPrepare(t *testing.T) {
 	if _, err := s.Prepare(id, "c1"); err != ErrNoBoxKey {
 		t.Fatalf("without the box key: %v", err)
 	}
+	// On a runtime directory that is not memory-backed, no key is made
+	// without the opt-in, and ssh-keygen does not even run (C1-12).
+	gateRT, _ := p.GateRuntimeDir()
+	os.MkdirAll(gateRT, 0o700)
+	if secrets.CheckMemoryFS(gateRT) != nil {
+		before := n
+		if _, err := k.NewBoxKey(context.Background(), id); err == nil || !strings.Contains(err.Error(), secrets.EnvAllowPersistent) {
+			t.Errorf("a box key on persistent storage: %v", err)
+		}
+		if n != before {
+			t.Error("ssh-keygen ran before the check")
+		}
+	} else {
+		t.Log("the test's runtime directory is memory-backed: the refusal is not exercised")
+	}
+	k.AllowPersistent = true
 	if _, err := k.NewBoxKey(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
@@ -406,5 +432,39 @@ func TestServerPrepare(t *testing.T) {
 	}
 	if _, err := s.Prepare(id, "-oX"); err == nil {
 		t.Error("an option as host was accepted")
+	}
+}
+
+// TestExecStartedWith: gate-exec allows what the box was started with and
+// the configuration still grants (finding C1-02).
+func TestExecStartedWith(t *testing.T) {
+	c := testConfig(t, map[string]string{"realms/demo/projects/hello/project.toml": helloTOML})
+	run := func(host, original string) (int, string) {
+		r := newExecRig(t, c, host)
+		r.env["SSH_ORIGINAL_COMMAND"] = original
+		r.master(t, true)
+		r.f.On("ssh", "-S", r.sock(t), "-o", "ControlMaster=no").Exit(0)
+		code := r.x.Run(context.Background())
+		return code, r.stderr.String()
+	}
+	// Started with c1 read-only (allowing ls and cat) and without c2.
+	box.WriteCapabilities(c.Paths, hello, box.Capabilities{V: 1, ContainerID: "cid", SSH: []string{"c1:ro"}, SSHAllow: map[string][]string{"c1": {"ls", "cat"}}})
+	if code, errs := run("c2", "ls"); code != 1 || !strings.Contains(errs, "after its box started") {
+		t.Errorf("a host granted after the start: %d %q", code, errs)
+	}
+	if code, errs := run("c1", "echo hi"); code != 1 || !strings.Contains(errs, "not allowed") {
+		t.Errorf("full now, read-only at the start: %d %q", code, errs)
+	}
+	if code, _ := run("c1", "cat f"); code != 0 {
+		t.Errorf("an allowed command: %d", code)
+	}
+	// Without a record nothing goes through.
+	os.Remove(c.Paths.BoxCapabilitiesFile(hello))
+	r := newExecRig(t, c, "c1")
+	os.Remove(c.Paths.BoxCapabilitiesFile(hello))
+	r.env["SSH_ORIGINAL_COMMAND"] = "ls"
+	r.master(t, true)
+	if code := r.x.Run(context.Background()); code != 1 || !strings.Contains(r.stderr.String(), "restart it") {
+		t.Errorf("without a record: %d %q", code, r.stderr.String())
 	}
 }

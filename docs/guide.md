@@ -146,6 +146,10 @@ Harnesses report through hooks that devc installs in their managed settings:
 prompt submitted, question asked, final message, start and end. devc keeps
 these events in a journal per session in its state directory, which the box
 cannot write; `devc ps` and the SESSIONS column of `devc ls` show them. A
+session ID belongs to the project whose journal recorded it first: a box
+cannot write into, or take over, another project's session by reusing its ID
+(devc warns when one tries). Commands that take a session accept its ID, a
+unique prefix, or `<realm>/<project>/<id>`. A
 harness runs with its permission prompts switched off: the box is the
 sandbox. Each harness also gets a generated description of the box (paths,
 network level, git and data rules) in its instructions.
@@ -399,9 +403,12 @@ daemon runs `git receive-pack` or `git upload-pack` on the relay of the box's
 own project, whatever URL `origin` has. A push follows the bank's rules:
 branches can be created and rewritten, deletions and protected branches are
 refused, tags can be created but not moved, `refs/devc/*` and
-`refs/remotes/*` are refused. Every pushed tip gets a bank ref at once, and
+`refs/remotes/*` are refused. Every pushed tip gets a bank ref before the
+relay accepts it (an update whose bank ref cannot be written is refused), and
 branches matching `git.forward` are pushed on to the upstream (the push prints
-the result). Before serving a fetch, the daemon fetches the upstream into the
+the result). A push may update at most 1000 refs (push in parts), its pack may
+be at most `git.max_push_size` (default `2g`), and it is refused as a whole
+when the relay would grow beyond `git.relay_quota` (default `20g`). Before serving a fetch, the daemon fetches the upstream into the
 relay (at most once a minute, 20 seconds at most, without prompts; turn it off
 with `git.fetch_through = false`), so `git fetch origin` brings new upstream
 commits as `origin/*` and `github/*` without `devc pull`. Without the daemon,
@@ -590,7 +597,9 @@ in the box can read the secrets granted to it.
 With `[secrets] delivery = "daemon"` in `config.toml`, nothing is written
 into boxes (except the SSH gate's key, see below): each time a harness starts, its launcher asks the daemon for the
 harness token and the granted secrets, and the daemon answers only for names
-the project is granted. Changes take effect at the next launch. Without a
+the project is granted now and was granted when the box was started:
+removing a grant takes effect at the next launch, a new grant once the box
+has been brought up again (`devc down` and `devc up`). Without a
 running daemon the harness starts without them and says so. In such a box,
 `devc box secret <NAME>` prints a granted secret for programs started outside
 a harness.
@@ -638,7 +647,9 @@ parentheses, newline), with no interactive shell and no sftp. It is a
 convenience, not a strong boundary: an allowed command that runs programs or
 scripts (`sbatch`, `find -exec`, an editor) can still do anything the account
 can. Removing a grant from `project.toml` closes the gate for that host at
-once; a new grant needs a restart of the box (`devc up --recreate`), which
+once, and so does narrowing it to `:ro` or shortening its `ssh_allow` list;
+a new grant, or a wider one, needs a restart of the box (`devc up
+--recreate`), which
 writes `/etc/devc/ssh_config` (also mounted at
 `/etc/ssh/ssh_config.d/50-devc.conf` and included from the box's
 `~/.ssh/config`).

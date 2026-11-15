@@ -3,13 +3,16 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"math"
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mb706/devc/internal/names"
@@ -30,13 +33,31 @@ const (
 	// relistEvery re-lists a journal directory even when its mtime did not
 	// change (coarse timestamps).
 	relistEvery = 30 * time.Second
-	// subQueue bounds the batches waiting for one subscriber; a subscriber
-	// that falls further behind is disconnected and resumes from its cursor.
-	subQueue = 4096
+	// subQueue bounds the batches waiting for one subscriber, subQueueBytes
+	// the bytes they hold (finding C1-08), and hubQueueBytes the bytes
+	// waiting for all subscribers together: a subscriber that would exceed
+	// either is disconnected and resumes from its cursor.
+	subQueue      = 4096
+	subQueueBytes = 32 << 20
+	hubQueueBytes = 256 << 20
+	// endedPollEvery: the periodic poll looks at the journals of ended
+	// sessions (host events such as seen may follow the end, finding C1-15)
+	// only every this many passes; a poll for one project always does.
+	endedPollEvery = 10
 	// DefaultWindow is how far back a subscription replays sessions the
 	// client does not know.
 	DefaultWindow = 30 * 24 * time.Hour
 )
+
+// sessionKey identifies a session: its project and its ID (finding C1-01).
+type sessionKey struct {
+	ref names.ProjectRef
+	id  string
+}
+
+func (k sessionKey) String() string { return proto.SessionKey(k.ref.String(), k.id) }
+
+func keyOf(ref names.ProjectRef, id string) sessionKey { return sessionKey{ref: ref, id: id} }
 
 type sessionEntry struct {
 	ref    names.ProjectRef
@@ -57,11 +78,15 @@ type hub struct {
 	p        *paths.Paths
 	refs     []names.ProjectRef
 	dirs     map[names.ProjectRef]*dirState
-	sessions map[string]*sessionEntry
+	sessions map[sessionKey]*sessionEntry
 	subs     map[*subscriber]struct{}
-	window   time.Duration
-	now      func() time.Time
-	log      *slog.Logger
+	// queued counts the bytes waiting in every subscriber's queue.
+	queued atomic.Int64
+	// polls counts periodic polls (for endedPollEvery).
+	polls  int
+	window time.Duration
+	now    func() time.Time
+	log    *slog.Logger
 	// heartbeat is the interval of heartbeat notifications.
 	heartbeat time.Duration
 	instance  string
@@ -73,7 +98,7 @@ type hub struct {
 }
 
 func newHub(log *slog.Logger, instance string) *hub {
-	return &hub{dirs: map[names.ProjectRef]*dirState{}, sessions: map[string]*sessionEntry{}, subs: map[*subscriber]struct{}{},
+	return &hub{dirs: map[names.ProjectRef]*dirState{}, sessions: map[sessionKey]*sessionEntry{}, subs: map[*subscriber]struct{}{},
 		window: DefaultWindow, now: time.Now, log: log, heartbeat: 15 * time.Second, instance: instance, changedCh: make(chan struct{})}
 }
 
@@ -97,16 +122,16 @@ func (h *hub) setProjects(p *paths.Paths, refs []names.ProjectRef) {
 	defer h.mu.Unlock()
 	if h.p == nil || h.p.StateDir() != p.StateDir() {
 		h.dirs = map[names.ProjectRef]*dirState{}
-		h.sessions = map[string]*sessionEntry{}
+		h.sessions = map[sessionKey]*sessionEntry{}
 	}
 	h.p = p
 	keep := map[names.ProjectRef]bool{}
 	for _, r := range refs {
 		keep[r] = true
 	}
-	for id, e := range h.sessions {
-		if !keep[e.ref] {
-			delete(h.sessions, id)
+	for k := range h.sessions {
+		if !keep[k.ref] {
+			delete(h.sessions, k)
 		}
 	}
 	for r := range h.dirs {
@@ -138,11 +163,12 @@ func (h *hub) scanLocked(ref names.ProjectRef, publish bool) {
 	ds.listed = h.now()
 	cutoff := h.now().Add(-h.window)
 	for _, id := range ids {
-		if _, ok := h.sessions[id]; ok {
+		k := keyOf(ref, id)
+		if _, ok := h.sessions[k]; ok {
 			continue
 		}
 		e := &sessionEntry{ref: ref, file: h.p.JournalFile(ref, id), view: proto.NewSessionView(ref.Realm, ref.Project, id)}
-		h.sessions[id] = e
+		h.sessions[k] = e
 		if !publish && session.EndedBefore(e.file, cutoff) {
 			e.ended = true // cold: read when someone asks
 			continue
@@ -208,12 +234,20 @@ func (h *hub) tailLocked(e *sessionEntry, publish bool) {
 }
 
 // poll reads what was appended to the journals of ref (nil: of every
-// project) and publishes it.
+// project) and publishes it. Ended sessions are looked at too (events the
+// host appends after the end, such as seen, must reach live views:
+// finding C1-15): always for one project, every endedPollEvery passes
+// otherwise. Their lifecycle stays ended (SessionView.Apply).
 func (h *hub) poll(ref *names.ProjectRef) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.p == nil {
 		return
+	}
+	withEnded := ref != nil
+	if ref == nil {
+		h.polls++
+		withEnded = h.polls%endedPollEvery == 0
 	}
 	refs := h.refs
 	if ref != nil {
@@ -235,7 +269,7 @@ func (h *hub) poll(ref *names.ProjectRef) {
 		}
 	}
 	for _, e := range h.sessions {
-		if e.ended || !e.loaded || (ref != nil && e.ref != *ref) {
+		if (e.ended && !withEnded) || !e.loaded || (ref != nil && e.ref != *ref) {
 			continue
 		}
 		fi, err := os.Stat(e.file)
@@ -253,17 +287,61 @@ func (h *hub) loadLocked(e *sessionEntry) {
 	}
 }
 
-// lookup returns a session's project and journal.
-func (h *hub) lookup(id string) (*sessionEntry, bool) {
+// lookup returns a copy of a session's entry (project, journal, view).
+func (h *hub) lookup(k sessionKey) (*sessionEntry, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	e, ok := h.sessions[id]
+	e, ok := h.sessions[k]
 	if ok {
 		h.loadLocked(e)
 		c := *e
 		return &c, true
 	}
 	return nil, false
+}
+
+// find returns copies of the entries of every session with the ID, in
+// project order (more than one only for IDs recorded before ownership
+// was: finding C1-01).
+func (h *hub) find(id string) []*sessionEntry {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []*sessionEntry
+	for k, e := range h.sessions {
+		if k.id == id {
+			h.loadLocked(e)
+			c := *e
+			out = append(out, &c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ref.String() < out[j].ref.String() })
+	return out
+}
+
+// resolve finds the session a client names by project (zero: any) and ID.
+// Without a project the ID must be unique; ambiguous lists the projects
+// when it is not.
+func (h *hub) resolve(ref names.ProjectRef, id string) (e *sessionEntry, ambiguous []string) {
+	if ref != (names.ProjectRef{}) {
+		e, _ := h.lookup(keyOf(ref, id))
+		return e, nil
+	}
+	all := h.find(id)
+	switch len(all) {
+	case 0:
+		return nil, nil
+	case 1:
+		return all[0], nil
+	}
+	for _, e := range all {
+		ambiguous = append(ambiguous, e.ref.String())
+	}
+	return nil, ambiguous
+}
+
+// ambiguousText is the message for an ID found in several projects.
+func ambiguousText(id string, refs []string) string {
+	return fmt.Sprintf("the session ID %s exists in %s: name the project (ref)", id, strings.Join(refs, " and "))
 }
 
 // openRefs reports which projects have sessions the journals show open.
@@ -316,7 +394,12 @@ func (h *hub) views(f listFilter) []proto.SessionView {
 		}
 		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Session < out[j].Session })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Session != out[j].Session {
+			return out[i].Session < out[j].Session
+		}
+		return out[i].Ref < out[j].Ref
+	})
 	return out
 }
 
@@ -386,55 +469,86 @@ func lastEvents(file string, n int, maxBytes int) ([]proto.Event, error) {
 // --- Subscriptions ---
 
 // batch is what the hub hands a subscriber: new events of one session, or
-// (missed set) the news that the session must be read again.
+// (missed set) the news that the session must be read again. size is what
+// it counts against the queue budgets.
 type batch struct {
-	ref     names.ProjectRef
-	session string
-	events  []proto.Event
-	missed  bool
+	key    sessionKey
+	events []proto.Event
+	missed bool
+	size   int64
+}
+
+func batchSize(evs []proto.Event) int64 {
+	n := int64(256)
+	for i := range evs {
+		n += int64(len(evs[i].Data)) + 200
+	}
+	return n
 }
 
 type replayItem struct {
-	session string
-	ref     names.ProjectRef
-	known   bool // the hub knows the session (else look for its journal)
-	from    int64
+	key   sessionKey
+	known bool // the hub knows the session (else look for its journal)
+	from  int64
 	// cursor is set when the client named the session: a journal ending
 	// before its seq cannot serve it (missed).
 	cursor bool
 }
 
 type subscriber struct {
-	h      *hub
-	conn   *proto.Conn
-	f      listFilter
-	ids    map[string]bool // nil: every session
+	h    *hub
+	conn *proto.Conn
+	f    listFilter
+	// ids and keys select sessions by bare ID or by key; both nil: every
+	// session.
+	ids    map[string]bool
+	keys   map[sessionKey]bool
 	queue  chan batch
-	sent   map[string]int64
+	queued atomic.Int64
+	sent   map[sessionKey]int64
 	replay []replayItem
 	refs   []names.ProjectRef
 	p      *paths.Paths
 }
 
-func (s *subscriber) wants(ref names.ProjectRef, id string) bool {
-	return s.f.match(ref) && (s.ids == nil || s.ids[id])
+func (s *subscriber) wants(k sessionKey) bool {
+	if !s.f.match(k.ref) {
+		return false
+	}
+	if s.ids == nil && s.keys == nil {
+		return true
+	}
+	return s.ids[k.id] || s.keys[k]
 }
 
 // enqueueLocked hands a batch to every interested subscriber. One that
-// cannot keep up is disconnected.
+// cannot keep up (too many batches or bytes waiting for it, or for all
+// subscribers together) is disconnected.
 func (h *hub) enqueueLocked(ref names.ProjectRef, id string, evs []proto.Event, missed bool) {
+	k := keyOf(ref, id)
+	size := batchSize(evs)
 	for s := range h.subs {
-		if !s.wants(ref, id) {
+		if !s.wants(k) {
+			continue
+		}
+		if s.queued.Load()+size > subQueueBytes || h.queued.Load()+size > hubQueueBytes {
+			h.dropLocked(s, "too many bytes waiting")
 			continue
 		}
 		select {
-		case s.queue <- batch{ref: ref, session: id, events: evs, missed: missed}:
+		case s.queue <- batch{key: k, events: evs, missed: missed, size: size}:
+			s.queued.Add(size)
+			h.queued.Add(size)
 		default:
-			h.log.Info("disconnecting a subscriber that fell behind")
-			delete(h.subs, s)
-			_ = s.conn.Close()
+			h.dropLocked(s, "too many batches waiting")
 		}
 	}
+}
+
+func (h *hub) dropLocked(s *subscriber, why string) {
+	h.log.Info("disconnecting a subscriber that fell behind", "why", why)
+	delete(h.subs, s)
+	_ = s.conn.Close()
 }
 
 // subscribe registers a subscription and starts sending to conn: first
@@ -450,14 +564,30 @@ func (h *hub) subscribe(conn *proto.Conn, p proto.SubscribeParams) error {
 	if p.Realm != "" && !names.ValidRealm(p.Realm) || p.Project != "" && !names.Valid(p.Project) || len(p.Sessions) > proto.MaxCursor {
 		return proto.Errorf(proto.CodeInvalidParams, "invalid filter")
 	}
-	s := &subscriber{h: h, conn: conn, f: listFilter{realm: p.Realm, project: p.Project}, queue: make(chan batch, subQueue), sent: map[string]int64{}}
-	if len(p.Sessions) > 0 {
-		s.ids = map[string]bool{}
-		for _, id := range p.Sessions {
-			if !names.ValidSessionID(id) {
-				return proto.Errorf(proto.CodeInvalidParams, "invalid session")
-			}
+	s := &subscriber{h: h, conn: conn, f: listFilter{realm: p.Realm, project: p.Project}, queue: make(chan batch, subQueue), sent: map[sessionKey]int64{}}
+	for _, x := range p.Sessions {
+		ref, id, err := proto.ParseSessionKey(x)
+		if err != nil {
+			return proto.Errorf(proto.CodeInvalidParams, "invalid session")
+		}
+		if s.ids == nil {
+			s.ids, s.keys = map[string]bool{}, map[sessionKey]bool{}
+		}
+		if ref == (names.ProjectRef{}) {
 			s.ids[id] = true
+		} else {
+			s.keys[keyOf(ref, id)] = true
+		}
+	}
+	// Cursor entries name a session by key or (older clients) by bare ID;
+	// a bare ID applies to every session with it.
+	byKey, byID := map[sessionKey]int64{}, map[string]int64{}
+	for x, seq := range p.Cursor {
+		ref, id, _ := proto.ParseSessionKey(x)
+		if ref == (names.ProjectRef{}) {
+			byID[id] = seq
+		} else {
+			byKey[keyOf(ref, id)] = seq
 		}
 	}
 	window := h.window
@@ -466,46 +596,86 @@ func (h *hub) subscribe(conn *proto.Conn, p proto.SubscribeParams) error {
 	}
 	h.mu.Lock()
 	cutoff := h.now().Add(-window)
-	for id, e := range h.sessions {
-		if !s.wants(e.ref, id) {
+	seenID := map[string]bool{}
+	for k, e := range h.sessions {
+		if !s.wants(k) {
 			continue
 		}
-		if seq, ok := p.Cursor[id]; ok {
-			s.sent[id] = seq
-			s.replay = append(s.replay, replayItem{session: id, ref: e.ref, known: true, from: seq, cursor: true})
+		seq, ok := byKey[k]
+		if !ok {
+			seq, ok = byID[k.id]
+		}
+		if ok {
+			seenID[k.id] = true
+			s.sent[k] = seq
+			s.replay = append(s.replay, replayItem{key: k, known: true, from: seq, cursor: true})
 			continue
+		}
+		// A cold session (ended before the default window) is read when
+		// the client asks for a window that reaches it (finding C1-16).
+		if !e.loaded && !p.FromNow && window > h.window && !session.EndedBefore(e.file, cutoff) {
+			h.loadLocked(e)
 		}
 		switch {
 		case !e.loaded:
 			// Cold: ended before the window; nothing to replay or follow.
-			s.sent[id] = math.MaxInt64
+			s.sent[k] = math.MaxInt64
 		case p.FromNow:
-			s.sent[id] = e.view.LastSeq
+			s.sent[k] = e.view.LastSeq
 		case e.view.Live || !e.view.LastEvent.Before(cutoff):
-			s.sent[id] = 0
-			s.replay = append(s.replay, replayItem{session: id, ref: e.ref, known: true})
+			s.sent[k] = 0
+			s.replay = append(s.replay, replayItem{key: k, known: true})
 		default:
-			s.sent[id] = math.MaxInt64
+			s.sent[k] = math.MaxInt64
 		}
 	}
-	for id, seq := range p.Cursor {
-		if _, ok := h.sessions[id]; !ok && (s.ids == nil || s.ids[id]) {
-			s.sent[id] = seq
-			s.replay = append(s.replay, replayItem{session: id, from: seq, cursor: true})
+	for k, seq := range byKey {
+		if _, ok := h.sessions[k]; !ok && s.wants(k) {
+			s.sent[k] = seq
+			s.replay = append(s.replay, replayItem{key: k, from: seq, cursor: true})
+		}
+	}
+	for id, seq := range byID {
+		if !seenID[id] && (s.ids == nil && s.keys == nil || s.ids[id]) {
+			k := sessionKey{id: id}
+			s.sent[k] = seq
+			s.replay = append(s.replay, replayItem{key: k, from: seq, cursor: true})
 		}
 	}
 	s.refs, s.p = slices.Clone(h.refs), h.p
 	h.subs[s] = struct{}{}
 	h.mu.Unlock()
-	sort.Slice(s.replay, func(i, j int) bool { return s.replay[i].session < s.replay[j].session })
+	sort.Slice(s.replay, func(i, j int) bool {
+		a, b := s.replay[i].key, s.replay[j].key
+		if a.id != b.id {
+			return a.id < b.id
+		}
+		return a.ref.String() < b.ref.String()
+	})
 	go s.run()
 	return nil
 }
 
+// unsubscribe removes s and releases what its queue still holds (nothing
+// is enqueued for it once it is removed).
 func (h *hub) unsubscribe(s *subscriber) {
 	h.mu.Lock()
 	delete(h.subs, s)
 	h.mu.Unlock()
+	for {
+		select {
+		case b := <-s.queue:
+			s.done(b)
+		default:
+			return
+		}
+	}
+}
+
+// done releases a batch's bytes.
+func (s *subscriber) done(b batch) {
+	s.queued.Add(-b.size)
+	s.h.queued.Add(-b.size)
 }
 
 func (s *subscriber) run() {
@@ -531,6 +701,7 @@ func (s *subscriber) run() {
 		case <-s.conn.Done():
 			return
 		case b := <-s.queue:
+			s.done(b)
 			if err := s.send(b); err != nil {
 				return
 			}
@@ -544,55 +715,82 @@ func (s *subscriber) run() {
 
 func (s *subscriber) send(b batch) error {
 	if b.missed {
-		s.sent[b.session] = 0
-		return s.conn.Notify(proto.NotifyMissed, proto.MissedNote{Ref: b.ref.String(), Session: b.session})
+		s.sent[b.key] = 0
+		return s.conn.Notify(proto.NotifyMissed, proto.MissedNote{Ref: b.key.ref.String(), Session: b.key.id})
 	}
 	for i := range b.events {
 		ev := &b.events[i]
-		if ev.Seq <= s.sent[b.session] {
+		if ev.Seq <= s.sent[b.key] {
 			continue
 		}
-		if err := s.conn.Notify(proto.NotifyEvent, proto.EventNote{Ref: b.ref.String(), Event: *ev}); err != nil {
+		if err := s.conn.Notify(proto.NotifyEvent, proto.EventNote{Ref: b.key.ref.String(), Event: *ev}); err != nil {
 			return err
 		}
-		s.sent[b.session] = ev.Seq
+		s.sent[b.key] = ev.Seq
 	}
 	return nil
 }
 
+// replayTail reads a journal for a replay (tests make it fail).
+var replayTail = session.TailJournal
+
 // replayOne sends a session's journal events after the cursor; a journal
-// that ends before the cursor (or is missing) gets a missed notification.
+// that ends before the cursor (or is missing) gets a missed notification,
+// and so does one that cannot be read to its end (finding C1-17): the
+// client must read the session again rather than take the replay as
+// complete.
 func (s *subscriber) replayOne(it replayItem) error {
-	ref, ok := it.ref, it.known
+	k, ok := it.key, it.known
 	if !ok {
-		ref, ok = session.FindJournal(s.p, s.refs, it.session)
-		if ok && !s.f.match(ref) {
+		var refs []names.ProjectRef
+		if k.ref != (names.ProjectRef{}) {
+			// Only a followed project's journals are read.
+			if slices.Contains(s.refs, k.ref) {
+				refs = []names.ProjectRef{k.ref}
+			}
+		} else {
+			refs = s.refs
+		}
+		ref, found := session.FindJournal(s.p, refs, k.id)
+		if found && !s.f.match(ref) {
 			return nil
 		}
+		if found {
+			// The sent map follows the session under its full key.
+			s.sent[keyOf(ref, k.id)] = s.sent[k]
+			k = keyOf(ref, k.id)
+		}
+		ok = found
 	}
 	if !ok {
-		s.sent[it.session] = 0
-		return s.conn.Notify(proto.NotifyMissed, proto.MissedNote{Session: it.session})
+		s.sent[k] = 0
+		note := proto.MissedNote{Session: k.id}
+		if k.ref != (names.ProjectRef{}) {
+			note.Ref = k.ref.String()
+		}
+		return s.conn.Notify(proto.NotifyMissed, note)
 	}
-	file := s.p.JournalFile(ref, it.session)
+	file := s.p.JournalFile(k.ref, k.id)
 	var last int64
 	off := int64(0)
 	for {
-		evs, next, err := session.TailJournal(file, off, tailChunk)
+		evs, next, err := replayTail(file, off, tailChunk)
 		if err != nil {
-			break
+			s.h.log.Warn("replaying a journal", "session", k.String(), "err", err)
+			s.sent[k] = 0
+			return s.conn.Notify(proto.NotifyMissed, proto.MissedNote{Ref: k.ref.String(), Session: k.id, LastSeq: last})
 		}
 		for i := range evs {
 			ev := &evs[i]
 			last = max(last, ev.Seq)
-			if ev.Seq <= s.sent[it.session] {
+			if ev.Seq <= s.sent[k] {
 				continue
 			}
 			ev.Spool = nil
-			if err := s.conn.Notify(proto.NotifyEvent, proto.EventNote{Ref: ref.String(), Event: *ev}); err != nil {
+			if err := s.conn.Notify(proto.NotifyEvent, proto.EventNote{Ref: k.ref.String(), Event: *ev}); err != nil {
 				return err
 			}
-			s.sent[it.session] = ev.Seq
+			s.sent[k] = ev.Seq
 		}
 		if next == off {
 			break
@@ -600,8 +798,8 @@ func (s *subscriber) replayOne(it replayItem) error {
 		off = next
 	}
 	if it.cursor && it.from > last {
-		s.sent[it.session] = last
-		return s.conn.Notify(proto.NotifyMissed, proto.MissedNote{Ref: ref.String(), Session: it.session, LastSeq: last})
+		s.sent[k] = last
+		return s.conn.Notify(proto.NotifyMissed, proto.MissedNote{Ref: k.ref.String(), Session: k.id, LastSeq: last})
 	}
 	return nil
 }

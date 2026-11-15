@@ -12,6 +12,8 @@ forward = []                   # glob patterns of branches forwarded to the upst
 protected = ["main"]           # relay branches the box may not update
 branch_prefix = ""             # overrides the realm's
 fetch_through = true           # git fetch in the box first fetches the upstream into the relay (at most once a minute)
+max_push_size = "2g"           # largest pack one push from the box may send to the relay
+relay_quota = "20g"            # a push that would make the relay larger is refused
 
 [grants]
 ssh = []                       # SSH host aliases reachable through the gate (devc ssh login <host>): "host" = full use of the account, "host:ro" = only [grants.ssh_allow]

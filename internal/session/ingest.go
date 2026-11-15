@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -40,6 +41,9 @@ type Store struct {
 	Now   func() time.Time
 	// LockTimeout bounds the wait for the per-box ingestion lock.
 	LockTimeout time.Duration
+	// claims caches the sessions this store found owned by the project
+	// that ingests them (Claim).
+	claims sync.Map
 }
 
 // NewStore returns a store with the real clock.
@@ -62,10 +66,15 @@ func (s *Store) offsetsFile(ref names.ProjectRef) string {
 // last sequence number when the position was recorded: journal events
 // with a higher number and a spool offset were appended after it, and
 // their offset wins (finding B6).
+//
+// Refused names the project that owns the file's session when it is not
+// the box's own (finding C1-01): nothing of the file is ingested, and the
+// refusal is reported once.
 type spoolPos struct {
-	Offset  int64 `json:"offset"`
-	Discard bool  `json:"discard,omitempty"`
-	Seq     int64 `json:"seq,omitempty"`
+	Offset  int64  `json:"offset"`
+	Discard bool   `json:"discard,omitempty"`
+	Seq     int64  `json:"seq,omitempty"`
+	Refused string `json:"refused,omitempty"`
 }
 
 func (s *Store) loadOffsets(ref names.ProjectRef) (map[string]spoolPos, error) {
@@ -139,6 +148,9 @@ type IngestReport struct {
 	// More is set when a file held more than one run may take: another
 	// run should follow at once.
 	More bool
+	// Refused lists the spool files refused in this run because their
+	// session belongs to another project (each is reported once).
+	Refused []Refusal
 }
 
 func (r *IngestReport) add(o IngestReport) {
@@ -149,6 +161,7 @@ func (r *IngestReport) add(o IngestReport) {
 	r.Removed += o.Removed
 	r.Notes += o.Notes
 	r.More = r.More || o.More
+	r.Refused = append(r.Refused, o.Refused...)
 }
 
 // spoolName returns the session of a spool file name, or "".
@@ -231,6 +244,21 @@ func (s *Store) Ingest(ref names.ProjectRef) (IngestReport, error) {
 // last of them, so nothing is read twice.
 func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid string, pos spoolPos) (spoolPos, IngestReport, bool, error) {
 	var rep IngestReport
+	if pos.Refused != "" {
+		rep.Skipped++
+		return pos, rep, false, nil
+	}
+	// The session must be this project's (finding C1-01).
+	owner, mine, err := s.Claim(ref, sid)
+	if err != nil {
+		return pos, rep, false, err
+	}
+	if !mine {
+		pos.Refused = owner.String()
+		rep.Skipped++
+		rep.Refused = append(rep.Refused, Refusal{Session: sid, Owner: owner.String()})
+		return pos, rep, false, nil
+	}
 	rel := "spool/" + name
 	jfile := s.Paths.JournalFile(ref, sid)
 	js, err := loadJournalState(jfile)
@@ -386,6 +414,16 @@ func (s *Store) AppendHost(ref names.ProjectRef, sid string, ps ...hostEvent) er
 	js, err := loadJournalState(s.Paths.JournalFile(ref, sid))
 	if err != nil {
 		return err
+	}
+	// The host may add to a journal ref already has (also one from before
+	// ownership was recorded, so reconciliation can end it), but never
+	// start one of another project's session (finding C1-01).
+	if !js.exists {
+		if owner, mine, err := s.Claim(ref, sid); err != nil {
+			return err
+		} else if !mine {
+			return fmt.Errorf("session %s belongs to %s, not %s", sid, owner, ref)
+		}
 	}
 	now := s.now()
 	var evs []proto.Event

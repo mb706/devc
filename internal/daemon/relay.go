@@ -48,7 +48,49 @@ const (
 	firstLineTimeout = 30 * time.Second
 	// maxReport bounds the report a relay hook leaves.
 	maxReport = 1 << 20
+	// pushSlack is what a push may send beyond its pack limit (ref update
+	// commands, capabilities): the daemon stops feeding receive-pack after
+	// git.max_push_size plus this (finding C1-07).
+	pushSlack = 64 << 20
 )
+
+// streamStall bounds one write to a raw box stream: a box that stops
+// reading for that long loses the stream (finding C1-09). Tests shorten it.
+var streamStall = 2 * time.Minute
+
+// rawStream is a box stream that carries a subprocess's input and output
+// (git, sshd). Every write has a deadline, and abort makes every blocked
+// read and write fail at once, so that the copies of a finished or
+// cancelled operation end and its locks are released (finding C1-09).
+type rawStream struct {
+	st    *yamux.Stream
+	stall time.Duration
+}
+
+func (r rawStream) Write(b []byte) (int, error) {
+	_ = r.st.SetWriteDeadline(time.Now().Add(r.stall))
+	return r.st.Write(b)
+}
+
+// abort ends the stream for both copies: deadlines in the past, then close.
+func (r rawStream) abort() {
+	now := time.Now()
+	_ = r.st.SetReadDeadline(now)
+	_ = r.st.SetWriteDeadline(now)
+	_ = r.st.Close()
+}
+
+// guard aborts the stream when ctx ends (the box stops, the daemon stops,
+// or the operation is over); the returned function ends the operation.
+func (r rawStream) guard(ctx context.Context) func() {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(ctx, r.abort)
+	return func() {
+		cancel()
+		stop()
+		r.abort()
+	}
+}
 
 // rateLimit allows an action at most once per interval per project; an
 // attempt counts whether or not it succeeds, so a failing upstream is not
@@ -147,7 +189,9 @@ func respond(st *yamux.Stream, id json.RawMessage, result any, perr *proto.Error
 // serveGit answers a host.git request and, when it is granted, runs the
 // service on the stream.
 func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Reader, m *proto.RPCMessage) {
-	defer st.Close()
+	raw := rawStream{st: st, stall: streamStall}
+	end := raw.guard(ctx)
+	defer end()
 	fail := func(code int, format string, args ...any) {
 		_ = respond(st, m.ID, nil, proto.Errorf(code, format, args...))
 	}
@@ -187,6 +231,7 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 	proj := gs.Project(r, true)
 	var env []string
 	var report string
+	var maxInput, feed int64
 	switch p.Service {
 	case gitx.ServiceUploadPack:
 		if r.Upstream != "" && r.Git.FetchThrough && d.fetchLimit.allow(ref) {
@@ -211,10 +256,15 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 			fail(proto.CodeInternal, "the host could not prepare the push; see the daemon's log")
 			return
 		}
-		defer os.Remove(report)
+		defer func() {
+			os.Remove(report)
+			os.Remove(gitx.HeadsFile(report))
+			os.Remove(gitx.RecordsFile(report))
+		}()
 		env = hookEnv(e.cfg.Paths, ref, report)
+		maxInput, feed = r.Git.MaxPushSize, r.Git.MaxPushSize+pushSlack
 	}
-	call, err := gitx.ServeCall(relay, p.Service, e.cfg.Paths.RelayHooksDir(), env, nil)
+	call, err := gitx.ServeCall(relay, p.Service, e.cfg.Paths.RelayHooksDir(), env, nil, maxInput)
 	if err != nil {
 		fail(proto.CodeInternal, "internal error")
 		return
@@ -222,7 +272,9 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 	if err := respond(st, m.ID, proto.GitReply{Service: p.Service}, nil); err != nil {
 		return
 	}
-	code, stderr, err := serveGitProcess(ctx, gs, call, st, br)
+	code, stderr, err := serveGitProcess(ctx, gs, call, raw, br, feed)
+	// git is gone: end both copies before the box lock is released.
+	end()
 	d.log.Info("relay service", "box", names.BoxName(ref), "service", p.Service, "exit", code, "err", err, "stderr", proto.Printable(proto.Truncate(stderr, 300)))
 	if report != "" {
 		d.pushed(ctx, e, ref, p.Session, report)
@@ -231,13 +283,17 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 
 // serveGitProcess runs git with the stream as its standard input and
 // output. Standard input is fed through a pipe of devc's own, so the run
-// ends when git exits even while the box keeps its side open.
-func serveGitProcess(ctx context.Context, gs *gitx.Service, call gitx.Call, st *yamux.Stream, br *bufio.Reader) (int, string, error) {
+// ends when git exits even while the box keeps its side open; with feed
+// positive, at most that many bytes are fed.
+func serveGitProcess(ctx context.Context, gs *gitx.Service, call gitx.Call, st io.Writer, br io.Reader, feed int64) (int, string, error) {
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return -1, "", err
 	}
 	defer pr.Close()
+	if feed > 0 {
+		br = io.LimitReader(br, feed)
+	}
 	go func() {
 		_, _ = io.Copy(pw, br)
 		pw.Close()

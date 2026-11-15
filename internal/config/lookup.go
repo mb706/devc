@@ -274,6 +274,9 @@ type ResolvedGit struct {
 	Forward      []string `toml:"forward" json:"forward"`
 	Protected    []string `toml:"protected" json:"protected"`
 	FetchThrough bool     `toml:"fetch_through" json:"fetch_through"`
+	// MaxPushSize and RelayQuota are in bytes.
+	MaxPushSize int64 `toml:"max_push_size" json:"max_push_size"`
+	RelayQuota  int64 `toml:"relay_quota" json:"relay_quota"`
 }
 
 type ResolvedData struct {
@@ -325,6 +328,8 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 			Forward:      nonNil(p.Git.Forward),
 			Protected:    nonNil(p.Git.Protected),
 			FetchThrough: p.Git.FetchThrough,
+			MaxPushSize:  sizeOr(p.Git.MaxPushSize, DefaultMaxPushSize),
+			RelayQuota:   sizeOr(p.Git.RelayQuota, DefaultRelayQuota),
 		},
 		Grants: Grants{SSH: nonNil(p.Grants.SSH), SSHAllow: cloneLists(p.Grants.SSHAllow), Secrets: nonNil(p.Grants.Secrets), GitHub: p.Grants.GitHub},
 		Data: ResolvedData{

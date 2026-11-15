@@ -99,6 +99,7 @@ const (
 // ChangesParams are the parameters of changes.get.
 type ChangesParams struct {
 	Session string `json:"session"`
+	Ref     string `json:"ref,omitempty"`
 	Scope   string `json:"scope"`
 }
 
@@ -162,6 +163,7 @@ func ValidStreamID(s string) bool { return streamRE.MatchString(s) }
 type TerminalOpenParams struct {
 	Stream  string `json:"stream"`
 	Session string `json:"session"`
+	Ref     string `json:"ref,omitempty"`
 	Mode    string `json:"mode"`
 }
 

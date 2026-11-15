@@ -87,6 +87,8 @@ type BoxHooks struct {
 	Keygen string
 	// Login returns the host user's login name (HostLogin when nil).
 	Login func() (string, error)
+	// AllowPersistent is Keys.AllowPersistent.
+	AllowPersistent bool
 }
 
 var (
@@ -96,7 +98,7 @@ var (
 )
 
 func (h *BoxHooks) keys() *Keys {
-	return &Keys{Paths: h.Paths, Runner: h.Runner, Keygen: h.Keygen}
+	return &Keys{Paths: h.Paths, Runner: h.Runner, Keygen: h.Keygen, AllowPersistent: h.AllowPersistent}
 }
 
 func hosts(r *config.Resolved) []string {

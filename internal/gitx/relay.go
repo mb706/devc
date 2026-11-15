@@ -186,6 +186,11 @@ func validRefName(n string) bool {
 
 // Update applies updates as one transaction: all or none.
 func (r *Relay) Update(ctx context.Context, ups []RefUpdate) error {
+	return r.update(ctx, ups, nil)
+}
+
+// update is Update with -c settings for the transaction.
+func (r *Relay) update(ctx context.Context, ups []RefUpdate, config []string) error {
 	if len(ups) == 0 {
 		return nil
 	}
@@ -207,7 +212,7 @@ func (r *Relay) Update(ctx context.Context, ups []RefUpdate) error {
 		}
 		b.WriteByte('\n')
 	}
-	res, err := r.Host.Run(ctx, Call{Relay: r.Dir, Args: []string{"update-ref", "--stdin"}, Stdin: strings.NewReader(b.String())})
+	res, err := r.Host.Run(ctx, Call{Relay: r.Dir, Config: config, Args: []string{"update-ref", "--stdin"}, Stdin: strings.NewReader(b.String())})
 	if err != nil {
 		return fmt.Errorf("updating refs: %w%s", err, tail(res.Stderr))
 	}

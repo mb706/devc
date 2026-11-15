@@ -52,6 +52,9 @@ func (a *app) refresh(ctx context.Context, e *boxEnv, ref names.ProjectRef) (ses
 	if res.Report.Invalid > 0 {
 		fmt.Fprintf(a.stderr, "devc: warning: %s: %d invalid spool line(s) ignored\n", ref, res.Report.Invalid)
 	}
+	for _, rf := range res.Report.Refused {
+		fmt.Fprintf(a.stderr, "devc: warning: %s: %s\n", ref, session.RefusalText(rf))
+	}
 	return res, err
 }
 

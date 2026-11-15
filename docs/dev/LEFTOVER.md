@@ -309,3 +309,16 @@ Other checks and deferred work:
 | **Vendored files** are checked against the npm tarballs' checksums recorded in `web/vendor/README.md`, not against signatures; the hooks module carries one edited import | nothing |
 | **A config.toml that does not parse** (seen in the integration test with a second `[terminal]` table; a file read half-written would do the same) makes the running daemon reload a configuration without its hub list: it disconnects from its hubs until the file is fixed. This predates C12 | a reload that keeps the last good hub list, if wanted |
 
+
+### From C12r1
+
+| Item | Needs |
+|---|---|
+| **The race detector was not run** on the changed packages (`./dev` builds with CGO off). C1-19's fix (a copy of the receipt taken before dispatch) holds by construction; `failSave`, the test hook of the receipt store, is atomic | `go test -race ./internal/daemon/` in the toolchain image with cgo |
+| **The hub and the web app still index sessions by bare ID** and send no `ref`; the daemon accepts that while IDs are unique (STATUS, C12r1, "Changed wire formats") | C12r2: send `ref`, key cursors by project and ID; then the daemon may require `ref` on hub connections |
+| **Git's CPU and memory are not limited** for a box's receive-pack (C1-07 asked for transfer and storage budgets, which exist: `receive.maxInputSize`, the fed bytes, `git.relay_quota`). index-pack and fsck of a 2 GiB pack still use the host's cores and memory for a while | cgroup limits for the daemon's children, if it matters |
+| **The relay budget walks the relay** at every push (`gitx.RelayUsage`); with `gc` off, loose objects accumulate and the walk grows with them | a periodic `git gc` of relays, or a cached size |
+| **Transport budgets are guesses**: 256 new streams per 10 s (every hint and in-box client opens one), 32 control frames, 128 streams. A harness that makes more than about 25 hook calls a second for a sustained time would have its channel closed and reopened with backoff | measuring real harnesses |
+| **A write stall of 2 minutes ends a raw stream**: an SSH session through the gate whose box-side client is suspended (Ctrl-Z) while output is pending loses its connection | nothing, or a longer stall for the gate |
+| **Boxes started before C12r1** have no capability record: daemon-delivered secrets and the SSH gate are refused until the box is restarted | a restart per box after the upgrade |
+| **Journals with one ID in two projects from before C12r1** stay; the owner is the earlier one, the other stops growing, and a bare ID is ambiguous until such a journal is removed by hand | nothing |

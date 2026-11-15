@@ -76,7 +76,7 @@ func TestParseHookInput(t *testing.T) {
 
 func TestServeCall(t *testing.T) {
 	h := &Host{HooksDir: "/s/local/git/no-hooks"}
-	up, err := ServeCall("/s/relay/p.git", ServiceUploadPack, "/s/local/git/relay-hooks", nil, nil)
+	up, err := ServeCall("/s/relay/p.git", ServiceUploadPack, "/s/local/git/relay-hooks", nil, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,14 +89,14 @@ func TestServeCall(t *testing.T) {
 		!strings.HasSuffix(joined, " /s/relay/p.git") || cmd.Dir != "/" || !slices.Contains(cmd.Env, "GIT_CONFIG_GLOBAL=/dev/null") {
 		t.Errorf("upload-pack: %q in %q env %q", cmd.Args, cmd.Dir, cmd.Env)
 	}
-	rp, _ := ServeCall("/s/relay/p.git", ServiceReceivePack, "/s/local/git/relay-hooks", []string{EnvRelayProject + "=r/p"}, nil)
+	rp, _ := ServeCall("/s/relay/p.git", ServiceReceivePack, "/s/local/git/relay-hooks", []string{EnvRelayProject + "=r/p"}, nil, 2<<30)
 	cmd, err = h.Cmd(rp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	joined = strings.Join(cmd.Args, " ")
 	for _, want := range []string{"core.hooksPath=/s/local/git/relay-hooks", "receive.hideRefs=refs/devc", "receive.hideRefs=refs/remotes",
-		"receive.denyDeletes=true", "receive.autogc=false", "receive.fsckObjects=true", "receive-pack /s/relay/p.git"} {
+		"receive.denyDeletes=true", "receive.autogc=false", "receive.fsckObjects=true", "receive.maxInputSize=2147483648", "receive-pack /s/relay/p.git"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("receive-pack lacks %q: %q", want, cmd.Args)
 		}
@@ -104,10 +104,10 @@ func TestServeCall(t *testing.T) {
 	if strings.Contains(joined, "no-hooks") || !slices.Contains(cmd.Env, EnvRelayProject+"=r/p") || !slices.Contains(cmd.Unset, "GIT_*") {
 		t.Errorf("receive-pack: %q env %q", cmd.Args, cmd.Env)
 	}
-	if _, err := ServeCall("/s/relay/p.git", "upload-archive", "/h", nil, nil); err == nil {
+	if _, err := ServeCall("/s/relay/p.git", "upload-archive", "/h", nil, nil, 0); err == nil {
 		t.Error("accepted another service")
 	}
-	if _, err := ServeCall("/s/relay/p.git", ServiceReceivePack, "rel", nil, nil); err == nil {
+	if _, err := ServeCall("/s/relay/p.git", ServiceReceivePack, "rel", nil, nil, 0); err == nil {
 		t.Error("accepted a relative hooks directory")
 	}
 	if _, err := h.Cmd(Call{Relay: "/r.git", Args: []string{"log"}, Config: []string{"-x=1"}}); err == nil {
@@ -140,7 +140,7 @@ func TestEnsureRelayHooks(t *testing.T) {
 			t.Errorf("%s -> %q %v", de.Name(), target, err)
 		}
 	}
-	if !slices.Equal(names, []string{HookPostReceive, HookUpdate}) {
+	if !slices.Equal(names, []string{HookPostReceive, HookPreReceive, HookUpdate}) {
 		t.Errorf("hooks directory holds %q", names)
 	}
 	if fi, _ := os.Stat(dir); fi.Mode().Perm() != 0o700 {

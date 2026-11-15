@@ -186,7 +186,10 @@ func (w *boxWorker) connect(ctx context.Context) error {
 	cfg.StreamOpenTimeout = 15 * time.Second
 	cfg.StreamCloseTimeout = time.Minute
 	cfg.LogOutput = io.Discard
-	sess, err := yamux.Client(conn, cfg)
+	// The guard bounds what yamux keeps for the box: streams and control
+	// frames (findings C1-03, C1-04).
+	guard := newMuxGuard(conn)
+	sess, err := yamux.Client(guard, cfg)
 	if err != nil {
 		conn.Close()
 		return err
@@ -236,6 +239,11 @@ func (w *boxWorker) connect(ctx context.Context) error {
 	case <-sess.CloseChan():
 	case <-ctrl.Done():
 	}
+	if err := guard.violation(); err != nil {
+		// Not a channel that ended normally: back off before the next.
+		w.d.log.Warn("closed a box channel", "box", names.BoxName(w.ref), "err", err)
+		return fmt.Errorf("%w: %v", errRefused, err)
+	}
 	return nil
 }
 
@@ -268,7 +276,7 @@ func (w *boxWorker) acceptStreams(ctx context.Context, sess *yamux.Session) {
 			return w.d.requests.status(ctx, w.ref, params)
 		},
 		proto.MethodHostSecret: func(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
-			return w.d.secret(ctx, w.ref, params)
+			return w.d.secret(ctx, w.ref, w.containerID, params)
 		},
 	}
 	notify := map[string]proto.NotifyHandler{

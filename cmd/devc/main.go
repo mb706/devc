@@ -51,7 +51,7 @@ type launcher interface {
 // the hooks directory holds links named after the hooks, and the daemon
 // sets the project for receive-pack (work order C10a).
 func relayHook(name string, getenv func(string) string) bool {
-	return (name == "update" || name == "post-receive") && getenv("DEVC_RELAY_PROJECT") != ""
+	return (name == "pre-receive" || name == "update" || name == "post-receive") && getenv("DEVC_RELAY_PROJECT") != ""
 }
 
 func dispatch(name string, args []string, l launcher) int {

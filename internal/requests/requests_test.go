@@ -245,3 +245,69 @@ func TestStore(t *testing.T) {
 		t.Error("request ID format")
 	}
 }
+
+// TestStoreCompaction: a log past CompactAt keeps every open request and
+// the most recent closed ones; a broken log does not hide requests of
+// other projects (finding C1-10).
+func TestStoreCompaction(t *testing.T) {
+	dir := t.TempDir()
+	p, err := paths.Resolve(paths.Options{ConfigDir: filepath.Join(dir, "c"), StateDir: filepath.Join(dir, "s"), RuntimeDir: filepath.Join(dir, "r"), Home: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &Store{Paths: p}
+	ref := names.ProjectRef{Realm: "demo", Project: "hello"}
+	start := time.Now().UTC().Add(-time.Hour)
+	text := strings.Repeat("n", 1900)
+	var open []string
+	var last proto.Request
+	for i := 0; i < 3000; i++ {
+		r := proto.Request{ID: NewID(), Time: start, Ref: ref.String(), Kind: "note", Params: proto.RequestParams{Kind: "note", Text: text},
+			Risk: "low", Status: proto.RequestDone, Updated: start.Add(time.Duration(i) * time.Second)}
+		if i%500 == 0 {
+			r.Status = proto.RequestPending
+			open = append(open, r.ID)
+		}
+		if err := st.Put(ref, r); err != nil {
+			t.Fatal(err)
+		}
+		last = r
+	}
+	size, _ := st.Size(ref)
+	if size > CompactAt+64<<10 {
+		t.Errorf("the log has %d bytes after compactions", size)
+	}
+	list, err := st.Load(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]proto.Request{}
+	closed := 0
+	for _, r := range list {
+		byID[r.ID] = r
+		if r.Status != proto.RequestPending {
+			closed++
+		}
+	}
+	for _, id := range open {
+		if byID[id].Status != proto.RequestPending {
+			t.Errorf("open request %s lost", id)
+		}
+	}
+	if _, ok := byID[last.ID]; !ok || closed > 3000 || closed < KeepClosed {
+		t.Errorf("closed requests kept: %d (the last one: %v)", closed, ok)
+	}
+	if len(list) >= 3000 {
+		t.Errorf("nothing was compacted: %d requests", len(list))
+	}
+
+	// A broken log in another project.
+	broken := names.ProjectRef{Realm: "demo", Project: "analysis"}
+	os.MkdirAll(st.File(broken), 0o700)
+	if gotRef, got, err := st.Find([]names.ProjectRef{broken, ref}, last.ID); err != nil || got.ID != last.ID || gotRef != ref {
+		t.Errorf("find beside a broken log: %v %v %v", gotRef, got.ID, err)
+	}
+	if _, _, err := st.Find([]names.ProjectRef{broken, ref}, "r00000000000000000099"); !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "cannot be read") {
+		t.Errorf("unknown request beside a broken log: %v", err)
+	}
+}

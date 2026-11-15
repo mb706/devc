@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,6 +39,9 @@ type cmdRecord struct {
 
 type receiptStore struct {
 	dir string
+	// failSave, when set, makes save fail for the records it refuses
+	// (tests: a full disk).
+	failSave atomic.Pointer[func(*cmdRecord) error]
 }
 
 func (s *receiptStore) path(id string) string { return filepath.Join(s.dir, id+".json") }
@@ -128,6 +132,11 @@ func (s *receiptStore) create(r *cmdRecord) (*cmdRecord, bool, error) {
 
 // save replaces a record (after create).
 func (s *receiptStore) save(r *cmdRecord) error {
+	if f := s.failSave.Load(); f != nil {
+		if err := (*f)(r); err != nil {
+			return err
+		}
+	}
 	tmp, err := s.writeTemp(r)
 	if err != nil {
 		return err

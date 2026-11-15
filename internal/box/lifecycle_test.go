@@ -246,6 +246,12 @@ func TestUpCreatesAndIsIdempotent(t *testing.T) {
 		t.Error("root log created by up")
 	}
 
+	// What the box was started with is recorded (finding C1-02).
+	caps, err := ReadCapabilities(p, hello)
+	if err != nil || caps.ContainerID != ci.ID || caps.V != 1 {
+		t.Errorf("capability record: %+v %v", caps, err)
+	}
+
 	r.eng.Log = nil
 	r.load()
 	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
@@ -253,6 +259,49 @@ func TestUpCreatesAndIsIdempotent(t *testing.T) {
 	}
 	if len(r.eng.Log) != 0 || !strings.Contains(r.out.String(), "already running") {
 		t.Errorf("second up: %v\n%s", r.eng.Log, r.out)
+	}
+	// A stopped box keeps no record.
+	if err := r.m.Down(ctx, hello); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadCapabilities(p, hello); !errors.Is(err, ErrNoCapabilities) {
+		t.Errorf("record after down: %v", err)
+	}
+}
+
+// TestCapabilities: the record is intersected with the configuration
+// (finding C1-02).
+func TestCapabilities(t *testing.T) {
+	r := &config.Resolved{Grants: config.Grants{Secrets: []string{"A", "B"}, SSH: []string{"h1", "h2:ro", "h3:ro"},
+		SSHAllow: map[string][]string{"h2": {"ls", "cat"}, "h3": {"ls"}}},
+		Harnesses: []config.ResolvedHarness{{ID: "codex", AuthMethod: "env-token", Secret: "TOKEN"}}}
+	c := CapabilitiesOf(r, "cid", time.Now())
+	if !slices.Equal(c.Secrets, []string{"A", "B", "TOKEN"}) {
+		t.Errorf("secrets: %q", c.Secrets)
+	}
+	now := &config.Resolved{Grants: config.Grants{Secrets: []string{"B", "C"}, SSH: []string{"h1:ro", "h2:ro", "h3", "h4"},
+		SSHAllow: map[string][]string{"h1": {"ls"}, "h2": {"cat", "rm"}}}}
+	for name, want := range map[string]bool{"A": false, "B": true, "C": false, "TOKEN": false} {
+		if c.AllowsSecret(now, name) != want {
+			t.Errorf("secret %s: want %v", name, want)
+		}
+	}
+	for _, tc := range []struct {
+		host  string
+		ok    bool
+		ro    bool
+		allow []string
+	}{
+		{"h1", true, true, []string{"ls"}},  // full at the start, read-only now
+		{"h2", true, true, []string{"cat"}}, // read-only both times: both lists
+		{"h3", true, true, []string{"ls"}},  // read-only at the start, full now
+		{"h4", false, false, nil},           // granted after the start
+		{"h5", false, false, nil},
+	} {
+		g, allow, ok := c.SSHGrant(now, tc.host)
+		if ok != tc.ok || g.ReadOnly != tc.ro || !slices.Equal(allow, tc.allow) {
+			t.Errorf("%s: %+v %q %v", tc.host, g, allow, ok)
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -10,10 +11,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/boxside"
+	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/proto"
@@ -299,7 +303,13 @@ func TestSecrets(t *testing.T) {
 	st := secrets.NewFileStore(r.p)
 	st.Set("demo", "API_TOKEN", []byte("s3cret"))
 	st.Set("demo", "OTHER", []byte("nope"))
+	st.Set("demo", "LATER", []byte("later"))
 	var rep proto.SecretReply
+	// No record of the box's start: nothing on demand (finding C1-02).
+	if err := r.boxCall(proto.MethodHostSecret, proto.SecretParams{Name: "API_TOKEN"}, &rep); !proto.IsCode(err, proto.CodeRefused) || !strings.Contains(err.Error(), "restart it") {
+		t.Errorf("without a record: %v", err)
+	}
+	r.recordStart()
 	if err := r.boxCall(proto.MethodHostSecret, proto.SecretParams{Name: "API_TOKEN"}, &rep); err != nil || rep.Value != "s3cret" {
 		t.Errorf("granted secret: %q %v", rep.Value, err)
 	}
@@ -315,6 +325,30 @@ func TestSecrets(t *testing.T) {
 	// The value never reaches the log.
 	if !strings.Contains(logBuf.String(), "secret delivered") || strings.Contains(logBuf.String(), "s3cret") {
 		t.Error("the secret's value was logged")
+	}
+	// A secret granted after the start (say, together with a network
+	// change the running box does not have) waits for the next start; a
+	// grant removed is gone at once (finding C1-02).
+	proj := filepath.Join(r.p.ConfigDir(), "realms", "demo", "projects", "hello", "project.toml")
+	pb, _ := os.ReadFile(proj)
+	os.WriteFile(proj, []byte(strings.Replace(string(pb), `secrets = ["API_TOKEN", "UNSET"]`, `secrets = ["UNSET", "LATER"]`, 1)), 0o644)
+	r.d.reload(true)
+	if err := r.boxCall(proto.MethodHostSecret, proto.SecretParams{Name: "LATER"}, &rep); !proto.IsCode(err, proto.CodeRefused) || !strings.Contains(err.Error(), "after its box started") {
+		t.Errorf("a secret granted after the start: %v", err)
+	}
+	if err := r.boxCall(proto.MethodHostSecret, proto.SecretParams{Name: "API_TOKEN"}, &rep); !proto.IsCode(err, proto.CodeRefused) {
+		t.Errorf("a secret no longer granted: %v", err)
+	}
+	r.recordStart()
+	if err := r.boxCall(proto.MethodHostSecret, proto.SecretParams{Name: "LATER"}, &rep); err != nil || rep.Value != "later" {
+		t.Errorf("after the box was brought up again: %q %v", rep.Value, err)
+	}
+	// A record of another container counts for nothing.
+	caps, _ := box.ReadCapabilities(r.p, hello)
+	caps.ContainerID = strings.Repeat("0", 64)
+	box.WriteCapabilities(r.p, hello, *caps)
+	if err := r.boxCall(proto.MethodHostSecret, proto.SecretParams{Name: "LATER"}, &rep); !proto.IsCode(err, proto.CodeRefused) || !strings.Contains(err.Error(), "another container") {
+		t.Errorf("a record of another container: %v", err)
 	}
 	// With file delivery the daemon serves nothing.
 	f := filepath.Join(r.p.ConfigDir(), "config.toml")
@@ -516,9 +550,18 @@ func TestRelayStreams(t *testing.T) {
 			t.Errorf("hook %s -> %q %v", h, target, err)
 		}
 	}
-	// The box lock is free again.
-	if _, err := os.Stat(r.p.BoxLockFile(hello)); err != nil {
-		t.Errorf("lock file: %v", err)
+	// The box lock is free again: it can be taken (finding C1-20).
+	lockFree := func(within time.Duration) bool {
+		t.Helper()
+		unlock, err := box.LockBox(context.Background(), r.p, hello, within, nil)
+		if err != nil {
+			return false
+		}
+		unlock()
+		return true
+	}
+	if !lockFree(2 * time.Second) {
+		t.Error("the box lock is still held after receive-pack")
 	}
 	// Garbage on a stream and unknown services do not disturb the channel.
 	for _, bad := range []string{"not json\n", `{"jsonrpc":"2.0","id":1,"method":"host.git","params":{"service":"upload-archive"}}` + "\n",
@@ -542,6 +585,32 @@ func TestRelayStreams(t *testing.T) {
 	}
 	readAdvertisement(t, conn)
 	conn.Close()
+
+	// A box that asks receive-pack for a large advertisement and never
+	// reads it loses the stream after the stall limit, and the box lock is
+	// released (finding C1-09).
+	var refs strings.Builder
+	for i := 0; i < 20000; i++ {
+		fmt.Fprintf(&refs, "%s refs/heads/many/branch-with-a-long-name-%05d\n", commit, i)
+	}
+	if err := os.WriteFile(filepath.Join(relay, "packed-refs"), []byte(refs.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := streamStall
+	streamStall = time.Second
+	t.Cleanup(func() { streamStall = old })
+	conn, err = dial.Open("receive-pack", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	time.Sleep(500 * time.Millisecond)
+	if lockFree(100 * time.Millisecond) {
+		t.Fatal("the box lock is not held during receive-pack")
+	}
+	if !lockFree(15 * time.Second) {
+		t.Error("a box that stopped reading kept the box lock")
+	}
 }
 
 func TestRequestCommands(t *testing.T) {
@@ -582,5 +651,128 @@ func TestRequestsInterrupted(t *testing.T) {
 	}
 	if len(r.devcCalls("seal")) != 0 {
 		t.Error("an interrupted request was run again")
+	}
+}
+
+// TestRequestExecutor: approved requests run on a bounded executor and
+// count against the per-project limit until they finish (finding C1-11).
+func TestRequestExecutor(t *testing.T) {
+	oldW, oldQ, oldO := requestWorkers, requestQueue, maxOutstanding
+	requestWorkers, requestQueue, maxOutstanding = 1, 2, 4
+	t.Cleanup(func() { requestWorkers, requestQueue, maxOutstanding = oldW, oldQ, oldO })
+	r := boxRig(t, "[requests]\nauto = [\"savepoint\"]\n", "")
+	r.d.o.Global = []string{"--config-dir", "/cfg"}
+	release := make(chan struct{})
+	var mu sync.Mutex
+	running := 0
+	r.runner.On("/fake/devc", "--config-dir", "/cfg", "save").Do(func(execx.Cmd) {
+		mu.Lock()
+		running++
+		mu.Unlock()
+		<-release
+	})
+	var ids []string
+	for i := 0; i < 3; i++ {
+		rep, err := r.request(t, proto.RequestParams{Kind: "savepoint"})
+		if err != nil || rep.Status != proto.RequestApproved {
+			t.Fatalf("savepoint %d: %+v %v", i, rep, err)
+		}
+		ids = append(ids, rep.ID)
+	}
+	// The executor is full: an automatic approval is refused as busy, and
+	// a local approval leaves the request pending.
+	if _, err := r.request(t, proto.RequestParams{Kind: "savepoint"}); !proto.IsCode(err, proto.CodeBusy) || !strings.Contains(err.Error(), "busy carrying out") {
+		t.Errorf("savepoint with the executor full: %v", err)
+	}
+	pkg, err := r.request(t, proto.RequestParams{Kind: "package", Manager: "apk", Packages: []string{"jq"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := r.client(nil)
+	var dec proto.DecideResult
+	if err := c.Call(context.Background(), proto.MethodRequestsDecide, proto.DecideParams{ID: pkg.ID, Approve: true}, &dec); !proto.IsCode(err, proto.CodeBusy) {
+		t.Errorf("approval with the executor full: %v", err)
+	}
+	if st := r.waitRequest(t, pkg.ID); st.Status != proto.RequestPending {
+		t.Errorf("after a busy approval: %+v", st)
+	}
+	// Three approved and one pending reach the project's limit of four.
+	if _, err := r.request(t, proto.RequestParams{Kind: "note", Text: "x"}); !proto.IsCode(err, proto.CodeBusy) || !strings.Contains(err.Error(), "too many requests") {
+		t.Errorf("approved requests not counted: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	if running != 1 {
+		t.Errorf("%d requests run at once with one worker", running)
+	}
+	mu.Unlock()
+	close(release)
+	for _, id := range ids {
+		if st := r.waitRequest(t, id); st.Status != proto.RequestDone {
+			t.Errorf("%s: %+v", id, st)
+		}
+	}
+	if err := c.Call(context.Background(), proto.MethodRequestsDecide, proto.DecideParams{ID: pkg.ID, Approve: true}, &dec); err != nil || dec.Request.Status != proto.RequestApproved {
+		t.Errorf("approval with room again: %+v %v", dec, err)
+	}
+}
+
+// TestRequestLogs: a broken log in one project does not stop decisions in
+// another (finding C1-10); a status poll never expires a request decided
+// meanwhile (C1-18).
+func TestRequestLogs(t *testing.T) {
+	r := boxRig(t, "[requests]\nauto = []\n", "")
+	c := r.client(nil)
+	// demo/analysis sorts before demo/hello; its log is unreadable.
+	analysis := names.ProjectRef{Realm: "demo", Project: "analysis"}
+	os.MkdirAll(r.p.RequestsFile(analysis), 0o700)
+	note, err := r.request(t, proto.RequestParams{Kind: "note", Text: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dec proto.DecideResult
+	if err := c.Call(context.Background(), proto.MethodRequestsDecide, proto.DecideParams{ID: note.ID, Approve: true}, &dec); err != nil || dec.Request.Status != proto.RequestDone {
+		t.Errorf("decision beside a broken log: %+v %v", dec, err)
+	}
+	var list proto.RequestsListResult
+	if err := c.Call(context.Background(), proto.MethodRequestsList, proto.RequestsListParams{All: true}, &list); err != nil || len(list.Requests) != 1 {
+		t.Errorf("list beside a broken log: %+v %v", list, err)
+	}
+
+	// A pending request past its expiry is approved while a status poll
+	// holds the old state.
+	st := &requests.Store{Paths: r.p}
+	old := proto.Request{ID: requests.NewID(), Time: time.Now().Add(-8 * 24 * time.Hour), Ref: hello.String(), Kind: "note",
+		Params: proto.RequestParams{Kind: "note", Text: "old"}, Risk: "low", Status: proto.RequestPending}
+	st.Put(hello, old)
+	statusExpireHook = func() {
+		statusExpireHook = nil
+		approved := old
+		approved.Status, approved.Result = proto.RequestDone, "noted"
+		st.Put(hello, approved)
+	}
+	t.Cleanup(func() { statusExpireHook = nil })
+	if got := r.waitRequest(t, old.ID); got.Status != proto.RequestDone {
+		t.Errorf("status poll over a decision: %+v", got)
+	}
+	list2, _ := st.Load(hello)
+	for _, q := range list2 {
+		if q.ID == old.ID && q.Status != proto.RequestDone {
+			t.Errorf("stored: %+v", q)
+		}
+	}
+}
+
+// recordStart writes the capability record a successful start of the
+// rig's box writes, from the current configuration.
+func (r *rig) recordStart() {
+	r.t.Helper()
+	c, _ := config.Load(r.p)
+	res, err := c.Resolved(hello)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if err := box.WriteCapabilities(r.p, hello, box.CapabilitiesOf(res, r.cid, time.Now())); err != nil {
+		r.t.Fatal(err)
 	}
 }

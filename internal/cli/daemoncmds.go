@@ -281,11 +281,12 @@ func (a *app) psWatch(cmd *cobra.Command, e *boxEnv, refs []names.ProjectRef, al
 				return
 			}
 			mu.Lock()
-			v := views[n.Event.Session]
+			key := proto.SessionKey(n.Ref, n.Event.Session)
+			v := views[key]
 			if v == nil {
 				nv := proto.NewSessionView(ref.Realm, ref.Project, n.Event.Session)
 				v = &nv
-				views[n.Event.Session] = v
+				views[key] = v
 			}
 			if n.Event.Seq > v.LastSeq {
 				v.Apply(&n.Event)
@@ -296,8 +297,12 @@ func (a *app) psWatch(cmd *cobra.Command, e *boxEnv, refs []names.ProjectRef, al
 		proto.NotifyMissed: func(_ context.Context, _ *proto.Conn, params json.RawMessage) {
 			var n proto.MissedNote
 			if json.Unmarshal(params, &n) == nil && names.ValidSessionID(n.Session) {
+				key := n.Session
+				if n.Ref != "" {
+					key = proto.SessionKey(n.Ref, n.Session)
+				}
 				mu.Lock()
-				missed[n.Session] = true
+				missed[key] = true
 				mu.Unlock()
 				poke()
 			}
@@ -333,15 +338,16 @@ func (a *app) psWatch(cmd *cobra.Command, e *boxEnv, refs []names.ProjectRef, al
 			mu.Lock()
 			for i := range sums {
 				s := sums[i]
-				views[s.Session] = &s
+				views[proto.SessionKey(s.Ref, s.Session)] = &s
 			}
 			mu.Unlock()
 			first = false
 		}
 		mu.Lock()
+		// Cursors name sessions by project and ID (finding C1-01).
 		cursor := proto.Cursor{}
-		for id, v := range views {
-			cursor[id] = v.LastSeq
+		for key, v := range views {
+			cursor[key] = v.LastSeq
 		}
 		mu.Unlock()
 		p := proto.SubscribeParams{Cursor: cursor, Window: window}
@@ -369,16 +375,24 @@ func (a *app) psWatch(cmd *cobra.Command, e *boxEnv, refs []names.ProjectRef, al
 				}
 				missed = map[string]bool{}
 				mu.Unlock()
-				for _, id := range again {
+				for _, key := range again {
+					ref, id, err := proto.ParseSessionKey(key)
+					if err != nil {
+						continue
+					}
+					p := proto.SessionsGetParams{Session: id, Events: 1}
+					if ref != (names.ProjectRef{}) {
+						p.Ref = ref.String()
+					}
 					var res proto.SessionsGetResult
-					if err := cl.Call(ctx, proto.MethodSessionsGet, proto.SessionsGetParams{Session: id, Events: 1}, &res); err == nil {
+					if err := cl.Call(ctx, proto.MethodSessionsGet, p, &res); err == nil {
 						mu.Lock()
 						s := res.Session
-						views[id] = &s
+						views[proto.SessionKey(s.Ref, s.Session)] = &s
 						mu.Unlock()
 					} else {
 						mu.Lock()
-						delete(views, id)
+						delete(views, key)
 						mu.Unlock()
 					}
 				}
@@ -412,6 +426,13 @@ func (a *app) drawWatch(mu *sync.Mutex, views map[string]*session.Summary, since
 // findAnySession finds a session (live or ended) by ID or unique prefix in
 // the journals of the configured projects.
 func (a *app) findAnySession(c *config.Config, prefix string) (names.ProjectRef, string, error) {
+	// <realm>/<project>/<id> names one session exactly.
+	if ref, sid, err := proto.ParseSessionKey(prefix); err == nil && ref != (names.ProjectRef{}) {
+		if _, ok := session.FindJournal(c.Paths, []names.ProjectRef{ref}, sid); !ok {
+			return names.ProjectRef{}, "", fmt.Errorf("no session %s in %s: see 'devc ps --all'", sid, ref)
+		}
+		return ref, sid, nil
+	}
 	if !sessionPrefixRE.MatchString(prefix) {
 		return names.ProjectRef{}, "", usageErrorf("%q is not a session ID or prefix", prefix)
 	}
@@ -419,7 +440,7 @@ func (a *app) findAnySession(c *config.Config, prefix string) (names.ProjectRef,
 		ref names.ProjectRef
 		id  string
 	}
-	var hits []hit
+	var hits, exact []hit
 	for _, ref := range allRefs(c) {
 		ids, err := session.JournalSessions(c.Paths, ref)
 		if err != nil {
@@ -427,12 +448,19 @@ func (a *app) findAnySession(c *config.Config, prefix string) (names.ProjectRef,
 		}
 		for _, id := range ids {
 			if id == prefix {
-				return ref, id, nil
+				exact = append(exact, hit{ref, id})
 			}
 			if matchSession(id, prefix) {
 				hits = append(hits, hit{ref, id})
 			}
 		}
+	}
+	switch len(exact) {
+	case 0:
+	case 1:
+		return exact[0].ref, exact[0].id, nil
+	default:
+		return names.ProjectRef{}, "", fmt.Errorf("the session ID %s exists in %s and %s: name it as <realm>/<project>/%s", prefix, exact[0].ref, exact[1].ref, prefix)
 	}
 	switch len(hits) {
 	case 0:
@@ -510,7 +538,7 @@ func newEventsCmd(a *app) *cobra.Command {
 			if sid != "" {
 				var evs []proto.Event
 				if derr == nil {
-					res, err := cl.Events(ctx, sid, 0)
+					res, err := cl.EventsOf(ctx, ref.String(), sid, 0)
 					if err != nil {
 						return err
 					}
@@ -534,7 +562,8 @@ func newEventsCmd(a *app) *cobra.Command {
 			}
 			p := proto.SubscribeParams{FromNow: true}
 			if sid != "" {
-				p = proto.SubscribeParams{Cursor: proto.Cursor{sid: last}, Sessions: []string{sid}}
+				key := proto.SessionKey(ref.String(), sid)
+				p = proto.SubscribeParams{Cursor: proto.Cursor{key: last}, Sessions: []string{key}}
 			}
 			if err := cl.Call(ctx, proto.MethodEventsSubscribe, p, nil); err != nil {
 				return err

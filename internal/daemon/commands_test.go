@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -457,9 +458,23 @@ func TestCommandsSurviveRestart(t *testing.T) {
 	f.event(proto.TypeState, proto.State{State: proto.StateWorking})
 	time.Sleep(300 * time.Millisecond)
 	queued := newID()
-	call(t, c, proto.MethodSessionSend, proto.SendParams{ID: queued, Session: sid, Text: "after the restart"})
+	if rec := call(t, c, proto.MethodSessionSend, proto.SendParams{ID: queued, Session: sid, Text: "after the restart"}); rec.Ref != hello.String() {
+		t.Errorf("the receipt does not name the session's project: %+v", rec)
+	}
 	c.Close()
 	stop()
+
+	// Another project gets a journal of the same session ID that looks
+	// older (finding C1-01). The stored command keeps its project: the
+	// restart must not rebind it.
+	analysis := names.ProjectRef{Realm: "demo", Project: "analysis"}
+	os.MkdirAll(r.p.JournalDir(analysis), 0o700)
+	planted := spoolLine(sid, proto.TypeSessionStart, proto.SessionStart{Harness: "claude"})
+	var ev proto.Event
+	json.Unmarshal([]byte(planted), &ev)
+	ev.Seq, ev.At = 1, time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	b, _ := json.Marshal(ev)
+	os.WriteFile(r.p.JournalFile(analysis, sid), append(b, '\n'), 0o600)
 
 	// A command that had begun to type when the daemon died.
 	store := &receiptStore{dir: r.p.ReceiptsDir()}
@@ -491,6 +506,18 @@ func TestCommandsSurviveRestart(t *testing.T) {
 	}
 	if strings.Join(f.pastes, "|") != "after the restart" {
 		t.Errorf("pastes %q", f.pastes)
+	}
+	// A bare ID that two projects share is refused; with its project it is
+	// found.
+	if err := c.Call(context.Background(), proto.MethodSessionsGet, proto.SessionsGetParams{Session: sid}, nil); !proto.IsCode(err, proto.CodeInvalidParams) || !strings.Contains(err.Error(), "demo/analysis and demo/hello") {
+		t.Errorf("ambiguous bare ID: %v", err)
+	}
+	var got proto.SessionsGetResult
+	if err := c.Call(context.Background(), proto.MethodSessionsGet, proto.SessionsGetParams{Session: sid, Ref: "demo/hello"}, &got); err != nil || got.Session.Ref != "demo/hello" || got.Session.Harness != "claude" {
+		t.Errorf("by project: %+v %v", got.Session, err)
+	}
+	if rec := call(t, c, proto.MethodSessionSend, proto.SendParams{ID: newID(), Session: sid, Text: "x"}); rec.Outcome != proto.OutcomeRefused || !strings.Contains(rec.Detail, "name the project") {
+		t.Errorf("command with an ambiguous ID: %+v", rec)
 	}
 }
 
@@ -652,3 +679,132 @@ func TestStartAndStop(t *testing.T) {
 		t.Errorf("no stop command: %+v", r.eng.Execs)
 	}
 }
+
+// TestDeliveryChecks: nothing is typed when "delivering" cannot be stored
+// (finding C1-06); a queued send that finds the session busy again after
+// the input gate goes back to waiting (C1-14); an answer whose question
+// changed while it waited is refused as stale, on screen and by hook
+// (C1-13).
+func TestDeliveryChecks(t *testing.T) {
+	shortTimes(t)
+	old := persistRetry
+	persistRetry = 300 * time.Millisecond
+	t.Cleanup(func() { persistRetry = old })
+	r := newRig(t)
+	r.boxUp(true)
+	r.start()
+	c := r.client(nil)
+	sid := names.NewSessionID()
+	f := &fakeBox{r: r, sid: sid, buffers: map[string][]byte{}}
+	r.agentWithInput(f)
+	r.waitChannel(c, proto.ChannelConnected)
+	r.startSession(c, sid)
+
+	// The disk is full when the command is about to type.
+	full := func(rec *cmdRecord) error {
+		if rec.Receipt.Outcome == proto.OutcomeDelivering {
+			return syscallErr("no space left on device")
+		}
+		return nil
+	}
+	r.d.cmd.store.failSave.Store(&full)
+	id := newID()
+	call(t, c, proto.MethodSessionSend, proto.SendParams{ID: id, Session: sid, Text: "not yet", Mode: proto.ModeSteer})
+	time.Sleep(time.Second)
+	if p, _ := f.counts(); p != 0 {
+		t.Fatalf("typed although delivering could not be stored: %q", f.pastes)
+	}
+	var got proto.Receipt
+	c.Call(context.Background(), proto.MethodCommandGet, proto.CommandGetParams{ID: id}, &got)
+	if got.Outcome != proto.OutcomeAccepted || got.Final {
+		t.Errorf("receipt while the disk is full: %+v", got)
+	}
+	r.d.cmd.store.failSave.Store(nil)
+	if rec := waitFinal(t, c, id); rec.Outcome != proto.OutcomeDelivered {
+		t.Errorf("after the disk has room again: %+v", rec)
+	}
+	if p, _ := f.counts(); p != 1 {
+		t.Errorf("pastes %q", f.pastes)
+	}
+
+	// A queued send waits in the gate while a person types; the person
+	// submits a turn meanwhile.
+	f.set(func(f *fakeBox) { f.clients, f.activity, f.hold = 1, time.Now().Unix(), true })
+	id = newID()
+	call(t, c, proto.MethodSessionSend, proto.SendParams{ID: id, Session: sid, Text: "queued"})
+	time.Sleep(500 * time.Millisecond)
+	f.event(proto.TypePrompt, proto.Prompt{SHA256: strings.Repeat("0", 64), Length: 3})
+	f.event(proto.TypeState, proto.State{State: proto.StateWorking})
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && r.view(c, sid).State != proto.StateWorking {
+		time.Sleep(30 * time.Millisecond)
+	}
+	f.set(func(f *fakeBox) { f.activity = time.Now().Unix() - 30 })
+	time.Sleep(time.Second)
+	if p, _ := f.counts(); p != 1 {
+		t.Fatalf("a queued send was typed into a busy session: %q", f.pastes)
+	}
+	f.set(func(f *fakeBox) { f.clients, f.hold = 0, false })
+	f.event(proto.TypeState, proto.State{State: proto.StateDone})
+	if rec := waitFinal(t, c, id); rec.Outcome != proto.OutcomeDelivered {
+		t.Errorf("queued after the turn: %+v", rec)
+	}
+
+	// An answer accepted for q1 waits in the gate; the harness moves on to
+	// q2 meanwhile.
+	f.event(proto.TypeQuestion, proto.Question{ID: "q1", Text: "first?", Options: []string{"a", "b"}})
+	f.event(proto.TypeState, proto.State{State: proto.StateBlocked, Kind: proto.KindQuestion})
+	waitQuestion := func(q string) {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if v := r.view(c, sid); v.Question != nil && v.Question.ID == q {
+				return
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+		t.Fatalf("question %s not pending", q)
+	}
+	waitQuestion("q1")
+	f.set(func(f *fakeBox) { f.clients, f.activity, f.keys = 1, time.Now().Unix(), nil })
+	id = newID()
+	call(t, c, proto.MethodSessionAnswer, proto.AnswerParams{ID: id, Session: sid, Choice: 1})
+	time.Sleep(time.Second) // past the wait for a hook, into the gate
+	f.event(proto.TypeQuestion, proto.Question{ID: "q2", Text: "second?", Options: []string{"c", "d"}})
+	waitQuestion("q2")
+	f.set(func(f *fakeBox) { f.activity = time.Now().Unix() - 30 })
+	if rec := waitFinal(t, c, id); rec.Outcome != proto.OutcomeRefused || !strings.Contains(rec.Detail, "stale") {
+		t.Errorf("stale answer on screen: %+v", rec)
+	}
+	f.set(func(f *fakeBox) { f.clients = 0 })
+	if _, k := f.counts(); k != 0 {
+		t.Errorf("a stale answer typed keys: %q", f.keys)
+	}
+
+	// A hook waits for q3; an answer bound to q2 is stale, not typed.
+	id = newID()
+	f.set(func(f *fakeBox) { f.clients, f.activity = 1, time.Now().Unix() })
+	call(t, c, proto.MethodSessionAnswer, proto.AnswerParams{ID: id, Session: sid, Choice: 2})
+	f.event(proto.TypeQuestion, proto.Question{ID: "q3", Text: "third?", Options: []string{"e", "f"}})
+	waitQuestion("q3")
+	hookDone := make(chan proto.QuestionReply, 1)
+	go func() {
+		var rep proto.QuestionReply
+		boxside.AgentCallAt(context.Background(), r.local, proto.MethodHostQuestion, proto.QuestionParams{Session: sid, Question: "q3", Timeout: 3}, &rep)
+		hookDone <- rep
+	}()
+	time.Sleep(300 * time.Millisecond)
+	f.set(func(f *fakeBox) { f.activity = time.Now().Unix() - 30 })
+	if rec := waitFinal(t, c, id); rec.Outcome != proto.OutcomeRefused || !strings.Contains(rec.Detail, "stale") {
+		t.Errorf("stale answer with a hook waiting: %+v", rec)
+	}
+	if rep := <-hookDone; rep.Choice != 0 {
+		t.Errorf("the hook got a stale answer: %+v", rep)
+	}
+	if _, k := f.counts(); k != 0 {
+		t.Errorf("a stale answer typed keys: %q", f.keys)
+	}
+}
+
+type syscallErr string
+
+func (e syscallErr) Error() string { return string(e) }

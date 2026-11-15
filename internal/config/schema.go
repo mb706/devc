@@ -155,6 +155,11 @@ type ProjectGit struct {
 	// FetchThrough fetches the upstream into the relay before the box
 	// fetches through the relay service (default true).
 	FetchThrough bool `toml:"fetch_through" json:"fetch_through"`
+	// MaxPushSize bounds the pack of one push from the box through the
+	// relay service, RelayQuota the relay's whole size after it (sizes
+	// such as 2g; defaults 2g and 20g; finding C1-07).
+	MaxPushSize string `toml:"max_push_size" json:"max_push_size,omitempty"`
+	RelayQuota  string `toml:"relay_quota" json:"relay_quota,omitempty"`
 }
 
 // Requests configures the requests of a project's box: Auto lists the

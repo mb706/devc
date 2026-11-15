@@ -19,12 +19,23 @@ import (
 	"github.com/mb706/devc/internal/proto"
 )
 
-// maxLog bounds the request log of one project that is read.
-const maxLog = 64 << 20
+// Bounds of a project's request log (finding C1-10). A log is compacted
+// when it passes CompactAt: each open request (pending or approved) keeps
+// its latest state, and of the closed ones the KeepClosed most recent.
+// Above HardCap even after that, the daemon takes no new requests from the
+// project. maxLog bounds what is read at all.
+const (
+	CompactAt  = 4 << 20
+	KeepClosed = 200
+	HardCap    = 16 << 20
+	maxLog     = 64 << 20
+)
 
 // Store is the request log: one file per project, one JSON object per
 // line, each line the whole request after a change (the last line of an ID
-// wins). Only the daemon writes it; readers take complete lines only.
+// wins). Only the daemon writes it; readers take complete lines only, and
+// a compaction replaces the file whole (rename), so a reader sees the old
+// or the new log, never a mix.
 type Store struct {
 	Paths *paths.Paths
 	mu    sync.Mutex
@@ -76,8 +87,20 @@ func (s *Store) Load(ref names.ProjectRef) ([]proto.Request, error) {
 	return out, nil
 }
 
+// Size is the size of a project's log (0 when there is none).
+func (s *Store) Size(ref names.ProjectRef) (int64, error) {
+	fi, err := os.Lstat(s.File(ref))
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
+}
+
 // Put appends the current state of a request to its project's log (0600 in
-// a 0700 directory) and syncs it.
+// a 0700 directory) and syncs it; a log past CompactAt is compacted.
 func (s *Store) Put(ref names.ProjectRef, r proto.Request) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -110,17 +133,85 @@ func (s *Store) Put(ref names.ProjectRef, r proto.Request) error {
 	if _, err := f.Write(append(b, '\n')); err != nil {
 		return err
 	}
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if fi, err := f.Stat(); err == nil && fi.Size() > CompactAt {
+		// The change is stored either way; a failed compaction is retried
+		// at the next one.
+		_ = s.compactLocked(ref)
+	}
+	return nil
 }
 
-// Find looks a request up by ID or unique prefix among refs.
+// open reports whether a request is still open (its latest state must
+// never be dropped).
+func open(r *proto.Request) bool {
+	return r.Status == proto.RequestPending || r.Status == proto.RequestApproved
+}
+
+// compactLocked rewrites a project's log with the latest state of every
+// open request and of the KeepClosed most recently changed closed ones.
+// The caller holds s.mu.
+func (s *Store) compactLocked(ref names.ProjectRef) error {
+	list, err := s.Load(ref)
+	if err != nil {
+		return err
+	}
+	var keep, closed []proto.Request
+	for _, r := range list {
+		if open(&r) {
+			keep = append(keep, r)
+		} else {
+			closed = append(closed, r)
+		}
+	}
+	sort.SliceStable(closed, func(i, j int) bool { return closed[i].Updated.After(closed[j].Updated) })
+	keep = append(keep, closed[:min(len(closed), KeepClosed)]...)
+	sort.Slice(keep, func(i, j int) bool { return keep[i].ID < keep[j].ID })
+	var buf bytes.Buffer
+	for _, r := range keep {
+		b, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	file := s.File(ref)
+	f, err := os.CreateTemp(filepath.Dir(file), ".tmp-requests-")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, file)
+}
+
+// Find looks a request up by ID or unique prefix among refs. A log that
+// cannot be read is skipped (finding C1-10: one project's broken log never
+// stops decisions in another); when the request is found nowhere, the
+// error says which logs could not be read.
 func (s *Store) Find(refs []names.ProjectRef, id string) (names.ProjectRef, proto.Request, error) {
 	var found []proto.Request
 	var where []names.ProjectRef
+	var broken []error
 	for _, ref := range refs {
 		rs, err := s.Load(ref)
 		if err != nil {
-			return names.ProjectRef{}, proto.Request{}, err
+			broken = append(broken, fmt.Errorf("the request log of %s cannot be read: %w", ref, err))
+			continue
 		}
 		for _, r := range rs {
 			if r.ID == id {
@@ -134,7 +225,7 @@ func (s *Store) Find(refs []names.ProjectRef, id string) (names.ProjectRef, prot
 	}
 	switch len(found) {
 	case 0:
-		return names.ProjectRef{}, proto.Request{}, ErrNotFound
+		return names.ProjectRef{}, proto.Request{}, errors.Join(append([]error{ErrNotFound}, broken...)...)
 	case 1:
 		return where[0], found[0], nil
 	}

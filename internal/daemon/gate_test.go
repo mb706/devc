@@ -61,6 +61,7 @@ func TestGateStreams(t *testing.T) {
 		code := boxside.GateConnect(r.local, host, strings.NewReader(input), &out, &errb)
 		return code, out.String(), errb.String()
 	}
+	r.recordStart()
 	for _, c := range []struct{ host, msg string }{
 		{"c9", "c9 is not granted to demo/hello"},
 		{"-oProxyCommand=x", "not a valid SSH host alias"},
@@ -70,6 +71,24 @@ func TestGateStreams(t *testing.T) {
 			t.Errorf("%s: exit %d out %q err %q", c.host, code, out, errb)
 		}
 	}
+	if len(confs) != 0 {
+		t.Fatalf("sshd ran for a refused stream: %v", confs)
+	}
+	// Without a record of the box's start, nothing (finding C1-02); a host
+	// the box was not started with neither.
+	os.Remove(r.p.BoxCapabilitiesFile(hello))
+	if code, _, errb := connect("c1", "hello"); code != 255 || !strings.Contains(errb, "no record of what it was started with") {
+		t.Errorf("without a record: %d %q", code, errb)
+	}
+	os.WriteFile(proj, []byte("harnesses = [\"claude\"]\n[grants]\nssh = [\"c2:ro\"]\n[grants.ssh_allow]\nc2 = [\"ls\"]\n"), 0o644)
+	r.d.reload(true)
+	r.recordStart()
+	os.WriteFile(proj, []byte("harnesses = [\"claude\"]\n[grants]\nssh = [\"c1\", \"c2:ro\"]\n[grants.ssh_allow]\nc2 = [\"ls\"]\n"), 0o644)
+	r.d.reload(true)
+	if code, _, errb := connect("c1", "hello"); code != 255 || !strings.Contains(errb, "after its box started") {
+		t.Errorf("a host granted after the start: %d %q", code, errb)
+	}
+	r.recordStart()
 	if len(confs) != 0 {
 		t.Fatalf("sshd ran for a refused stream: %v", confs)
 	}

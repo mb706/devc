@@ -280,6 +280,17 @@ func (p *Paths) JournalFile(r names.ProjectRef, session string) string {
 	}
 	return filepath.Join(p.JournalDir(r), session+".jsonl")
 }
+
+// SessionOwnersDir records which project owns each session ID (finding
+// C1-01): one file per ID naming the project whose journal first recorded
+// it.
+func (p *Paths) SessionOwnersDir() string { return filepath.Join(p.DurableDir(), "session-owners") }
+func (p *Paths) SessionOwnerFile(session string) string {
+	if !names.ValidSessionID(session) {
+		panic(fmt.Sprintf("paths: unvalidated session ID %q", session))
+	}
+	return filepath.Join(p.SessionOwnersDir(), session)
+}
 func (p *Paths) SecretsDir(realm string) string {
 	return filepath.Join(p.DurableRealmDir(realm), "secrets")
 }
@@ -303,6 +314,13 @@ func (p *Paths) NodeHubDir(id string) string {
 func (p *Paths) ReceiptsDir() string { return filepath.Join(p.LocalDir(), "receipts") }
 func (p *Paths) BoxLocalDir(r names.ProjectRef) string {
 	return filepath.Join(p.LocalDir(), "boxes", must(names.KindRealm, r.Realm), must(names.KindProject, r.Project))
+}
+
+// BoxCapabilitiesFile records what a box was started with (finding C1-02):
+// the secrets and SSH grants in force at its last successful start. It
+// sits beside the home, not in it, so no box can reach it.
+func (p *Paths) BoxCapabilitiesFile(r names.ProjectRef) string {
+	return filepath.Join(p.BoxLocalDir(r), "capabilities.json")
 }
 
 // BoxHomeDir is mounted at /home/dev.

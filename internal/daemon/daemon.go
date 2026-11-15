@@ -295,6 +295,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cmd.resume()
 	d.requests.recoverInterrupted(d.ctx)
 	d.requests.expireAll(d.ctx)
+	d.requests.start()
 	d.log.Info("daemon started", "version", d.version, "instance", d.instance, "socket", sock)
 	d.goSafe("api", func() { d.serveAPI(ln) })
 	d.goSafe("watch", d.watchLoop)
@@ -587,6 +588,7 @@ func (d *Daemon) ingest(ctx context.Context, e *env, ref names.ProjectRef) (sess
 	rep, err := e.store.Ingest(ref)
 	unlock()
 	d.noteInvalid(ref, rep.Invalid, "")
+	d.noteRefused(ref, rep.Refused)
 	if rep.Events > 0 || rep.Notes > 0 {
 		d.hub.poll(&ref)
 	}
@@ -604,6 +606,7 @@ func (d *Daemon) recordHost(ctx context.Context, ref names.ProjectRef, sid, typ 
 	}
 	rep, ierr := e.store.Ingest(ref)
 	d.noteInvalid(ref, rep.Invalid, "")
+	d.noteRefused(ref, rep.Refused)
 	err = e.store.AppendHostEvent(ref, sid, typ, data)
 	unlock()
 	d.hub.poll(&ref)
@@ -648,6 +651,16 @@ func (d *Daemon) noteInvalid(ref names.ProjectRef, invalid int, text string) {
 	}
 }
 
+// noteRefused logs and keeps for the next client the spool files of a box
+// that ingestion refused because their session belongs to another project
+// (finding C1-01).
+func (d *Daemon) noteRefused(ref names.ProjectRef, refused []session.Refusal) {
+	for _, rf := range refused {
+		d.log.Warn("refused a spool file: its session belongs to another project", "ref", ref.String(), "session", rf.Session, "owner", rf.Owner)
+		d.noteInvalid(ref, 0, session.RefusalText(rf))
+	}
+}
+
 // takeWarnings returns and clears the pending warnings of refs.
 func (d *Daemon) takeWarnings(refs []names.ProjectRef) []proto.Warning {
 	d.mu.Lock()
@@ -683,6 +696,7 @@ func (d *Daemon) refresh(ctx context.Context, e *env, ref names.ProjectRef) (ses
 	}
 	res, err := e.store.Refresh(ctx, ref, observe, e.eng)
 	d.noteInvalid(ref, res.Report.Invalid, res.Warning)
+	d.noteRefused(ref, res.Report.Refused)
 	d.mu.Lock()
 	if res.Live != nil {
 		wins := map[string]string{}

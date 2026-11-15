@@ -1,0 +1,174 @@
+package box
+
+// The capabilities a box was started with (finding C1-02). Secrets the
+// daemon hands out on demand and SSH hosts behind the gate are granted by
+// the configuration, but a running box keeps the isolation it was started
+// with: granting it something new while its network policy or definition
+// has drifted would hand the capability to a box that does not implement
+// the policy the user now expects. So every successful start records what
+// the box was started with, next to its other generated state (beside the
+// home, out of every box's reach), and the daemon and gate-exec authorise
+// against the intersection of that record and the current configuration:
+// removing a grant takes effect at once, adding one needs the box to be
+// brought up again. A box without a record (started before this record
+// existed, or a start that failed) gets nothing on demand.
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"syscall"
+	"time"
+
+	"github.com/mb706/devc/internal/config"
+	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/paths"
+)
+
+// maxCapabilitiesFile bounds the record when it is read.
+const maxCapabilitiesFile = 1 << 20
+
+// Capabilities is the record of one start.
+type Capabilities struct {
+	V int `json:"v"`
+	// ContainerID is the container the record belongs to.
+	ContainerID string    `json:"container_id"`
+	Recorded    time.Time `json:"recorded"`
+	// Secrets are the names the box may receive (GrantedSecrets).
+	Secrets []string `json:"secrets"`
+	// SSH and SSHAllow are grants.ssh and grants.ssh_allow.
+	SSH      []string            `json:"ssh"`
+	SSHAllow map[string][]string `json:"ssh_allow,omitempty"`
+}
+
+// GrantedSecrets lists the secrets a project may receive: its granted
+// secrets and the credentials of its env-token and api-key harnesses.
+func GrantedSecrets(r *config.Resolved) []string {
+	out := append([]string{}, r.Grants.Secrets...)
+	for _, h := range r.Harnesses {
+		if (h.AuthMethod == "env-token" || h.AuthMethod == "api-key") && h.Secret != "" && !slices.Contains(out, h.Secret) {
+			out = append(out, h.Secret)
+		}
+	}
+	return out
+}
+
+// CapabilitiesOf is the record of a start of container with r.
+func CapabilitiesOf(r *config.Resolved, containerID string, now time.Time) Capabilities {
+	allow := map[string][]string{}
+	for h, l := range r.Grants.SSHAllow {
+		allow[h] = slices.Clone(l)
+	}
+	return Capabilities{V: 1, ContainerID: containerID, Recorded: now.UTC(), Secrets: GrantedSecrets(r),
+		SSH: slices.Clone(r.Grants.SSH), SSHAllow: allow}
+}
+
+// WriteCapabilities stores the record of ref's box (0600, replaced whole).
+func WriteCapabilities(p *paths.Paths, ref names.ProjectRef, c Capabilities) error {
+	file := p.BoxCapabilitiesFile(ref)
+	if err := p.Ensure(filepath.Dir(file)); err != nil {
+		return err
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(file), ".tmp-capabilities-")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, file)
+}
+
+// RemoveCapabilities removes the record (the box stopped, or a start
+// begins).
+func RemoveCapabilities(p *paths.Paths, ref names.ProjectRef) error {
+	if err := os.Remove(p.BoxCapabilitiesFile(ref)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// ErrNoCapabilities: the box has no record of its start.
+var ErrNoCapabilities = errors.New("the box has no record of what it was started with")
+
+// ReadCapabilities reads the record of ref's box; ErrNoCapabilities when
+// there is none.
+func ReadCapabilities(p *paths.Paths, ref names.ProjectRef) (*Capabilities, error) {
+	f, err := os.OpenFile(p.BoxCapabilitiesFile(ref), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, ErrNoCapabilities
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxCapabilitiesFile+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxCapabilitiesFile {
+		return nil, fmt.Errorf("%s is too large", p.BoxCapabilitiesFile(ref))
+	}
+	var c Capabilities
+	if err := json.Unmarshal(b, &c); err != nil || c.V != 1 {
+		return nil, fmt.Errorf("%s is corrupt", p.BoxCapabilitiesFile(ref))
+	}
+	return &c, nil
+}
+
+// AllowsSecret reports whether the box may receive the secret: it was
+// started with it and the configuration r still grants it.
+func (c *Capabilities) AllowsSecret(r *config.Resolved, name string) bool {
+	return slices.Contains(c.Secrets, name) && slices.Contains(GrantedSecrets(r), name)
+}
+
+// SSHGrant is the grant of host in force for the box: granted at its start
+// and still now, read-only when either says so, and the commands a
+// read-only host allows both then and now.
+func (c *Capabilities) SSHGrant(r *config.Resolved, host string) (config.SSHGrant, []string, bool) {
+	cur, ok := r.Grants.SSHGrantFor(host)
+	if !ok {
+		return config.SSHGrant{}, nil, false
+	}
+	started, ok := config.Grants{SSH: c.SSH}.SSHGrantFor(host)
+	if !ok {
+		return config.SSHGrant{}, nil, false
+	}
+	g := config.SSHGrant{Host: host, ReadOnly: cur.ReadOnly || started.ReadOnly}
+	if !g.ReadOnly {
+		return g, nil, true
+	}
+	var allow []string
+	switch {
+	case cur.ReadOnly && started.ReadOnly:
+		for _, cmd := range r.Grants.SSHAllowed(host) {
+			if slices.Contains(c.SSHAllow[host], cmd) {
+				allow = append(allow, cmd)
+			}
+		}
+	case started.ReadOnly:
+		allow = slices.Clone(c.SSHAllow[host])
+	default:
+		allow = r.Grants.SSHAllowed(host)
+	}
+	return g, allow, true
+}

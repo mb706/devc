@@ -6,13 +6,17 @@ package gitx
 // input and output. The box never gets a path to the relay; the project is
 // the one bound to the channel.
 //
-// Pushes are checked by two hooks in a host-controlled directory, which
-// are links to the devc binary (no shell is involved): update applies the
-// policy table (CheckUpdate) to each ref, post-receive records what was
-// accepted the way a bank would (RecordPush) and forwards branches listed
-// in git.forward. Ref names and object names in hook input come from a box:
-// they are validated before use and only ever passed as single arguments
-// or update-ref lines.
+// Pushes are checked by three hooks in a host-controlled directory, which
+// are links to the devc binary (no shell is involved): pre-receive refuses
+// a whole push that updates too many refs or would take the relay over its
+// storage budget (CheckPushSize, RelayUsage) and notes the box's own
+// branches; update applies the policy table (CheckUpdate) to each ref and
+// then records it the way a bank would (RecordUpdate) before receive-pack
+// applies it, refusing the update when that fails (finding C1-05: an
+// accepted push always has its bank refs); post-receive only forwards
+// branches listed in git.forward and reports (ReportPush). Ref names and
+// object names in hook input come from a box: they are validated before
+// use and only ever passed as single arguments or update-ref lines.
 
 import (
 	"bufio"
@@ -38,6 +42,7 @@ const (
 
 // Hook names in the relay hooks directory.
 const (
+	HookPreReceive  = "pre-receive"
 	HookUpdate      = "update"
 	HookPostReceive = "post-receive"
 )
@@ -47,9 +52,16 @@ const (
 	// EnvRelayProject names the project (realm/project) whose relay is
 	// served: the one bound to the box's channel.
 	EnvRelayProject = "DEVC_RELAY_PROJECT"
-	// EnvRelayReport is the file post-receive writes its report to.
+	// EnvRelayReport is the file post-receive writes its report to. The
+	// hooks keep their notes for one push beside it: <report>.heads (the
+	// box's branches, from pre-receive) and <report>.records (what update
+	// recorded).
 	EnvRelayReport = "DEVC_RELAY_REPORT"
 )
+
+// HeadsFile and RecordsFile are the notes beside a push's report file.
+func HeadsFile(report string) string   { return report + ".heads" }
+func RecordsFile(report string) string { return report + ".records" }
 
 // serveTimeout bounds one upload-pack or receive-pack run.
 const serveTimeout = 30 * time.Minute
@@ -57,9 +69,9 @@ const serveTimeout = 30 * time.Minute
 // ServeCall is the host git command that serves one service on a relay.
 // upload-pack hides devc's bookkeeping; receive-pack also hides
 // refs/remotes, refuses deletions on its own (the update hook refuses them
-// too), never collects garbage and runs the hooks in hooksDir, with env
-// added for them.
-func ServeCall(relay, service, hooksDir string, env []string, stdin io.Reader) (Call, error) {
+// too), never collects garbage, refuses a pack above maxInput bytes (when
+// positive) and runs the hooks in hooksDir, with env added for them.
+func ServeCall(relay, service, hooksDir string, env []string, stdin io.Reader, maxInput int64) (Call, error) {
 	c := Call{Relay: relay, Stdin: stdin, Timeout: serveTimeout, Env: env}
 	switch service {
 	case ServiceUploadPack:
@@ -73,6 +85,9 @@ func ServeCall(relay, service, hooksDir string, env []string, stdin io.Reader) (
 		c.Config = []string{"receive.hideRefs=refs/devc", "receive.hideRefs=refs/remotes", "receive.denyDeletes=true",
 			"receive.autogc=false", "receive.fsckObjects=true", "receive.advertisePushOptions=false",
 			"receive.updateServerInfo=false", "receive.shallowUpdate=false"}
+		if maxInput > 0 {
+			c.Config = append(c.Config, "receive.maxInputSize="+strconv.FormatInt(maxInput, 10))
+		}
 		c.Args = []string{"receive-pack", relay}
 	default:
 		return Call{}, fmt.Errorf("unknown git service %q", service)
@@ -145,11 +160,16 @@ type PushedRef struct {
 	Ref string `json:"ref"`
 }
 
-// maxPushedRefs bounds the post-receive input devc reads.
-const maxPushedRefs = 10000
+// MaxPushRefs bounds the refs one push may update; pre-receive refuses a
+// push with more as a whole (finding C1-05), so every accepted update is
+// recorded.
+const MaxPushRefs = 1000
 
-// ParseHookInput reads post-receive input ("<old> <new> <ref>" per line)
-// strictly.
+// ErrTooManyRefs is ParseHookInput's error for input above MaxPushRefs.
+var ErrTooManyRefs = fmt.Errorf("a push may update at most %d refs at a time", MaxPushRefs)
+
+// ParseHookInput reads pre-receive or post-receive input ("<old> <new>
+// <ref>" per line) strictly.
 func ParseHookInput(r io.Reader) ([]PushedRef, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 4096), 4096)
@@ -163,8 +183,8 @@ func ParseHookInput(r io.Reader) ([]PushedRef, error) {
 		if len(f) != 3 || !ValidOID(f[0]) || !ValidOID(f[1]) || !validRefName(f[2]) {
 			return nil, fmt.Errorf("malformed hook input line %q", printableName(line))
 		}
-		if len(out) == maxPushedRefs {
-			return nil, fmt.Errorf("more than %d updated refs", maxPushedRefs)
+		if len(out) == MaxPushRefs {
+			return nil, ErrTooManyRefs
 		}
 		out = append(out, PushedRef{Old: f[0], New: f[1], Ref: f[2]})
 	}
@@ -184,73 +204,188 @@ type PushReport struct {
 // waits for it).
 const forwardTimeout = 2 * time.Minute
 
-// RecordPush records the updates of a push the way a bank would (finding
-// B8): every new branch tip gets a bank ref unless it was the branch's last
-// one; the box's observed tip moves with it when the box's own branch of
-// that name has the pushed tip (a push of another local branch, as in
-// "git push origin wip:feature", is no observation of the box's feature);
-// a new tag gets a refs/devc/tags record. Branches matching git.forward
-// are then pushed to the upstream. The caller (the daemon) holds the box
-// lock for the whole receive-pack run.
-func (s *Service) RecordPush(ctx context.Context, p *Project, pushed []PushedRef) *PushReport {
-	rep := &PushReport{Branches: []BranchChange{}, Tags: []Recorded{}, Forwards: []Forward{}, Problems: []string{}}
-	set, err := p.Relay.RefSet(ctx)
-	if err != nil {
-		rep.Problems = append(rep.Problems, err.Error())
-		return rep
-	}
-	local, err := s.boxHeads(ctx, p)
-	if err != nil {
-		// Without the box's own branches no tip is observed; the next bank
-		// observes them.
-		local = nil
-	}
+// PushRecord is what the update hook recorded for one ref: a branch's new
+// tip, or a new tag.
+type PushRecord struct {
+	Branch *BranchChange `json:"branch,omitempty"`
+	Tag    *Recorded     `json:"tag,omitempty"`
+}
+
+// recordConfig makes the refs of a push durable before receive-pack
+// accepts it (git 2.36 and later; older versions ignore the key).
+var recordConfig = []string{"core.fsync=reference"}
+
+// RecordUpdate records one ref update of a push the way a bank would
+// (finding B8), before receive-pack applies it: a new branch tip gets a
+// bank ref unless it is the branch's last one; the box's observed tip moves
+// with it when the box's own branch of that name has the pushed tip (heads,
+// nil when unknown: a push of another local branch, as in "git push origin
+// wip:feature", is no observation of the box's feature); a new tag gets a
+// refs/devc/tags record. One transaction per ref. The update hook runs it
+// after the objects left the quarantine and refuses the update when it
+// fails, so an accepted push always has its records (finding C1-05). The
+// caller (the daemon) holds the box lock for the whole receive-pack run.
+func (s *Service) RecordUpdate(ctx context.Context, p *Project, u PushedRef, heads map[string]string) (PushRecord, error) {
 	now := s.now().Unix()
-	updated := map[string]string{}
+	switch {
+	case strings.HasPrefix(u.Ref, HeadsPrefix) && !isZeroOID(u.New):
+		b := u.Ref[len(HeadsPrefix):]
+		if err := CheckName(b); err != nil {
+			return PushRecord{}, err
+		}
+		refs, err := p.Relay.Refs(ctx, BankPrefix+b+"/", BoxTipPrefix+b)
+		if err != nil {
+			return PushRecord{}, err
+		}
+		set := SortRefs(refs)
+		ch := BranchChange{Branch: b, New: u.New}
+		if !isZeroOID(u.Old) {
+			ch.Old = u.Old
+		}
+		var ups []RefUpdate
+		if last := set.LastBank[b]; last.OID != u.New {
+			ch.BankRef = BankPrefix + b + "/" + strconv.FormatInt(stamp(now, last.Time), 10)
+			ups = append(ups, RefUpdate{Ref: ch.BankRef, New: u.New, Old: Zero(u.New)})
+		}
+		if heads != nil && heads[b] == u.New && set.BoxTips[b] != u.New {
+			ups = append(ups, boxTipUpdate(set.BoxTips, b, u.New))
+		}
+		if err := p.Relay.update(ctx, ups, recordConfig); err != nil {
+			return PushRecord{}, err
+		}
+		return PushRecord{Branch: &ch}, nil
+	case strings.HasPrefix(u.Ref, TagsPrefix) && isZeroOID(u.Old) && !isZeroOID(u.New):
+		t := u.Ref[len(TagsPrefix):]
+		if err := CheckName(t); err != nil {
+			return PushRecord{}, err
+		}
+		refs, err := p.Relay.Refs(ctx, DevcTagsPrefix+t+"/")
+		if err != nil {
+			return PushRecord{}, err
+		}
+		set := SortRefs(refs)
+		if set.DevcTags[t][u.New] {
+			return PushRecord{}, nil
+		}
+		rec := Recorded{Name: t, OID: u.New, Ref: DevcTagsPrefix + t + "/" + strconv.FormatInt(stamp(now, set.NewestTag[t]), 10)}
+		if err := p.Relay.update(ctx, []RefUpdate{{Ref: rec.Ref, New: rec.OID, Old: Zero(rec.OID)}}, recordConfig); err != nil {
+			return PushRecord{}, err
+		}
+		return PushRecord{Tag: &rec}, nil
+	}
+	return PushRecord{}, nil
+}
+
+// BoxHeads lists the box's own branches for RecordUpdate (nil when the box
+// cannot be asked: then no box tip moves, and the next bank observes them).
+func (s *Service) BoxHeads(ctx context.Context, p *Project) map[string]string {
+	heads, err := s.boxHeads(ctx, p)
+	if err != nil {
+		return nil
+	}
+	return heads
+}
+
+// RecordPush records every update of a push (RecordUpdate) and forwards
+// branches as post-receive does; for callers that record after the fact.
+func (s *Service) RecordPush(ctx context.Context, p *Project, pushed []PushedRef) *PushReport {
+	heads := s.BoxHeads(ctx, p)
+	var recs []PushRecord
+	var problems []string
 	for _, u := range pushed {
+		rec, err := s.RecordUpdate(ctx, p, u, heads)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("recording %s: %s", printableName(u.Ref), printable(err.Error())))
+			continue
+		}
+		recs = append(recs, rec)
+	}
+	rep := s.ReportPush(ctx, p, pushed, recs)
+	rep.Problems = append(problems, rep.Problems...)
+	return rep
+}
+
+// ReportPush is post-receive's part: the report of what the update hooks
+// recorded for the updates receive-pack applied, and the forwarding of the
+// branches listed in git.forward.
+func (s *Service) ReportPush(ctx context.Context, p *Project, pushed []PushedRef, recs []PushRecord) *PushReport {
+	rep := &PushReport{Branches: []BranchChange{}, Tags: []Recorded{}, Forwards: []Forward{}, Problems: []string{}}
+	accepted := map[string]string{}
+	for _, u := range pushed {
+		accepted[u.Ref] = u.New
+	}
+	updated := map[string]string{}
+	for _, r := range recs {
 		switch {
-		case strings.HasPrefix(u.Ref, HeadsPrefix) && !isZeroOID(u.New):
-			b := u.Ref[len(HeadsPrefix):]
-			if CheckName(b) != nil {
-				continue
-			}
-			ch := BranchChange{Branch: b, New: u.New}
-			if !isZeroOID(u.Old) {
-				ch.Old = u.Old
-			}
-			var ups []RefUpdate
-			if last := set.LastBank[b]; last.OID != u.New {
-				ch.BankRef = BankPrefix + b + "/" + strconv.FormatInt(stamp(now, last.Time), 10)
-				ups = append(ups, RefUpdate{Ref: ch.BankRef, New: u.New, Old: Zero(u.New)})
-			}
-			if local != nil && local[b] == u.New && set.BoxTips[b] != u.New {
-				ups = append(ups, boxTipUpdate(set.BoxTips, b, u.New))
-			}
-			if err := p.Relay.Update(ctx, ups); err != nil {
-				ch.Error = printable(err.Error())
-				rep.Problems = append(rep.Problems, fmt.Sprintf("recording %s: %s", b, ch.Error))
-			}
-			rep.Branches = append(rep.Branches, ch)
-			updated[b] = u.New
-		case strings.HasPrefix(u.Ref, TagsPrefix) && isZeroOID(u.Old) && !isZeroOID(u.New):
-			t := u.Ref[len(TagsPrefix):]
-			if CheckName(t) != nil || set.DevcTags[t][u.New] {
-				continue
-			}
-			rec := Recorded{Name: t, OID: u.New, Ref: DevcTagsPrefix + t + "/" + strconv.FormatInt(stamp(now, set.NewestTag[t]), 10)}
-			if err := p.Relay.Update(ctx, []RefUpdate{{Ref: rec.Ref, New: rec.OID, Old: Zero(rec.OID)}}); err != nil {
-				rec.Error = printable(err.Error())
-				rep.Problems = append(rep.Problems, fmt.Sprintf("recording tag %s: %s", t, rec.Error))
-			}
-			rep.Tags = append(rep.Tags, rec)
+		case r.Branch != nil && accepted[HeadsPrefix+r.Branch.Branch] == r.Branch.New:
+			rep.Branches = append(rep.Branches, *r.Branch)
+			updated[r.Branch.Branch] = r.Branch.New
+		case r.Tag != nil && accepted[TagsPrefix+r.Tag.Name] == r.Tag.OID:
+			rep.Tags = append(rep.Tags, *r.Tag)
 		}
 	}
 	if p.Resolved.Upstream != "" && len(p.Resolved.Git.Forward) > 0 && len(updated) > 0 {
+		set, err := p.Relay.RefSet(ctx)
+		if err != nil {
+			rep.Problems = append(rep.Problems, err.Error())
+			return rep
+		}
 		fctx, cancel := context.WithTimeout(ctx, forwardTimeout*time.Duration(min(len(updated), 5)))
 		rep.Forwards = s.forward(fctx, p, updated, set.Github)
 		cancel()
 	}
 	return rep
+}
+
+// CheckPushSize refuses a push that would take the relay above quota
+// bytes: the relay's size, which includes the incoming objects in their
+// quarantine while pre-receive runs (finding C1-07).
+func CheckPushSize(relay string, quota int64) error {
+	if quota <= 0 {
+		return nil
+	}
+	used, err := RelayUsage(relay)
+	if err != nil {
+		return refuse("the relay's size could not be checked: %v", err)
+	}
+	if used > quota {
+		return refuse("the relay would hold %s, more than its budget of %s (git.relay_quota): ask the user to raise the budget or to clean up the relay", SizeText(used), SizeText(quota))
+	}
+	return nil
+}
+
+// RelayUsage is the total size of the regular files below a relay. The
+// relay is host-owned (no box writes it); symbolic links are not followed.
+func RelayUsage(dir string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type().IsRegular() {
+			fi, err := d.Info()
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			total += fi.Size()
+		}
+		return nil
+	})
+	return total, err
+}
+
+// SizeText writes a byte count for messages.
+func SizeText(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	}
+	return fmt.Sprintf("%d bytes", n)
 }
 
 // boxHeads lists the box's own branches (git in the box, as dev); the
@@ -318,8 +453,8 @@ func (r *PushReport) Summary() string {
 }
 
 // EnsureRelayHooks makes dir hold exactly the relay hooks: symbolic links
-// named update and post-receive pointing at the devc executable exe (which
-// dispatches on its name). dir is host-owned (below the state directory's
+// named pre-receive, update and post-receive pointing at the devc
+// executable exe (which dispatches on its name). dir is host-owned (below the state directory's
 // local part, which no box mounts); anything else in it is removed.
 func EnsureRelayHooks(dir, exe string) error {
 	if !filepath.IsAbs(exe) {
@@ -335,7 +470,7 @@ func EnsureRelayHooks(dir, exe string) error {
 	if err != nil {
 		return err
 	}
-	want := map[string]bool{HookUpdate: true, HookPostReceive: true}
+	want := map[string]bool{HookPreReceive: true, HookUpdate: true, HookPostReceive: true}
 	for _, de := range des {
 		if !want[de.Name()] {
 			if err := os.RemoveAll(filepath.Join(dir, de.Name())); err != nil {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/names"
@@ -85,9 +86,18 @@ func (x *Exec) Run(ctx context.Context) int {
 	if err != nil {
 		return refuse(exitRefused, "not configured", fmt.Sprintf("%s is not configured on the host", ref))
 	}
-	grant, ok := r.Grants.SSHGrantFor(x.Host)
-	if !ok {
+	if _, ok := r.Grants.SSHGrantFor(x.Host); !ok {
 		return refuse(exitRefused, "not granted", fmt.Sprintf("%s is not granted to %s (grants.ssh); ask the user", x.Host, ref))
+	}
+	// In force is what the box was started with and the configuration
+	// still grants (finding C1-02).
+	caps, err := box.ReadCapabilities(x.Config.Paths, ref)
+	if err != nil {
+		return refuse(exitRefused, "no capability record", fmt.Sprintf("this box has no usable record of what it was started with (%v); ask the user to restart it ('devc down %s' and 'devc up %s')", err, ref, ref))
+	}
+	grant, allowed, ok := caps.SSHGrant(r, x.Host)
+	if !ok {
+		return refuse(exitRefused, "granted after the start", fmt.Sprintf("%s was granted to %s after its box started; ask the user to bring the box up again", x.Host, ref))
 	}
 	if grant.ReadOnly {
 		switch mode {
@@ -96,7 +106,7 @@ func (x *Exec) Run(ctx context.Context) int {
 		case ModeSFTP:
 			return refuse(exitRefused, "read-only: sftp", fmt.Sprintf("%s is granted read-only: sftp, scp and rsync are not allowed", x.Host))
 		default:
-			if err := CheckReadOnly(original, r.Grants.SSHAllowed(x.Host)); err != nil {
+			if err := CheckReadOnly(original, allowed); err != nil {
 				return refuse(exitRefused, "read-only: "+err.Error(), fmt.Sprintf("%s: %v", x.Host, err))
 			}
 		}

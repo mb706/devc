@@ -50,7 +50,8 @@ func (d *Daemon) gateServer(e *env) (*gate.Server, error) {
 // serveGate answers a host.gate request and, when the host is granted to
 // the channel's project, runs the gate's sshd on the stream.
 func (w *boxWorker) serveGate(ctx context.Context, st *yamux.Stream, br *bufio.Reader, m *proto.RPCMessage) {
-	defer st.Close()
+	raw := rawStream{st: st, stall: streamStall}
+	defer raw.guard(ctx)()
 	fail := func(code int, format string, args ...any) {
 		_ = respond(st, m.ID, nil, proto.Errorf(code, format, args...))
 	}
@@ -78,6 +79,17 @@ func (w *boxWorker) serveGate(ctx context.Context, st *yamux.Stream, br *bufio.R
 		fail(proto.CodeRefused, "%s is not granted to %s; the user can add it to grants.ssh in the project's configuration", p.Host, ref)
 		return
 	}
+	// Granted now and when the box started (finding C1-02).
+	caps, perr := d.startedWith(e.cfg.Paths, ref, w.containerID)
+	if perr != nil {
+		_ = respond(st, m.ID, nil, perr)
+		return
+	}
+	if _, _, ok := caps.SSHGrant(r, p.Host); !ok {
+		d.log.Info("gate: host granted after the box started", "box", names.BoxName(ref), "host", p.Host)
+		fail(proto.CodeRefused, "%s was granted to %s after its box started; ask the user to bring the box up again ('devc down %s' and 'devc up %s')", p.Host, ref, ref, ref)
+		return
+	}
 	srv, err := d.gateServer(e)
 	if err != nil {
 		fail(proto.CodeRefused, "%s", err.Error())
@@ -98,9 +110,11 @@ func (w *boxWorker) serveGate(ctx context.Context, st *yamux.Stream, br *bufio.R
 		return
 	}
 	start := time.Now()
-	code, stderr, err := runGateSSHD(ctx, d.o.Runner, srv.Command(conf), st, br)
-	// sshd is gone: stop waiting for more input from the box.
-	_ = st.SetReadDeadline(time.Now())
+	code, stderr, err := runGateSSHD(ctx, d.o.Runner, srv.Command(conf), raw, br)
+	// sshd is gone: its configuration goes, and the stream ends for both
+	// copies (finding C1-09).
+	_ = os.Remove(conf)
+	raw.abort()
 	d.log.Info("gate", "box", names.BoxName(ref), "host", p.Host, "exit", code, "err", err,
 		"duration", time.Since(start).Round(time.Millisecond), "log", proto.Printable(proto.Truncate(stderr, 600)))
 }

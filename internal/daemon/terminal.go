@@ -114,6 +114,10 @@ func (m *termManager) open(ctx context.Context, c *proto.Conn, params json.RawMe
 	if !proto.ValidStreamID(p.Stream) {
 		return nil, proto.Errorf(proto.CodeInvalidParams, "invalid stream id")
 	}
+	want, err := parseRefParam(p.Ref)
+	if err != nil {
+		return nil, err
+	}
 	if err := checkSession(p.Session); err != nil {
 		return nil, err
 	}
@@ -129,10 +133,10 @@ func (m *termManager) open(ctx context.Context, c *proto.Conn, params json.RawMe
 	if control && !e.cfg.Global.Terminal.Control {
 		return nil, proto.Errorf(proto.CodeRefused, "terminal control is off on this machine ([terminal] control = true in config.toml turns it on)")
 	}
-	v, ref, ok := d.cmd.lookup(ctx, p.Session)
+	v, ref, reason := d.cmd.lookup(ctx, want, p.Session)
 	switch {
-	case !ok:
-		return nil, proto.Errorf(proto.CodeNotFound, "no session %s", p.Session)
+	case reason != "":
+		return nil, proto.Errorf(proto.CodeNotFound, "%s", reason)
 	case !v.Live:
 		return nil, proto.Errorf(proto.CodeRefused, "the session has ended")
 	case d.boxState(ref) != "running":
@@ -265,7 +269,7 @@ func (st *termStream) watch(ctx context.Context) {
 			return
 		case <-tick.C:
 		}
-		e, ok := st.m.d.hub.lookup(st.session)
+		e, ok := st.m.d.hub.lookup(keyOf(st.ref, st.session))
 		if !ok || !e.view.Live {
 			st.end("the session ended")
 			return

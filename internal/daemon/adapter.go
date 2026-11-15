@@ -27,7 +27,10 @@ type Capabilities struct {
 }
 
 // Adapter delivers input to one live session. Each method returns a final
-// outcome and a detail for the receipt.
+// outcome and a detail for the receipt. Before its first key, after the
+// input gate, every method calls t.begin and returns what it says when it
+// says anything: nothing may be typed then (findings C1-06, C1-13,
+// C1-14).
 type Adapter interface {
 	Name() string
 	Capabilities() Capabilities
@@ -94,7 +97,10 @@ func (paste) Send(ctx context.Context, t *target, text string) (string, string) 
 	if err := t.gate(ctx); err != nil {
 		return proto.OutcomeRefused, boxErr(err)
 	}
-	before := c.lastSeq(t.session)
+	if outcome, detail := t.begin(); outcome != "" {
+		return outcome, detail
+	}
+	before := c.lastSeq(t.key())
 	submit := t.m.Input.SubmitKey
 	if err := t.w.call(ctx, proto.MethodBoxPaste, proto.BoxInputParams{Session: t.session, Text: text, Submit: submit}, nil); err != nil {
 		return refusedOrUnknown(err)
@@ -103,7 +109,7 @@ func (paste) Send(ctx context.Context, t *target, text string) (string, string) 
 		return proto.OutcomeUnknown, "typed and submitted; the harness reports no prompts, so delivery cannot be confirmed"
 	}
 	hashes := promptHashes(text)
-	if c.waitPrompt(ctx, t.session, before, hashes, confirmWait) {
+	if c.waitPrompt(ctx, t.key(), before, hashes, confirmWait) {
 		return proto.OutcomeDelivered, ""
 	}
 	if ctx.Err() != nil {
@@ -115,7 +121,7 @@ func (paste) Send(ctx context.Context, t *target, text string) (string, string) 
 	if err := t.w.call(ctx, proto.MethodBoxKeys, proto.BoxInputParams{Session: t.session, Keys: []string{submit}}, nil); err != nil {
 		return proto.OutcomeTypedNotSubmitted, "typed, but no prompt was reported; sending the submit key again failed: " + boxErr(err)
 	}
-	if c.waitPrompt(ctx, t.session, before, hashes, retryWait) {
+	if c.waitPrompt(ctx, t.key(), before, hashes, retryWait) {
 		return proto.OutcomeDelivered, "after a second submit key"
 	}
 	return proto.OutcomeTypedNotSubmitted, "typed, but no prompt was reported after two submit keys"
@@ -128,11 +134,14 @@ func (paste) Interrupt(ctx context.Context, t *target) (string, string) {
 	if err := t.gate(ctx); err != nil {
 		return proto.OutcomeRefused, boxErr(err)
 	}
-	before := c.lastSeq(t.session)
+	if outcome, detail := t.begin(); outcome != "" {
+		return outcome, detail
+	}
+	before := c.lastSeq(t.key())
 	if err := t.w.call(ctx, proto.MethodBoxKeys, proto.BoxInputParams{Session: t.session, Keys: t.m.Input.Interrupt()}, nil); err != nil {
 		return refusedOrUnknown(err)
 	}
-	if c.waitState(ctx, t.session, before, stateWait) {
+	if c.waitState(ctx, t.key(), before, stateWait) {
 		return proto.OutcomeDelivered, ""
 	}
 	return proto.OutcomeUnknown, "keys sent; the session reported no state change"
@@ -145,7 +154,10 @@ func (paste) Answer(ctx context.Context, t *target, choice int, text string) (st
 	if err := t.gate(ctx); err != nil {
 		return proto.OutcomeRefused, boxErr(err)
 	}
-	before := c.lastSeq(t.session)
+	if outcome, detail := t.begin(); outcome != "" {
+		return outcome, detail
+	}
+	before := c.lastSeq(t.key())
 	var err error
 	if choice > 0 {
 		err = t.w.call(ctx, proto.MethodBoxKeys, proto.BoxInputParams{Session: t.session, Keys: answerKeys(t.m, choice)}, nil)
@@ -155,7 +167,7 @@ func (paste) Answer(ctx context.Context, t *target, choice int, text string) (st
 	if err != nil {
 		return refusedOrUnknown(err)
 	}
-	if c.waitState(ctx, t.session, before, stateWait) {
+	if c.waitState(ctx, t.key(), before, stateWait) {
 		return proto.OutcomeDelivered, "typed into the dialog"
 	}
 	return proto.OutcomeUnknown, "typed into the dialog; the session reported no state change"

@@ -3,10 +3,12 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/mb706/devc/internal/names"
@@ -67,9 +69,42 @@ func (k checker) name(key, kind, v string) bool {
 }
 
 func (k checker) size(key, v string) {
-	if !sizeRE.MatchString(v) {
+	if _, err := ParseSize(v); err != nil {
 		k.bad(key, "%q is not a size: use a number with a unit b, k, m or g, for example 512m or 16g", v)
 	}
+}
+
+// Defaults of the relay service's budgets (git.max_push_size and
+// git.relay_quota).
+const (
+	DefaultMaxPushSize = 2 << 30
+	DefaultRelayQuota  = 20 << 30
+)
+
+// ParseSize reads a size such as 512m or 16g (units b, k, m, g; powers of
+// 1024).
+func ParseSize(v string) (int64, error) {
+	if !sizeRE.MatchString(v) {
+		return 0, fmt.Errorf("%q is not a size", v)
+	}
+	n, err := strconv.ParseInt(v[:len(v)-1], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	shift := map[byte]uint{'b': 0, 'k': 10, 'm': 20, 'g': 30}[v[len(v)-1]|0x20]
+	if n > math.MaxInt64>>shift {
+		return 0, fmt.Errorf("%q is too large", v)
+	}
+	return n << shift, nil
+}
+
+// sizeOr is the size v (already validated) or def when v is empty or
+// invalid.
+func sizeOr(v string, def int64) int64 {
+	if n, err := ParseSize(v); err == nil {
+		return n
+	}
+	return def
 }
 
 // memory checks a memory limit: a size, or "none" to switch it off.
@@ -576,6 +611,12 @@ func validateProject(c *Config, p *Project, ps *problems) {
 	}
 	if p.Git.BranchPrefix != "" {
 		k.branch("git.branch_prefix", p.Git.BranchPrefix, true)
+	}
+	if p.Git.MaxPushSize != "" {
+		k.size("git.max_push_size", p.Git.MaxPushSize)
+	}
+	if p.Git.RelayQuota != "" {
+		k.size("git.relay_quota", p.Git.RelayQuota)
 	}
 	for i, kind := range p.Requests.Auto {
 		switch proto.RequestRisk(kind) {

@@ -50,7 +50,7 @@ func (a *app) boxEnv() (*boxEnv, error) {
 	m := box.NewManager(c, a.engine(c), a.runner, exe, version.Version, a.stderr)
 	// The SSH gate (work order C10b): the configuration mount, the files in
 	// /etc/devc, and the box's key, which the secrets delivery hands over.
-	gh := &gate.BoxHooks{Paths: c.Paths, Runner: a.runner}
+	gh := &gate.BoxHooks{Paths: c.Paths, Runner: a.runner, AllowPersistent: a.getenv(secrets.EnvAllowPersistent) == "1"}
 	hooks := &harness.BoxHooks{Config: c, Toolbox: m.Toolbox, Secrets: secrets.NewFileStore(c.Paths), Out: a.stderr,
 		AllowPersistentSecrets: a.getenv(secrets.EnvAllowPersistent) == "1", Extra: []harness.SecretSource{gh}}
 	m.Contributors = append(m.Contributors, hooks, gh)

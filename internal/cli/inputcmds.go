@@ -21,6 +21,7 @@ import (
 	"github.com/mb706/devc/internal/daemon"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/proto"
+	"github.com/mb706/devc/internal/session"
 )
 
 // commandFlags are the flags every command shares.
@@ -64,14 +65,35 @@ func (a *app) commandClient(ctx context.Context) (*config.Config, *daemon.Client
 	return c, cl, nil
 }
 
-// resolveSession turns an ID or prefix into a session ID. A full ID is
-// taken as it is (the daemon refuses an unknown one with a receipt).
-func (a *app) resolveSession(c *config.Config, arg string) (string, error) {
-	if names.ValidSessionID(arg) {
-		return arg, nil
+// resolveSession turns a session argument into a project and session ID:
+// <realm>/<project>/<id> names both; a full ID alone gets the project whose
+// journal holds it (none yet: ref "", and the daemon looks for it in the
+// boxes and refuses an unknown one with a receipt; two: an error); a
+// prefix is looked up in the journals.
+func (a *app) resolveSession(c *config.Config, arg string) (string, string, error) {
+	if ref, sid, err := proto.ParseSessionKey(arg); err == nil {
+		if ref != (names.ProjectRef{}) {
+			return ref.String(), sid, nil
+		}
+		var holders []names.ProjectRef
+		for _, r := range allRefs(c) {
+			if _, ok := session.FindJournal(c.Paths, []names.ProjectRef{r}, sid); ok {
+				holders = append(holders, r)
+			}
+		}
+		switch len(holders) {
+		case 0:
+			return "", sid, nil
+		case 1:
+			return holders[0].String(), sid, nil
+		}
+		return "", "", fmt.Errorf("the session ID %s exists in %s and %s: name it as <realm>/<project>/%s", sid, holders[0], holders[1], sid)
 	}
-	_, sid, err := a.findAnySession(c, arg)
-	return sid, err
+	ref, sid, err := a.findAnySession(c, arg)
+	if err != nil {
+		return "", "", err
+	}
+	return ref.String(), sid, nil
 }
 
 // runCommand sends one command, waits for its outcome when asked, and
@@ -169,7 +191,7 @@ func newInputCmds(a *app) []*cobra.Command {
 				return err
 			}
 			a.warnProblems(probs)
-			sid, err := a.resolveSession(c, args[0])
+			ref, sid, err := a.resolveSession(c, args[0])
 			if err != nil {
 				return err
 			}
@@ -185,7 +207,7 @@ func newInputCmds(a *app) []*cobra.Command {
 			if steer {
 				mode = proto.ModeSteer
 			}
-			return a.runCommand(cmd, &sendF, proto.MethodSessionSend, proto.SendParams{ID: id, Session: sid, Text: text, Mode: mode})
+			return a.runCommand(cmd, &sendF, proto.MethodSessionSend, proto.SendParams{ID: id, Session: sid, Ref: ref, Text: text, Mode: mode})
 		},
 	}
 	sendF.add(send)
@@ -211,11 +233,11 @@ func newInputCmds(a *app) []*cobra.Command {
 				return err
 			}
 			a.warnProblems(probs)
-			sid, err := a.resolveSession(c, args[0])
+			ref, sid, err := a.resolveSession(c, args[0])
 			if err != nil {
 				return err
 			}
-			p := proto.AnswerParams{ID: id, Session: sid, Question: question}
+			p := proto.AnswerParams{ID: id, Session: sid, Ref: ref, Question: question}
 			if !asText && choiceRE.MatchString(args[1]) {
 				p.Choice, _ = strconv.Atoi(args[1])
 			} else {
@@ -243,11 +265,11 @@ func newInputCmds(a *app) []*cobra.Command {
 				return err
 			}
 			a.warnProblems(probs)
-			sid, err := a.resolveSession(c, args[0])
+			ref, sid, err := a.resolveSession(c, args[0])
 			if err != nil {
 				return err
 			}
-			return a.runCommand(cmd, &interruptF, proto.MethodSessionInterrupt, proto.SessionCommandParams{ID: id, Session: sid})
+			return a.runCommand(cmd, &interruptF, proto.MethodSessionInterrupt, proto.SessionCommandParams{ID: id, Session: sid, Ref: ref})
 		},
 	}
 	interruptF.add(interrupt)
@@ -278,11 +300,11 @@ func newInputCmds(a *app) []*cobra.Command {
 				return err
 			}
 			a.warnProblems(probs)
-			sid, err := a.resolveSession(c, args[0])
+			ref, sid, err := a.resolveSession(c, args[0])
 			if err != nil {
 				return err
 			}
-			return a.runCommand(cmd, &keysF, proto.MethodSessionKeys, proto.KeysParams{ID: id, Session: sid, Keys: args[1:]})
+			return a.runCommand(cmd, &keysF, proto.MethodSessionKeys, proto.KeysParams{ID: id, Session: sid, Ref: ref, Keys: args[1:]})
 		},
 	}
 	keysF.add(keys)
@@ -306,11 +328,11 @@ func newInputCmds(a *app) []*cobra.Command {
 				return err
 			}
 			a.warnProblems(probs)
-			sid, err := a.resolveSession(c, args[0])
+			ref, sid, err := a.resolveSession(c, args[0])
 			if err != nil {
 				return err
 			}
-			return a.runCommand(cmd, &seenF, proto.MethodSessionSeen, proto.SeenParams{ID: id, Session: sid, Turn: turn})
+			return a.runCommand(cmd, &seenF, proto.MethodSessionSeen, proto.SeenParams{ID: id, Session: sid, Ref: ref, Turn: turn})
 		},
 	}
 	seenF.add(seen)

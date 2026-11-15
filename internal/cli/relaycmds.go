@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"syscall"
 	"time"
@@ -18,15 +21,21 @@ import (
 // hookTimeout bounds one relay hook run (post-receive forwards branches).
 const hookTimeout = 15 * time.Minute
 
-// newRelayHookCmd is `devc relay-hook update|post-receive`: the relay
-// service's hooks (work order C10a section 1). receive-pack, started by the
-// daemon for a box's push, runs them through links in the relay hooks
-// directory; the daemon names the project in DEVC_RELAY_PROJECT. Their
-// input (ref names, object names) comes from the box and is validated
-// before it is used.
+// Bounds of the notes the hooks of one push leave for each other.
+const (
+	maxHeadsNote   = 4 << 20
+	maxRecordsNote = 8 << 20
+)
+
+// newRelayHookCmd is `devc relay-hook pre-receive|update|post-receive`: the
+// relay service's hooks (work order C10a section 1, finding C1-05).
+// receive-pack, started by the daemon for a box's push, runs them through
+// links in the relay hooks directory; the daemon names the project in
+// DEVC_RELAY_PROJECT. Their input (ref names, object names) comes from the
+// box and is validated before it is used.
 func newRelayHookCmd(a *app) *cobra.Command {
 	return &cobra.Command{
-		Use:                "relay-hook update|post-receive [args...]",
+		Use:                "relay-hook pre-receive|update|post-receive [args...]",
 		Short:              "Check and record a push to a relay (run by git receive-pack for the daemon)",
 		Hidden:             true,
 		DisableFlagParsing: true,
@@ -48,7 +57,7 @@ func (a *app) relayHook(ctx context.Context, args []string) error {
 		return fmt.Errorf("devc relay-hook runs only as a relay hook started by the daemon (%s): %w", gitx.EnvRelayProject, err)
 	}
 	if len(args) == 0 {
-		return usageErrorf("name the hook: update or post-receive")
+		return usageErrorf("name the hook: pre-receive, update or post-receive")
 	}
 	c, probs, err := a.load()
 	if err != nil {
@@ -62,18 +71,61 @@ func (a *app) relayHook(ctx context.Context, args []string) error {
 	gs := a.gitService(c, eng)
 	gs.Host.Terminal, gs.Host.Background = false, true
 	p := gs.Project(r, true)
+	report := a.getenv(gitx.EnvRelayReport)
+	refuse := func(format string, args ...any) error {
+		fmt.Fprintf(a.stderr, "devc: refused: "+format+"\n", args...)
+		return exitCode(1)
+	}
 	switch args[0] {
+	case gitx.HookPreReceive:
+		// The whole push, before any ref changes: too many refs or too
+		// large a relay refuses all of it (findings C1-05, C1-07).
+		if _, err := gitx.ParseHookInput(a.stdinReader()); err != nil {
+			if errors.Is(err, gitx.ErrTooManyRefs) {
+				return refuse("%v; push in parts", err)
+			}
+			return refuse("%s", errText(err))
+		}
+		if len(c.ProblemsFor(ref)) > 0 {
+			return refuse("the configuration of %s has problems; run 'devc config check' on the host", ref)
+		}
+		if err := gitx.CheckPushSize(p.Relay.Dir, r.Git.RelayQuota); err != nil {
+			fmt.Fprintf(a.stderr, "devc: %s\n", errText(err))
+			return exitCode(1)
+		}
+		if report != "" {
+			if heads := gs.BoxHeads(ctx, p); heads != nil {
+				if err := writeNote(gitx.HeadsFile(report), heads, false); err != nil {
+					return refuse("the host could not prepare the push: %s", errText(err))
+				}
+			}
+		}
+		return nil
 	case gitx.HookUpdate:
 		if len(args) != 4 {
 			return usageErrorf("update takes <ref> <old> <new>")
 		}
 		if len(c.ProblemsFor(ref)) > 0 {
-			fmt.Fprintf(a.stderr, "devc: refused: the configuration of %s has problems; run 'devc config check' on the host\n", ref)
-			return exitCode(1)
+			return refuse("the configuration of %s has problems; run 'devc config check' on the host", ref)
 		}
 		if err := gitx.CheckUpdate(args[1], args[2], args[3], r.Git.Protected, func(b string) error { return p.Relay.CheckRefFormat(ctx, b) }); err != nil {
 			fmt.Fprintf(a.stderr, "devc: %s\n", errText(err))
 			return exitCode(1)
+		}
+		// Recorded before receive-pack accepts the update, or refused.
+		var heads map[string]string
+		if report != "" {
+			_ = readNote(gitx.HeadsFile(report), maxHeadsNote, &heads)
+		}
+		rec, err := gs.RecordUpdate(ctx, p, gitx.PushedRef{Ref: args[1], Old: args[2], New: args[3]}, heads)
+		if err != nil {
+			return refuse("recording %s in the relay failed: %s", printableArg(args[1]), errText(err))
+		}
+		if report != "" && (rec.Branch != nil || rec.Tag != nil) {
+			if err := writeNote(gitx.RecordsFile(report), rec, true); err != nil {
+				// The record is in the relay; only the report misses it.
+				fmt.Fprintf(a.stderr, "devc: warning: noting the push for the report failed: %s\n", errText(err))
+			}
 		}
 		return nil
 	case gitx.HookPostReceive:
@@ -82,14 +134,91 @@ func (a *app) relayHook(ctx context.Context, args []string) error {
 			return err
 		}
 		if len(probs) > 0 && len(c.ProblemsFor(ref)) > 0 {
-			// Record what was accepted, but forward nothing.
+			// Report what was accepted, but forward nothing.
 			r.Git.Forward = nil
 		}
-		rep := gs.RecordPush(ctx, p, pushed)
+		var recs []gitx.PushRecord
+		if report != "" {
+			recs, err = readRecords(gitx.RecordsFile(report))
+			if err != nil {
+				fmt.Fprintf(a.stderr, "devc: warning: reading the push's records: %s\n", errText(err))
+			}
+		}
+		rep := gs.ReportPush(ctx, p, pushed, recs)
 		fmt.Fprint(a.stderr, gitx.FormatPush(rep))
-		return writeReport(a.getenv(gitx.EnvRelayReport), rep)
+		return writeReport(report, rep)
 	}
 	return usageErrorf("unknown hook %q", printableArg(args[0]))
+}
+
+// writeNote writes (or, with appending, adds a line to) a note of the
+// hooks beside the push's report file. The directory is the host's own
+// (local/tmp); nothing is followed.
+func writeNote(file string, v any, appending bool) error {
+	flags := os.O_WRONLY | os.O_CREATE | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
+	if appending {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(file, flags, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := json.NewEncoder(f).Encode(v); err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// readNote reads a note written by writeNote (bounded); a missing note is
+// no error and leaves v alone.
+func readNote(file string, max int64, v any) error {
+	b, err := readBoundedFile(file, max)
+	if err != nil || len(b) == 0 {
+		return err
+	}
+	return json.Unmarshal(b, v)
+}
+
+func readBoundedFile(file string, max int64) ([]byte, error) {
+	f, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s is larger than %d bytes", file, max)
+	}
+	return b, nil
+}
+
+// readRecords reads the records the update hooks of a push left.
+func readRecords(file string) ([]gitx.PushRecord, error) {
+	b, err := readBoundedFile(file, maxRecordsNote)
+	if err != nil {
+		return nil, err
+	}
+	var out []gitx.PushRecord
+	for _, line := range bytes.Split(b, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var rec gitx.PushRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return out, err
+		}
+		out = append(out, rec)
+	}
+	return out, nil
 }
 
 // writeReport writes post-receive's report into the file the daemon made

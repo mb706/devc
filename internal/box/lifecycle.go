@@ -495,7 +495,11 @@ func (m *Manager) publish(ctx context.Context, pl *plan) error {
 	if err := prepareMountPoints(pl.spec); err != nil {
 		return err
 	}
-	// A binding from an earlier start must never meet this one.
+	// A binding or a capability record from an earlier start must never
+	// meet this one.
+	if err := RemoveCapabilities(m.Config.Paths, pl.spec.Ref); err != nil {
+		return err
+	}
 	if err := netpolicy.RemoveBinding(m.bindingPath(pl.spec.Ref)); err != nil {
 		return err
 	}
@@ -627,6 +631,12 @@ func (m *Manager) afterStart(ctx context.Context, pl *plan) error {
 					return err
 				}
 			}
+			// What the box was started with, for the grants handed out on
+			// demand (finding C1-02); written only for a start that
+			// succeeded.
+			if err := m.recordCapabilities(ctx, pl); err != nil {
+				return fmt.Errorf("recording what %s was started with: %w", name, err)
+			}
 			m.printf("devc: %s is ready\n", name)
 			m.afterReady(ctx, pl.spec.Ref, name)
 			return nil
@@ -645,6 +655,18 @@ func (m *Manager) afterStart(ctx context.Context, pl *plan) error {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// recordCapabilities writes the record of this start (capabilities.go).
+func (m *Manager) recordCapabilities(ctx context.Context, pl *plan) error {
+	ci, err := m.Find(ctx, pl.spec.Ref)
+	if err != nil {
+		return err
+	}
+	if ci == nil || !ci.State.Running {
+		return errors.New("the box is not running")
+	}
+	return WriteCapabilities(m.Config.Paths, pl.spec.Ref, CapabilitiesOf(pl.resolved, ci.ID, time.Now()))
 }
 
 // afterReady runs the start hooks; failures are warnings.
@@ -734,9 +756,13 @@ func (m *Manager) State(ctx context.Context, ref names.ProjectRef) (ci *engine.C
 	return ci, ci.State.Running, ci.State.Running && m.isReady(ref), nil
 }
 
-// cleanup runs the cleaners; all run even when one fails.
+// cleanup runs the cleaners; all run even when one fails. A stopped box
+// keeps no capability record.
 func (m *Manager) cleanup(ctx context.Context, ref names.ProjectRef) error {
 	var errs []error
+	if err := RemoveCapabilities(m.Config.Paths, ref); err != nil {
+		errs = append(errs, err)
+	}
 	for _, c := range m.Cleaners {
 		if err := c.Cleanup(ctx, ref); err != nil {
 			errs = append(errs, err)
