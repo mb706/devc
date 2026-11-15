@@ -242,5 +242,39 @@ func DecodeResult(b []byte, op string) (*boxside.DataResult, error) {
 			return nil, fmt.Errorf("invalid seal record %q", proto.Printable(sr.Path))
 		}
 	}
+	if r.Same < 0 {
+		return nil, errors.New("negative counts")
+	}
+	if r.Stage != "" && !boxside.ValidStageName(r.Stage) {
+		return nil, fmt.Errorf("invalid staging directory %q", proto.Printable(r.Stage))
+	}
+	if len(r.Digests) > 100000 {
+		return nil, errors.New("too many digests")
+	}
+	for _, d := range r.Digests {
+		if err := checkEntryDigest(d); err != nil {
+			return nil, err
+		}
+	}
 	return &r, nil
+}
+
+// checkEntryDigest validates a digest a worker reported.
+func checkEntryDigest(d boxside.EntryDigest) error {
+	if d.Path != "." {
+		if err := boxside.CheckDataPath(d.Path); err != nil {
+			return fmt.Errorf("invalid digest path %q: %w", proto.Printable(d.Path), err)
+		}
+	}
+	switch {
+	case d.Type != "dir" && d.Type != "file" && d.Type != "symlink":
+		return fmt.Errorf("invalid entry type %q", proto.Printable(d.Type))
+	case d.Files < 0 || d.Size < 0:
+		return errors.New("negative counts")
+	case !boxside.ValidDigest(d.Digest):
+		return fmt.Errorf("invalid digest %q", proto.Printable(d.Digest))
+	case d.Content != "" && !boxside.ValidDigest(d.Content):
+		return fmt.Errorf("invalid content hash %q", proto.Printable(d.Content))
+	}
+	return nil
 }

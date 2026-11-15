@@ -16,6 +16,9 @@ type Global struct {
 	Hubs         []Hub          `toml:"hubs" json:"hubs"`
 	Terminal     GlobalTerminal `toml:"terminal" json:"terminal"`
 	Router       GlobalRouter   `toml:"router" json:"router"`
+	// MachineName names this machine in the data manifest (work order
+	// C14); empty means the host name.
+	MachineName string `toml:"machine_name" json:"machine_name"`
 }
 
 // GlobalRouter is the daemon's router for local URLs (work order C13):
@@ -220,6 +223,10 @@ type Savepoints struct {
 	Keep          int    `toml:"keep" json:"keep"`
 }
 
+// Remote is a place data is pulled from and pushed to with rsync (work
+// order C14): an SSH host alias (empty for a directory on this machine)
+// and the path of its data root; Pull and Push are the default paths,
+// relative to the data root on both sides.
 type Remote struct {
 	Host string   `toml:"host" json:"host"`
 	Path string   `toml:"path" json:"path"`

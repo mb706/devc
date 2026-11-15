@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -75,7 +74,7 @@ func (r *Repo) run(ctx context.Context, realm string, args ...string) (execx.Res
 	if err := r.Paths.Ensure(r.Paths.LocalDir()); err != nil {
 		return execx.Result{}, err
 	}
-	unlock, err := flock.Acquire(ctx, filepath.Join(r.Paths.LocalDir(), "context-"+realm+".lock"), flock.Options{Timeout: 5 * time.Minute})
+	unlock, err := flock.Acquire(ctx, r.Paths.ContextLockFile(realm), flock.Options{Timeout: 5 * time.Minute})
 	if err != nil {
 		return execx.Result{}, err
 	}

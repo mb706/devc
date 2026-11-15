@@ -116,6 +116,14 @@ func (w *DataWorker) Run(req DataRequest) (*DataResult, error) {
 		err = w.savepointDrop(req, res)
 	case OpRestore:
 		err = w.restore(req, res)
+	case OpPullIn:
+		err = w.pullIn(req, res)
+	case OpPushStage:
+		err = w.pushStage(req, res)
+	case OpPushUnstage:
+		err = w.pushUnstage(req, res)
+	case OpDigest:
+		err = w.digest(req, res)
 	default:
 		err = fmt.Errorf("unknown operation %q", req.Op)
 	}
@@ -311,8 +319,18 @@ func (w *DataWorker) setup(req DataRequest, res *DataResult) error {
 	defer root.Close()
 	defer devc.Close()
 	// What a savepoint leaves out, for the restic driver.
-	_, res.Exclude, err = w.sealedEntries(root, req.Layout)
-	return err
+	if _, res.Exclude, err = w.sealedEntries(root, req.Layout); err != nil {
+		return err
+	}
+	if req.Digest {
+		// The manifest record of a restic savepoint: the tree it covers.
+		d, err := digestTree(root, res.Exclude, false)
+		if err != nil {
+			return err
+		}
+		res.Digests = []EntryDigest{d}
+	}
+	return nil
 }
 
 // --- seal and unseal ---
@@ -522,6 +540,15 @@ func (w *DataWorker) seal(req DataRequest, res *DataResult, seal bool) error {
 		return fmt.Errorf("%s was moved while it was being processed; check the zone and try again", req.Path)
 	}
 	res.Files, res.Size, res.Skipped = s.files, s.size, s.skipped
+	if req.Digest && seal {
+		// The entry is read-only for the box now; its digest is that of
+		// what was sealed.
+		d, err := digestEntry(zd, name, req.Path, req.Content)
+		if err != nil {
+			return err
+		}
+		res.Digests = []EntryDigest{d}
+	}
 	if res.Already {
 		return nil
 	}
@@ -1292,6 +1319,15 @@ func (w *DataWorker) reflinkSave(req DataRequest, res *DataResult) error {
 			return nil
 		}
 		return err
+	}
+	if req.Digest {
+		// The copy cannot change any more: its digest is the savepoint's.
+		d, err := digestTree(pd, nil, false)
+		if err != nil {
+			_ = sp.RemoveAll(partial)
+			return err
+		}
+		res.Digests = []EntryDigest{d}
 	}
 	if err := pd.Chown(w.VaultUID, w.VaultGID); err != nil {
 		return err

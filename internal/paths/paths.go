@@ -265,6 +265,26 @@ func (p *Paths) NotesDir(r names.ProjectRef) string {
 func (p *Paths) MemoryDir(realm, group string) string {
 	return filepath.Join(p.ContextDir(realm), "memory", must(names.KindGroup, group))
 }
+
+// ManifestRel is the data manifest of a project relative to its realm's
+// context directory (work order C14). No box mounts data/; the host still
+// writes it only through safefs, since the rest of the context directory
+// is box-written.
+func ManifestRel(r names.ProjectRef) string {
+	return filepath.Join("data", must(names.KindProject, r.Project), "manifest.jsonl")
+}
+
+// ManifestFile is ManifestRel below the context directory.
+func (p *Paths) ManifestFile(r names.ProjectRef) string {
+	return filepath.Join(p.ContextDir(r.Realm), ManifestRel(r))
+}
+
+// ContextLockFile serialises the context worker and manifest appends of a
+// realm.
+func (p *Paths) ContextLockFile(realm string) string {
+	return filepath.Join(p.LocalDir(), "context-"+must(names.KindRealm, realm)+".lock")
+}
+
 func (p *Paths) RelayDir(realm string) string {
 	return filepath.Join(p.DurableRealmDir(realm), "relay")
 }
@@ -405,6 +425,12 @@ func (p *Paths) GateLog(realm string) string {
 // TmpDir is for short-lived host directories (temporary homes for logins).
 func (p *Paths) TmpDir() string        { return filepath.Join(p.LocalDir(), "tmp") }
 func (p *Paths) SavepointsDir() string { return filepath.Join(p.LocalDir(), "savepoints") }
+
+// SyncStagingDir receives what `devc data pull` fetches for a project
+// before a helper container moves it into the data root. No box mounts it.
+func (p *Paths) SyncStagingDir(r names.ProjectRef) string {
+	return filepath.Join(p.LocalDir(), "staging", must(names.KindRealm, r.Realm), must(names.KindProject, r.Project))
+}
 
 // SavepointIndex lists a project's savepoints (one JSON object per line);
 // it is host-owned durable state, outside every box's reach.

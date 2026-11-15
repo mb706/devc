@@ -25,6 +25,11 @@ const (
 	OpReflinkSave   = "reflink-save"
 	OpSavepointDrop = "savepoint-drop"
 	OpRestore       = "restore"
+	// Work order C14 (data sync and manifest).
+	OpPullIn      = "pull-in"
+	OpPushStage   = "push-stage"
+	OpPushUnstage = "push-unstage"
+	OpDigest      = "digest"
 )
 
 // Restore sources.
@@ -56,6 +61,16 @@ type DataRequest struct {
 	InPlace bool     `json:"in_place,omitempty"`
 	// Sizes asks ls to measure the zones.
 	Sizes bool `json:"sizes,omitempty"`
+	// Label names the remote of pull-in (it labels the trash entry).
+	Label string `json:"label,omitempty"`
+	// Stage is the push staging directory below PushStagingDir.
+	Stage string `json:"stage,omitempty"`
+	// Check makes pull-in check its targets against the tree and stop.
+	Check bool `json:"check,omitempty"`
+	// Digest asks seal and setup for the digest of what they cover (the
+	// manifest); Content adds the content hash (seal, push-stage, digest).
+	Digest  bool `json:"digest,omitempty"`
+	Content bool `json:"content,omitempty"`
 }
 
 // DataResult is what a data worker reports.
@@ -88,6 +103,14 @@ type DataResult struct {
 	// Exclude lists what a savepoint leaves out: input zones and sealed
 	// entries (reflink-save, and ls for restic).
 	Exclude []string `json:"exclude,omitempty"`
+	// Same counts the files pull-in left alone because they were
+	// identical already.
+	Same int64 `json:"same,omitempty"`
+	// Stage is the push staging directory push-stage created.
+	Stage string `json:"stage,omitempty"`
+	// Digests describe the entries for the manifest (seal, setup with
+	// Digest, reflink-save, pull-in, push-stage, digest).
+	Digests []EntryDigest `json:"digests,omitempty"`
 	// ls
 	Zones   []ZoneInfo   `json:"zones,omitempty"`
 	Entries []EntryInfo  `json:"entries,omitempty"`

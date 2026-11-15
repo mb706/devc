@@ -290,3 +290,16 @@ func TestAppendLog(t *testing.T) {
 		t.Errorf("symlink target written: %v", err)
 	}
 }
+
+func TestRsyncShell(t *testing.T) {
+	if got := (&Client{}).RsyncShell(""); got != nil {
+		t.Errorf("default shell: %q", got)
+	}
+	if got := (&Client{Config: "/t/ssh config"}).RsyncShell(""); !slices.Equal(got, []string{"ssh", "-F", "/t/ssh config"}) {
+		t.Errorf("with a configuration: %q", got)
+	}
+	got := (&Client{Config: "/t/c"}).RsyncShell("/r/gate/m-%h.sock")
+	if !slices.Equal(got, []string{"ssh", "-F", "/t/c", "-S", "/r/gate/m-%%h.sock", "-o", "ControlMaster=no"}) {
+		t.Errorf("over a master: %q", got)
+	}
+}

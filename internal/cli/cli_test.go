@@ -72,6 +72,13 @@ func TestUsageErrors(t *testing.T) {
 		{"data", "unseal", "a", "b", "c"},
 		{"data", "trash", "restore"},
 		{"data", "trash", "empty", "--older-than", "soon"},
+		{"data", "pull"},
+		{"data", "push"},
+		{"data", "pull", "nas", "--max-size", "lots"},
+		{"data", "push", "nas", "--max-size", "1g"},
+		{"data", "status", "a/b", "c/d"},
+		{"data", "verify"},
+		{"data", "verify", "a", "b/c", "d"},
 	} {
 		code, _, errOut := run(t, nil, args...)
 		if code != 2 || !strings.Contains(errOut, "--help") {

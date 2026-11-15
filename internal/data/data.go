@@ -1,8 +1,9 @@
 // Package data implements a project's data directory on the host side
-// (spec 14, work order C06): zones and their ownership, sealing, the trash,
-// savepoints (reflink and restic drivers) and restores, and the box hooks
-// that set the layout up at `devc up`, mount input zones read-only and give
-// worktrees their data link.
+// (spec 14, work orders C06 and C14): zones and their ownership, sealing,
+// the trash, savepoints (reflink and restic drivers) and restores, the box
+// hooks that set the layout up at `devc up`, mount input zones read-only
+// and give worktrees their data link, data pull and push with rsync, and
+// the data manifest.
 //
 // Security rules: the project tree is box-writable, so this package never
 // walks it, reads it or changes it from the host (README rule 2). Every
@@ -12,9 +13,15 @@
 // network and only the capabilities it needs, and resolves every path below
 // the mount without following symlinks. Worker output is untrusted: it is
 // decoded strictly with a size cap and validated, and text from it is made
-// printable before it reaches a terminal. restic runs in the helper
-// container as the box user without capabilities, with the data root
-// mounted read-only. Unsealing, trash deletion and restoring are host-only
+// printable before it reaches a terminal. Data sync (work order C14) runs
+// rsync on the host with the user's own SSH, but only between a remote
+// and a staging directory no box can write: pulls land under the state
+// directory and a worker moves them in; pushes read a vault-owned
+// directory of hard links a worker made. The rsync command line is built
+// in one place (RsyncArgs) from validated configuration; nothing from a
+// box reaches it. The manifest is appended beneath the context directory
+// through safefs. restic runs in the helper container as the box user
+// without capabilities, with the data root mounted read-only. Unsealing, trash deletion and restoring are host-only
 // commands; nothing here can be triggered from a box. The savepoint index
 // and the restic repository live in the state directory, which no box can
 // reach.
@@ -34,6 +41,7 @@ import (
 	"github.com/mb706/devc/internal/boxside"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/engine"
+	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/toolbox"
@@ -56,6 +64,12 @@ type Service struct {
 	Now func() time.Time
 	// HostRoot prefixes host paths probed for facts ("/" normally).
 	HostRoot string
+	// Runner runs rsync and ssh on the host (data pull and push).
+	Runner execx.Runner
+	// SSHConfig is passed to ssh with -F when set (DEVC_SSH_CONFIG).
+	SSHConfig string
+	// RsyncBin is the rsync executable ("rsync" when empty).
+	RsyncBin string
 
 	syncOnce sync.Once
 	syncErr  error

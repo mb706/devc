@@ -165,9 +165,18 @@ type world struct {
 	p       *Project
 	restics [][]string
 	runs    []engine.RunOptions
+	// host runs rsync and ssh (data pull and push).
+	host *execx.Fake
+	dir  string
 }
 
 func newWorld(t *testing.T, driver string) *world {
+	t.Helper()
+	return newWorldExtra(t, driver, "")
+}
+
+// newWorldExtra is newWorld with more project.toml (data remotes).
+func newWorldExtra(t *testing.T, driver, extra string) *world {
 	t.Helper()
 	if os.Geteuid() != 0 {
 		t.Skip("needs root to change owners")
@@ -175,9 +184,9 @@ func newWorld(t *testing.T, driver string) *world {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config")
 	for file, content := range map[string]string{
-		"config.toml":                      "projects_root = \"" + filepath.Join(dir, "projects") + "\"\n",
+		"config.toml":                      "projects_root = \"" + filepath.Join(dir, "projects") + "\"\nmachine_name = \"ws\"\n",
 		"realms/r/realm.toml":              "[network]\ndefault = \"open\"\n",
-		"realms/r/projects/p/project.toml": "image = \"docker.io/library/debian:bookworm-slim\"\nharnesses = []\n[data]\ninputs = [\"raw\"]\nwork = [\"scratch\"]\nsealed = [\"results\"]\n[data.savepoints]\ndriver = \"" + driver + "\"\nkeep = 2\n",
+		"realms/r/projects/p/project.toml": "image = \"docker.io/library/debian:bookworm-slim\"\nharnesses = []\n[data]\ninputs = [\"raw\"]\nwork = [\"scratch\"]\nsealed = [\"results\"]\n[data.savepoints]\ndriver = \"" + driver + "\"\nkeep = 2\n" + strings.ReplaceAll(extra, "@DIR@", dir),
 	} {
 		os.MkdirAll(filepath.Dir(filepath.Join(cfg, file)), 0o755)
 		os.WriteFile(filepath.Join(cfg, file), []byte(content), 0o644)
@@ -192,9 +201,9 @@ func newWorld(t *testing.T, driver string) *world {
 	}
 	exe := filepath.Join(dir, "devc-exe")
 	os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755)
-	w := &world{t: t, eng: engine.NewFake()}
+	w := &world{t: t, eng: engine.NewFake(), host: execx.NewFake(), dir: dir}
 	w.svc = &Service{Config: c, Engine: w.eng, Toolbox: toolbox.New(c.Paths.ToolboxDir()), Executable: exe, Version: "test",
-		Out: io.Discard, HostRoot: dir, Commit: func(context.Context, names.ProjectRef) string { return "c0ffee" }}
+		Out: io.Discard, HostRoot: dir, Commit: func(context.Context, names.ProjectRef) string { return "c0ffee" }, Runner: w.host}
 	w.eng.RunFunc = w.run
 	if w.p, err = w.svc.Project(names.ProjectRef{Realm: "r", Project: "p"}); err != nil {
 		t.Fatal(err)
@@ -278,14 +287,14 @@ func TestServiceWorkers(t *testing.T) {
 	}
 	os.MkdirAll(filepath.Join(w.p.HostRoot(), "results", "run1"), 0o755)
 	os.WriteFile(filepath.Join(w.p.HostRoot(), "results", "run1", "f"), []byte("x"), 0o644)
-	res, err := w.svc.Seal(ctx, w.p, "results/run1")
+	res, err := w.svc.Seal(ctx, w.p, "results/run1", false)
 	if err != nil || res.Files != 1 {
 		t.Fatalf("seal: %+v %v", res, err)
 	}
-	if _, err := w.svc.Seal(ctx, w.p, "scratch/x"); err == nil {
+	if _, err := w.svc.Seal(ctx, w.p, "scratch/x", false); err == nil {
 		t.Error("sealing outside a sealed zone was sent to a worker")
 	}
-	if _, err := w.svc.Seal(ctx, w.p, "results/none"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+	if _, err := w.svc.Seal(ctx, w.p, "results/none", false); err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Errorf("the worker's message did not come through: %v", err)
 	}
 	l, err := w.svc.Ls(ctx, w.p)
@@ -321,7 +330,7 @@ func TestServiceRestic(t *testing.T) {
 	if _, err := w.svc.Setup(ctx, w.p); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.svc.Seal(ctx, w.p, "results/*odd"); err != nil {
+	if _, err := w.svc.Seal(ctx, w.p, "results/*odd", false); err != nil {
 		t.Fatal(err)
 	}
 	w.restics = nil

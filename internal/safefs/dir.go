@@ -285,6 +285,22 @@ func (d *Dir) Rename(name string, to *Dir, toName string) error {
 	return nil
 }
 
+// Link makes toName in the directory to a hard link of the entry name
+// (linkat without AT_SYMLINK_FOLLOW: a symlink is linked as itself, never
+// followed). It never replaces an existing entry.
+func (d *Dir) Link(name string, to *Dir, toName string) error {
+	if err := CheckName(name); err != nil {
+		return d.pathErr("link", name, err)
+	}
+	if err := CheckName(toName); err != nil {
+		return to.pathErr("link", toName, err)
+	}
+	if err := unix.Linkat(d.fd, name, to.fd, toName, 0); err != nil {
+		return fmt.Errorf("safefs: link %s to %s: %w", d.join(name), to.join(toName), err)
+	}
+	return nil
+}
+
 // Remove deletes the entry name: a file or symlink with unlink, a
 // directory (which must be empty) with rmdir.
 func (d *Dir) Remove(name string) error {

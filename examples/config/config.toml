@@ -5,6 +5,7 @@ projects_root = "~/devc"       # where project directories live: <projects_root>
 state_dir = ""                 # empty: ~/.local/share/devc; --state-dir and DEVC_STATE_DIR win
 engine = "podman"
 default_env = "base"           # used by projects that set neither env nor image (default: none)
+machine_name = ""              # this machine's name in the data manifest; empty: the host name
 
 [box]
 memory = "16g"

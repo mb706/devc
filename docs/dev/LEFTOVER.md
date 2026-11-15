@@ -353,3 +353,20 @@ Other checks and deferred work:
 | **Exceptions on boxes started before C13**: `lan` needs a restart (old rules have no `lan4`); host exceptions need a restart (the old agent does not know `box.listen`) | a restart per box |
 | **SELinux**: the proxy, the relays and the router add no file or socket a box can reach; not checked on an SELinux host | a run on Fedora |
 | **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/netpolicy/ ./internal/daemon/ ./internal/boxside/` in the toolchain image with cgo |
+
+### From C14
+
+| Item | Needs |
+|---|---|
+| **Every pull transfers the selected files in full**: the staging directory starts empty (the host may not read the data tree to compare), so rsync's delta transfer does not apply, except when a pull continues an interrupted one | a worker listing of the target (paths, sizes, times) turned into rsync filter rules, if large repeated pulls matter |
+| **A continued pull also brings what the interrupted one received**, even files removed from the remote in between | nothing, or a fresh staging directory per path set |
+| **A push decides by size and modification time** (rsync's quick check); the box controls both, so a file changed in place with its size and time restored is not sent. `--checksum` is not offered | a `--checksum` flag, if wanted |
+| **Staged files are hard links**: a process in the box holding one open can change it during the push, and the content hash of `push --content` describes the bytes when they were staged. Documented in the guide | nothing (seal or stop the session first for a consistent copy) |
+| **The box can block pushes** by creating `.devc-staging` itself; the push then refuses (fail closed) until the user removes it | nothing, or moving a squatted directory to the trash automatically |
+| **The manifest is not rotated.** The context worker leaves files above 10 MiB out of its commits (about 30,000 records); a project that records that much stops committing its manifest | rotation or compaction of old records |
+| **Only rsync 3.2.7 (host) was exercised**, also as the "remote" over SSH; older remotes, rsync 3.0/3.1 and BSD or macOS openrsync were not tried (`--protect-args`, `--info=progress2`, the itemized format) | runs against a cluster's rsync |
+| **SSH**: the integration test pulls over a master with key authentication only; a push over SSH, password or second-factor prompts during the dry run or transfer, and the fallback from a master that dies between the check and the transfer were not exercised | a run against a real cluster |
+| **Concurrent pull and push on one project** use separate staging directories and take the box lock for their worker phases; they were not run concurrently | a test, if it matters |
+| **SELinux**: the helper containers and the host staging directory get no new labels; not checked on an SELinux host | a run on Fedora |
+| **A pull trusts the remote's rsync.** The host's rsync writes only into the staging directory, but a hostile rsync on the remote (a cluster where an agent with a gate grant replaced it, say) could try receiver bugs such as CVE-2024-12087 to write elsewhere as the user; spec 14.5 already treats such a cluster as the user's own | keeping rsync current on the host (3.4.0 or a patched distribution package); the guide could say so |
+| **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/data/ ./internal/boxside/` in the toolchain image with cgo |

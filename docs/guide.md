@@ -62,13 +62,14 @@ create or start a box refuses while that project's configuration has a
 problem.
 
 Some keys are accepted for features that are not available yet and have no
-effect: `grants.github`, `[data.remotes]`, `[sync]`. `build_from_repo` and
+effect: `grants.github`, `[sync]`. `build_from_repo` and
 `capabilities.nested` are refused with a message.
 
 State lives in `~/.local/share/devc` (`--state-dir`, `DEVC_STATE_DIR` or
 `state_dir`): `durable/` holds what is worth backing up (relays, journals,
-context repositories, harness state, secrets), `local/` what belongs to this
-machine (box homes, savepoint repositories), `cache/` what can be deleted, and
+context repositories with the data manifests, harness state, secrets),
+`local/` what belongs to this machine (box homes, savepoint repositories, the
+staging directories of data pulls), `cache/` what can be deleted, and
 `toolbox/` the toolbox. Project directories live below `projects_root`
 (default `~/devc/<realm>/<project>`). Runtime files are in
 `$XDG_RUNTIME_DIR/devc`.
@@ -489,6 +490,103 @@ install restic`); `auto` picks `reflink` when a probe succeeds, else `restic`.
 one before a session starts (at most one per 30 minutes). All data
 operations run in a throwaway helper container that sees only the project.
 
+## Moving data between machines
+
+Data moves between this machine and others (a cluster, a workstation, a
+laptop, a mounted disk) with rsync, wrapped by devc so that the defaults are
+safe: nothing is ever deleted, what is replaced is kept, and you see what
+would be transferred before anything happens. A remote is declared in
+`project.toml`:
+
+```toml
+[data.remotes.cluster1]
+host = "cluster1"                 # an SSH host alias of your own ssh configuration
+path = "/scratch/me/analysis"     # its data root: absolute, or relative to the remote home
+pull = ["results"]                # default paths of 'devc data pull cluster1'
+push = ["raw"]                    # default paths of 'devc data push cluster1'
+
+[data.remotes.nas]
+path = "/mnt/nas/analysis"        # no host: a directory on this machine (absolute)
+```
+
+Paths are relative to the data root on both sides and must lie in a zone (or
+be one). rsync runs on the host with your own SSH configuration, keys and
+agent; when `devc ssh login cluster1` has a connection open, the transfer
+goes through it (its control socket never leaves the host). The remote needs
+rsync 3.0 or later.
+
+```sh
+devc data pull cluster1 [path...] -p demo/analysis [--dry-run] [--yes] [--max-size 2g]
+devc data push cluster1 [path...] -p demo/analysis [--dry-run] [--yes] [--content]
+```
+
+Both first list what would be transferred (an rsync dry run) and ask; `--yes`
+skips the list and the question (needed without a terminal), `--dry-run`
+shows the list and changes nothing on either side.
+
+**Pull.** rsync fetches into a staging directory in devc's state (no box sees
+it), keeping symlinks as links and never following them; owners, groups,
+devices and special files are not transferred. A helper container then moves
+the files into the data root, owned by the box user (set-ID bits dropped):
+
+- a file that differs from the one already there replaces it, and the old one
+  goes to one trash entry for the pull (`devc data trash ls`, `restore`);
+- identical files (same bytes) are left alone;
+- sealed data is never changed: a pull of a path inside a sealed entry is
+  refused, and sealed entries inside a pulled directory are left as they are
+  (reported when the remote's copy differs);
+- new entries in a sealed zone arrive unsealed; seal them with `devc seal`.
+
+`--max-size` (default 2g, `0` for no limit) refuses a pull whose transfer would
+be larger in total. Every pull transfers the selected files in full, since the
+staging directory starts empty: pull the paths you need rather than whole
+zones. When a transfer is interrupted, what arrived is kept and the next pull
+from the same remote continues from it (and also brings what that interrupted
+pull received).
+
+**Push.** The data tree is writable by the box, so rsync does not read it. A
+helper container first hard-links the selected files into
+`.devc-staging/push-<time>/` in the project directory, whose directories
+belong to the vault: the box can read them but cannot add, remove, rename or
+replace anything there. rsync sends only that directory. Nothing is deleted on
+the remote; a file the push replaces is kept there in
+`<path>/.devc-backup/<time>/`. New files keep their permission bits, limited
+by the remote's umask; a file that replaces another keeps that one's
+permissions (and takes over the executable bit); directories are created with
+the remote's defaults.
+
+The staged files are hard links, not copies: a process in the box that holds
+a file open can still change it while it is being sent, and rsync decides
+what to send by size and modification time, which the box controls too. For a
+consistent copy, seal the entry (or stop the session) before pushing.
+
+**The manifest.** Seals, savepoints, pulls and pushes are recorded in
+`durable/realms/<realm>/context/data/<project>/manifest.jsonl`: the time, the
+machine (`machine_name` in `config.toml`, default the host name), the action,
+the path, the number of files, the total size, a digest of the sorted list of
+files with their sizes, the remote, and with `--content` (on `devc seal` and
+`devc data push`) a SHA-256 hash over the contents. The manifest is part of
+the realm's context repository, committed after every pull and push and with
+the context's other commits, so it travels with it.
+
+```sh
+devc data status demo/analysis [--json]   # each top-level entry: size, digest, state, where it was last recorded
+devc data verify results/run7 [--content] # recompute and compare with the manifest (exit 1 when it differs)
+devc seal results/run7 --content          # seal and store a content hash
+```
+
+`data status` shows each top-level entry of each zone as `new` (no record),
+`recorded` (as last recorded), `changed` or `absent` (recorded but not here),
+with the machines and remotes it was last recorded on; a `*` marks a record
+that differs from the entry now.
+
+**Clusters.** On a cluster the agent acts as you, with your account, and devc
+cannot sandbox it there: it can only help against accidents. Seal finished
+runs on the cluster with `chmod -R a-w <run>`; keep results that matter on
+backed-up storage rather than on scratch; and pull post-processed data off the
+cluster (`devc data pull cluster1 results/run7`, then `devc seal
+results/run7`) rather than raw output.
+
 ## Network levels, exceptions and port forwarding
 
 A realm sets `network.default` in `realm.toml`; a project may override it with
@@ -816,7 +914,8 @@ everything that matters outside it, but it is not a virtual machine.
   with hooks and the box's configuration ignored; spool files and other
   box-written files are read without following links and parsed strictly;
   data operations and context commits run in throwaway containers that see
-  only the tree they work on. The daemon's channel is opened from the host to
+  only the tree they work on. `devc data pull` and `push` run rsync on the
+  host only between a remote and a staging directory no box can change. The daemon's channel is opened from the host to
   a socket in the box's runtime directory without following links, and only
   to a process of that box; what arrives on it is bounded and checked.
 - Banked commits, sealed data, session journals and notes commits are kept

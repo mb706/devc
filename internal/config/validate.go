@@ -255,6 +255,9 @@ func validateGlobal(c *Config, ps *problems) {
 		}
 		seenHubs[norm] = true
 	}
+	if g.MachineName != "" && !ValidMachineName(g.MachineName) {
+		k.bad("machine_name", "%q must start with a letter or digit and contain only letters, digits, '.', '_' and '-' (at most 63 characters)", g.MachineName)
+	}
 	if l := g.Router.Listen; l != RouterOff {
 		ap, err := netip.ParseAddrPort(l)
 		if err != nil || !ap.Addr().Unmap().IsLoopback() || ap.Port() == 0 {
@@ -800,11 +803,8 @@ func validateData(k checker, d *Data) {
 		key := "data.remotes." + name
 		k.name(key, names.KindRemote, name)
 		r := d.Remotes[name]
-		if !hostAliasRE.MatchString(r.Host) {
-			k.bad(key+".host", "%q is not a valid SSH host alias", r.Host)
-		}
-		if r.Path == "" || strings.HasPrefix(r.Path, "-") || strings.ContainsAny(r.Path, "\x00\n\r") {
-			k.bad(key+".path", "%q must be a non-empty path that does not start with '-'", r.Path)
+		if err := CheckRemote(r); err != nil {
+			k.bad(key, "%v", err)
 		}
 		for i, p := range r.Pull {
 			k.dataPath(idx(key+".pull", i), p)

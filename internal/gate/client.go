@@ -63,6 +63,23 @@ func (c *Client) LoginCmd(sock, host string, ttl time.Duration) (execx.Cmd, erro
 	return execx.Cmd{Name: c.bin(), Args: args}, nil
 }
 
+// RsyncShell is the remote shell of `devc data pull` and `push` (work
+// order C14) as words: ssh with -F when a configuration is set, and over
+// the master on sock when one answers (a multiplexing client only, which
+// falls back to the user's ordinary SSH if the master goes away). nil
+// means rsync's default. The socket path stays on the host's command line;
+// no box ever sees it.
+func (c *Client) RsyncShell(sock string) []string {
+	if sock == "" && c.Config == "" && c.Bin == "" {
+		return nil
+	}
+	words := append([]string{c.bin()}, c.base()...)
+	if sock != "" {
+		words = append(words, "-S", controlPath(sock), "-o", "ControlMaster=no")
+	}
+	return words
+}
+
 // controlCmd is `ssh -S <sock> -O <op> <host>`.
 func (c *Client) controlCmd(sock, host, op string) execx.Cmd {
 	args := append(c.base(), "-S", controlPath(sock), "-O", op, host)

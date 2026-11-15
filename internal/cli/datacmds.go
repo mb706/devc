@@ -32,6 +32,7 @@ func (a *app) dataService(c *config.Config, eng engine.Engine, tb *toolbox.Toolb
 	git := a.gitService(c, eng)
 	return &data.Service{
 		Config: c, Engine: eng, Toolbox: tb, Executable: exe, Version: version.Version, Out: a.stderr, HostRoot: "/",
+		Runner: a.runner, SSHConfig: a.sshConfigFile(),
 		Commit: func(ctx context.Context, ref names.ProjectRef) string {
 			r, err := c.Resolved(ref)
 			if err != nil {
@@ -131,20 +132,23 @@ func (a *app) printSkipped(skipped []string) {
 }
 
 func newDataCmds(a *app) []*cobra.Command {
+	var sealContent bool
 	seal := &cobra.Command{
 		Use:   "seal <path> [<realm>/<project>]",
 		Short: "Seal a finished entry of a sealed zone so that nothing in the box can change it",
 		Long: "Hand a direct child of a sealed zone to the vault and remove its write permission, recursively. From the box it " +
 			"can still be read but not changed, moved or removed; new entries can still be created beside it. Paths are " +
-			"relative to the data root, or absolute inside it (in-box or host path). Sealing a sealed entry does nothing.",
-		Args: rangeArgs(1, 2, "devc seal <path> [<realm>/<project>]"),
+			"relative to the data root, or absolute inside it (in-box or host path). Sealing a sealed entry does nothing. " +
+			"The seal is recorded in the data manifest (see 'devc data status'); --content also stores a SHA-256 hash of " +
+			"the entry's contents, for 'devc data verify --content' (also for an entry that is sealed already).",
+		Args: rangeArgs(1, 2, "devc seal <path> [<realm>/<project>] [--content]"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.withData(cmd, args[1:], args[0], true, func(ctx context.Context, e *boxEnv, p *data.Project) error {
 				rel, err := data.Normalize(p, e.cfg.Paths.ProjectsRoot(), args[0])
 				if err != nil {
 					return err
 				}
-				res, err := e.data.Seal(ctx, p, rel)
+				res, err := e.data.Seal(ctx, p, rel, sealContent)
 				if err != nil {
 					return err
 				}
@@ -158,6 +162,7 @@ func newDataCmds(a *app) []*cobra.Command {
 			})
 		},
 	}
+	seal.Flags().BoolVar(&sealContent, "content", false, "also record a content hash in the data manifest")
 
 	save := &cobra.Command{
 		Use:   "save [name] [<realm>/<project>]",
@@ -334,7 +339,8 @@ func newDataCmd(a *app) *cobra.Command {
 	}
 	gc.Flags().StringArrayVar(&drop, "drop", nil, "drop this savepoint (named or not); repeatable")
 
-	return group("data", "Work with a project's data directory", false, ls, rm, unseal, gc, newTrashCmd(a))
+	return group("data", "Work with a project's data directory", false, ls, rm, unseal, gc, newTrashCmd(a),
+		newDataPullCmd(a), newDataPushCmd(a), newDataStatusCmd(a), newDataVerifyCmd(a))
 }
 
 func newTrashCmd(a *app) *cobra.Command {

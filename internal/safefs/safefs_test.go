@@ -346,6 +346,25 @@ func TestDirOperations(t *testing.T) {
 	if l, _ := os.Readlink(filepath.Join(base, "root", "sub", "moved-link")); l != "../outside/secret" {
 		t.Errorf("moved link %q", l)
 	}
+	// Link links a symlink as itself and never replaces.
+	if err := sub.Link("moved-link", d, "linked-link"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(filepath.Join(base, "root", "linked-link")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("linked symlink: %v %v", fi, err)
+	}
+	if err := d.Link("ok.txt", sub, "inner.txt"); err == nil {
+		t.Error("Link replaced an existing entry")
+	}
+	if err := d.Link("ok.txt", d, "ok-link.txt"); err != nil {
+		t.Fatal(err)
+	}
+	var st1, st2 syscall.Stat_t
+	syscall.Lstat(filepath.Join(base, "root", "ok.txt"), &st1)
+	syscall.Lstat(filepath.Join(base, "root", "ok-link.txt"), &st2)
+	if st1.Ino != st2.Ino {
+		t.Error("Link did not make a hard link")
+	}
 	// RemoveAll deletes links, not their targets.
 	os.Symlink(filepath.Join(base, "outside"), filepath.Join(base, "root", "a", "b", "out"))
 	if err := d.RemoveAll("a"); err != nil {

@@ -202,14 +202,17 @@ func (s *Service) Save(ctx context.Context, p *Project, name string) (*Savepoint
 	now := s.now()
 	sp := &Savepoint{V: 1, Op: opSave, ID: NewID(now, name, used), Name: name, Time: now.Format(time.RFC3339Nano),
 		Paths: []string{"."}, Commit: s.commit(ctx, p.Ref)}
+	// The manifest record (work order C14) describes what was saved.
+	var digests []boxside.EntryDigest
 	if driver != DriverRestic {
-		res, err := s.work(ctx, p, boxside.DataRequest{Op: boxside.OpReflinkSave, Savepoint: sp.ID, Time: sp.Time}, capsOwner, "")
+		res, err := s.work(ctx, p, boxside.DataRequest{Op: boxside.OpReflinkSave, Savepoint: sp.ID, Time: sp.Time, Digest: true}, capsOwner, "")
 		if err != nil {
 			return nil, err
 		}
 		switch {
 		case !res.Unsupported:
 			sp.Driver, sp.Files, sp.Size, sp.Exclude = DriverReflink, res.Files, res.Size, res.Exclude
+			digests = res.Digests
 			s.reportSkipped(res.Skipped)
 		case driver == DriverReflink:
 			return nil, fmt.Errorf("the project filesystem of %s cannot clone files, so the reflink driver does not work there: set data.savepoints.driver to \"restic\" or \"auto\"", p.Ref)
@@ -220,13 +223,14 @@ func (s *Service) Save(ctx context.Context, p *Project, name string) (*Savepoint
 		}
 	}
 	if sp.Driver == "" {
-		if err := s.resticSave(ctx, p, sp); err != nil {
+		if digests, err = s.resticSave(ctx, p, sp); err != nil {
 			return nil, err
 		}
 	}
 	if err := appendIndex(index, *sp); err != nil {
 		return nil, fmt.Errorf("recording the savepoint %s: %w", sp.ID, err)
 	}
+	s.record(ctx, p, s.records(ActionSave, "", sp.ID, digests))
 	sps, _, err := ReadIndex(index)
 	if err != nil {
 		return sp, err
@@ -480,15 +484,16 @@ type resticSummary struct {
 	Bytes       int64  `json:"total_bytes_processed"`
 }
 
-func (s *Service) resticSave(ctx context.Context, p *Project, sp *Savepoint) error {
+func (s *Service) resticSave(ctx context.Context, p *Project, sp *Savepoint) ([]boxside.EntryDigest, error) {
 	// The setup worker checks the layout (no symlinked data root) and
-	// reports what to leave out: input zones and sealed entries.
-	res, err := s.work(ctx, p, boxside.DataRequest{Op: boxside.OpSetup}, capsOwner, "")
+	// reports what to leave out: input zones and sealed entries, and the
+	// digest of the rest for the manifest.
+	res, err := s.work(ctx, p, boxside.DataRequest{Op: boxside.OpSetup, Digest: true}, capsOwner, "")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := s.ensureRepo(ctx, p); err != nil {
-		return err
+		return nil, err
 	}
 	root := path.Join(resticProject, p.Layout.Root)
 	args := []string{"backup", "--json", "--quiet", "--host", "devc", "--tag", sp.ID}
@@ -499,7 +504,7 @@ func (s *Service) resticSave(ctx context.Context, p *Project, sp *Savepoint) err
 	out, err := s.restic(ctx, p, nil, args...)
 	// Exit status 3: the snapshot was made, but some files were unreadable.
 	if err != nil && out.ExitCode != 3 {
-		return err
+		return nil, err
 	}
 	if out.ExitCode == 3 {
 		s.printf("devc: warning: restic could not read some files of %s; the savepoint lacks them%s\n", p.Ref, tail(out.Stderr))
@@ -512,10 +517,10 @@ func (s *Service) resticSave(ctx context.Context, p *Project, sp *Savepoint) err
 		}
 	}
 	if sum == nil || !snapshotRE.MatchString(sum.SnapshotID) {
-		return fmt.Errorf("restic did not report a snapshot%s", tail(out.Stderr))
+		return nil, fmt.Errorf("restic did not report a snapshot%s", tail(out.Stderr))
 	}
 	sp.Driver, sp.Snapshot, sp.Files, sp.Size, sp.Exclude = DriverRestic, sum.SnapshotID, sum.Files, sum.Bytes, res.Exclude
-	return nil
+	return res.Digests, nil
 }
 
 func (s *Service) resticRestore(ctx context.Context, p *Project, sp *Savepoint, req boxside.DataRequest) (*boxside.DataResult, error) {

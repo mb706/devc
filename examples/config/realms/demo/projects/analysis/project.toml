@@ -33,11 +33,15 @@ driver = "auto"                # auto | reflink | restic | borg | none
 before_session = false
 keep = 10
 
-[data.remotes.cluster1]
-host = "cluster1"              # SSH host alias
-path = "/scratch/demo/analysis"
-pull = ["results"]
-push = ["raw"]
+[data.remotes.cluster1]         # devc data pull|push cluster1 [path...]
+host = "cluster1"              # SSH host alias of your own ssh configuration (over 'devc ssh login cluster1' when it is open)
+path = "/scratch/demo/analysis" # the remote's data root: absolute, or relative to the remote home directory
+pull = ["results"]             # default paths of a pull, relative to the data root on both sides
+push = ["raw"]                 # default paths of a push
+
+[data.remotes.nas]
+path = "/mnt/nas/demo/analysis" # no host: a directory on this machine (a mounted disk or NAS); absolute
+push = ["results"]
 
 [requests]
 auto = ["seal", "savepoint", "note"]   # low-risk request kinds approved without asking ([] for none)

@@ -28,12 +28,21 @@ func (s *Service) Setup(ctx context.Context, p *Project) (*boxside.DataResult, e
 
 // Seal hands a direct child of a sealed zone to the vault (work order C06
 // section 4). A record with the relay's default-branch tip is appended to
-// .devc/seals.jsonl, unless the entry was sealed already.
-func (s *Service) Seal(ctx context.Context, p *Project, rel string) (*boxside.DataResult, error) {
+// .devc/seals.jsonl, unless the entry was sealed already, and one with its
+// digest to the data manifest (work order C14); content adds the content
+// hash, and records an entry that was sealed already too.
+func (s *Service) Seal(ctx context.Context, p *Project, rel string, content bool) (*boxside.DataResult, error) {
 	if _, _, err := p.Layout.SealTarget(rel); err != nil {
 		return nil, err
 	}
-	return s.work(ctx, p, boxside.DataRequest{Op: boxside.OpSeal, Path: rel, Commit: s.commit(ctx, p.Ref)}, capsOwner, "")
+	res, err := s.work(ctx, p, boxside.DataRequest{Op: boxside.OpSeal, Path: rel, Commit: s.commit(ctx, p.Ref), Digest: true, Content: content}, capsOwner, "")
+	if err != nil {
+		return nil, err
+	}
+	if !res.Already || content {
+		s.record(ctx, p, s.records(ActionSeal, "", "", res.Digests))
+	}
+	return res, nil
 }
 
 // Unseal gives a sealed entry back to the box user with owner write bits.
