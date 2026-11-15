@@ -13,8 +13,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | C04 Sessions | done | 5cecf71 |
 | C05 Git | done | c6fd027 |
 | C06 Data | done | 5b17028 |
-| C07 Network and finish | in progress | |
-| Review B + C07r | pending | |
+| C07 Network and finish | done | 1c8643d |
+| Review B + C07r | in progress | |
 | C08 Daemon core | pending | |
 | C09 Status and input | pending | |
 | C10a Relay service, requests, on-demand secrets | pending | |
