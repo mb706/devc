@@ -20,6 +20,10 @@ mode = "labels"                # labels: expect the file-context rule from `devc
 delivery = "files"             # files: written to each box's tmpfs /run/devc-secrets at devc up
                                # daemon: nothing is written; harnesses ask the daemon at launch
 
+[terminal]
+control = false                # true: a hub's web app may type into session terminals
+                               # (the hub must allow it too); false: it only observes
+
 # Hubs this machine reports to, in order of preference (the first connected
 # one sends notifications). None by default; 'devc join' adds an entry and
 # stores the hub's credentials, 'devc leave' removes both.

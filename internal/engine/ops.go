@@ -286,8 +286,13 @@ type ExecOptions struct {
 	TTY         bool
 	Cmd         []string
 	Stdin       io.Reader
-	Timeout     time.Duration
-	Redact      []string
+	// Stdout and Stderr redirect the output of ExecInteractive (default:
+	// the process's own); Ctty makes Stdin (a terminal) the engine
+	// process's controlling terminal, so resizing it reaches the exec.
+	Stdout, Stderr io.Writer
+	Ctty           bool
+	Timeout        time.Duration
+	Redact         []string
 }
 
 var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -351,7 +356,8 @@ func (p *Podman) ExecInteractive(ctx context.Context, o ExecOptions) (int, error
 	if err != nil {
 		return -1, err
 	}
-	return p.Runner.Interactive(ctx, execx.Cmd{Name: p.Bin, Args: args, Dir: "/", Stdin: o.Stdin, Timeout: o.Timeout, Redact: o.Redact})
+	return p.Runner.Interactive(ctx, execx.Cmd{Name: p.Bin, Args: args, Dir: "/", Stdin: o.Stdin, Stdout: o.Stdout, Stderr: o.Stderr,
+		Ctty: o.Ctty, Timeout: o.Timeout, Redact: o.Redact})
 }
 
 // Unshare implements Engine.

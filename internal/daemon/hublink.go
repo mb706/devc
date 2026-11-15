@@ -35,9 +35,12 @@ import (
 
 // hubMethods is the allowlist of daemon methods a hub may call: reading
 // boxes, sessions and events, the session commands of C09 (box-scoped:
-// they type into or start and stop sessions in a box), receipts, and
-// listing and deciding requests (low-risk only, by origin). Anything else,
-// daemon.stop and hubs.status included, does not exist for a hub.
+// they type into or start and stop sessions in a box), receipts, listing
+// and deciding requests (low-risk only, by origin), and for the web app
+// (C12) reading projects and a session's changes and a session's terminal
+// (observing; typing into that one pane only in control mode, which the
+// machine's own configuration must allow). Anything else, daemon.stop and
+// hubs.status included, does not exist for a hub.
 var hubMethods = []string{
 	proto.MethodDaemonInfo,
 	proto.MethodBoxesList,
@@ -55,6 +58,11 @@ var hubMethods = []string{
 	proto.MethodCommandGet,
 	proto.MethodRequestsList,
 	proto.MethodRequestsDecide,
+	proto.MethodProjectsList,
+	proto.MethodChangesGet,
+	proto.MethodTerminalOpen,
+	proto.MethodTerminalInput,
+	proto.MethodTerminalClose,
 }
 
 // hubHandlers is the method table of a hub connection: the allowlisted

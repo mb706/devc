@@ -20,8 +20,17 @@ import (
 // Config is hub.toml.
 type Config struct {
 	// PublicURL is https://<public name>; it defaults to that.
-	PublicURL string      `toml:"public_url"`
-	Ntfy      *NtfyConfig `toml:"ntfy"`
+	PublicURL string         `toml:"public_url"`
+	Ntfy      *NtfyConfig    `toml:"ntfy"`
+	Terminal  TerminalConfig `toml:"terminal"`
+}
+
+// TerminalConfig governs the web app's terminal (work order C12): with
+// Control the app offers to take control of a session's terminal and type
+// into it. The machine must allow it too ([terminal] control in its
+// config.toml). Off by default: terminals only observe.
+type TerminalConfig struct {
+	Control bool `toml:"control"`
 }
 
 // NtfyConfig names the ntfy server and topic notifications go to.

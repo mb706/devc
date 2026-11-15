@@ -288,6 +288,15 @@ microG):
 
 `devc hub doctor` checks that the ntfy server answers (`/v1/health`).
 
+`hub.toml` also decides whether the web app may take control of a session's
+terminal (off by default; the machine must allow it in its own `config.toml`
+too):
+
+```toml
+[terminal]
+control = true
+```
+
 ## 5. Run the hub as a service
 
 A systemd unit for a dedicated user `devc-hub` (adapt the paths):
@@ -373,8 +382,11 @@ devc hub doctor
 
 Over its connection the hub is the caller and the machine daemon decides what
 it may call: reading boxes, sessions and events, the session commands
-(`send`, `answer`, `interrupt`, `keys`, `seen`, `start`, `stop`), receipts, and
-listing and deciding requests. The daemon refuses everything else (stopping
+(`send`, `answer`, `interrupt`, `keys`, `seen`, `start`, `stop`), receipts,
+listing and deciding requests, and for the web app listing projects, reading a
+session's changes from the relay and showing a session's terminal (typing into
+it only when `[terminal] control = true` is set on the machine as well as in
+`hub.toml`). The daemon refuses everything else (stopping
 the daemon, host commands, policy changes) and decides low-risk requests only
 (seal, savepoint, note); high-risk requests are decided with the CLI on the
 machine. A compromised hub can therefore read the transcripts it mirrors and
@@ -396,7 +408,7 @@ sent; every response carries a content security policy for the web app
 |---|---|
 | `POST /api/login` | `{"password", "totp"}`; sets the session cookie |
 | `POST /api/logout` | ends the session |
-| `GET /api/me` | the device and the session's expiry |
+| `GET /api/me` | the device, the session's expiry and `terminal_control` (hub.toml allows taking control of terminals) |
 | `GET /api/machines` | machines with `online`, `last_seen`, `notifier` and their boxes |
 | `GET /api/inbox` | sections `needs-you`, `failed`, `finished`, `working`, `idle`, each with session summaries, most recent change first |
 | `GET /api/sessions?machine=&realm=&project=&live=&limit=` | session summaries, most recent change first |
@@ -406,6 +418,9 @@ sent; every response carries a content security policy for the web app
 | `GET /api/requests?machine=&realm=&project=` | pending requests |
 | `POST /api/requests/<machine>/<id>/decide` | `{"approve", "reason"}`; the machine refuses high-risk requests |
 | `GET /api/stream?session=<machine>/<session>` | server-sent events (below) |
+| `GET /api/projects?machine=` | per machine (all, or the one named): `online` and its projects with box state, default branch, harnesses (`ready`: installed in the box), worktrees (branch, `dirty`, ahead/behind the banked branch and the upstream's default branch, live sessions), live and needs-you counts |
+| `GET /api/changes/<machine>/<session>?scope=snapshot\|branch` | files changed with a diffstat and the unified diff (at most 384 KiB, `truncated`), computed on the machine's relay: `snapshot` the uncommitted work of the worktree's last snapshot against the commit it was made on (`stale` when the branch has moved since), `branch` the worktree's branch against the upstream's default branch from their merge base |
+| `GET /api/terminal/<machine>/<session>?mode=observe\|control` | a WebSocket to the session's tmux window (below) |
 | `POST /api/act/<token>` | a notification button: needs the device certificate and `X-Devc-Request: 1`, no session; performs the one answer the token is bound to and answers with a short text |
 | `GET /enroll/<token>`, `POST /enroll/<token>` | enrolment (no certificate needed): a device's bundle, or a machine's certificate for `{"csr"}` |
 
@@ -423,6 +438,24 @@ gets exactly the messages after it. A stream without an ID starts with a
 `reset` and should read its lists again. Snapshots (`/api/inbox`,
 `/api/sessions`, …) carry `stream_id`, the ID to resume the stream from.
 While a stream names a session, the hub sends no notifications for it.
+
+The terminal WebSocket sends the pane's output as binary messages and JSON
+text messages `{"type":"open","cols","rows","mode"}`, `{"type":"size",…}`
+when the window changes size, `{"type":"ping"}` every 25 seconds and
+`{"type":"end","reason"}` before it closes. The browser sends
+`{"type":"input","data"}` (control mode only; in observe mode it ends the
+stream) and `{"type":"visible","visible"}`. The machine runs the box's tmux
+client with the flags `read-only` and `ignore-size` (in control mode only
+`ignore-size`): a terminal never resizes the pane. `mode=control` is refused
+with 403 unless `hub.toml` has `[terminal] control = true`, and ends at once
+unless the machine's `config.toml` has it too. A stream ends with the session,
+when either side goes, after 30 minutes without the page visible, and when the
+login session ends.
+
+The web app's own files (`/`, `/app/`, `/vendor/`, `/icons/`, `/sw.js`,
+`/manifest.webmanifest`) need the device certificate but no login; the page
+may be opened from a link on another site, its parts only from the hub's own
+pages.
 
 With curl (the cookie jar keeps the session):
 

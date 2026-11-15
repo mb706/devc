@@ -266,7 +266,7 @@ request` tells the agent to ask you directly.
 ### Hubs
 
 A hub is a server your machines report to, so that you can see and steer
-the sessions of every machine from one place (the web app follows). Machines
+the sessions of every machine from one place (the web app, below). Machines
 dial out to it; it needs no access to them. Setting one up, with or without a
 reverse proxy, is described in [hub-deployment.md](hub-deployment.md). On a
 machine:
@@ -287,6 +287,63 @@ your phone through ntfy. A hub can read the sessions' events, type into sessions
 and stop them, and decide low-risk requests; it cannot stop the daemon, run
 anything on the host, change the configuration, or approve high-risk
 requests.
+
+### The web app
+
+The hub serves a small web app at its address, made for a phone first. Open
+`https://hub.example.org/` in the browser that holds the device certificate
+(from `devc hub enroll device <name>`), log in with the hub's password (and
+the code from your authenticator when TOTP is on), and add it to the home
+screen if you like: it installs as an app and opens offline with the last
+data it saw. Notifications come from ntfy, not from the browser; tapping one
+opens the session in the app.
+
+- **Inbox** (home): every session across machines in the hub's sections:
+  needs you, failed, finished, working, idle. A row shows project, worktree,
+  harness, machine, state, the question or last message, and when it last
+  changed; a machine that is offline dims its rows. Filter by machine, realm
+  and project. The tab bar counts the sessions that need you.
+- **Session**: the header says project, worktree, harness, machine, state and
+  how long it runs. A pending question sits above the composer as a card with
+  a button per option and a field for your own words; a pending request has
+  Approve and Deny when it is low risk (a high-risk one shows the command to
+  run on the machine). The timeline shows your prompts, the agent's messages,
+  tool calls folded into one line per run (tap to expand), notes, questions
+  and requests. The composer has **Send** (typed when the agent is ready),
+  **Steer** (typed now, even mid-turn) and **Stop** (interrupts the turn, as
+  Escape does); ending the session is in the ⋯ menu. Opening a session marks
+  its finished turns seen.
+- **Terminal** tab: the session's tmux window, live. It only observes: the
+  phone never resizes the agent's pane, and the font shrinks to show the
+  whole width (Zoom shows it larger, scrolling sideways). When both the hub
+  and the machine allow it, **Take control** lets you type into the pane,
+  with a key bar for Esc, Tab, Ctrl and the arrows. A terminal closes when the
+  session ends and after 30 minutes in the background.
+- **Changes** tab: what the session's worktree changed, computed from the
+  machine's relay: **Uncommitted** is the work of the last bank's snapshot,
+  **Branch vs upstream** the worktree's branch against the upstream's default
+  branch. A diffstat, then the diff file by file.
+- **Projects**: each machine's projects with their box, sessions, worktrees
+  (uncommitted work; commits ahead of or behind the banked branch and the
+  upstream) and pending requests.
+- **New**: start a session: machine, project, worktree (an existing one, or a
+  new name, which creates the worktree and its branch), harness and the first
+  prompt. The box must be running (`devc up`).
+- **Machines**: online, or when last seen, and how many sessions run.
+
+Typing into a terminal is off by default. It needs `[terminal] control =
+true` in the hub's `hub.toml` and in the machine's `config.toml`:
+
+```toml
+[terminal]
+control = true
+```
+
+Everything else the app does goes through the hub's API with the same rules
+as before: a login bound to the device certificate, box-scoped commands
+only. The app has no build step; its files and the libraries it uses
+(Preact, htm, xterm.js, listed with their versions in
+`web/vendor/README.md`) are built into `devc`.
 
 ## Git: relay, bank, pull, push
 

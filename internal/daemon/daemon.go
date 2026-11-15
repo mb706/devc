@@ -155,6 +155,8 @@ type Daemon struct {
 	turns      *turnBanker
 	fetchLimit *rateLimit
 	hubs       *hubManager
+	term       *termManager
+	wtCache    worktreeCache
 	wg         sync.WaitGroup
 }
 
@@ -222,6 +224,7 @@ func New(o Options) (*Daemon, error) {
 		warnings: map[names.ProjectRef]*pendingWarn{}, hub: newHub(o.Log, instance), fetchLimit: newRateLimit(fetchThroughEvery)}
 	d.requests = newRequestService(d)
 	d.hubs = newHubManager(d)
+	d.term = newTermManager(d)
 	d.turns = newTurnBanker(d, o.TurnBankInterval)
 	d.hub.onTurnEnd = d.turns.turnEnded
 	return d, nil
@@ -304,6 +307,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	ln.Close()
 	d.turns.stop()
 	d.hub.closeAll(context.Background())
+	d.term.closeAll()
 	d.mu.Lock()
 	for _, b := range d.boxes {
 		if b.worker != nil {

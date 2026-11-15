@@ -105,6 +105,21 @@ func routeTable() []route {
 		{"GET", "/api/requests", accessUser, xsiteRead, h((*Server).apiRequests)},
 		{"POST", "/api/requests/{machine}/{id}/decide", accessUser, xsiteStrict, h((*Server).apiDecide)},
 		{"GET", "/api/stream", accessUser, xsiteRead, h((*Server).apiStream)},
+		{"GET", "/api/projects", accessUser, xsiteRead, h((*Server).apiProjects)},
+		{"GET", "/api/changes/{machine}/{session}", accessUser, xsiteRead, h((*Server).apiChanges)},
+		// A WebSocket: browsers always send Origin on the handshake, which
+		// xsiteRead requires to be the hub's.
+		{"GET", "/api/terminal/{machine}/{session}", accessUser, xsiteRead, h((*Server).apiTerminal)},
+
+		// The web app (C12): device certificate, no login (the login screen
+		// is part of it). The page itself may be opened from a link on
+		// another site (xsiteOpen); its parts only from the hub's pages.
+		{"GET", "/{$}", accessDevice, xsiteOpen, h((*Server).serveIndex)},
+		{"GET", "/sw.js", accessDevice, xsiteRead, h((*Server).serveStatic)},
+		{"GET", "/manifest.webmanifest", accessDevice, xsiteRead, h((*Server).serveStatic)},
+		{"GET", "/app/{file...}", accessDevice, xsiteRead, h((*Server).serveStatic)},
+		{"GET", "/icons/{file...}", accessDevice, xsiteRead, h((*Server).serveStatic)},
+		{"GET", "/vendor/{file...}", accessDevice, xsiteRead, h((*Server).serveStatic)},
 
 		{"GET", enrolPrefix + "{token}", accessEnrol, xsiteOpen, h((*Server).enrolDevice)},
 		{"POST", enrolPrefix + "{token}", accessEnrol, xsiteToken, h((*Server).enrolMachine)},
@@ -318,6 +333,9 @@ func (s *Server) clientAddr(r *http.Request) string {
 
 // seen records the use of a certificate, at most once a minute.
 func (s *Server) seen(id Identity) {
+	if s.o.DevNoAuth {
+		return
+	}
 	now := s.now()
 	s.mu.Lock()
 	last := s.seenAt[id.Fingerprint]

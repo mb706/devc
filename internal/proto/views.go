@@ -352,6 +352,9 @@ type Command struct {
 	Harness  string   `json:"harness,omitempty"`
 	Worktree string   `json:"worktree,omitempty"`
 	Args     []string `json:"args,omitempty"`
+	// NewWorktree: create the worktree (and its branch) when it does not
+	// exist yet (work order C12, the new-session screen).
+	NewWorktree bool `json:"new_worktree,omitempty"`
 }
 
 var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -419,6 +422,8 @@ type StartParams struct {
 	Worktree string   `json:"worktree,omitempty"`
 	Prompt   string   `json:"prompt,omitempty"`
 	Args     []string `json:"args,omitempty"`
+	// NewWorktree creates the worktree first when it does not exist.
+	NewWorktree bool `json:"new_worktree,omitempty"`
 }
 
 // SeenParams are the parameters of session.seen; Turn defaults to the

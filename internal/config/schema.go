@@ -6,14 +6,23 @@ package config
 
 // Global is config.toml.
 type Global struct {
-	ProjectsRoot string        `toml:"projects_root" json:"projects_root"`
-	StateDir     string        `toml:"state_dir" json:"state_dir"`
-	Engine       string        `toml:"engine" json:"engine"`
-	DefaultEnv   string        `toml:"default_env" json:"default_env"`
-	Box          GlobalBox     `toml:"box" json:"box"`
-	SELinux      GlobalSELinux `toml:"selinux" json:"selinux"`
-	Secrets      GlobalSecrets `toml:"secrets" json:"secrets"`
-	Hubs         []Hub         `toml:"hubs" json:"hubs"`
+	ProjectsRoot string         `toml:"projects_root" json:"projects_root"`
+	StateDir     string         `toml:"state_dir" json:"state_dir"`
+	Engine       string         `toml:"engine" json:"engine"`
+	DefaultEnv   string         `toml:"default_env" json:"default_env"`
+	Box          GlobalBox      `toml:"box" json:"box"`
+	SELinux      GlobalSELinux  `toml:"selinux" json:"selinux"`
+	Secrets      GlobalSecrets  `toml:"secrets" json:"secrets"`
+	Hubs         []Hub          `toml:"hubs" json:"hubs"`
+	Terminal     GlobalTerminal `toml:"terminal" json:"terminal"`
+}
+
+// GlobalTerminal governs the web app's terminal view of sessions (work
+// order C12). Control lets a hub's web app type into a session's terminal;
+// it takes effect only when the hub allows it too ([terminal] control in
+// hub.toml). Off by default: the terminal only observes.
+type GlobalTerminal struct {
+	Control bool `toml:"control" json:"control"`
 }
 
 // GlobalSecrets says how secrets reach boxes: "files" writes them into

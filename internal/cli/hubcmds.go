@@ -252,7 +252,7 @@ func newHubCmd(a *app) *cobra.Command {
 	ca := group("ca", "Manage the hub's certificates", false, issue, lsCmd, revoke)
 
 	var listen, tlsCert, tlsKey, servePublic, level string
-	var behindProxy bool
+	var behindProxy, devNoAuth bool
 	serve := &cobra.Command{
 		Use:   "serve --listen addr [--tls-cert file --tls-key file | --behind-proxy]",
 		Short: "Run the hub server in the foreground",
@@ -270,6 +270,12 @@ func newHubCmd(a *app) *cobra.Command {
 			}
 			if behindProxy && (tlsCert != "" || tlsKey != "") {
 				return usageErrorf("--behind-proxy and --tls-cert/--tls-key exclude each other")
+			}
+			if devNoAuth {
+				if behindProxy || tlsCert != "" || tlsKey != "" || servePublic != "" {
+					return usageErrorf("--dev-no-auth takes only --listen and --log-level")
+				}
+				return a.hubDev(cmd, listen, level)
 			}
 			dir, err := a.hubDir(dirFlag)
 			if err != nil {
@@ -302,6 +308,8 @@ func newHubCmd(a *app) *cobra.Command {
 	serve.Flags().BoolVar(&behindProxy, "behind-proxy", false, "plain HTTP on loopback behind a reverse proxy that verifies client certificates")
 	serve.Flags().StringVar(&servePublic, "public-name", "", "host[:port] the Host header must name (default: from 'devc hub init')")
 	serve.Flags().StringVar(&level, "log-level", "info", "debug, info, warn or error")
+	serve.Flags().BoolVar(&devNoAuth, "dev-no-auth", false, "development of the web app only: no certificates, no login, invented machines (loopback, needs DEVC_DEV=1)")
+	_ = serve.Flags().MarkHidden("dev-no-auth")
 
 	var statusJSON bool
 	status := &cobra.Command{
@@ -515,4 +523,25 @@ func newLeaveCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// hubDev runs the hub's development mode (work order C12 section 5).
+func (a *app) hubDev(cmd *cobra.Command, listen, level string) error {
+	lvl, err := parseLevel(level)
+	if err != nil {
+		return err
+	}
+	if listen == "" {
+		listen = "127.0.0.1:8090"
+	}
+	log := slog.New(slog.NewTextHandler(a.stderr, &slog.HandlerOptions{Level: lvl}))
+	s, err := hub.New(hub.Options{Listen: listen, DevNoAuth: true, Log: log, Ready: func(addr string) {
+		fmt.Fprintf(a.stdout, "development hub on http://%s/ (no authentication; invented machines)\n", addr)
+	}})
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	return s.Run(ctx)
 }

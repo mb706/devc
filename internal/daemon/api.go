@@ -47,6 +47,12 @@ func (d *Daemon) handlers() map[string]proto.Handler {
 		proto.MethodRequestsDecide: d.decideHandler(proto.OriginLocal),
 
 		proto.MethodHubsStatus: d.apiHubs,
+
+		proto.MethodProjectsList:  d.apiProjects,
+		proto.MethodChangesGet:    d.apiChanges,
+		proto.MethodTerminalOpen:  d.term.open,
+		proto.MethodTerminalInput: d.term.input,
+		proto.MethodTerminalClose: d.term.close,
 	}
 }
 
@@ -448,7 +454,11 @@ func (d *Daemon) apiStart(_ context.Context, _ *proto.Conn, params json.RawMessa
 			return nil, proto.Errorf(proto.CodeInvalidParams, "invalid harness argument")
 		}
 	}
-	cmd := proto.Command{ID: p.ID, Kind: proto.CommandStart, Ref: ref.String(), Harness: p.Harness, Worktree: p.Worktree, Text: prompt, Args: p.Args}
+	if p.NewWorktree && p.Worktree == "main" {
+		return nil, proto.Errorf(proto.CodeInvalidParams, "main always exists; a new worktree needs another name")
+	}
+	cmd := proto.Command{ID: p.ID, Kind: proto.CommandStart, Ref: ref.String(), Harness: p.Harness, Worktree: p.Worktree, Text: prompt, Args: p.Args,
+		NewWorktree: p.NewWorktree}
 	refusal := ""
 	if prompt != "" {
 		if err := proto.CheckInputText(prompt); err != nil {

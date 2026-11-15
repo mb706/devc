@@ -58,6 +58,9 @@ type Options struct {
 	Window time.Duration
 	// Ready, when set, receives the listening address.
 	Ready func(addr string)
+	// DevNoAuth is the development mode (devmode.go): no certificates, no
+	// login, invented machines; loopback only, and only with DEVC_DEV=1.
+	DevNoAuth bool
 }
 
 // Server is a running hub.
@@ -93,6 +96,8 @@ type Server struct {
 	seenAt map[string]time.Time
 	// watch counts the event streams that name each session.
 	watch map[SessionKey]int
+	// devLogin is the development mode's login session.
+	devLogin Login
 }
 
 // Identity is who a request comes from, per the registry.
@@ -153,6 +158,9 @@ func loopbackPeer(remote string) bool {
 
 // New prepares a server: it opens the database and reads the CA.
 func New(o Options) (*Server, error) {
+	if o.DevNoAuth {
+		return newDev(o)
+	}
 	if o.Log == nil {
 		o.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -311,11 +319,16 @@ func (s *Server) listen() (net.Listener, error) {
 
 // Run serves until ctx ends.
 func (s *Server) Run(ctx context.Context) error {
+	defer s.devCleanup()
 	defer s.st.Close()
 	if err := s.st.ResetOnline(); err != nil {
 		return err
 	}
-	ln, err := s.listen()
+	listen := s.listen
+	if s.o.DevNoAuth {
+		listen = s.devListen
+	}
+	ln, err := listen()
 	if err != nil {
 		return err
 	}
@@ -331,7 +344,10 @@ func (s *Server) Run(ctx context.Context) error {
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 	mode := "direct TLS"
-	if s.o.BehindProxy {
+	switch {
+	case s.o.DevNoAuth:
+		mode = "development, without authentication"
+	case s.o.BehindProxy:
 		mode = "behind a proxy"
 	}
 	s.log.Info("hub listening", "addr", ln.Addr().String(), "mode", mode, "public_name", s.o.PublicName, "instance", s.instance)
@@ -340,6 +356,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	go s.watchRegistry(ctx)
 	go s.housekeeping(ctx)
+	if s.o.DevNoAuth {
+		go s.runDevMachines(ctx)
+	}
 	notified := make(chan struct{})
 	go func() { defer close(notified); s.notifier.run(ctx) }()
 	defer func() { cancel(); <-notified }()
@@ -494,6 +513,9 @@ func (s *Server) origin() string {
 	if strings.Contains(h, ":") {
 		h = "[" + h + "]"
 	}
+	if s.o.DevNoAuth {
+		return "http://" + h + ":" + s.port
+	}
 	if s.port == "" || s.port == "443" {
 		return "https://" + h
 	}
@@ -526,6 +548,9 @@ func parseProxyCert(v string) (*x509.Certificate, error) {
 // status is non-zero when it carries one that is not accepted (or comes
 // from a peer that may not send requests).
 func (s *Server) identify(r *http.Request) (id Identity, hasCert bool, status int, msg string) {
+	if s.o.DevNoAuth {
+		return devIdentity, true, 0, ""
+	}
 	var cert *x509.Certificate
 	if s.o.BehindProxy {
 		if !loopbackPeer(r.RemoteAddr) {

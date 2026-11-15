@@ -194,3 +194,40 @@ func TestInputCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestObserve(t *testing.T) {
+	got, err := Observe("devc-0a1b", "@3", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-u", "-L", "devc", "-f", ConfigPath, "new-session", "-t", "=devc", "-s", "devc-0a1b", "-f", "read-only,ignore-size", ";",
+		"set-option", "-t", "=devc-0a1b:", "destroy-unattached", "on", ";", "set-option", "-t", "=devc-0a1b:", "status", "off", ";",
+		"select-window", "-t", "=devc-0a1b:@3"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Observe: %q", got)
+	}
+	got, _ = Observe("devc-0a1b", "@3", true)
+	if !slices.Contains(got, "ignore-size") || slices.Contains(got, "read-only,ignore-size") || !slices.Contains(got, "prefix2") {
+		t.Errorf("Observe in control mode: %q", got)
+	}
+	for _, c := range [][2]string{{"x", "@1"}, {"devc-0a1b", ""}, {"devc-0a1b", "%1"}} {
+		if _, err := Observe(c[0], c[1], false); err == nil {
+			t.Errorf("Observe(%q, %q) accepted", c[0], c[1])
+		}
+	}
+	if got, err := KillSession("devc-0a1b"); err != nil || !slices.Equal(got[len(got)-3:], []string{"kill-session", "-t", "=devc-0a1b"}) {
+		t.Errorf("KillSession: %q %v", got, err)
+	}
+	if _, err := KillSession("devc"); err == nil {
+		t.Error("KillSession accepted the main session")
+	}
+	if got, err := WindowSize("@7"); err != nil || got[len(got)-1] != "#{window_width} #{window_height}" {
+		t.Errorf("WindowSize: %q %v", got, err)
+	}
+	for in, ok := range map[string]bool{"120 40\n": true, "80 24": true, "0 3": false, "a b": false, "1": false, "": false} {
+		c, r, err := ParseWindowSize(in)
+		if (err == nil) != ok || (ok && (c <= 0 || r <= 0)) {
+			t.Errorf("ParseWindowSize(%q) = %d %d %v", in, c, r, err)
+		}
+	}
+}

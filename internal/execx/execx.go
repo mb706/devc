@@ -65,6 +65,10 @@ type Cmd struct {
 	// terminal: nothing it starts (ssh, a credential helper) can prompt on
 	// the terminal devc runs in.
 	Setsid bool
+	// Ctty starts the command in a new session with its standard input (a
+	// terminal) as controlling terminal, so it gets SIGWINCH when the
+	// terminal is resized (Interactive only).
+	Ctty bool
 }
 
 // String renders the command for messages, with redaction applied.
@@ -208,7 +212,10 @@ func (Real) command(ctx context.Context, c Cmd) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.Dir = c.WorkDir()
 	cmd.ExtraFiles = c.ExtraFiles
-	if c.Setsid {
+	switch {
+	case c.Ctty:
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	case c.Setsid:
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	}
 	if len(c.Env) > 0 || len(c.Unset) > 0 {

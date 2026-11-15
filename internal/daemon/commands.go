@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
@@ -734,6 +735,12 @@ func (c *commander) runStart(r *cmdRecord) {
 		return
 	}
 	c.setDelivering(r)
+	if cmd.NewWorktree {
+		if reason := c.newWorktree(ctx, env, ref, cmd.Worktree); reason != "" {
+			c.finish(r, proto.OutcomeRefused, reason)
+			return
+		}
+	}
 	sid := names.NewSessionID()
 	sctx, cancel := context.WithTimeout(ctx, time.Minute)
 	res, err := env.eng.Exec(sctx, engine.ExecOptions{Container: names.BoxName(ref), Workdir: "/", Timeout: time.Minute,
@@ -757,6 +764,30 @@ func (c *commander) runStart(r *cmdRecord) {
 	r.Phase, r.Receipt.Outcome = "prompt", proto.OutcomeAccepted
 	c.save(r)
 	c.dispatch(r)
+}
+
+// newWorktree creates a task worktree for a new session (an existing one
+// is used as it is), with the box lock held as for 'devc wt new'. It
+// returns why it could not, or "".
+func (c *commander) newWorktree(ctx context.Context, env *env, ref names.ProjectRef, name string) string {
+	rv, err := env.cfg.Resolved(ref)
+	if err != nil {
+		return err.Error()
+	}
+	unlock, err := box.LockBox(ctx, env.cfg.Paths, ref, pushLockTimeout, nil)
+	if err != nil {
+		return "devc is busy with " + ref.String() + "; try again shortly"
+	}
+	defer unlock()
+	wctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	gs := c.d.gitService(env)
+	dir, created, err := gs.WorktreeNew(wctx, gs.Project(rv, true), name, "")
+	if err != nil {
+		return "creating the worktree " + name + " failed: " + proto.Printable(proto.Truncate(err.Error(), 300))
+	}
+	c.d.log.Info("worktree for a new session", "ref", ref.String(), "worktree", name, "dir", dir, "created", created)
+	return ""
 }
 
 func (c *commander) startRefusal(env *env, ref names.ProjectRef, cmd proto.Command) string {

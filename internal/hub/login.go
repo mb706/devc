@@ -40,6 +40,9 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, token string, maxAge in
 // bound to the request's certificate and still valid. On failure it has
 // answered.
 func (s *Server) checkSession(w http.ResponseWriter, r *http.Request, id Identity) (Login, bool) {
+	if s.o.DevNoAuth {
+		return s.devLogin, true
+	}
 	now := s.now()
 	fail := func(why string) (Login, bool) {
 		if s.limited(w, "c:"+id.Fingerprint) {
@@ -47,7 +50,9 @@ func (s *Server) checkSession(w http.ResponseWriter, r *http.Request, id Identit
 		}
 		s.lim.fail("c:"+id.Fingerprint, now)
 		s.log.Debug("no valid login session", "cert", id.Name, "why", why)
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "log in first (POST /api/login)", "login": true})
+		// The login screen asks for a code only when one is needed.
+		secret, _, _ := s.st.TOTP()
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "log in first (POST /api/login)", "login": true, "totp": secret != ""})
 		return Login{}, false
 	}
 	c, err := r.Cookie(SessionCookie)
@@ -98,6 +103,11 @@ type LoginReply struct {
 	Device  string    `json:"device"`
 	Session string    `json:"session"`
 	Expires time.Time `json:"expires"`
+	// TerminalControl says the hub lets the web app take control of
+	// terminals (hub.toml [terminal] control); Dev marks the development
+	// mode without authentication.
+	TerminalControl bool `json:"terminal_control"`
+	Dev             bool `json:"dev,omitempty"`
 }
 
 // verifyPassword hashes with at most two logins at a time (each takes 64
@@ -115,6 +125,14 @@ func (s *Server) verifyPassword(ctx context.Context, hash, password string) bool
 func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	id := identityOf(r)
 	now := s.now()
+	if s.o.DevNoAuth {
+		var req LoginRequest
+		if !decodeBody(w, r, &req) {
+			return
+		}
+		writeJSON(w, http.StatusOK, LoginReply{Device: id.Name, Session: s.devLogin.ID[:12], Expires: s.devLogin.Expires(), TerminalControl: true, Dev: true})
+		return
+	}
 	attempt := func(outcome string) { s.log.Info("login attempt", "cert", id.Name, "outcome", outcome) }
 	if s.limited(w, "c:"+id.Fingerprint) {
 		attempt("rate-limited")
@@ -202,11 +220,15 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	attempt("ok")
 	s.setSessionCookie(w, token, int(SessionIdle/time.Second))
-	writeJSON(w, http.StatusOK, LoginReply{Device: id.Name, Session: lid[:12], Expires: l.Expires()})
+	writeJSON(w, http.StatusOK, LoginReply{Device: id.Name, Session: lid[:12], Expires: l.Expires(), TerminalControl: s.cfg.Terminal.Control})
 }
 
 func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 	l := loginOf(r)
+	if s.o.DevNoAuth {
+		writeJSON(w, http.StatusOK, struct{}{})
+		return
+	}
 	if err := s.st.DeleteLogin(l.ID); err != nil {
 		s.internal(w, err)
 		return
@@ -218,5 +240,5 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiMe(w http.ResponseWriter, r *http.Request) {
 	l := loginOf(r)
-	writeJSON(w, http.StatusOK, LoginReply{Device: l.Device, Session: l.ID[:12], Expires: l.Expires()})
+	writeJSON(w, http.StatusOK, LoginReply{Device: l.Device, Session: l.ID[:12], Expires: l.Expires(), TerminalControl: s.cfg.Terminal.Control, Dev: s.o.DevNoAuth})
 }

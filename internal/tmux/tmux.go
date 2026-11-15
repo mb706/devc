@@ -200,6 +200,64 @@ func Attach(client, window string) ([]string, error) {
 	return a, nil
 }
 
+// Observe attaches a client for the web app's terminal (work order C12
+// section 3) through its own grouped session named client, showing window.
+// The client never resizes the window (ignore-size) and, unless control,
+// cannot type (read-only). Its session has no status line, so the client's
+// size is exactly the window's; in control mode it has no prefix key
+// either, so every key reaches the pane and none switches windows. -u: the
+// client's output is UTF-8 whatever the locale of the exec.
+func Observe(client, window string, control bool) ([]string, error) {
+	if !ValidClientName(client) || !ValidWindowID(window) {
+		return nil, fmt.Errorf("invalid client %q or window %q", client, window)
+	}
+	flags := "read-only,ignore-size"
+	if control {
+		flags = "ignore-size"
+	}
+	target := "=" + client + ":"
+	a := append([]string{"-u"}, base()...)
+	a = append(a, "new-session", "-t", "="+SessionName, "-s", client, "-f", flags, sep,
+		"set-option", "-t", target, "destroy-unattached", "on", sep,
+		"set-option", "-t", target, "status", "off")
+	if control {
+		a = append(a, sep, "set-option", "-t", target, "prefix", "None", sep,
+			"set-option", "-t", target, "prefix2", "None")
+	}
+	return append(a, sep, "select-window", "-t", target+window), nil
+}
+
+// KillSession removes an observing client's grouped session (and with it
+// the client).
+func KillSession(client string) ([]string, error) {
+	if !ValidClientName(client) {
+		return nil, fmt.Errorf("invalid client %q", client)
+	}
+	return append(base(), "kill-session", "-t", "="+client), nil
+}
+
+// WindowSize prints a window's width and height.
+func WindowSize(window string) ([]string, error) {
+	if !ValidWindowID(window) {
+		return nil, fmt.Errorf("invalid window %q", window)
+	}
+	return append(base(), "display-message", "-p", "-t", window, "#{window_width} #{window_height}"), nil
+}
+
+// ParseWindowSize parses the output of WindowSize.
+func ParseWindowSize(out string) (cols, rows int, err error) {
+	f := strings.Fields(out)
+	if len(f) != 2 {
+		return 0, 0, fmt.Errorf("unexpected window size %q", out)
+	}
+	cols, err1 := strconv.Atoi(f[0])
+	rows, err2 := strconv.Atoi(f[1])
+	if err1 != nil || err2 != nil || cols <= 0 || rows <= 0 {
+		return 0, 0, fmt.Errorf("unexpected window size %q", out)
+	}
+	return cols, rows, nil
+}
+
 // KillPane removes a pane.
 func KillPane(pane string) ([]string, error) {
 	if !ValidPaneID(pane) {

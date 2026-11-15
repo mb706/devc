@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"sort"
 	"sync"
@@ -137,6 +138,10 @@ type machineLink struct {
 	lastTouch  time.Time
 	// after is what a batch asks for once it is committed.
 	after []func()
+
+	// terms are the terminal streams open through this link (terminal.go).
+	termMu sync.Mutex
+	terms  map[string]*termSink
 }
 
 // link returns the connected link of a machine.
@@ -156,9 +161,15 @@ func (s *Server) handleMachine(w http.ResponseWriter, r *http.Request, id Identi
 		s.log.Debug("machine link: websocket upgrade failed", "machine", id.Name, "err", err)
 		return
 	}
+	s.serveLink(func(ctx context.Context) io.ReadWriteCloser { return wsconn.New(ctx, ws) }, id)
+}
+
+// serveLink serves one machine link over the connection open returns (a
+// WebSocket; the development mode's machines use a pipe) until it ends.
+func (s *Server) serveLink(open func(context.Context) io.ReadWriteCloser, id Identity) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	l := &machineLink{s: s, name: id.Name, fp: id.Fingerprint, ctx: ctx, cancel: cancel, done: make(chan struct{}),
-		helloCh: make(chan struct{}), queue: make(chan linkItem, linkQueue)}
+		helloCh: make(chan struct{}), queue: make(chan linkItem, linkQueue), terms: map[string]*termSink{}}
 	live := s.addLive(id.Fingerprint, cancel)
 	defer s.dropLive(live)
 	defer close(l.done)
@@ -173,16 +184,19 @@ func (s *Server) handleMachine(w http.ResponseWriter, r *http.Request, id Identi
 		old.cancel()
 		<-old.done
 	}
-	l.conn = proto.NewConn(wsconn.New(ctx, ws), proto.Options{
+	l.conn = proto.NewConn(open(ctx), proto.Options{
 		Handlers: map[string]proto.Handler{
 			proto.MethodHubHello: l.onHello,
 			proto.MethodHubRole:  l.onRole,
 		},
 		Notify: map[string]proto.NotifyHandler{
-			proto.NotifyEvent:     l.onEvent,
-			proto.NotifyMissed:    l.onMissed,
-			proto.NotifyCaughtUp:  func(context.Context, *proto.Conn, json.RawMessage) { l.enqueue(linkItem{kind: itemCaughtUp}) },
-			proto.NotifyHeartbeat: func(context.Context, *proto.Conn, json.RawMessage) { l.enqueue(linkItem{kind: itemHeartbeat}) },
+			proto.NotifyEvent:        l.onEvent,
+			proto.NotifyMissed:       l.onMissed,
+			proto.NotifyCaughtUp:     func(context.Context, *proto.Conn, json.RawMessage) { l.enqueue(linkItem{kind: itemCaughtUp}) },
+			proto.NotifyHeartbeat:    func(context.Context, *proto.Conn, json.RawMessage) { l.enqueue(linkItem{kind: itemHeartbeat}) },
+			proto.NotifyTerminalData: l.onTermData,
+			proto.NotifyTerminalSize: l.onTermSize,
+			proto.NotifyTerminalEnd:  l.onTermEnd,
 		},
 		IdleTimeout: linkIdle,
 		CallTimeout: time.Minute,

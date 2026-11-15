@@ -410,3 +410,13 @@ func (r *reporter) close() {
 	case <-time.After(2 * time.Second):
 	}
 }
+
+// OpenPTY opens a new pseudo-terminal pair for a caller that runs its own
+// program on it (the daemon's terminal streams, work order C12): the
+// master is non-blocking, so read deadlines work.
+func OpenPTY() (master, slave *os.File, err error) { return openPTY() }
+
+// SetSize sets the size of the terminal behind master.
+func SetSize(master *os.File, cols, rows int) error {
+	return setWinsize(master, &unix.Winsize{Col: uint16(cols), Row: uint16(rows)})
+}
