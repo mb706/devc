@@ -79,7 +79,7 @@ func (s *Server) apiProjects(w http.ResponseWriter, r *http.Request) {
 				err = proto.DecodeResult(raw, &res)
 			}
 			if err != nil {
-				_, msg := rpcStatus(err)
+				_, msg, _ := rpcStatus(err)
 				mp.Error = msg
 				return
 			}
@@ -168,10 +168,9 @@ func (s *Server) apiChanges(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), webTimeout)
 	defer cancel()
-	raw, err := l.forward(ctx, proto.MethodChangesGet, proto.ChangesParams{Session: sid, Scope: scope})
+	raw, err := l.forward(ctx, proto.MethodChangesGet, proto.ChangesParams{Session: sid, Ref: s.sessionRef(machine, sid), Scope: scope})
 	if err != nil {
-		st, msg := rpcStatus(err)
-		writeError(w, st, "%s", msg)
+		writeRPCError(w, err)
 		return
 	}
 	var res proto.ChangesResult

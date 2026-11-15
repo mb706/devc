@@ -61,6 +61,17 @@ CREATE TABLE IF NOT EXISTS notifications (
 	sent TEXT NOT NULL,
 	PRIMARY KEY (machine, session)
 );
+CREATE TABLE IF NOT EXISTS notify_states (
+	machine TEXT NOT NULL,
+	session TEXT NOT NULL,
+	key TEXT NOT NULL,
+	state TEXT NOT NULL,
+	seq TEXT NOT NULL,
+	tries INTEGER NOT NULL DEFAULT 0,
+	next_at TEXT NOT NULL DEFAULT '',
+	created TEXT NOT NULL,
+	PRIMARY KEY (machine, session, key)
+);
 `
 
 // Meta keys of the user.
@@ -571,51 +582,87 @@ func (s *Store) PruneActions(now time.Time) error {
 	return err
 }
 
-// --- Notifications ---
+// --- Notification states ---
 
-// NotificationRow is a notification the hub published and may have to
-// clear.
-type NotificationRow struct {
-	Machine, Session, Key, Seq string
-	Sent                       time.Time
+// Notification states (findings C2-13, C2-14): a record per attention
+// state of a session (its notifyKey) says what became of its notification.
+const (
+	// NotePending: to be published, by this hub once it is the machine's
+	// notifier, while the state lasts (publishing failures are retried).
+	NotePending = "pending"
+	// NoteSent: published (Seq names the message), or handled without a
+	// message (Seq empty: a client followed the session, or it was not
+	// news).
+	NoteSent = "sent"
+	// NoteCleared: the state ended after its message was published; the
+	// message is cleared at ntfy (retried until ntfy confirms, then the
+	// record goes).
+	NoteCleared = "cleared"
+)
+
+// NoteState is the notification record of one attention state.
+type NoteState struct {
+	Machine, Session, Key string
+	State                 string
+	// Seq is the ntfy sequence ID, chosen when the record is made, so a
+	// retried publish replaces rather than repeats the message.
+	Seq     string
+	Tries   int
+	NextAt  time.Time
+	Created time.Time
 }
 
-// PutNotification records a published notification (Seq "" records a
-// state that was not notified, so it is not notified later).
-func (s *Store) PutNotification(n NotificationRow) error {
-	s.wmu.Lock()
-	defer s.wmu.Unlock()
-	_, err := s.db.Exec(`INSERT INTO notifications (machine, session, key, seq, sent) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT (machine, session) DO UPDATE SET key = excluded.key, seq = excluded.seq, sent = excluded.sent`, n.Machine, n.Session, n.Key, n.Seq, ts(n.Sent))
+// migrateNotifications turns the records of the C11b notifications table
+// (published messages) into notification states.
+func migrateNotifications(db *sql.DB) error {
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM notifications`).Scan(&n); err != nil || n == 0 {
+		return err
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO notify_states (machine, session, key, state, seq, tries, next_at, created)
+		SELECT machine, session, key, 'sent', seq, 0, '', sent FROM notifications`); err != nil {
+		return err
+	}
+	_, err := db.Exec(`DELETE FROM notifications`)
 	return err
 }
 
-// DeleteNotification forgets a session's notification.
-func (s *Store) DeleteNotification(machine, session string) error {
-	s.wmu.Lock()
-	defer s.wmu.Unlock()
-	_, err := s.db.Exec(`DELETE FROM notifications WHERE machine = ? AND session = ?`, machine, session)
-	return err
-}
-
-// Notifications returns the recorded notifications.
-func (s *Store) Notifications() ([]NotificationRow, error) {
-	rows, err := s.db.Query(`SELECT machine, session, key, seq, sent FROM notifications`)
+// NoteStates returns every notification record.
+func (s *Store) NoteStates() ([]NoteState, error) {
+	rows, err := s.db.Query(`SELECT machine, session, key, state, seq, tries, next_at, created FROM notify_states`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []NotificationRow
+	var out []NoteState
 	for rows.Next() {
-		var n NotificationRow
-		var sent string
-		if err := rows.Scan(&n.Machine, &n.Session, &n.Key, &n.Seq, &sent); err != nil {
+		var n NoteState
+		var next, created string
+		if err := rows.Scan(&n.Machine, &n.Session, &n.Key, &n.State, &n.Seq, &n.Tries, &next, &created); err != nil {
 			return nil, err
 		}
-		n.Sent = parseTS(sent)
+		n.NextAt, n.Created = parseTS(next), parseTS(created)
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// PutNoteState stores a notification record.
+func (s *Store) PutNoteState(n NoteState) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	_, err := s.db.Exec(`INSERT INTO notify_states (machine, session, key, state, seq, tries, next_at, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (machine, session, key) DO UPDATE SET state = excluded.state, seq = excluded.seq, tries = excluded.tries, next_at = excluded.next_at`,
+		n.Machine, n.Session, n.Key, n.State, n.Seq, n.Tries, ts(n.NextAt), ts(n.Created))
+	return err
+}
+
+// DeleteNoteState removes a notification record.
+func (s *Store) DeleteNoteState(machine, session, key string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM notify_states WHERE machine = ? AND session = ? AND key = ?`, machine, session, key)
+	return err
 }
 
 // PeekAction returns an action token that is still usable, without using

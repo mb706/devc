@@ -117,6 +117,10 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("opening the hub database %s: %w", path, err)
 	}
+	if err := migrateNotifications(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("opening the hub database %s: %w", path, err)
+	}
 	v, err := s.Meta(metaSchema)
 	switch {
 	case err != nil:
@@ -760,9 +764,29 @@ func (s *Store) PendingBySession() (map[[2]string]int, error) {
 	return out, rows.Err()
 }
 
-// Prune removes sessions that ended before cutoff, with their events.
-func (s *Store) Prune(cutoff time.Time) (int, error) {
-	rows, err := s.Sessions(SessionFilter{})
+// SessionMachines lists the machines that have stored sessions.
+func (s *Store) SessionMachines() ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT machine FROM sessions ORDER BY machine`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// PruneMachine removes a machine's sessions that ended before cutoff, with
+// their events, and records their removal in the change log. It is for
+// machines without a link (a link prunes through its worker).
+func (s *Store) PruneMachine(machine string, cutoff time.Time) (int, error) {
+	rows, err := s.Sessions(SessionFilter{Machine: machine})
 	if err != nil {
 		return 0, err
 	}
@@ -773,6 +797,9 @@ func (s *Store) Prune(cutoff time.Time) (int, error) {
 				continue
 			}
 			if err := t.DeleteSession(r.Machine, r.View.Session); err != nil {
+				return err
+			}
+			if err := t.AddChange(ChangeSessionRemoved, r.Machine, r.View.Session, SessionKey{Machine: r.Machine, Session: r.View.Session}); err != nil {
 				return err
 			}
 			n++

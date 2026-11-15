@@ -19,6 +19,8 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"io"
 	"mime"
 	"net"
 	"net/http"
@@ -92,7 +94,9 @@ func routeTable() []route {
 		{"GET", "/machine", accessMachine, xsiteRead, h((*Server).handleMachineRoute)},
 
 		{"POST", "/api/login", accessDevice, xsiteStrict, h((*Server).apiLogin)},
-		{"POST", "/api/act/{token}", accessDevice, xsiteToken, h((*Server).apiAct)},
+		// The button's token travels in the ActionHeader, never in the URL
+		// (finding C2-06).
+		{"POST", actPath, accessDevice, xsiteToken, h((*Server).apiAct)},
 
 		{"POST", "/api/logout", accessUser, xsiteStrict, h((*Server).apiLogout)},
 		{"GET", "/api/me", accessUser, xsiteRead, h((*Server).apiMe)},
@@ -193,7 +197,48 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	s.seen(id)
 	r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, id))
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	if !s.bodyDeadline(w, r) {
+		return
+	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// bodyDeadline bounds how long reading a request's body may take, so an
+// unfinished body cannot hold a handler (finding C2-04). The deadline is
+// lifted once the body has been read to its end: a handler that then waits
+// (a command for its receipt) must not lose its connection. Requests
+// without a body (reads, the event stream, WebSocket upgrades) get none.
+// When the deadline cannot be set, the request is refused.
+func (s *Server) bodyDeadline(w http.ResponseWriter, r *http.Request) bool {
+	if r.Body == nil || r.Body == http.NoBody || (r.ContentLength == 0 && len(r.TransferEncoding) == 0) {
+		return true
+	}
+	rc := http.NewResponseController(w)
+	if err := rc.SetReadDeadline(time.Now().Add(bodyTimeout)); err != nil {
+		s.log.Error("cannot bound the reading of a request body", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return false
+	}
+	r.Body = &deadlineBody{ReadCloser: r.Body, rc: rc}
+	return true
+}
+
+// deadlineBody lifts the read deadline when its body has been read to the
+// end. After any other error the deadline stays: the server then discards
+// the rest of the body, and that must not wait without one either.
+type deadlineBody struct {
+	io.ReadCloser
+	rc   *http.ResponseController
+	done bool
+}
+
+func (b *deadlineBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if errors.Is(err, io.EOF) && !b.done {
+		b.done = true
+		_ = b.rc.SetReadDeadline(time.Time{})
+	}
+	return n, err
 }
 
 // gate is the one place where a request without a client certificate is
@@ -208,6 +253,9 @@ func (s *Server) gate(w http.ResponseWriter, r *http.Request, addr string) {
 	}
 	if isEnrolPath(r.URL.Path) && s.enrolOpen() {
 		r.Body = http.MaxBytesReader(w, r.Body, maxEnrolBody)
+		if !s.bodyDeadline(w, r) {
+			return
+		}
 		s.enrolMux.ServeHTTP(w, r)
 		return
 	}
@@ -259,6 +307,17 @@ func (s *Server) guard(rt route) http.Handler {
 		}
 		if !s.checkSite(w, r, rt.xsite) {
 			return
+		}
+		if rt.access == accessDevice || rt.access == accessEnrol {
+			// Requests without a login session are bounded in number.
+			select {
+			case s.anonSem <- struct{}{}:
+				defer func() { <-s.anonSem }()
+			default:
+				w.Header().Set("Retry-After", "1")
+				writeError(w, http.StatusTooManyRequests, "too many requests without a login in progress; try again")
+				return
+			}
 		}
 		if rt.access == accessUser {
 			l, ok := s.checkSession(w, r, id)
@@ -470,13 +529,11 @@ func (w *logWriter) Flush() {
 func (w *logWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // logPath is a request path as logged: without the query, and with the
-// single-use tokens of enrolment and action URLs left out.
+// single-use token of enrolment URLs left out (button tokens travel in a
+// header, which is never logged).
 func logPath(p string) string {
-	switch {
-	case strings.HasPrefix(p, enrolPrefix):
+	if strings.HasPrefix(p, enrolPrefix) {
 		p = enrolPrefix + "-"
-	case strings.HasPrefix(p, actPrefix):
-		p = actPrefix + "-"
 	}
 	return proto.Printable(proto.Truncate(p, 200))
 }

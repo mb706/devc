@@ -81,6 +81,13 @@ func loginFor(t *testing.T, st *Store, is *Issued, now time.Time) string {
 // issue issues and registers a certificate.
 func (h *testHub) issue(role, name string) *Issued {
 	h.t.Helper()
+	return h.issueUntil(role, name, time.Time{})
+}
+
+// issueUntil issues a certificate that the registry says expires at exp
+// (zero: when the certificate does).
+func (h *testHub) issueUntil(role, name string, exp time.Time) *Issued {
+	h.t.Helper()
 	is, err := h.ca.IssueClient(role, name, false)
 	if err != nil {
 		h.t.Fatal(err)
@@ -90,7 +97,10 @@ func (h *testHub) issue(role, name string) *Issued {
 		h.t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.AddCert(CertRecord{Fingerprint: is.Fingerprint, Role: role, Name: name, Serial: "1", Issued: is.Cert.NotBefore, Expires: is.Cert.NotAfter}); err != nil {
+	if exp.IsZero() {
+		exp = is.Cert.NotAfter
+	}
+	if err := st.AddCert(CertRecord{Fingerprint: is.Fingerprint, Role: role, Name: name, Serial: "1", Issued: is.Cert.NotBefore, Expires: exp}); err != nil {
 		h.t.Fatal(err)
 	}
 	h.certs[role+"/"+name] = is
@@ -98,6 +108,13 @@ func (h *testHub) issue(role, name string) *Issued {
 }
 
 func proxyHeader(is *Issued) string { return url.QueryEscape(string(is.CertPEM)) }
+
+// deadlineRecorder lets the front set a body deadline on a recorded
+// response (a real connection supports it; the front refuses a body it
+// cannot bound).
+type deadlineRecorder struct{ *httptest.ResponseRecorder }
+
+func (deadlineRecorder) SetReadDeadline(time.Time) error { return nil }
 
 func TestProxyFront(t *testing.T) {
 	h := newTestHub(t, "hub.test")
@@ -139,7 +156,7 @@ func TestProxyFront(t *testing.T) {
 			mod(r)
 		}
 		w := httptest.NewRecorder()
-		s.ServeHTTP(w, r)
+		s.ServeHTTP(deadlineRecorder{w}, r)
 		return w.Code, w.Body.String()
 	}
 	const lo = "127.0.0.1:40000"

@@ -5,6 +5,7 @@
 
 import { html, useState, useEffect } from './lib.js';
 import * as api from './api.js';
+import { stale } from './store.js';
 import { Icon, Empty, ago, useNow } from './ui.js';
 
 // files splits a unified diff at its "diff --git" lines.
@@ -70,7 +71,7 @@ export function ChangesTab({ s }) {
       ${scopes.map(([id, label]) => html`<button role="radio" aria-checked=${scope === id} class=${scope === id ? 'on' : ''} onClick=${() => setScope(id)}>${label}</button>`)}
       <button class="iconbtn" onClick=${() => setTick(tick + 1)} aria-label="Refresh" disabled=${loading}><${Icon} name="refresh" /></button>
     </div>
-    ${err ? html`<${Empty} icon="diff">${s.stale ? 'The machine is offline.' : err}<//>` : null}
+    ${err ? html`<${Empty} icon="diff">${stale(s) ? 'The machine is offline.' : err}<//>` : null}
     ${!res && !err ? html`<${Empty} icon="diff">Computing the changes…<//>` : null}
     ${res ? html`<div class=${loading ? 'loading' : ''}>
       <div class="cmp">

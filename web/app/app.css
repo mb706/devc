@@ -412,6 +412,13 @@ select { padding-right: 28px; }
   overflow-wrap: anywhere;
 }
 .tl-prompt.pending .bubble { opacity: 0.7; border: 1px dashed var(--accent); }
+.tl-prompt.uncertain .bubble { border-color: var(--needs); }
+.tl-prompt.uncertain .when { color: var(--needs); }
+.pend-actions { display: flex; gap: 8px; margin-top: 6px; justify-content: flex-end; }
+.pcard { border-color: var(--needs); }
+.pcard .pend { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pcard .pend .grow { flex: 1 1 12rem; }
+.pcard .pend-actions { margin-top: 0; }
 .tl-message .msg {
   max-width: 94%;
   padding: 9px 12px;

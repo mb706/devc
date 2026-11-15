@@ -4,7 +4,10 @@
 // set of open sessions changes, and closes while the page is hidden (a
 // stream that names a session keeps the hub from notifying about it, and a
 // hidden page would otherwise hold notifications back) to reopen when the
-// page is visible again.
+// page is visible again. A reset (the hub no longer has the changes after
+// our position) stops the stream, reads the snapshot and reopens from the
+// snapshot's position, so no change is applied twice or lost meanwhile
+// (finding C2-10).
 
 import { state, set, applyChange, loadSnapshot, loadDetail, checkAuth, key } from './store.js';
 
@@ -52,11 +55,12 @@ function open() {
     retryDelay = 1000;
     set({ stream: 'live' });
   });
-  src.addEventListener('reset', async (e) => {
-    track(e);
+  src.addEventListener('reset', () => {
+    if (es !== src) return;
     retryDelay = 1000;
-    set({ stream: 'live' });
-    await resync();
+    close();
+    lastId = null;
+    reconnect();
   });
   for (const kind of KINDS) {
     src.addEventListener(kind, (e) => {
@@ -99,13 +103,19 @@ function schedule() {
   retryTimer = setTimeout(reconnect, wait);
 }
 
-// resync reads the snapshot again (after a reset, or a long absence).
+// resync reads the snapshot again (after a reset, or a long absence);
+// only the newest of overlapping reads is applied.
+let generation = 0;
 async function resync() {
+  const mine = ++generation;
+  let pos;
   try {
-    lastId = await loadSnapshot();
+    pos = await loadSnapshot(() => mine === generation);
   } catch (e) {
     return false;
   }
+  if (pos === null || mine !== generation) return false;
+  lastId = pos;
   for (const k of follow) {
     const i = k.indexOf('/');
     loadDetail(k.slice(0, i), k.slice(i + 1));

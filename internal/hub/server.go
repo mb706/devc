@@ -84,9 +84,17 @@ type Server struct {
 	// (built from routeTable).
 	mux, enrolMux *http.ServeMux
 	lim           *limiter
-	// hashSem bounds concurrent password hashing (64 MiB each).
-	hashSem  chan struct{}
+	// hashSem bounds concurrent password hashing (64 MiB each); hashQueue
+	// bounds the logins waiting for it or hashing (finding C2-03).
+	hashSem   chan struct{}
+	hashQueue chan struct{}
+	// anonSem bounds the requests in progress that have no login session
+	// (login, buttons, the app's files, enrolment: finding C2-04).
+	anonSem  chan struct{}
 	notifier *notifier
+	// pruneMu orders the pruning of an offline machine's sessions before a
+	// new link of that machine loads them.
+	pruneMu sync.RWMutex
 	// routeHook, in tests, sees every request that reaches a route's guard.
 	routeHook func(route)
 
@@ -96,20 +104,49 @@ type Server struct {
 	seenAt map[string]time.Time
 	// watch counts the event streams that name each session.
 	watch map[SessionKey]int
+	// loginBusy holds the certificates with a login attempt in progress
+	// (one at a time per certificate: finding C2-03).
+	loginBusy map[string]bool
 	// devLogin is the development mode's login session.
 	devLogin Login
 }
 
-// Identity is who a request comes from, per the registry.
+// Identity is who a request comes from, per the registry; Expires is when
+// its certificate stops being valid (zero: never, in the development mode).
 type Identity struct {
 	Role, Name, Fingerprint string
+	Expires                 time.Time
 }
 
-// liveConn is a long-lived connection (machine link, event stream) that
-// ends when its certificate is revoked.
+// liveConn is a long-lived connection (machine link, event stream,
+// terminal) that ends when its certificate is revoked or expires.
 type liveConn struct {
 	fingerprint string
 	cancel      func()
+	expiry      *time.Timer
+}
+
+// Limits of requests without a login session.
+var (
+	// maxAnonymous requests without a login session may be in progress.
+	maxAnonymous = 64
+	// maxHashWaiting logins may wait for a hashing slot.
+	maxHashWaiting = 8
+	// bodyTimeout bounds the reading of a request body.
+	bodyTimeout = 10 * time.Second
+)
+
+// initState fills the parts of a Server both modes share.
+func (s *Server) initState() {
+	s.lim = newLimiter()
+	s.hashSem = make(chan struct{}, 2)
+	s.hashQueue = make(chan struct{}, cap(s.hashSem)+maxHashWaiting)
+	s.anonSem = make(chan struct{}, maxAnonymous)
+	s.links = map[string]*machineLink{}
+	s.live = map[*liveConn]struct{}{}
+	s.seenAt = map[string]time.Time{}
+	s.watch = map[SessionKey]int{}
+	s.loginBusy = map[string]bool{}
 }
 
 type ctxKey struct{}
@@ -203,9 +240,8 @@ func New(o Options) (*Server, error) {
 	pool.AddCert(ca)
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	s := &Server{o: o, l: l, st: st, pool: pool, log: o.Log, instance: hex.EncodeToString(b), host: host, port: port, now: time.Now,
-		cfg: cfg, lim: newLimiter(), hashSem: make(chan struct{}, 2),
-		links: map[string]*machineLink{}, live: map[*liveConn]struct{}{}, seenAt: map[string]time.Time{}, watch: map[SessionKey]int{}}
+	s := &Server{o: o, l: l, st: st, pool: pool, log: o.Log, instance: hex.EncodeToString(b), host: host, port: port, now: time.Now, cfg: cfg}
+	s.initState()
 	s.publicURL = s.origin()
 	if cfg.PublicURL != "" {
 		if err := checkPublicURL(cfg.PublicURL, host, port); err != nil {
@@ -399,8 +435,22 @@ func (s *Server) closeLinks() {
 	}
 }
 
-func (s *Server) addLive(fp string, cancel func()) *liveConn {
-	c := &liveConn{fingerprint: fp, cancel: cancel}
+// addLive registers a long-lived connection of id: it is cancelled when the
+// certificate is revoked (watchRegistry) and, by a timer, when it expires,
+// whether or not the registry changes (finding C2-05).
+func (s *Server) addLive(id Identity, cancel func()) *liveConn {
+	c := &liveConn{fingerprint: id.Fingerprint, cancel: cancel}
+	if !id.Expires.IsZero() {
+		d := id.Expires.Sub(s.now())
+		if d <= 0 {
+			cancel()
+		} else {
+			c.expiry = time.AfterFunc(d, func() {
+				s.log.Info("closing a connection whose certificate expired", "cert", id.Name)
+				cancel()
+			})
+		}
+	}
 	s.mu.Lock()
 	s.live[c] = struct{}{}
 	s.mu.Unlock()
@@ -408,6 +458,9 @@ func (s *Server) addLive(fp string, cancel func()) *liveConn {
 }
 
 func (s *Server) dropLive(c *liveConn) {
+	if c.expiry != nil {
+		c.expiry.Stop()
+	}
 	s.mu.Lock()
 	delete(s.live, c)
 	s.mu.Unlock()
@@ -451,11 +504,7 @@ func (s *Server) housekeeping(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
-		if n, err := s.st.Prune(s.now().Add(-s.o.Window)); err != nil {
-			s.log.Warn("pruning old sessions", "err", err)
-		} else if n > 0 {
-			s.log.Info("pruned old sessions", "sessions", n)
-		}
+		s.pruneSessions(s.now().Add(-s.o.Window))
 		now := s.now()
 		for what, err := range map[string]error{
 			"login sessions": s.st.PruneLogins(now.Add(-SessionIdle)),
@@ -470,6 +519,44 @@ func (s *Server) housekeeping(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+	}
+}
+
+// pruneSessions removes the sessions that ended before cutoff: a connected
+// machine's through its link's worker, so the worker's sessions (its
+// capacity) and the database agree; an offline machine's directly, before
+// any new link of it loads them. Clients get a removal either way
+// (finding C2-15).
+func (s *Server) pruneSessions(cutoff time.Time) {
+	names, err := s.st.SessionMachines()
+	if err != nil {
+		s.log.Warn("pruning old sessions", "err", err)
+		return
+	}
+	for _, name := range names {
+		s.mu.Lock()
+		l := s.links[name]
+		s.mu.Unlock()
+		if l != nil {
+			l.requestPrune(cutoff)
+			continue
+		}
+		s.pruneMu.Lock()
+		s.mu.Lock()
+		l = s.links[name]
+		s.mu.Unlock()
+		if l != nil {
+			s.pruneMu.Unlock()
+			l.requestPrune(cutoff)
+			continue
+		}
+		n, err := s.st.PruneMachine(name, cutoff)
+		s.pruneMu.Unlock()
+		if err != nil {
+			s.log.Warn("pruning old sessions", "machine", name, "err", err)
+		} else if n > 0 {
+			s.log.Info("pruned old sessions", "machine", name, "sessions", n)
 		}
 	}
 }
@@ -591,5 +678,9 @@ func (s *Server) identify(r *http.Request) (id Identity, hasCert bool, status in
 	if !ok || !rec.Valid(s.now()) {
 		return Identity{}, true, http.StatusForbidden, "the client certificate is unknown, expired or revoked"
 	}
-	return Identity{Role: rec.Role, Name: rec.Name, Fingerprint: fp}, true, 0, ""
+	exp := rec.Expires
+	if cert.NotAfter.Before(exp) {
+		exp = cert.NotAfter
+	}
+	return Identity{Role: rec.Role, Name: rec.Name, Fingerprint: fp, Expires: exp}, true, 0, ""
 }

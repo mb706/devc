@@ -17,8 +17,10 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/mb706/devc/internal/boxside"
 	hubsrv "github.com/mb706/devc/internal/hub"
 	"github.com/mb706/devc/internal/hubnode"
+	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/wsconn"
 )
@@ -190,7 +192,9 @@ func TestHubOrigin(t *testing.T) {
 	os.WriteFile(f, append(b, []byte("\n[requests]\nauto = []\n")...), 0o644)
 	r.boxUp(true)
 	r.start()
-	r.agent(nil)
+	// One live session in the box, for a command that waits (below).
+	sid := names.NewSessionID()
+	r.agent([]boxside.Live{{Session: sid, Source: "tmux", Window: "@3", Pane: "%3", PID: 42}})
 	r.waitChannel(r.client(nil), proto.ChannelConnected)
 	c := fh.conn()
 	ctx := context.Background()
@@ -258,16 +262,50 @@ func TestHubOrigin(t *testing.T) {
 	if err := c.Call(ctx, proto.MethodEventsSubscribe, proto.SubscribeParams{}, nil); !proto.IsCode(err, proto.CodeRefused) {
 		t.Errorf("second subscription: %v", err)
 	}
-	slow := make(chan error, 1)
-	go func() {
-		slow <- c.Call(ctx, proto.MethodCommandGet, proto.CommandGetParams{ID: "123e4567-e89b-12d3-a456-426614174000", Wait: 3}, nil)
-	}()
-	time.Sleep(100 * time.Millisecond)
-	began := time.Now()
-	if err := c.Call(ctx, proto.MethodBoxesList, nil, nil); err != nil || time.Since(began) > time.Second {
-		t.Errorf("boxes.list behind a waiting command.get: %v after %s", err, time.Since(began))
+	// A queued send to a working session stays accepted, so command.get
+	// with a wait really waits (finding C2-16).
+	lc := r.client(nil)
+	r.startSession(lc, sid)
+	r.spool(sid, spoolLine(sid, proto.TypeState, proto.State{State: proto.StateWorking}))
+	boxside.SendHintTo(r.local, sid)
+	waitHub(t, "the session working", func() bool { return r.view(lc, sid).State == proto.StateWorking })
+	const waitID = "123e4567-e89b-12d3-a456-426614174000"
+	var queued proto.Receipt
+	if err := c.Call(ctx, proto.MethodSessionSend, proto.SendParams{ID: waitID, Session: sid, Ref: hello.String(), Text: "later"}, &queued); err != nil || queued.Final {
+		t.Fatalf("queued send: %+v %v", queued, err)
 	}
-	<-slow
+	type answer struct {
+		rec proto.Receipt
+		err error
+		at  time.Time
+	}
+	slow := make(chan answer, 1)
+	began := time.Now()
+	go func() {
+		var a answer
+		a.err = c.Call(ctx, proto.MethodCommandGet, proto.CommandGetParams{ID: waitID, Wait: 3}, &a.rec)
+		a.at = time.Now()
+		slow <- a
+	}()
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case a := <-slow:
+		t.Fatalf("command.get did not wait: %+v", a)
+	default:
+	}
+	listed := time.Now()
+	if err := c.Call(ctx, proto.MethodBoxesList, nil, nil); err != nil || time.Since(listed) > time.Second {
+		t.Errorf("boxes.list behind a waiting command.get: %v after %s", err, time.Since(listed))
+	}
+	select {
+	case a := <-slow:
+		t.Errorf("command.get ended before boxes.list was answered: %+v", a)
+	default:
+	}
+	a := <-slow
+	if a.err != nil || a.rec.Command != waitID || a.rec.Final || a.at.Sub(began) < 2500*time.Millisecond {
+		t.Errorf("the waiting command.get: %+v %v after %s", a.rec, a.err, a.at.Sub(began))
+	}
 
 	// The local socket sees the hub.
 	var st proto.HubsStatusResult

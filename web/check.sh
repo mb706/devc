@@ -305,6 +305,34 @@ page.wait("[...document.querySelectorAll('.tl-prompt .bubble')].some(b => b.text
 open(os.path.join(out, "action-session.png"), "wb").write(base64.b64decode(page.send("Page.captureScreenshot", {"format": "png"})["data"]))
 collect("actions: session")
 
+# A prompt whose outcome is unknown: every attempt to send it fails on the
+# network. It stays in the timeline as unknown, the receipt the app then
+# asks for says it never arrived, and "Send again" delivers it with its
+# own ID.
+page.send("Fetch.enable", {"patterns": [{"urlPattern": "*/api/commands", "requestStage": "Request"}]})
+page.js("""(() => { const t = document.querySelector('.composer textarea');
+  t.value = 'A prompt the network loses.'; t.dispatchEvent(new Event('input', {bubbles: true})); })()""")
+page.js("document.querySelector('.composer button[type=submit]').click()")
+lost = 0
+while lost < 4:  # the app's attempts with the prompt's ID; other commands pass
+    paused = page.wait_event("Fetch.requestPaused", 15)["params"]
+    if "network loses" in paused["request"].get("postData", ""):
+        page.send("Fetch.failRequest", {"requestId": paused["requestId"], "errorReason": "ConnectionReset"})
+        lost += 1
+    else:
+        page.send("Fetch.continueRequest", {"requestId": paused["requestId"]})
+page.send("Fetch.disable")
+page.wait("[...document.querySelectorAll('.tl-prompt.uncertain .bubble')].some(b => b.textContent.includes('network loses'))", "the prompt shown as unknown", 15)
+page.wait("[...document.querySelectorAll('.tl-prompt.uncertain .pend-actions button')].some(b => b.textContent === 'Send again')", "the receipt saying it never arrived", 25)
+page.js("document.querySelector('.tl-prompt.uncertain').scrollIntoView({block: 'center'})")
+time.sleep(0.3)
+open(os.path.join(out, "action-unconfirmed.png"), "wb").write(base64.b64decode(page.send("Page.captureScreenshot", {"format": "png"})["data"]))
+page.js("[...document.querySelectorAll('.tl-prompt.uncertain .pend-actions button')].find(b => b.textContent === 'Send again').click()")
+page.wait("[...document.querySelectorAll('.tl-prompt .bubble')].some(b => b.textContent.includes('network loses') && !b.closest('.pending'))", "the prompt delivered by Send again", 20)
+# The network errors of the lost attempts are expected; nothing else may be logged.
+page.events = [m for m in page.events if not (m.get("method") == "Log.entryAdded" and "/api/commands" in m.get("params", {}).get("entry", {}).get("url", ""))]
+collect("actions: unconfirmed")
+
 page.goto(f"{base}/{sid(working, 'terminal')}")
 page.wait("[...document.querySelectorAll('.term-btns button')].some(b => b.textContent === 'Take control')", "the take-control button")
 # The click asks confirm(), which blocks the page: click from a timer and
@@ -327,7 +355,7 @@ except SystemExit:
 open(os.path.join(out, "action-terminal.png"), "wb").write(base64.b64decode(page.send("Page.captureScreenshot", {"format": "png"})["data"]))
 collect("actions: terminal")
 
-print(f"{len(screens) * 4} screens and 2 action runs checked; screenshots and DOM in {out}")
+print(f"{len(screens) * 4} screens and 3 action runs checked; screenshots and DOM in {out}")
 if problems:
     print("problems:")
     for p in problems:

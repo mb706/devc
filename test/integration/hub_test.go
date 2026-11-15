@@ -860,7 +860,8 @@ func notificationFlow(t *testing.T, e *itest.Env, api *hubClient, ntfy *fakeNtfy
 	n := pub.note
 	if n.Title != d.Session.Project+" · fakeosc" || n.Priority != 4 || n.Click != base+"/#/s/"+machine+"/"+sid || n.Topic != "devc-it" || n.SequenceID == "" ||
 		len(n.Actions) != 3 || n.Actions[0].Label != "red" || n.Actions[1].Label != "blue" || n.Actions[2].Label != "Open" || n.Actions[2].URL != n.Click ||
-		!strings.HasPrefix(n.Actions[0].URL, base+"/api/act/") || n.Actions[0].Method != "POST" || n.Actions[0].Headers[hub.RequestHeader] != "1" {
+		n.Actions[0].URL != base+"/api/act" || n.Actions[1].URL != n.Actions[0].URL || n.Actions[0].Method != "POST" || n.Actions[0].Headers[hub.RequestHeader] != "1" ||
+		n.Actions[0].Headers[hub.ActionHeader] == "" || n.Actions[0].Headers[hub.ActionHeader] == n.Actions[1].Headers[hub.ActionHeader] {
 		t.Errorf("notification %+v", n)
 	}
 	count := 0
@@ -872,10 +873,25 @@ func notificationFlow(t *testing.T, e *itest.Env, api *hubClient, ntfy *fakeNtfy
 	if count != 1 {
 		t.Errorf("%d notifications of the question", count)
 	}
-	// The button: the device certificate, no login session.
-	button := &hubClient{t: t, base: base, c: api.c}
-	act := strings.TrimPrefix(n.Actions[0].URL, base)
-	code, body, err := button.try("POST", act, nil)
+	// The button, as ntfy sends it (its URL, method and headers): the
+	// device certificate, no login session; the token in a header.
+	press := func(a hub.NtfyAction) (int, string, error) {
+		req, err := http.NewRequest(a.Method, a.URL, nil)
+		if err != nil {
+			return 0, "", err
+		}
+		for k, v := range a.Headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := api.c.Do(req)
+		if err != nil {
+			return 0, "", err
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b), nil
+	}
+	code, body, err := press(n.Actions[0])
 	if err != nil || code != 200 || !strings.Contains(body, "Answered: red") {
 		t.Errorf("the button: %d %q %v", code, body, err)
 	}
@@ -883,10 +899,10 @@ func notificationFlow(t *testing.T, e *itest.Env, api *hubClient, ntfy *fakeNtfy
 		d, _ := api.detail(machine, sid)
 		return strings.Contains(d.Session.Message, "answer: 1")
 	})
-	if code, body, _ := button.try("POST", act, nil); code != 404 {
+	if code, body, _ := press(n.Actions[0]); code != 404 {
 		t.Errorf("the button twice: %d %s", code, body)
 	}
-	if code, _, _ := button.try("POST", strings.TrimPrefix(n.Actions[1].URL, base), nil); code != 404 {
+	if code, _, _ := press(n.Actions[1]); code != 404 {
 		t.Errorf("the other button after the answer: %d", code)
 	}
 	hubWait(t, 20*time.Second, "the notification cleared", func() bool {

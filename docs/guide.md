@@ -316,7 +316,12 @@ opens the session in the app.
   and requests. The composer has **Send** (typed when the agent is ready),
   **Steer** (typed now, even mid-turn) and **Stop** (interrupts the turn, as
   Escape does); ending the session is in the ⋯ menu. Opening a session marks
-  its finished turns seen.
+  its finished turns seen. The timeline keeps the latest 1,000 events (**Load
+  earlier** pages back from there). When the hub or the machine goes away
+  while a command is on its way, the app cannot know whether it arrived: the
+  prompt (or command) stays on screen as *unknown* and the app asks the
+  machine for its receipt when it can; if it never arrived, **Send again**
+  sends it with the same ID, so it is typed at most once.
 - **Terminal** tab: the session's tmux window, live. It only observes: the
   phone never resizes the agent's pane, and the font shrinks to show the
   whole width (Zoom shows it larger, scrolling sideways). When both the hub

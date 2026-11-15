@@ -64,9 +64,8 @@ func newDev(o Options) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{o: o, l: l, st: st, log: o.Log, instance: newStreamID()[:16], host: strings.ToLower(host), now: time.Now,
-		cfg: &Config{Terminal: TerminalConfig{Control: true}}, lim: newLimiter(), hashSem: make(chan struct{}, 2),
-		links: map[string]*machineLink{}, live: map[*liveConn]struct{}{}, seenAt: map[string]time.Time{}, watch: map[SessionKey]int{},
-		devLogin: login}
+		cfg: &Config{Terminal: TerminalConfig{Control: true}}, devLogin: login}
+	s.initState()
 	s.buildMuxes()
 	s.notifier = newNotifier(s, nil)
 	o.Log.Warn("development mode: no certificates, no login, invented machines; never expose this", "listen", o.Listen)

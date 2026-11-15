@@ -8,9 +8,10 @@ package hub
 // message is published: title "<project> · <harness>", the question or the
 // last message as body, a priority by section, a click URL into the web
 // app, and up to three buttons (one per option of a question with one or
-// two options, and Open). An option button posts to /api/act/<token>: a
-// random token, single-use, valid for an hour, bound to that one answer.
-// When the session leaves the state, the message is cleared by its
+// two options, and Open). An option button posts to /api/act with a token
+// in the X-Devc-Action header (never in the URL, which proxies log:
+// finding C2-06): random, single-use, valid for an hour, bound to that one
+// answer. When the session leaves the state, the message is cleared by its
 // sequence ID and its buttons stop working.
 
 import (
@@ -31,8 +32,12 @@ import (
 	"github.com/mb706/devc/internal/proto"
 )
 
-// actPrefix is the path of notification buttons.
-const actPrefix = "/api/act/"
+// actPath is the path of notification buttons; ActionHeader carries the
+// button's token.
+const (
+	actPath      = "/api/act"
+	ActionHeader = "X-Devc-Action"
+)
 
 // Limits of notifications.
 const (
@@ -185,9 +190,9 @@ func buildNotification(publicURL, topic, seq string, sum *SessionSummary, tokens
 		n.Actions = append(n.Actions, NtfyAction{
 			Action:  "http",
 			Label:   cutRunes(proto.Printable(opt), maxLabel),
-			URL:     publicURL + actPrefix + tokens[i],
+			URL:     publicURL + actPath,
 			Method:  http.MethodPost,
-			Headers: map[string]string{RequestHeader: "1"},
+			Headers: map[string]string{RequestHeader: "1", ActionHeader: tokens[i]},
 			Clear:   true,
 		})
 	}
@@ -314,50 +319,142 @@ func NtfyHealth(ctx context.Context, cfg NtfyConfig) error {
 
 // --- The notifier ---
 
-type noteState struct{ key, seq string }
+// Retries of notifications (variables for tests): due records are looked
+// at every notifyRetryTick; a failed publish or clear waits notifyRetryBase,
+// doubling up to notifyRetryMax; a clear is given up after clearMaxAge.
+var (
+	notifyRetryTick = 15 * time.Second
+	notifyRetryBase = 30 * time.Second
+	notifyRetryMax  = 15 * time.Minute
+	clearMaxAge     = 7 * 24 * time.Hour
+)
 
+// metaNotifyPos is the change ID the notifier has looked at.
+const metaNotifyPos = "notify_pos"
+
+// notifier keeps the notification state of every session explicit and
+// durable (findings C2-13, C2-14): each attention state has a record,
+// pending until published (or handled without a message), sent, then
+// cleared once the state ends. A hub that is not the machine's notifier
+// records pending and sends what is still pending and still current when
+// it becomes the notifier; a state that ends before it was sent is
+// dropped. Failed publishes and clears are retried with backoff, also
+// after a restart, and the change log position is kept, so a restart
+// misses nothing.
 type notifier struct {
-	s     *Server
-	c     *ntfyClient
-	state map[SessionKey]noteState
+	s *Server
+	c *ntfyClient
+	// rows are the records by session and key; last is each session's
+	// current key (for "not news").
+	rows map[SessionKey]map[string]*NoteState
+	last map[SessionKey]string
 }
 
 func newNotifier(s *Server, cfg *NtfyConfig) *notifier {
-	n := &notifier{s: s, state: map[SessionKey]noteState{}}
+	n := &notifier{s: s, rows: map[SessionKey]map[string]*NoteState{}, last: map[SessionKey]string{}}
 	if cfg != nil {
 		n.c = newNtfyClient(*cfg)
 	}
 	return n
 }
 
-// load sets the state from the projection (states the hub already holds
-// at start are not notified) and the notifications recorded as published.
-func (n *notifier) load(ctx context.Context) error {
+func noteKey(r *NoteState) SessionKey { return SessionKey{Machine: r.Machine, Session: r.Session} }
+
+// put stores a record (and keeps it in memory).
+func (n *notifier) put(r *NoteState) {
+	k := noteKey(r)
+	if n.rows[k] == nil {
+		n.rows[k] = map[string]*NoteState{}
+	}
+	n.rows[k][r.Key] = r
+	if err := n.s.st.PutNoteState(*r); err != nil {
+		n.s.log.Warn("notifications: recording", "err", err)
+	}
+}
+
+// drop removes a record.
+func (n *notifier) drop(r *NoteState) {
+	k := noteKey(r)
+	delete(n.rows[k], r.Key)
+	if len(n.rows[k]) == 0 {
+		delete(n.rows, k)
+	}
+	if err := n.s.st.DeleteNoteState(r.Machine, r.Session, r.Key); err != nil {
+		n.s.log.Warn("notifications: recording", "err", err)
+	}
+}
+
+// backoff is the wait before attempt tries+1.
+func backoff(tries int) time.Duration {
+	d := notifyRetryBase
+	for i := 1; i < tries && d < notifyRetryMax; i++ {
+		d *= 2
+	}
+	return min(d, notifyRetryMax)
+}
+
+// current returns the summaries of every session.
+func (n *notifier) current() (map[SessionKey]*SessionSummary, error) {
 	list, err := n.s.summaries(SessionFilter{})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cur := map[SessionKey]*SessionSummary{}
-	n.state = map[SessionKey]noteState{}
 	for i := range list {
-		k := SessionKey{Machine: list[i].Machine, Session: list[i].Session}
-		cur[k] = &list[i]
-		if key := notifyKey(&list[i]); key != "" {
-			n.state[k] = noteState{key: key}
-		}
+		cur[SessionKey{Machine: list[i].Machine, Session: list[i].Session}] = &list[i]
 	}
-	rows, err := n.s.st.Notifications()
+	return cur, nil
+}
+
+// start loads the records and decides where to follow the change log
+// from: where it stopped, if the log still reaches back there; else from
+// the present after comparing the projection with the records. On the very
+// first start the states the hub holds are not notified.
+func (n *notifier) start(ctx context.Context) (int64, error) {
+	lo, hi, err := n.s.st.ChangeRange()
 	if err != nil {
-		return err
+		return 0, err
 	}
-	for _, r := range rows {
-		k := SessionKey{Machine: r.Machine, Session: r.Session}
-		n.state[k] = noteState{key: r.Key, seq: r.Seq}
-		// A notification whose session moved on (or went) while the hub
-		// was down is cleared.
-		n.update(ctx, k, cur[k])
+	rows, err := n.s.st.NoteStates()
+	if err != nil {
+		return 0, err
 	}
-	return nil
+	for i := range rows {
+		r := rows[i]
+		k := noteKey(&r)
+		if n.rows[k] == nil {
+			n.rows[k] = map[string]*NoteState{}
+		}
+		n.rows[k][r.Key] = &r
+	}
+	cur, err := n.current()
+	if err != nil {
+		return 0, err
+	}
+	for k, sum := range cur {
+		n.last[k] = notifyKey(sum)
+	}
+	v, err := n.s.st.Meta(metaNotifyPos)
+	if err != nil {
+		return 0, err
+	}
+	pos, perr := strconv.ParseInt(v, 10, 64)
+	switch {
+	case v == "" || perr != nil:
+		now := n.s.now()
+		for k, sum := range cur {
+			if key := notifyKey(sum); key != "" && n.rows[k][key] == nil {
+				n.put(&NoteState{Machine: k.Machine, Session: k.Session, Key: key, State: NoteSent, Created: now})
+			}
+		}
+		n.resync(ctx, cur)
+		return hi, nil
+	case pos <= hi && (pos >= lo-1 || lo == 0 && pos == hi):
+		return pos, nil
+	}
+	n.s.log.Warn("notifications: the change log moved on while the hub was down; resynchronising")
+	n.resync(ctx, cur)
+	return hi, nil
 }
 
 // run follows the change log until ctx ends.
@@ -365,46 +462,53 @@ func (n *notifier) run(ctx context.Context) {
 	if n.c == nil {
 		return
 	}
-	_, from, err := n.s.st.ChangeRange()
-	if err == nil {
-		err = n.load(ctx)
-	}
+	from, err := n.start(ctx)
 	if err != nil {
 		n.s.log.Error("notifications: reading the projection", "err", err)
 		return
 	}
+	n.savePos(from)
 	n.s.log.Info("notifications go to ntfy", "server", n.c.cfg.URL, "topic", n.c.cfg.Topic)
+	n.retryDue(ctx)
+	tick := time.NewTicker(notifyRetryTick)
+	defer tick.Stop()
 	for {
 		ch := n.s.st.Changed()
-		lo, _, err := n.s.st.ChangeRange()
+		cs, gap, err := n.s.st.changesAfter(from, streamPage)
 		if err != nil {
 			n.s.log.Error("notifications: reading the change log", "err", err)
-			return
+			cs = nil
 		}
-		if lo > from+1 {
+		if gap {
 			// The change log moved past what was looked at: start again
-			// from the projection (and clear what moved on).
+			// from the projection.
 			n.s.log.Warn("notifications fell behind the change log; resynchronising")
-			_, from, _ = n.s.st.ChangeRange()
-			n.resync(ctx)
+			_, hi, err := n.s.st.ChangeRange()
+			if err != nil {
+				return
+			}
+			from = hi
+			if cur, err := n.current(); err == nil {
+				n.resync(ctx, cur)
+			}
+			n.savePos(from)
 			continue
-		}
-		cs, err := n.s.st.ChangesAfter(from, streamPage)
-		if err != nil {
-			n.s.log.Error("notifications: reading the change log", "err", err)
-			return
 		}
 		if len(cs) == 0 {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ch:
+			case <-tick.C:
+				n.retryDue(ctx)
 			}
 			continue
 		}
-		// The latest summary of each session in the batch (nil: removed).
+		// The latest summary of each session in the batch (nil: removed),
+		// and the machines whose connection or role changed.
 		latest := map[SessionKey]*SessionSummary{}
 		var order []SessionKey
+		machines := false
 		for _, c := range cs {
 			from = c.ID
 			var k SessionKey
@@ -418,6 +522,9 @@ func (n *notifier) run(ctx context.Context) {
 				k, sum = SessionKey{Machine: c.Machine, Session: c.Session}, &v
 			case ChangeSessionRemoved:
 				k = SessionKey{Machine: c.Machine, Session: c.Session}
+			case ChangeMachine:
+				machines = true
+				continue
 			default:
 				continue
 			}
@@ -432,21 +539,24 @@ func (n *notifier) run(ctx context.Context) {
 			}
 			n.update(ctx, k, latest[k])
 		}
+		if machines {
+			// A hub that just became a notifier sends what is still
+			// pending.
+			n.retryDue(ctx)
+		}
+		n.savePos(from)
 	}
 }
 
-// resync applies the current projection to every session known.
-func (n *notifier) resync(ctx context.Context) {
-	list, err := n.s.summaries(SessionFilter{})
-	if err != nil {
-		n.s.log.Error("notifications: reading the projection", "err", err)
-		return
+func (n *notifier) savePos(pos int64) {
+	if err := n.s.st.SetMeta(metaNotifyPos, strconv.FormatInt(pos, 10)); err != nil {
+		n.s.log.Warn("notifications: recording the position", "err", err)
 	}
-	cur := map[SessionKey]*SessionSummary{}
-	for i := range list {
-		cur[SessionKey{Machine: list[i].Machine, Session: list[i].Session}] = &list[i]
-	}
-	for k := range n.state {
+}
+
+// resync compares the records with the current projection.
+func (n *notifier) resync(ctx context.Context, cur map[SessionKey]*SessionSummary) {
+	for k := range n.rows {
 		if _, ok := cur[k]; !ok {
 			n.update(ctx, k, nil)
 		}
@@ -463,80 +573,180 @@ func (n *notifier) machineNotifies(name string) bool {
 	return err == nil && ok && m.Online && m.Notifier
 }
 
-// update compares a session's state with the one last notified: it clears
-// a notification whose state was left and publishes one for a new state.
+// update applies a session's current state (nil: the session is gone):
+// records of states that ended are dropped (pending) or cleared (sent),
+// and a new state gets a pending record that is published at once when
+// it can be.
 func (n *notifier) update(ctx context.Context, k SessionKey, sum *SessionSummary) {
 	want := notifyKey(sum)
-	cur := n.state[k]
-	if want == cur.key {
-		return
+	prev := n.last[k]
+	if sum == nil {
+		delete(n.last, k)
+	} else {
+		n.last[k] = want
 	}
-	if cur.seq != "" {
-		if err := n.s.st.DeleteActions(cur.seq); err != nil {
-			n.s.log.Warn("notifications: removing buttons", "err", err)
+	now := n.s.now()
+	for key, r := range n.rows[k] {
+		if key == want {
+			continue
 		}
-		if err := n.c.clear(ctx, cur.seq); err != nil {
-			n.s.log.Warn("notifications: clearing a message failed", "machine", k.Machine, "session", k.Session, "err", err)
-		} else {
-			n.s.log.Info("notification cleared", "machine", k.Machine, "session", k.Session)
-		}
-		if err := n.s.st.DeleteNotification(k.Machine, k.Session); err != nil {
-			n.s.log.Warn("notifications: recording", "err", err)
+		switch r.State {
+		case NotePending:
+			// Ended before it was sent: dropped.
+			n.drop(r)
+		case NoteSent:
+			if r.Seq == "" {
+				n.drop(r)
+				continue
+			}
+			if err := n.s.st.DeleteActions(r.Seq); err != nil {
+				n.s.log.Warn("notifications: removing buttons", "err", err)
+			}
+			r.State, r.Tries, r.NextAt = NoteCleared, 0, now
+			n.put(r)
+			n.clear(ctx, r)
 		}
 	}
 	if want == "" {
-		delete(n.state, k)
 		return
 	}
-	st := noteState{key: want}
-	switch {
-	case want == SectionNeedsYou && strings.HasPrefix(cur.key, SectionNeedsYou+"/q/"):
+	if r := n.rows[k][want]; r != nil {
+		if r.State == NoteCleared {
+			// The state came back before its old message was cleared: the
+			// message (same sequence ID) is published again instead.
+			r.State, r.Tries, r.NextAt = NotePending, 0, now
+			n.put(r)
+			n.publish(ctx, r, sum)
+		}
+		return
+	}
+	r := &NoteState{Machine: k.Machine, Session: k.Session, Key: want, State: NotePending, Seq: newSeq(), NextAt: now, Created: now}
+	if want == SectionNeedsYou && strings.HasPrefix(prev, SectionNeedsYou+"/q/") {
 		// The question was answered and the session has not reported its
 		// next state yet: not news.
-	case !n.machineNotifies(k.Machine):
-		n.s.log.Debug("no notification: the machine has not named this hub its notifier", "machine", k.Machine, "session", k.Session, "section", sum.Section)
-	case n.s.watched(k):
-		n.s.log.Debug("no notification: a client follows the session", "machine", k.Machine, "session", k.Session, "section", sum.Section)
-	default:
-		st.seq = n.publish(ctx, k, sum)
+		r.State, r.Seq = NoteSent, ""
 	}
-	n.state[k] = st
+	n.put(r)
+	if r.State == NotePending {
+		n.publish(ctx, r, sum)
+	}
 }
 
-// publish sends the notification of a session's state with its buttons;
-// it returns the sequence ID, or "" when it could not be sent.
-func (n *notifier) publish(ctx context.Context, k SessionKey, sum *SessionSummary) string {
-	seq := newSeq()
+// retryDue retries the publishes and clears that are due: a pending
+// record whose state is still current (when this hub is the machine's
+// notifier), a cleared record whose clear has not been confirmed.
+func (n *notifier) retryDue(ctx context.Context) {
+	now := n.s.now()
+	var due []*NoteState
+	for _, m := range n.rows {
+		for _, r := range m {
+			if (r.State == NotePending || r.State == NoteCleared) && !r.NextAt.After(now) {
+				due = append(due, r)
+			}
+		}
+	}
+	notifies := map[string]bool{}
+	for _, r := range due {
+		if ctx.Err() != nil {
+			return
+		}
+		if r.State == NoteCleared {
+			n.clear(ctx, r)
+			continue
+		}
+		on, ok := notifies[r.Machine]
+		if !ok {
+			on = n.machineNotifies(r.Machine)
+			notifies[r.Machine] = on
+		}
+		if !on {
+			continue
+		}
+		list, err := n.s.summaries(SessionFilter{Machine: r.Machine, Session: r.Session})
+		if err != nil {
+			continue
+		}
+		if len(list) != 1 || notifyKey(&list[0]) != r.Key {
+			n.drop(r)
+			continue
+		}
+		n.publish(ctx, r, &list[0])
+	}
+}
+
+// publish sends a pending record's notification with its buttons, when the
+// machine named this hub its notifier; a session a client follows is
+// handled without a message. A failure is retried later.
+func (n *notifier) publish(ctx context.Context, r *NoteState, sum *SessionSummary) {
+	k := noteKey(r)
+	if !n.machineNotifies(r.Machine) {
+		n.s.log.Debug("notification pending: the machine has not named this hub its notifier", "machine", k.Machine, "session", k.Session, "section", sum.Section)
+		return
+	}
+	if n.s.watched(k) {
+		n.s.log.Debug("no notification: a client follows the session", "machine", k.Machine, "session", k.Session, "section", sum.Section)
+		r.State, r.Seq = NoteSent, ""
+		n.put(r)
+		return
+	}
+	now := n.s.now()
+	fail := func(what string, err error) {
+		r.Tries++
+		r.NextAt = now.Add(backoff(r.Tries))
+		n.put(r)
+		n.s.log.Warn("notifications: "+what, "machine", k.Machine, "session", k.Session, "tries", r.Tries, "err", err)
+	}
 	opts := actionOptions(sum)
 	var tokens []string
 	var actions []Action
-	now := n.s.now()
 	for i, opt := range opts {
 		tok, id, err := NewToken()
 		if err != nil {
-			return ""
+			fail("making buttons failed", err)
+			return
 		}
 		tokens = append(tokens, tok)
 		actions = append(actions, Action{ID: id, Machine: k.Machine, Session: k.Session, Question: sum.Question.ID, Choice: i + 1,
-			Label: proto.Truncate(opt, 200), Command: newUUID(), Seq: seq, Expires: now.Add(ActionTTL)})
+			Label: proto.Truncate(opt, 200), Command: newUUID(), Seq: r.Seq, Expires: now.Add(ActionTTL)})
 	}
+	// Buttons of an earlier attempt of this message go.
+	_ = n.s.st.DeleteActions(r.Seq)
 	if len(actions) > 0 {
 		if err := n.s.st.AddActions(actions); err != nil {
-			n.s.log.Error("notifications: storing buttons", "err", err)
-			return ""
+			fail("storing buttons failed", err)
+			return
 		}
 	}
-	note := buildNotification(n.s.publicURL, n.c.cfg.Topic, seq, sum, tokens)
+	note := buildNotification(n.s.publicURL, n.c.cfg.Topic, r.Seq, sum, tokens)
 	if err := n.c.publish(ctx, note); err != nil {
-		n.s.log.Warn("notifications: publishing failed", "machine", k.Machine, "session", k.Session, "err", err)
-		_ = n.s.st.DeleteActions(seq)
-		return ""
+		_ = n.s.st.DeleteActions(r.Seq)
+		fail("publishing failed; it is retried", err)
+		return
 	}
-	if err := n.s.st.PutNotification(NotificationRow{Machine: k.Machine, Session: k.Session, Key: notifyKey(sum), Seq: seq, Sent: now}); err != nil {
-		n.s.log.Warn("notifications: recording", "err", err)
-	}
+	r.State, r.Tries = NoteSent, 0
+	n.put(r)
 	n.s.log.Info("notification published", "machine", k.Machine, "session", k.Session, "section", sum.Section, "buttons", len(tokens))
-	return seq
+}
+
+// clear clears a cleared record's message at ntfy; the record goes when
+// ntfy confirms (or after clearMaxAge), else the clear is retried later.
+func (n *notifier) clear(ctx context.Context, r *NoteState) {
+	k := noteKey(r)
+	if err := n.c.clear(ctx, r.Seq); err != nil {
+		now := n.s.now()
+		if now.Sub(r.Created) > clearMaxAge {
+			n.s.log.Warn("notifications: giving up clearing a message", "machine", k.Machine, "session", k.Session, "err", err)
+			n.drop(r)
+			return
+		}
+		r.Tries++
+		r.NextAt = now.Add(backoff(r.Tries))
+		n.put(r)
+		n.s.log.Warn("notifications: clearing a message failed; it is retried", "machine", k.Machine, "session", k.Session, "tries", r.Tries, "err", err)
+		return
+	}
+	n.s.log.Info("notification cleared", "machine", k.Machine, "session", k.Session)
+	n.drop(r)
 }
 
 // --- Buttons ---
@@ -560,11 +770,12 @@ func (s *Server) apiAct(w http.ResponseWriter, r *http.Request) {
 		s.log.Info("notification button refused", "cert", id.Name)
 		text(http.StatusNotFound, "This button is no longer valid.")
 	}
-	tok := r.PathValue("token")
-	if !ValidToken(tok) {
+	vals := r.Header.Values(ActionHeader)
+	if len(vals) != 1 || !ValidToken(vals[0]) {
 		invalid()
 		return
 	}
+	tok := vals[0]
 	tid := TokenID(tok)
 	a, ok, err := s.st.PeekAction(tid, now)
 	if err != nil {
@@ -592,7 +803,7 @@ func (s *Server) apiAct(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), forwardTimeout)
 	defer cancel()
-	raw, err := l.forward(ctx, proto.MethodSessionAnswer, proto.AnswerParams{ID: a.Command, Session: a.Session, Question: a.Question, Choice: a.Choice})
+	raw, err := l.forward(ctx, proto.MethodSessionAnswer, proto.AnswerParams{ID: a.Command, Session: a.Session, Ref: s.sessionRef(a.Machine, a.Session), Question: a.Question, Choice: a.Choice})
 	var rec proto.Receipt
 	if err == nil && proto.DecodeResult(raw, &rec) != nil {
 		err = errors.New("invalid receipt")
@@ -605,8 +816,12 @@ func (s *Server) apiAct(w http.ResponseWriter, r *http.Request) {
 	}
 	label := proto.Printable(cutRunes(a.Label, maxLabel))
 	if err != nil {
-		code, msg := rpcStatus(err)
+		code, msg, uncertain := rpcStatus(err)
 		s.log.Info("notification button", "cert", id.Name, "machine", a.Machine, "session", a.Session, "err", msg)
+		if uncertain {
+			text(code, "Maybe not answered: %s", msg)
+			return
+		}
 		text(code, "Not answered: %s", msg)
 		return
 	}

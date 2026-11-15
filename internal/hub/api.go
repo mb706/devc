@@ -7,10 +7,12 @@ package hub
 // nothing queued: the request fails at once.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -204,26 +206,9 @@ func (s *Server) sessionDetail(w http.ResponseWriter, r *http.Request, machine, 
 	}
 	if before > 0 && len(evs) < limit && lowest > 1 {
 		want := limit - len(evs)
-		from := max(0, lowest-1-int64(want))
-		if l := s.link(machine); l != nil {
-			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-			raw, err := l.forward(ctx, proto.MethodEventsRead, proto.EventsReadParams{Session: sid, From: from, Limit: want})
-			cancel()
-			var res proto.EventsReadResult
-			if err == nil && proto.DecodeResult(raw, &res) == nil {
-				var older []proto.Event
-				for _, e := range res.Events {
-					if ev, err := cleanEventOnly(e); err == nil && ev.Session == sid && ev.Seq < lowest {
-						older = append(older, ev)
-					}
-				}
-				d.Events = append(older, d.Events...)
-			} else {
-				d.Partial = true
-			}
-		} else {
-			d.Partial = true
-		}
+		older, ok := s.readOlder(r.Context(), machine, sid, sum.Ref, lowest, want)
+		d.Events = append(older, d.Events...)
+		d.Partial = !ok
 	}
 	if d.Events == nil {
 		d.Events = []proto.Event{}
@@ -234,6 +219,75 @@ func (s *Server) sessionDetail(w http.ResponseWriter, r *http.Request, machine, 
 		d.More = upper > 1 && d.Partial
 	}
 	writeJSON(w, http.StatusOK, d)
+}
+
+// Bounds of reading older events from a machine (variables for tests).
+var (
+	// olderPageBytes bounds the events one backward page returns.
+	olderPageBytes = 1 << 20
+	// olderReadBytes and olderReads bound what the hub reads for one page.
+	olderReadBytes = 16 << 20
+	olderReads     = 64
+)
+
+// readOlder returns up to want events of a session immediately below seq
+// lowest, from the machine. The machine's events.read goes forward and
+// stops at its own byte cap (More), so the hub follows it up to lowest-1,
+// keeping the most recent events within olderPageBytes: a page always ends
+// right below lowest and the next one starts below its first event, so
+// paging never skips (finding C2-08). ok is false when the machine could
+// not be asked or broke a bound; the page is then empty.
+func (s *Server) readOlder(ctx context.Context, machine, sid, ref string, lowest int64, want int) ([]proto.Event, bool) {
+	l := s.link(machine)
+	if l == nil {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	from := max(0, lowest-1-int64(want))
+	var out []proto.Event
+	sizes := []int{}
+	pageBytes, readBytes := 0, 0
+	for reads := 0; ; reads++ {
+		if reads >= olderReads {
+			return nil, false
+		}
+		raw, err := l.forward(ctx, proto.MethodEventsRead, proto.EventsReadParams{Session: sid, Ref: ref, From: from, Limit: int(lowest - 1 - from)})
+		var res proto.EventsReadResult
+		if err != nil || proto.DecodeResult(raw, &res) != nil {
+			return nil, false
+		}
+		if readBytes += len(raw); readBytes > olderReadBytes {
+			return nil, false
+		}
+		progress := false
+		for _, e := range res.Events {
+			ev, err := cleanEventOnly(e)
+			if err != nil || ev.Session != sid || ev.Seq <= from || ev.Seq >= lowest {
+				continue
+			}
+			b, _ := json.Marshal(ev)
+			out, sizes = append(out, ev), append(sizes, len(b))
+			pageBytes += len(b)
+			from, progress = ev.Seq, true
+		}
+		for len(out) > 1 && pageBytes > olderPageBytes {
+			pageBytes -= sizes[0]
+			out, sizes = out[1:], sizes[1:]
+		}
+		if from >= lowest-1 || !res.More {
+			break
+		}
+		if !progress {
+			// More is said, but nothing below lowest came: a machine that
+			// does not advance.
+			return nil, false
+		}
+	}
+	if len(out) > want {
+		out = out[len(out)-want:]
+	}
+	return out, true
 }
 
 // commandMethods maps the command types of POST /api/commands to the
@@ -273,7 +327,11 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: %s", proto.Printable(proto.Truncate(err.Error(), 200)))
 		return false
 	}
-	if dec.More() {
+	// Only white space may follow. Reading on to the end of the body
+	// (bounded by the size limit and the body deadline) also lifts that
+	// deadline (front.go).
+	rest, _ := io.ReadAll(io.MultiReader(dec.Buffered(), io.LimitReader(r.Body, 64)))
+	if len(bytes.TrimSpace(rest)) > 0 {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: data after the object")
 		return false
 	}
@@ -328,32 +386,87 @@ func commandParams(typ, id string, raw json.RawMessage) (any, error) {
 	return target, nil
 }
 
-// rpcStatus maps a machine's error to an HTTP status.
-func rpcStatus(err error) (int, string) {
+// commandRef names the session's project in a command's parameters.
+func (s *Server) commandRef(machine string, params any) error {
+	switch p := params.(type) {
+	case *proto.SendParams:
+		return s.fillRef(machine, &p.Ref, p.Session)
+	case *proto.AnswerParams:
+		return s.fillRef(machine, &p.Ref, p.Session)
+	case *proto.SessionCommandParams:
+		return s.fillRef(machine, &p.Ref, p.Session)
+	case *proto.KeysParams:
+		return s.fillRef(machine, &p.Ref, p.Session)
+	case *proto.SeenParams:
+		return s.fillRef(machine, &p.Ref, p.Session)
+	}
+	return nil
+}
+
+// rpcStatus maps a machine's error to an HTTP status. uncertain says the
+// machine may have received the call although no answer came: the client
+// keeps the command's ID and asks for its receipt (finding C2-11).
+func rpcStatus(err error) (status int, msg string, uncertain bool) {
 	var e *proto.Error
 	if errors.As(err, &e) {
 		msg := proto.Printable(proto.Truncate(e.Message, 500))
 		switch e.Code {
 		case proto.CodeInvalidParams, proto.CodeInvalidRequest, proto.CodeParseError:
-			return http.StatusBadRequest, msg
+			return http.StatusBadRequest, msg, false
 		case proto.CodeNotFound:
-			return http.StatusNotFound, msg
+			return http.StatusNotFound, msg, false
 		case proto.CodeRefused:
-			return http.StatusForbidden, msg
+			return http.StatusForbidden, msg, false
 		case proto.CodeBusy:
-			return http.StatusTooManyRequests, msg
+			return http.StatusTooManyRequests, msg, false
 		case proto.CodeMethodNotFound:
-			return http.StatusNotImplemented, "the machine does not offer this to the hub"
+			return http.StatusNotImplemented, "the machine does not offer this to the hub", false
 		}
-		return http.StatusBadGateway, "the machine failed: " + msg
+		return http.StatusBadGateway, "the machine failed: " + msg, false
 	}
 	if errors.Is(err, errOffline) {
-		return http.StatusServiceUnavailable, "the machine went offline; the command may or may not have arrived (retry with the same ID)"
+		return http.StatusServiceUnavailable, "the machine went offline; the command may or may not have arrived (ask for its receipt, or retry with the same ID)", true
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return http.StatusGatewayTimeout, "the machine did not answer in time (retry with the same ID)"
+		return http.StatusGatewayTimeout, "the machine did not answer in time (ask for the receipt, or retry with the same ID)", true
 	}
-	return http.StatusBadGateway, "the machine could not be asked"
+	return http.StatusBadGateway, "the machine could not be asked", true
+}
+
+// writeRPCError answers with a machine's error; an uncertain outcome says
+// so in the body ("uncertain": true).
+func writeRPCError(w http.ResponseWriter, err error) {
+	st, msg, uncertain := rpcStatus(err)
+	if uncertain {
+		writeJSON(w, st, map[string]any{"error": msg, "uncertain": true})
+		return
+	}
+	writeError(w, st, "%s", msg)
+}
+
+// sessionRef is the project of a session the hub holds ("" when it holds
+// none): the hub names it on every call about the session (finding C1-01).
+func (s *Server) sessionRef(machine, sid string) string {
+	rows, err := s.st.Sessions(SessionFilter{Machine: machine, Session: sid})
+	if err != nil || len(rows) != 1 {
+		return ""
+	}
+	return rows[0].View.Ref
+}
+
+// fillRef checks a client's ref, or fills in the one the hub holds for the
+// session.
+func (s *Server) fillRef(machine string, ref *string, sid string) error {
+	if *ref != "" {
+		if _, err := names.Parse(*ref); err != nil {
+			return errors.New("invalid ref: use <realm>/<project>")
+		}
+		return nil
+	}
+	if sid != "" {
+		*ref = s.sessionRef(machine, sid)
+	}
+	return nil
 }
 
 // offline answers for a machine that is not connected.
@@ -390,6 +503,9 @@ func (s *Server) apiCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	params, err := commandParams(c.Type, c.ID, c.Params)
+	if err == nil {
+		err = s.commandRef(c.Machine, params)
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "%s", proto.Printable(proto.Truncate(err.Error(), 300)))
 		return
@@ -403,25 +519,28 @@ func (s *Server) apiCommand(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	raw, err := l.forward(ctx, method, params)
 	if err != nil {
-		st, msg := rpcStatus(err)
-		writeError(w, st, "%s", msg)
+		writeRPCError(w, err)
 		return
 	}
 	var rec proto.Receipt
 	if err := proto.DecodeResult(raw, &rec); err != nil {
-		writeError(w, http.StatusBadGateway, "the machine sent an invalid receipt")
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "the machine sent an invalid receipt", "uncertain": true})
 		return
 	}
 	if c.Wait > 0 && !rec.Final {
 		raw, err = l.forward(ctx, proto.MethodCommandGet, proto.CommandGetParams{ID: c.ID, Wait: c.Wait})
-		if err == nil && proto.DecodeResult(raw, &rec) != nil {
+		var fin proto.Receipt
+		if err == nil && proto.DecodeResult(raw, &fin) != nil {
 			err = errors.New("invalid receipt")
 		}
 		if err != nil {
-			st, msg := rpcStatus(err)
-			writeError(w, st, "%s", msg)
+			// The command was taken; only its final outcome is not known
+			// yet: the receipt so far says so.
+			s.log.Info("command forwarded; waiting for its receipt failed", "machine", c.Machine, "type", c.Type, "id", c.ID, "err", err)
+			writeJSON(w, http.StatusOK, rec)
 			return
 		}
+		rec = fin
 	}
 	s.log.Info("command forwarded", "machine", c.Machine, "type", c.Type, "id", c.ID, "outcome", rec.Outcome)
 	writeJSON(w, http.StatusOK, rec)
@@ -447,8 +566,7 @@ func (s *Server) apiCommandGet(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	raw, err := l.forward(ctx, proto.MethodCommandGet, proto.CommandGetParams{ID: id, Wait: int(wait)})
 	if err != nil {
-		st, msg := rpcStatus(err)
-		writeError(w, st, "%s", msg)
+		writeRPCError(w, err)
 		return
 	}
 	var rec proto.Receipt
@@ -509,8 +627,9 @@ func (s *Server) apiDecide(w http.ResponseWriter, r *http.Request) {
 	raw, err := l.forward(ctx, proto.MethodRequestsDecide, proto.DecideParams{ID: id, Approve: d.Approve, Reason: d.Reason})
 	l.kick()
 	if err != nil {
-		st, msg := rpcStatus(err)
-		writeError(w, st, "%s", msg)
+		// Busy (the machine's executor is full) answers 429: the request
+		// stays pending and may be decided again.
+		writeRPCError(w, err)
 		return
 	}
 	var res proto.DecideResult

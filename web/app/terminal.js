@@ -5,7 +5,7 @@
 // phone keyboard lacks.
 
 import { html, useState, useEffect, useRef } from './lib.js';
-import { useStore } from './store.js';
+import { useStore, stale } from './store.js';
 import { Icon, Empty } from './ui.js';
 import { installCspShim } from './cspshim.js';
 
@@ -54,7 +54,7 @@ export function TerminalTab({ s }) {
   const [ctrlOn, setCtrlOn] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const allowControl = st.me && st.me.terminal_control;
-  const usable = s.live && !s.stale;
+  const usable = s.live && !stale(s);
 
   const send = (data) => {
     const w = ws.current;
@@ -98,10 +98,14 @@ export function TerminalTab({ s }) {
       const w = new WebSocket(`${proto}//${location.host}/api/terminal/${encodeURIComponent(s.machine)}/${s.session}?mode=${mode}`);
       w.binaryType = 'arraybuffer';
       ws.current = w;
+      // The hub counts a stream as hidden until told otherwise: the state
+      // goes out when the socket opens, after the terminal opened, and on
+      // every change (finding C2-17).
       const visible = () => {
         if (w.readyState === WebSocket.OPEN) w.send(JSON.stringify({ type: 'visible', visible: document.visibilityState === 'visible' }));
       };
       document.addEventListener('visibilitychange', visible);
+      w.onopen = visible;
       w.onmessage = (ev) => {
         if (typeof ev.data !== 'string') {
           t.write(new Uint8Array(ev.data));
@@ -116,7 +120,10 @@ export function TerminalTab({ s }) {
         if (m.type === 'open' || m.type === 'size') {
           t.resize(m.cols, m.rows);
           setSize({ cols: m.cols, rows: m.rows });
-          if (m.type === 'open') setStatus('open');
+          if (m.type === 'open') {
+            setStatus('open');
+            visible();
+          }
         } else if (m.type === 'end') {
           setReason(m.reason || '');
         }
@@ -152,7 +159,7 @@ export function TerminalTab({ s }) {
   }, [size, zoom, status]);
 
   if (!usable) {
-    return html`<${Empty} icon="terminal">${s.stale ? 'The machine is offline.' : 'The session has ended; its terminal is gone.'}<//>`;
+    return html`<${Empty} icon="terminal">${stale(s) ? 'The machine is offline.' : 'The session has ended; its terminal is gone.'}<//>`;
   }
   const takeControl = () => {
     if (!confirm('Take control of this terminal? What you type goes straight to the session.')) return;

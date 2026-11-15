@@ -3,7 +3,7 @@
 
 import { html, useEffect, useState } from './lib.js';
 import * as api from './api.js';
-import { useStore, loadProjects, decide } from './store.js';
+import { useStore, loadProjects, decide, stale } from './store.js';
 import { Icon, TopBar, Empty, ago, useNow } from './ui.js';
 import { SessionRow } from './inbox.js';
 import { describeRequest } from './session.js';
@@ -48,8 +48,8 @@ function RequestRow({ r }) {
   return html`<li class="req">
     <div class="req-top"><span><${Icon} name="key" />${describeRequest(r)}</span><span class=${'tag risk-' + r.risk}>${r.risk} risk</span></div>
     ${r.risk === 'low'
-      ? html`<div class="row-actions"><button class="btn" disabled=${busy || r.stale} onClick=${() => act(false)}>Deny</button>
-          <button class="btn primary" disabled=${busy || r.stale} onClick=${() => act(true)}>Approve</button></div>`
+      ? html`<div class="row-actions"><button class="btn" disabled=${busy || stale(r)} onClick=${() => act(false)}>Deny</button>
+          <button class="btn primary" disabled=${busy || stale(r)} onClick=${() => act(true)}>Approve</button></div>`
       : html`<div class="hint">Approve it on the machine: <code class="cmd">devc requests approve ${r.id}</code></div>`}
   </li>`;
 }

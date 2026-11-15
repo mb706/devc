@@ -110,21 +110,54 @@ type LoginReply struct {
 	Dev             bool `json:"dev,omitempty"`
 }
 
-// verifyPassword hashes with at most two logins at a time (each takes 64
-// MiB).
-func (s *Server) verifyPassword(ctx context.Context, hash, password string) bool {
+// loginSlot takes the certificate's one login slot; false when another
+// attempt of that certificate is in progress. With one attempt at a time,
+// the fifth failure locks the next attempt, however many are sent at once
+// (finding C2-03).
+func (s *Server) loginSlot(fp string) (release func(), ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loginBusy[fp] {
+		return nil, false
+	}
+	s.loginBusy[fp] = true
+	return func() {
+		s.mu.Lock()
+		delete(s.loginBusy, fp)
+		s.mu.Unlock()
+	}, true
+}
+
+// hashSlot admits a login to password hashing: at most two hash at a time
+// (64 MiB each) and maxHashWaiting wait; beyond that the hub is busy.
+func (s *Server) hashSlot(ctx context.Context) (release func(), ok bool) {
+	select {
+	case s.hashQueue <- struct{}{}:
+	default:
+		return nil, false
+	}
 	select {
 	case s.hashSem <- struct{}{}:
 	case <-ctx.Done():
-		return false
+		<-s.hashQueue
+		return nil, false
 	}
-	defer func() { <-s.hashSem }()
-	return VerifyPassword(hash, password)
+	return func() { <-s.hashSem; <-s.hashQueue }, true
+}
+
+// locked answers 429 when the certificate's logins are locked at now.
+func (s *Server) locked(w http.ResponseWriter, fp string, now time.Time) (bool, error) {
+	until, err := s.st.LoginLocked(fp, now)
+	if err != nil || until.IsZero() {
+		return false, err
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(int(until.Sub(now).Seconds())+1))
+	writeError(w, http.StatusTooManyRequests, "too many failed logins with this device; try again after %s", until.UTC().Format(time.RFC3339))
+	return true, nil
 }
 
 func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	id := identityOf(r)
-	now := s.now()
 	if s.o.DevNoAuth {
 		var req LoginRequest
 		if !decodeBody(w, r, &req) {
@@ -138,15 +171,19 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		attempt("rate-limited")
 		return
 	}
-	until, err := s.st.LoginLocked(id.Fingerprint, now)
-	if err != nil {
-		s.internal(w, err)
+	release, ok := s.loginSlot(id.Fingerprint)
+	if !ok {
+		attempt("another attempt in progress")
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "another login with this device is in progress")
 		return
 	}
-	if !until.IsZero() {
+	defer release()
+	if lk, err := s.locked(w, id.Fingerprint, s.now()); err != nil {
+		s.internal(w, err)
+		return
+	} else if lk {
 		attempt("locked")
-		w.Header().Set("Retry-After", strconv.Itoa(int(until.Sub(now).Seconds())+1))
-		writeError(w, http.StatusTooManyRequests, "too many failed logins with this device; try again after %s", until.UTC().Format(time.RFC3339))
 		return
 	}
 	var req LoginRequest
@@ -164,12 +201,29 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "%s", errNoPassword.Error())
 		return
 	}
+	done, ok := s.hashSlot(r.Context())
+	if !ok {
+		attempt("busy")
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusTooManyRequests, "the hub is busy with other logins; try again")
+		return
+	}
+	defer done()
+	// The lock is decided again right before the password is looked at.
+	now := s.now()
+	if lk, err := s.locked(w, id.Fingerprint, now); err != nil {
+		s.internal(w, err)
+		return
+	} else if lk {
+		attempt("locked")
+		return
+	}
 	secret, last, err := s.st.TOTP()
 	if err != nil {
 		s.internal(w, err)
 		return
 	}
-	passOK := s.verifyPassword(r.Context(), hash, req.Password)
+	passOK := VerifyPassword(hash, req.Password)
 	codeOK, outcome := true, "wrong password"
 	if secret != "" {
 		var step int64

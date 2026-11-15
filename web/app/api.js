@@ -10,6 +10,10 @@ export class ApiError extends Error {
     this.body = body || {};
     // network: the request did not reach the hub (offline, TLS refused).
     this.network = status === 0;
+    // uncertain: it may have taken effect although no answer came (the
+    // request may have reached the hub; the hub says the machine went
+    // away mid-way or did not answer in time).
+    this.uncertain = status === 0 || !!this.body.uncertain;
   }
 }
 
@@ -53,9 +57,11 @@ export function newID() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// command sends a command and returns the machine's receipt. Failures that
-// may not have reached the machine (network, 502, 504) are retried with the
-// same ID; the machine applies a command ID once.
+// command sends a command and returns the machine's receipt. Failures
+// whose outcome is uncertain (network errors; the hub's 502, 503 and 504
+// that say so) are retried with the same ID, which the machine applies
+// once; after the last attempt the error is still marked uncertain, and
+// the caller keeps the ID to ask for the receipt later.
 export async function command(machine, type, params, wait = 0, id = newID()) {
   let last;
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -63,8 +69,8 @@ export async function command(machine, type, params, wait = 0, id = newID()) {
       return await post('/api/commands', { machine, type, id, params, wait });
     } catch (e) {
       last = e;
-      if (!(e.network || e.status === 502 || e.status === 504)) throw e;
-      await sleep(800 * 2 ** attempt);
+      if (!e.uncertain) throw e;
+      if (attempt < 3) await sleep(800 * 2 ** attempt);
     }
   }
   throw last;

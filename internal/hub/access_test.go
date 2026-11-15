@@ -198,7 +198,7 @@ func (p *proxyServer) req(is *Issued, method, path, body, cookie string, mod fun
 		mod(r)
 	}
 	w := httptest.NewRecorder()
-	p.ServeHTTP(w, r)
+	p.ServeHTTP(deadlineRecorder{w}, r)
 	return w
 }
 
@@ -438,7 +438,7 @@ func TestEveryRouteNeedsACertificate(t *testing.T) {
 		if rt.method != "GET" && (rt.xsite == xsiteRead || rt.xsite == xsiteOpen) {
 			t.Errorf("state-changing route %s %s has a read rule", rt.method, rt.path)
 		}
-		if strings.HasPrefix(rt.path, "/api/") && rt.access != accessUser && rt.path != "/api/login" && !strings.HasPrefix(rt.path, actPrefix) {
+		if strings.HasPrefix(rt.path, "/api/") && rt.access != accessUser && rt.path != "/api/login" && rt.path != actPath {
 			t.Errorf("API route %s %s does not need a login session", rt.method, rt.path)
 		}
 	}
@@ -707,9 +707,10 @@ func TestNotificationText(t *testing.T) {
 		n.Click != pub+"/#/s/m1/s0000000000000000000a" || !strings.Contains(strings.Join(n.Tags, ","), SectionNeedsYou) {
 		t.Errorf("needs-you: %+v", n)
 	}
-	if len(n.Actions) != 3 || n.Actions[0].Action != "http" || n.Actions[0].Label != "red" || n.Actions[0].URL != pub+"/api/act/tokA" ||
-		n.Actions[0].Method != "POST" || n.Actions[0].Headers[RequestHeader] != "1" || !n.Actions[0].Clear ||
-		n.Actions[1].URL != pub+"/api/act/tokB" || len([]rune(n.Actions[1].Label)) != maxLabel ||
+	// The token travels in a header; the URL is the same for every button.
+	if len(n.Actions) != 3 || n.Actions[0].Action != "http" || n.Actions[0].Label != "red" || n.Actions[0].URL != pub+"/api/act" ||
+		n.Actions[0].Method != "POST" || n.Actions[0].Headers[RequestHeader] != "1" || n.Actions[0].Headers[ActionHeader] != "tokA" || !n.Actions[0].Clear ||
+		n.Actions[1].URL != pub+"/api/act" || n.Actions[1].Headers[ActionHeader] != "tokB" || len([]rune(n.Actions[1].Label)) != maxLabel ||
 		n.Actions[2].Action != "view" || n.Actions[2].Label != "Open" || n.Actions[2].URL != n.Click {
 		t.Errorf("buttons: %+v", n.Actions)
 	}
@@ -833,13 +834,16 @@ func TestNotifier(t *testing.T) {
 		n.Actions[0].Label != "red" || n.Actions[1].Label != "blue" || n.Actions[2].Label != "Open" {
 		t.Fatalf("published %+v", pub)
 	}
-	tokRed := strings.TrimPrefix(n.Actions[0].URL, "https://hub.test"+actPrefix)
-	tokBlue := strings.TrimPrefix(n.Actions[1].URL, "https://hub.test"+actPrefix)
+	if n.Actions[0].URL != "https://hub.test"+actPath || n.Actions[1].URL != n.Actions[0].URL {
+		t.Errorf("button URLs %q %q", n.Actions[0].URL, n.Actions[1].URL)
+	}
+	tokRed, tokBlue := n.Actions[0].Headers[ActionHeader], n.Actions[1].Headers[ActionHeader]
 	act := func(tok string, cookie bool, mod func(*http.Request)) (int, string) {
-		req, _ := http.NewRequest("POST", "http://"+addr+actPrefix+tok, nil)
+		req, _ := http.NewRequest("POST", "http://"+addr+actPath, nil)
 		req.Host = "hub.test"
 		req.Header.Set(ProxyHeader, proxyHeader(dev))
 		req.Header.Set(RequestHeader, "1")
+		req.Header.Set(ActionHeader, tok)
 		if mod != nil {
 			mod(req)
 		}
@@ -859,6 +863,12 @@ func TestNotifier(t *testing.T) {
 	}
 	if code, _ := act(tokRed, false, func(r *http.Request) { r.Header.Set(ProxyHeader, proxyHeader(mach)) }); code != 403 {
 		t.Errorf("a button with a machine certificate: %d", code)
+	}
+	if code, _ := act(tokRed, false, func(r *http.Request) { r.Header.Add(ActionHeader, tokBlue) }); code != 404 {
+		t.Errorf("a button with two tokens: %d", code)
+	}
+	if code, _ := act("", false, func(r *http.Request) { r.Header.Del(ActionHeader) }); code != 404 {
+		t.Errorf("a button without a token: %d", code)
 	}
 	// The button needs the device certificate, no login, and performs
 	// exactly the bound answer.
@@ -895,25 +905,43 @@ func TestNotifier(t *testing.T) {
 	m.notify(m.add(s2, proto.TypeState, proto.State{State: "done"}))
 	waitFor(t, "s2 finished", func() bool { return api.detail(s2, "").Session.Section == SectionFinished })
 	sse.close()
-	// Nor for a machine that has not named this hub its notifier.
+	// Nor for a machine that has not named this hub its notifier: the
+	// states are recorded as pending (finding C2-13).
 	if err := conn.Call(ctx, proto.MethodHubRole, proto.HubRole{Notifier: false}, nil); err != nil {
 		t.Fatal(err)
 	}
 	m.notify(m.add(s3, proto.TypeState, proto.State{State: "error"}))
 	waitFor(t, "s3 failed", func() bool { return api.detail(s3, "").Session.Section == SectionFailed })
-	// A finished turn with the notifier role again is published.
+	// A question that is answered before the role comes back is dropped.
+	m.notify(m.add(s1, proto.TypeQuestion, proto.Question{ID: "q2", Text: "again?", Options: []string{"yes"}}))
+	m.notify(m.add(s1, proto.TypeState, proto.State{State: "blocked", Kind: "question"}))
+	waitFor(t, "s1 needs you", func() bool { return api.detail(s1, "").Session.Section == SectionNeedsYou })
+	m.notify(m.add(s1, proto.TypeAnswer, proto.Answer{Question: "q2", Choice: 1, Via: "screen"}))
+	m.notify(m.add(s1, proto.TypeState, proto.State{State: "working"}))
+	waitFor(t, "s1 working again", func() bool { return api.detail(s1, "").Session.Section == SectionWorking })
+	time.Sleep(200 * time.Millisecond)
+	if n := len(ntfy.requests()); n != 2 {
+		t.Errorf("published without the notifier role: %+v", ntfy.requests()[2:])
+	}
+	// With the role again, what is still pending and still current goes
+	// out: s3 failed, not the answered question.
 	if err := conn.Call(ctx, proto.MethodHubRole, proto.HubRole{Notifier: true}, nil); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, "the pending message", func() bool { return len(ntfy.requests()) >= 3 })
+	if f := ntfy.requests()[2].note; f.Message != "The session failed." || f.Click != "https://hub.test/#/s/m1/"+s3 {
+		t.Errorf("pending at hand-over: %+v", f)
+	}
+	// A finished turn is published.
 	m.notify(m.add(s1, proto.TypePrompt, proto.Prompt{SHA256: strings.Repeat("b", 64), Length: 4, Text: "next"}))
 	m.notify(m.add(s1, proto.TypeMessage, proto.Message{Text: "red it is"}))
 	m.notify(m.add(s1, proto.TypeState, proto.State{State: "done"}))
-	waitFor(t, "the finished message", func() bool { return len(ntfy.requests()) >= 3 })
-	if f := ntfy.requests()[2].note; f.Message != "red it is" || f.Priority != 3 || len(f.Actions) != 1 {
+	waitFor(t, "the finished message", func() bool { return len(ntfy.requests()) >= 4 })
+	if f := ntfy.requests()[3].note; f.Message != "red it is" || f.Priority != 3 || len(f.Actions) != 1 {
 		t.Errorf("finished: %+v", f)
 	}
 	time.Sleep(300 * time.Millisecond)
-	if n := len(ntfy.requests()); n != 3 {
+	if n := len(ntfy.requests()); n != 4 {
 		t.Errorf("%d requests to ntfy: %+v", n, ntfy.requests())
 	}
 }

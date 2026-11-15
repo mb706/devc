@@ -13,11 +13,21 @@ package hub
 // their results come back through the same queue as the notifications.
 // Otherwise a worker waiting for an answer while the reader waits for room
 // in the queue (a large replay) would stall both.
+//
+// A machine is authenticated but may be compromised (finding C2-01, C2-02):
+// everything it can make the hub fetch or store is bounded. A refresh asks
+// for at most MaxMachineSessions sessions, needs strictly advancing pages,
+// and has a byte budget and an overall deadline; sessions read again
+// (sessions.get) go through a small queue served by a few workers, and
+// capacity is reserved for stored plus outstanding sessions. A machine
+// that breaks a bound has its link closed; its daemon reconnects with
+// backoff.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -43,12 +53,29 @@ const (
 	// maxBuffered bounds the events held back for a session being read
 	// again; beyond it the session is read once more afterwards.
 	maxBuffered = 2000
+	// resyncWorkers sessions are read again at a time.
+	resyncWorkers = 4
 )
 
-// MaxMachineSessions bounds the sessions the hub keeps per machine, so a
-// misbehaving machine cannot grow the database without end (sessions that
-// ended before the window are pruned every hour).
-var MaxMachineSessions = 20000
+// Bounds of what a machine can make the hub fetch or hold (variables so
+// tests can shrink them).
+var (
+	// MaxMachineSessions bounds the sessions the hub keeps per machine, so a
+	// misbehaving machine cannot grow the database without end (sessions
+	// that ended before the window are pruned every hour). Sessions being
+	// read again count against it.
+	MaxMachineSessions = 20000
+	// refreshBytes bounds the answers of one refresh; refreshDeadline its
+	// duration.
+	refreshBytes    = 64 << 20
+	refreshDeadline = 2 * time.Minute
+	// resyncQueueMax bounds the sessions waiting to be read again; beyond
+	// it a gap is left for the next refresh to find.
+	resyncQueueMax = 256
+	// maxHeldTotal bounds the events held back for all sessions being read
+	// again.
+	maxHeldTotal = 20000
+)
 
 // Change kinds of the change log (and of server-sent events).
 const (
@@ -97,6 +124,7 @@ const (
 	itemHeartbeat
 	itemKick   // refresh the requests
 	itemResult // the result of a call
+	itemPrune  // remove sessions that ended before cutoff
 )
 
 type linkItem struct {
@@ -104,11 +132,21 @@ type linkItem struct {
 	event  proto.EventNote
 	missed proto.MissedNote
 	result func(t *Tx) error // applied in the worker, in a transaction
+	cutoff time.Time
 }
 
 type sessState struct {
 	view    proto.SessionView
 	lastSeq int64
+}
+
+// resync is a session waiting to be read again or being read: its project
+// (the read names it, finding C1-01), the events held back meanwhile, and
+// whether it must be read once more afterwards.
+type resync struct {
+	ref   string
+	held  []proto.Event
+	again bool
 }
 
 type machineLink struct {
@@ -127,10 +165,18 @@ type machineLink struct {
 	queue chan linkItem
 
 	// Worker state (only the worker touches it).
-	sessions   map[string]*sessState
-	pending    map[string]map[string]string // session → request ID → status
-	resyncing  map[string][]proto.Event     // sessions being read again, with the events held back
-	again      map[string]bool              // read once more when the current read is done
+	sessions map[string]*sessState
+	pending  map[string]map[string]string // session → request ID → status
+	// resyncing holds the sessions waiting in resyncQ or being read
+	// (resyncActive of them); heldTotal counts their held-back events.
+	resyncing    map[string]*resync
+	resyncQ      []string
+	resyncActive int
+	heldTotal    int
+	// resyncLost: a gap could not be queued; the next refresh reads every
+	// session that is behind the machine's list.
+	resyncLost bool
+	warnedFull bool
 	caughtUp   bool
 	refreshing bool
 	requesting bool
@@ -170,7 +216,7 @@ func (s *Server) serveLink(open func(context.Context) io.ReadWriteCloser, id Ide
 	ctx, cancel := context.WithCancel(s.ctx)
 	l := &machineLink{s: s, name: id.Name, fp: id.Fingerprint, ctx: ctx, cancel: cancel, done: make(chan struct{}),
 		helloCh: make(chan struct{}), queue: make(chan linkItem, linkQueue), terms: map[string]*termSink{}}
-	live := s.addLive(id.Fingerprint, cancel)
+	live := s.addLive(id, cancel)
 	defer s.dropLive(live)
 	defer close(l.done)
 	defer cancel()
@@ -344,16 +390,23 @@ func (l *machineLink) async(fn func() func(*Tx) error) {
 }
 
 func (l *machineLink) call(method string, params, result any) error {
-	ctx, cancel := context.WithTimeout(l.ctx, time.Minute)
+	_, err := l.callCtx(l.ctx, method, params, result)
+	return err
+}
+
+// callCtx calls the machine within ctx (and a minute) and returns the size
+// of the answer.
+func (l *machineLink) callCtx(ctx context.Context, method string, params, result any) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	var raw json.RawMessage
 	if err := l.conn.Call(ctx, method, params, &raw); err != nil {
-		return err
+		return 0, err
 	}
 	if result == nil {
-		return nil
+		return len(raw), nil
 	}
-	return proto.DecodeResult(raw, result)
+	return len(raw), proto.DecodeResult(raw, result)
 }
 
 // fail ends the link after a failed call.
@@ -412,15 +465,18 @@ func (l *machineLink) run() {
 	}
 }
 
-// load reads the machine's sessions and pending requests.
+// load reads the machine's sessions and pending requests. Pruning of an
+// offline machine's sessions (Server.pruneSessions) holds pruneMu, so the
+// link starts from the pruned rows.
 func (l *machineLink) load() error {
+	l.s.pruneMu.RLock()
+	defer l.s.pruneMu.RUnlock()
 	rows, err := l.s.st.Sessions(SessionFilter{Machine: l.name})
 	if err != nil {
 		return err
 	}
 	l.sessions = map[string]*sessState{}
-	l.resyncing = map[string][]proto.Event{}
-	l.again = map[string]bool{}
+	l.resyncing = map[string]*resync{}
 	for _, r := range rows {
 		l.sessions[r.View.Session] = &sessState{view: r.View, lastSeq: r.LastSeq}
 	}
@@ -450,7 +506,9 @@ func (l *machineLink) start() {
 	cursor := proto.Cursor{}
 	for id, st := range l.sessions {
 		if st.view.Live || st.view.LastEvent.After(cutoff) {
-			cursor[id] = st.lastSeq
+			// Keyed by project and ID, so the cursor applies to this
+			// project's session only (finding C1-01).
+			cursor[proto.SessionKey(st.view.Ref, id)] = st.lastSeq
 		}
 	}
 	window := int64(l.s.o.Window / time.Second)
@@ -533,6 +591,10 @@ func (l *machineLink) process(batch []linkItem) error {
 				if err := it.result(t); err != nil {
 					return err
 				}
+			case itemPrune:
+				if err := l.prune(t, bs, it.cutoff); err != nil {
+					return err
+				}
 			}
 		}
 		for sid := range bs.touched {
@@ -568,28 +630,36 @@ func (l *machineLink) process(batch []linkItem) error {
 // applyEvent folds one event into its session.
 func (l *machineLink) applyEvent(t *Tx, bs *batchState, ref string, ev proto.Event) error {
 	sid := ev.Session
-	if held, ok := l.resyncing[sid]; ok {
-		if len(held) >= maxBuffered {
-			l.again[sid] = true
-			l.resyncing[sid] = held[:0]
-		} else {
-			l.resyncing[sid] = append(held, ev)
+	if r, ok := l.resyncing[sid]; ok {
+		switch {
+		case r.ref != ref || r.again:
+			// Another project's session with this ID, or one that is read
+			// once more anyway.
+		case len(r.held) >= maxBuffered || l.heldTotal >= maxHeldTotal:
+			r.again = true
+			l.heldTotal -= len(r.held)
+			r.held = nil
+		default:
+			r.held = append(r.held, ev)
+			l.heldTotal++
 		}
 		return nil
 	}
 	st := l.sessions[sid]
 	switch {
+	case st != nil && st.view.Ref != ref:
+		// The hub keeps one session per ID and machine; an ID in another
+		// project (only from before session ownership) is not mixed in.
+		return nil
 	case st != nil && ev.Seq <= st.lastSeq:
 		return nil
-	case st != nil && st.view.Ref != ref:
-		return nil
-	case st == nil && len(l.sessions) >= MaxMachineSessions:
-		l.s.log.Warn("machine link: too many sessions; new ones are not kept", "machine", l.name)
+	case st == nil && l.used() >= MaxMachineSessions:
+		l.full()
 		return nil
 	case st == nil && ev.Seq != 1, st != nil && ev.Seq > st.lastSeq+1:
 		// A gap: read the session again from the machine, holding back
 		// what arrives meanwhile.
-		l.startResync(sid, []proto.Event{ev})
+		l.startResync(sid, ref, []proto.Event{ev})
 		return nil
 	case st == nil:
 		realm, project, _ := splitRef(ref)
@@ -622,18 +692,23 @@ func splitRef(ref string) (string, string, bool) {
 }
 
 // applyMissed handles a session the machine cannot serve from the cursor.
+// Only a session the hub holds, of the project it holds it for, is acted
+// on: a missed notification for anything else could otherwise make the hub
+// fetch sessions without bound (finding C2-02). A session the hub does not
+// hold yet is found by the next refresh.
 func (l *machineLink) applyMissed(t *Tx, bs *batchState, n proto.MissedNote) error {
 	sid := n.Session
-	if l.sessions[sid] == nil && n.Ref == "" {
+	st := l.sessions[sid]
+	if st == nil || (n.Ref != "" && n.Ref != st.view.Ref) {
 		return nil
 	}
 	if n.Ref != "" {
 		if _, ok := l.resyncing[sid]; !ok {
-			l.startResync(sid, nil)
+			l.startResync(sid, st.view.Ref, nil)
 		}
 		return nil
 	}
-	// The machine has no journal for it any more.
+	// A daemon from before keyed cursors: no journal for it any more.
 	delete(bs.touched, sid)
 	return l.removeSession(t, sid)
 }
@@ -646,31 +721,98 @@ func (l *machineLink) removeSession(t *Tx, sid string) error {
 	return t.AddChange(ChangeSessionRemoved, l.name, sid, SessionKey{Machine: l.name, Session: sid})
 }
 
-// startResync reads a session again from the machine (sessions.get: its
-// view and the most recent events); held are events to apply afterwards.
-func (l *machineLink) startResync(sid string, held []proto.Event) {
-	l.resyncing[sid] = held
-	l.async(func() func(*Tx) error {
-		var res proto.SessionsGetResult
-		err := l.call(proto.MethodSessionsGet, proto.SessionsGetParams{Session: sid, Events: TailEvents}, &res)
-		gone := proto.IsCode(err, proto.CodeNotFound)
-		if err != nil && !gone {
-			return l.fail("reading a session again", err)
+// used counts the sessions held and those being read for the first time:
+// both count against MaxMachineSessions.
+func (l *machineLink) used() int {
+	n := len(l.sessions)
+	for sid := range l.resyncing {
+		if l.sessions[sid] == nil {
+			n++
 		}
-		return func(t *Tx) error { return l.finishResync(t, sid, res, gone) }
-	})
+	}
+	return n
+}
+
+// full logs, once per link, that new sessions are not kept.
+func (l *machineLink) full() {
+	if !l.warnedFull {
+		l.warnedFull = true
+		l.s.log.Warn("machine link: too many sessions; new ones are not kept", "machine", l.name, "max", MaxMachineSessions)
+	}
+}
+
+// startResync queues a session to be read again from the machine
+// (sessions.get of project ref: its view and the most recent events); held
+// are events to apply afterwards. A full queue, or no capacity for a session
+// the hub does not hold, leaves it for a later refresh.
+func (l *machineLink) startResync(sid, ref string, held []proto.Event) bool {
+	if _, ok := l.resyncing[sid]; ok {
+		return true
+	}
+	if len(l.resyncQ) >= resyncQueueMax {
+		l.resyncLost = true
+		return false
+	}
+	if l.sessions[sid] == nil && l.used() >= MaxMachineSessions {
+		l.full()
+		return false
+	}
+	if len(held) > 0 && l.heldTotal+len(held) > maxHeldTotal {
+		held = nil
+	}
+	l.resyncing[sid] = &resync{ref: ref, held: held}
+	l.heldTotal += len(held)
+	l.resyncQ = append(l.resyncQ, sid)
+	l.pumpResync()
+	return true
+}
+
+// pumpResync starts reads from the queue while a worker is free.
+func (l *machineLink) pumpResync() {
+	for l.resyncActive < resyncWorkers && len(l.resyncQ) > 0 {
+		sid := l.resyncQ[0]
+		l.resyncQ = l.resyncQ[1:]
+		r := l.resyncing[sid]
+		if r == nil {
+			continue
+		}
+		l.resyncActive++
+		ref := r.ref
+		l.async(func() func(*Tx) error {
+			var res proto.SessionsGetResult
+			err := l.call(proto.MethodSessionsGet, proto.SessionsGetParams{Session: sid, Ref: ref, Events: TailEvents}, &res)
+			gone := proto.IsCode(err, proto.CodeNotFound)
+			if err != nil && !gone {
+				return l.fail("reading a session again", err)
+			}
+			return func(t *Tx) error { return l.finishResync(t, sid, res, gone) }
+		})
+	}
 }
 
 func (l *machineLink) finishResync(t *Tx, sid string, res proto.SessionsGetResult, gone bool) error {
-	held := l.resyncing[sid]
+	l.resyncActive--
+	l.after = append(l.after, l.pumpResync)
+	r := l.resyncing[sid]
 	delete(l.resyncing, sid)
+	if r == nil {
+		return nil
+	}
+	l.heldTotal -= len(r.held)
+	known := l.sessions[sid] != nil
 	if gone {
-		delete(l.again, sid)
-		return l.removeSession(t, sid)
+		if known {
+			return l.removeSession(t, sid)
+		}
+		return nil
 	}
 	v := res.Session
-	if v.Session != sid || cleanView(&v, l.name) != nil {
+	if v.Session != sid || v.Ref != r.ref || cleanView(&v, l.name) != nil {
 		l.s.log.Warn("machine link: invalid session view dropped", "machine", l.name, "session", sid)
+		return nil
+	}
+	if !known && len(l.sessions) >= MaxMachineSessions {
+		l.full()
 		return nil
 	}
 	var evs []proto.Event
@@ -680,6 +822,9 @@ func (l *machineLink) finishResync(t *Tx, sid string, res proto.SessionsGetResul
 		}
 	}
 	sort.Slice(evs, func(i, j int) bool { return evs[i].Seq < evs[j].Seq })
+	if len(evs) > TailEvents {
+		evs = evs[len(evs)-TailEvents:]
+	}
 	last := v.LastSeq
 	for i := range evs {
 		if evs[i].Seq > last {
@@ -711,13 +856,12 @@ func (l *machineLink) finishResync(t *Tx, sid string, res proto.SessionsGetResul
 		return err
 	}
 	l.s.log.Debug("machine link: session read again", "machine", l.name, "session", sid, "last_seq", last)
-	if l.again[sid] {
-		delete(l.again, sid)
-		l.startResync(sid, nil)
+	if r.again {
+		l.startResync(sid, r.ref, nil)
 		return nil
 	}
 	bs := &batchState{touched: map[string]bool{}}
-	for _, ev := range held {
+	for _, ev := range r.held {
 		if err := l.applyEvent(t, bs, v.Ref, ev); err != nil {
 			return err
 		}
@@ -748,26 +892,14 @@ func (l *machineLink) startRefresh() {
 	l.refreshing = true
 	since := l.s.now().Add(-l.s.o.Window)
 	l.async(func() func(*Tx) error {
-		var views []proto.SessionView
-		after := ""
-		for {
-			var res proto.SessionsListResult
-			if err := l.call(proto.MethodSessionsList, proto.SessionsListParams{Since: since, After: after, Limit: sessionsPageSize}, &res); err != nil {
-				return l.fail("listing sessions", err)
-			}
-			for i := range res.Sessions {
-				v := res.Sessions[i]
-				if cleanView(&v, l.name) == nil {
-					views = append(views, v)
-				}
-			}
-			if !res.More || len(res.Sessions) == 0 {
-				break
-			}
-			after = res.Sessions[len(res.Sessions)-1].Session
+		ctx, cancel := context.WithTimeout(l.ctx, refreshDeadline)
+		defer cancel()
+		views, err := l.listSessions(ctx, since)
+		if err != nil {
+			return l.fail("listing sessions", err)
 		}
 		var boxes []proto.BoxView
-		if err := l.call(proto.MethodBoxesList, nil, &boxes); err != nil {
+		if _, err := l.callCtx(ctx, proto.MethodBoxesList, nil, &boxes); err != nil {
 			return l.fail("listing boxes", err)
 		}
 		boxes = cleanBoxes(boxes)
@@ -775,8 +907,58 @@ func (l *machineLink) startRefresh() {
 	})
 }
 
+// errBound is a machine breaking a bound of the link.
+var errBound = errors.New("the machine broke a bound of the hub")
+
+// listSessions pages through sessions.list within ctx. The hub asks for at
+// most MaxMachineSessions sessions in all; a page with more than asked, a
+// page that does not advance strictly past the previous one (sessions come
+// ordered by ID, then project), or answers above refreshBytes are a broken
+// bound (finding C2-01).
+func (l *machineLink) listSessions(ctx context.Context, since time.Time) ([]proto.SessionView, error) {
+	var views []proto.SessionView
+	after, lastID, lastRef := "", "", ""
+	received, size := 0, 0
+	for received < MaxMachineSessions {
+		limit := min(sessionsPageSize, MaxMachineSessions-received)
+		var res proto.SessionsListResult
+		n, err := l.callCtx(ctx, proto.MethodSessionsList, proto.SessionsListParams{Since: since, After: after, Limit: limit}, &res)
+		if err != nil {
+			return nil, err
+		}
+		size += n
+		switch {
+		case size > refreshBytes:
+			return nil, fmt.Errorf("%w: more than %d bytes of sessions", errBound, refreshBytes)
+		case len(res.Sessions) > limit:
+			return nil, fmt.Errorf("%w: %d sessions where %d were asked for", errBound, len(res.Sessions), limit)
+		case res.More && len(res.Sessions) == 0:
+			return nil, fmt.Errorf("%w: an empty page that says more follow", errBound)
+		}
+		for i := range res.Sessions {
+			v := res.Sessions[i]
+			if received > 0 && (v.Session < lastID || (v.Session == lastID && v.Ref <= lastRef)) {
+				return nil, fmt.Errorf("%w: the session list does not advance", errBound)
+			}
+			received++
+			lastID, lastRef = v.Session, v.Ref
+			if cleanView(&v, l.name) == nil {
+				views = append(views, v)
+			}
+		}
+		if !res.More {
+			return views, nil
+		}
+		after = proto.SessionKey(lastRef, lastID)
+	}
+	l.full()
+	return views, nil
+}
+
 func (l *machineLink) finishRefresh(t *Tx, views []proto.SessionView, boxes []proto.BoxView) error {
 	l.refreshing = false
+	lost := l.resyncLost
+	l.resyncLost = false
 	for _, v := range views {
 		if _, busy := l.resyncing[v.Session]; busy {
 			continue
@@ -785,10 +967,16 @@ func (l *machineLink) finishRefresh(t *Tx, views []proto.SessionView, boxes []pr
 		changed := false
 		switch {
 		case st == nil:
-			// Not covered by the stream: read it with its tail.
-			if len(l.sessions)+len(l.resyncing) < MaxMachineSessions {
-				l.startResync(v.Session, nil)
-			}
+			// Not covered by the stream: read it with its tail (when it
+			// fits).
+			l.startResync(v.Session, v.Ref, nil)
+			continue
+		case st.view.Ref != v.Ref:
+			// Another project's session with this ID (see applyEvent).
+			continue
+		case lost && st.lastSeq < v.LastSeq:
+			// A gap that could not be queued earlier.
+			l.startResync(v.Session, v.Ref, nil)
 			continue
 		case st.lastSeq == v.LastSeq:
 			a, _ := json.Marshal(st.view)
@@ -816,6 +1004,41 @@ func (l *machineLink) finishRefresh(t *Tx, views []proto.SessionView, boxes []pr
 		return err
 	}
 	l.after = append(l.after, l.startRequests)
+	return nil
+}
+
+// requestPrune asks the worker to remove the sessions that ended before
+// cutoff, so the database and the worker's sessions (which decide the
+// capacity) agree (finding C2-15). A worker that makes no room is skipped
+// this time.
+func (l *machineLink) requestPrune(cutoff time.Time) {
+	t := time.NewTimer(5 * time.Second)
+	defer t.Stop()
+	select {
+	case l.queue <- linkItem{kind: itemPrune, cutoff: cutoff}:
+	case <-l.ctx.Done():
+	case <-t.C:
+	}
+}
+
+// prune removes the sessions that ended before cutoff, with a removal for
+// the clients.
+func (l *machineLink) prune(t *Tx, bs *batchState, cutoff time.Time) error {
+	n := 0
+	for sid, st := range l.sessions {
+		if _, busy := l.resyncing[sid]; busy || st.view.Live || st.view.LastEvent.After(cutoff) {
+			continue
+		}
+		delete(bs.touched, sid)
+		if err := l.removeSession(t, sid); err != nil {
+			return err
+		}
+		n++
+	}
+	if n > 0 {
+		l.s.log.Info("pruned old sessions", "machine", l.name, "sessions", n)
+		l.warnedFull = false
+	}
 	return nil
 }
 

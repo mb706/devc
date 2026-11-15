@@ -3,7 +3,7 @@
 // filters for machine, realm and project.
 
 import { html } from './lib.js';
-import { useStore } from './store.js';
+import { useStore, stale } from './store.js';
 import { Icon, StateBadge, TopBar, Empty, sectionInfo, ago, useNow } from './ui.js';
 
 const ORDER = ['needs-you', 'failed', 'finished', 'working', 'idle'];
@@ -20,13 +20,14 @@ function line(s) {
 export function SessionRow({ s, now, showRealm = true }) {
   const where = [s.harness || 'harness?', s.machine].join(' · ');
   const name = `${showRealm ? s.realm + '/' : ''}${s.project}`;
-  return html`<li><a class=${'row' + (s.stale ? ' stale' : '')} href=${`#/s/${encodeURIComponent(s.machine)}/${s.session}`}>
+  const off = stale(s);
+  return html`<li><a class=${'row' + (off ? ' stale' : '')} href=${`#/s/${encodeURIComponent(s.machine)}/${s.session}`}>
     <div class="row-top">
       <span class="row-title">${name}<span class="wt"> · ${s.worktree || 'main'}</span></span>
       <span class="row-time">${ago(s.last_event, now)}</span>
     </div>
     <div class="row-meta"><${StateBadge} s=${s} /><span class="where">${where}</span>
-      ${s.stale ? html`<span class="tag"><${Icon} name="offline" />machine offline</span>` : null}</div>
+      ${off ? html`<span class="tag"><${Icon} name="offline" />machine offline</span>` : null}</div>
     ${line(s) ? html`<div class="row-text">${line(s)}</div>` : null}
   </a></li>`;
 }

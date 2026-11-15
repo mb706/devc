@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -26,11 +27,20 @@ type fakeMachine struct {
 	mu       sync.Mutex
 	journals map[string][]proto.Event
 	cursors  []proto.Cursor
-	gets     []string
+	gets     []proto.SessionsGetParams
 	reads    []proto.EventsReadParams
 	commands []json.RawMessage
 	answers  []proto.AnswerParams
 	conn     *proto.Conn
+	// readCap, when set, is the most events one events.read returns (the
+	// daemon's byte cap), with More.
+	readCap int
+	// list, when set, answers sessions.list instead (a hostile machine).
+	list func(p proto.SessionsListParams) (any, error)
+	// getHook, when set, runs (unlocked) before sessions.get answers.
+	getHook func(p proto.SessionsGetParams)
+	// sendDelay delays the answer to session.send.
+	sendDelay time.Duration
 }
 
 func newFakeMachine(t *testing.T) *fakeMachine {
@@ -39,11 +49,16 @@ func newFakeMachine(t *testing.T) *fakeMachine {
 
 // add appends an event to a session's journal and returns it.
 func (m *fakeMachine) add(sid, typ string, data any) proto.Event {
+	return m.addAt(sid, typ, data, time.Now())
+}
+
+// addAt appends an event ingested at a given time.
+func (m *fakeMachine) addAt(sid, typ string, data any, at time.Time) proto.Event {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	ev, _ := proto.New(sid, typ, data, time.Now())
+	ev, _ := proto.New(sid, typ, data, at)
 	ev.Seq = int64(len(m.journals[sid]) + 1)
-	ev.At = time.Now().UTC().Format(time.RFC3339Nano)
+	ev.At = at.UTC().Format(time.RFC3339Nano)
 	m.journals[sid] = append(m.journals[sid], ev)
 	return ev
 }
@@ -66,6 +81,31 @@ func (m *fakeMachine) view(sid string) proto.SessionView {
 	return v
 }
 
+// listPage answers sessions.list as the daemon does: ordered by ID (one
+// project here), in pages after After.
+func (m *fakeMachine) listPage(p proto.SessionsListParams) proto.SessionsListResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var ids []string
+	for sid := range m.journals {
+		ids = append(ids, sid)
+	}
+	sort.Strings(ids)
+	_, after, _ := proto.ParseSessionKey(p.After)
+	res := proto.SessionsListResult{Sessions: []proto.SessionView{}}
+	for _, sid := range ids {
+		if p.After != "" && sid <= after {
+			continue
+		}
+		if p.Limit > 0 && len(res.Sessions) >= p.Limit {
+			res.More = true
+			break
+		}
+		res.Sessions = append(res.Sessions, m.view(sid))
+	}
+	return res
+}
+
 func (m *fakeMachine) handlers() map[string]proto.Handler {
 	return map[string]proto.Handler{
 		proto.MethodDaemonInfo: func(context.Context, *proto.Conn, json.RawMessage) (any, error) {
@@ -81,7 +121,7 @@ func (m *fakeMachine) handlers() map[string]proto.Handler {
 			var replay []proto.Event
 			for sid, evs := range m.journals {
 				for _, ev := range evs {
-					if ev.Seq > p.Cursor[sid] {
+					if ev.Seq > p.Cursor[proto.SessionKey(m.ref, sid)] {
 						replay = append(replay, ev)
 					}
 				}
@@ -95,14 +135,18 @@ func (m *fakeMachine) handlers() map[string]proto.Handler {
 			}()
 			return proto.SubscribeResult{Instance: "abcd"}, nil
 		},
-		proto.MethodSessionsList: func(context.Context, *proto.Conn, json.RawMessage) (any, error) {
-			m.mu.Lock()
-			defer m.mu.Unlock()
-			res := proto.SessionsListResult{Sessions: []proto.SessionView{}}
-			for sid := range m.journals {
-				res.Sessions = append(res.Sessions, m.view(sid))
+		proto.MethodSessionsList: func(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
+			var p proto.SessionsListParams
+			if err := proto.DecodeParams(params, &p); err != nil {
+				return nil, err
 			}
-			return res, nil
+			m.mu.Lock()
+			list := m.list
+			m.mu.Unlock()
+			if list != nil {
+				return list(p)
+			}
+			return m.listPage(p), nil
 		},
 		proto.MethodSessionsGet: func(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 			var p proto.SessionsGetParams
@@ -110,8 +154,14 @@ func (m *fakeMachine) handlers() map[string]proto.Handler {
 				return nil, err
 			}
 			m.mu.Lock()
+			hook := m.getHook
+			m.mu.Unlock()
+			if hook != nil {
+				hook(p)
+			}
+			m.mu.Lock()
 			defer m.mu.Unlock()
-			m.gets = append(m.gets, p.Session)
+			m.gets = append(m.gets, p)
 			evs, ok := m.journals[p.Session]
 			if !ok {
 				return nil, proto.Errorf(proto.CodeNotFound, "no session")
@@ -131,9 +181,14 @@ func (m *fakeMachine) handlers() map[string]proto.Handler {
 			m.reads = append(m.reads, p)
 			res := proto.EventsReadResult{Ref: m.ref, Events: []proto.Event{}}
 			for _, ev := range m.journals[p.Session] {
-				if ev.Seq > p.From && len(res.Events) < p.Limit {
-					res.Events = append(res.Events, ev)
+				if ev.Seq <= p.From || len(res.Events) >= p.Limit {
+					continue
 				}
+				if m.readCap > 0 && len(res.Events) >= m.readCap {
+					res.More = true
+					break
+				}
+				res.Events = append(res.Events, ev)
 			}
 			return res, nil
 		},
@@ -161,7 +216,9 @@ func (m *fakeMachine) handlers() map[string]proto.Handler {
 			}
 			m.mu.Lock()
 			m.commands = append(m.commands, params)
+			delay := m.sendDelay
 			m.mu.Unlock()
+			time.Sleep(delay)
 			now := time.Now().UTC()
 			return proto.Receipt{Command: p.ID, Kind: proto.CommandSend, Session: p.Session, Outcome: proto.OutcomeAccepted, Accepted: now, At: now}, nil
 		},
@@ -171,6 +228,14 @@ func (m *fakeMachine) handlers() map[string]proto.Handler {
 // runHub starts a hub behind a "proxy" on loopback and returns its address.
 func runHub(t *testing.T, h *testHub) (string, *Server) {
 	t.Helper()
+	addr, s, stop := startHub(t, h)
+	t.Cleanup(stop)
+	return addr, s
+}
+
+// startHub starts a hub and returns a function that stops it (once).
+func startHub(t *testing.T, h *testHub) (string, *Server, func()) {
+	t.Helper()
 	ready := make(chan string, 1)
 	s, err := New(Options{Dir: h.dir, BehindProxy: true, Listen: "127.0.0.1:0", Ready: func(a string) { ready <- a }})
 	if err != nil {
@@ -179,21 +244,24 @@ func runHub(t *testing.T, h *testHub) (string, *Server) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(15 * time.Second):
-			t.Error("the hub did not stop")
-		}
-	})
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(15 * time.Second):
+				t.Error("the hub did not stop")
+			}
+		})
+	}
 	select {
 	case a := <-ready:
-		return a, s
+		return a, s, stop
 	case err := <-done:
 		t.Fatal(err)
 	}
-	return "", nil
+	return "", nil, nil
 }
 
 // connect dials the hub as a machine and says hello.
@@ -204,7 +272,9 @@ func (m *fakeMachine) connect(addr string, cert *Issued) *proto.Conn {
 	if err != nil {
 		m.t.Fatal(err)
 	}
-	c := proto.NewConn(wsconn.New(ctx, ws), proto.Options{Handlers: m.handlers(), Workers: 4})
+	// More workers than the hub's resync workers, so a hub that asked
+	// more at once would be seen.
+	c := proto.NewConn(wsconn.New(ctx, ws), proto.Options{Handlers: m.handlers(), Workers: 16})
 	m.mu.Lock()
 	m.conn = c
 	m.mu.Unlock()
@@ -355,10 +425,10 @@ func TestMachineLink(t *testing.T) {
 		t.Errorf("after the gap: %s %+v", seqsOf(d.Events), d.Session)
 	}
 	m.mu.Lock()
-	gets := strings.Join(m.gets, " ")
+	gets := append([]proto.SessionsGetParams(nil), m.gets...)
 	m.mu.Unlock()
-	if gets != s1 {
-		t.Errorf("sessions.get calls: %q", gets)
+	if len(gets) != 1 || gets[0].Session != s1 || gets[0].Ref != "demo/hello" {
+		t.Errorf("sessions.get calls: %+v", gets)
 	}
 
 	// The inbox has both sessions.
@@ -376,7 +446,7 @@ func TestMachineLink(t *testing.T) {
 		t.Errorf("command: %d %s", code, body)
 	}
 	m.mu.Lock()
-	if len(m.commands) != 1 || !strings.Contains(string(m.commands[0]), `"id":"123e4567-e89b-12d3-a456-426614174000"`) {
+	if len(m.commands) != 1 || !strings.Contains(string(m.commands[0]), `"id":"123e4567-e89b-12d3-a456-426614174000"`) || !strings.Contains(string(m.commands[0]), `"ref":"demo/hello"`) {
 		t.Errorf("forwarded: %s", m.commands)
 	}
 	m.mu.Unlock()
@@ -445,7 +515,7 @@ func TestMachineLink(t *testing.T) {
 	m.mu.Lock()
 	cur := m.cursors[len(m.cursors)-1]
 	m.mu.Unlock()
-	if cur[s1] != 9 || cur[s2] != 2 {
+	if cur["demo/hello/"+s1] != 9 || cur["demo/hello/"+s2] != 2 || len(cur) != 2 {
 		t.Errorf("cursor at reconnection: %v", cur)
 	}
 	if d := api.detail(s1, ""); seqsOf(d.Events) != "1,2,3,4,5,6,7,8,9,10" {

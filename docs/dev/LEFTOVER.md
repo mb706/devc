@@ -322,3 +322,17 @@ Other checks and deferred work:
 | **A write stall of 2 minutes ends a raw stream**: an SSH session through the gate whose box-side client is suspended (Ctrl-Z) while output is pending loses its connection | nothing, or a longer stall for the gate |
 | **Boxes started before C12r1** have no capability record: daemon-delivered secrets and the SSH gate are refused until the box is restarted | a restart per box after the upgrade |
 | **Journals with one ID in two projects from before C12r1** stay; the owner is the earlier one, the other stops growing, and a bare ID is ambiguous until such a journal is removed by hand | nothing |
+
+### From C12r2
+
+| Item | Needs |
+|---|---|
+| **The race detector was not run** on `internal/hub` (`./dev` builds with CGO off). The link's new state (resync queue, held events, capacity) is touched only by the worker; tests change package variables (`refreshBytes`, `MaxMachineSessions`, `bodyTimeout`) before the hub that reads them starts | `go test -race ./internal/hub/ ./internal/daemon/` in the toolchain image with cgo |
+| **The hub keys its store by machine and session ID.** It sends `ref` on every call and keys its cursor by project and ID; a duplicate ID in two projects of one machine (only from before C12r1) shows as the project the hub learned first, the other is not shown | nothing, unless legacy duplicates matter |
+| **The daemon still accepts calls without `ref` from hubs.** The hub now always sends it | requiring `ref` on hub connections in the daemon, if wanted |
+| **Hub and machines must be upgraded together**: a daemon from before C12r1 refuses the keyed cursor, so its link to a C12r2 hub fails | nothing (one binary) |
+| **The web app's logic has no unit tests** (no JS test runner; no build step). Staleness from the machine map, the merge of held-back events, superseded snapshots and the pending commands are exercised by `web/check.sh` (the unknown-then-not-arrived prompt, Send again) and `TestWebApp` only in their common paths; a machine going offline while the inbox is open, a reset during a detail read and a lost detail answer were not driven in a browser | a JS test harness, or check.sh steps that disconnect an invented machine |
+| **Caddy's logging rule was only validated** (`caddy validate`, Caddy 2.10.0), not run: Caddy writes no access log unless configured, and `log_skip` applies when one is. nginx was run (no access or error log line for an enrolment request) | a run of Caddy with a `log` directive in front of a hub |
+| **Hand-over can notify twice**: a state that reached both hubs is pending on the second; if the first hub published it and then went away, the second publishes it too when it becomes notifier (by design: a duplicate rather than a loss). Pending records of a hub that never becomes notifier stay until their state ends | nothing |
+| **Limits are this chunk's choices**: refresh 64 MiB and 2 minutes, resync queue 256 with 4 workers, 20,000 held events, body deadline 10 s, 64 requests without login, 8 logins waiting for hashing, backward pages of 1 MiB with 64 reads and 16 MiB, notification retries from 30 s to 15 min, clears given up after 7 days, 1,000 events per open session in the app | measuring real hubs |
+| **A pending command is polled every 10 s** (receipt, wait 0) while its machine is online until it is final; a send queued behind a long turn is polled for as long as the turn runs | nothing, or a longer interval |

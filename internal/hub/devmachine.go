@@ -495,8 +495,12 @@ func (m *devMachine) handlers() map[string]proto.Handler {
 			m.mu.Lock()
 			var replay []proto.EventNote
 			for id, ss := range m.sessions {
+				from, ok := p.Cursor[proto.SessionKey(ss.ref.String(), id)]
+				if !ok {
+					from = p.Cursor[id]
+				}
 				for _, ev := range ss.events {
-					if ev.Seq > p.Cursor[id] {
+					if ev.Seq > from {
 						replay = append(replay, proto.EventNote{Ref: ss.ref.String(), Event: ev})
 					}
 				}

@@ -165,7 +165,7 @@ func (s *Server) apiTerminal(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	id, login := identityOf(r), loginOf(r)
-	live := s.addLive(id.Fingerprint, cancel)
+	live := s.addLive(id, cancel)
 	defer s.dropLive(live)
 
 	var wmu sync.Mutex
@@ -190,7 +190,7 @@ func (s *Server) apiTerminal(w http.ResponseWriter, r *http.Request) {
 	sink := l.addTerm(stream)
 	defer l.dropTerm(stream)
 	octx, ocancel := context.WithTimeout(ctx, 30*time.Second)
-	raw, err := l.forward(octx, proto.MethodTerminalOpen, proto.TerminalOpenParams{Stream: stream, Session: sid, Mode: mode})
+	raw, err := l.forward(octx, proto.MethodTerminalOpen, proto.TerminalOpenParams{Stream: stream, Session: sid, Ref: s.sessionRef(machine, sid), Mode: mode})
 	ocancel()
 	var res proto.TerminalOpenResult
 	if err == nil {
@@ -199,7 +199,7 @@ func (s *Server) apiTerminal(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
-		_, msg := rpcStatus(err)
+		_, msg, _ := rpcStatus(err)
 		finish(msg)
 		return
 	}
@@ -215,9 +215,11 @@ func (s *Server) apiTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reader: input and visibility from the browser.
+	// Reader: input and visibility from the browser. Until the page says
+	// it is visible, the stream counts as hidden: a page hidden while the
+	// socket was connecting still meets the deadline (finding C2-17).
 	var hmu sync.Mutex
-	var hiddenSince time.Time
+	hiddenSince := time.Now()
 	readErr := make(chan string, 1)
 	go func() {
 		for {
@@ -254,7 +256,7 @@ func (s *Server) apiTerminal(w http.ResponseWriter, r *http.Request) {
 				_, err := l.forward(ictx, proto.MethodTerminalInput, proto.TerminalInputParams{Stream: stream, Data: m.Data})
 				icancel()
 				if err != nil {
-					_, msg := rpcStatus(err)
+					_, msg, _ := rpcStatus(err)
 					readErr <- "input failed: " + msg
 					return
 				}

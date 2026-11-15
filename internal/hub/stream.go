@@ -30,6 +30,22 @@ const (
 // login session (a variable for tests).
 var streamHeartbeat = 15 * time.Second
 
+// streamPageHook, in tests, runs before a stream reads a page of changes.
+var streamPageHook func()
+
+// changesAfter reads the next page of the change log after from. The IDs
+// of the log are consecutive (AUTOINCREMENT, rows deleted only by pruning
+// the oldest), and a page is one statement, so one consistent snapshot: a
+// first ID other than from+1 means pruning overtook the reader, and gap is
+// true (finding C2-09).
+func (s *Store) changesAfter(from int64, limit int) (cs []Change, gap bool, err error) {
+	cs, err = s.ChangesAfter(from, limit)
+	if err != nil {
+		return nil, false, err
+	}
+	return cs, len(cs) > 0 && cs[0].ID != from+1, nil
+}
+
 // streamFilter says which session events a stream wants.
 type streamFilter map[[2]string]bool
 
@@ -81,7 +97,7 @@ func (s *Server) apiStream(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	id := identityOf(r)
 	login := loginOf(r)
-	live := s.addLive(id.Fingerprint, cancel)
+	live := s.addLive(id, cancel)
 	defer s.dropLive(live)
 	// A session a logged-in client follows gets no notifications.
 	keys := make([]SessionKey, 0, len(f))
@@ -127,9 +143,26 @@ func (s *Server) apiStream(w http.ResponseWriter, r *http.Request) {
 	defer beat.Stop()
 	for {
 		for {
-			cs, err := s.st.ChangesAfter(from, streamPage)
+			if streamPageHook != nil {
+				streamPageHook()
+			}
+			cs, gap, err := s.st.changesAfter(from, streamPage)
 			if err != nil {
 				return
+			}
+			if gap {
+				// The log no longer reaches back to this stream's position:
+				// changes were lost to it, so the client reads its snapshot
+				// again.
+				_, hi, err := s.st.ChangeRange()
+				if err != nil {
+					return
+				}
+				from = hi
+				if write(hi, "reset", fmt.Sprintf(`{"id":%d}`, hi)) != nil {
+					return
+				}
+				continue
 			}
 			for _, c := range cs {
 				from = c.ID

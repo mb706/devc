@@ -426,7 +426,7 @@ func TestWebEndpoints(t *testing.T) {
 		t.Errorf("changes without scope: %d", code)
 	}
 	m.mu.Lock()
-	if len(m.changes) != 2 || m.changes[0] != (proto.ChangesParams{Session: sid, Scope: "branch"}) || m.changes[1].Scope != proto.ScopeSnapshot {
+	if len(m.changes) != 2 || m.changes[0] != (proto.ChangesParams{Session: sid, Ref: "demo/hello", Scope: "branch"}) || m.changes[1].Scope != proto.ScopeSnapshot {
 		t.Errorf("changes asked: %+v", m.changes)
 	}
 	m.scope = "snapshot"
@@ -482,6 +482,7 @@ func TestWebEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ws.Write(context.Background(), websocket.MessageText, []byte(`{"type":"visible","visible":true}`))
 	readTerm(t, ws, 3)
 	ws.Write(context.Background(), websocket.MessageText, []byte(`{"type":"input","data":"ls\r"}`))
 	waitFor(t, "the input on the machine", func() bool { m.mu.Lock(); defer m.mu.Unlock(); return slices.Equal(m.inputs, []string{"ls\r"}) })
@@ -493,7 +494,19 @@ func TestWebEndpoints(t *testing.T) {
 	}
 	ws.CloseNow()
 
+	// A page that never says it is visible (hidden while connecting) is
+	// hidden from the start: the deadline applies (finding C2-17).
+	ws, _, err = api.terminal(sid, "observe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evs := readTerm(t, ws, 4); evs[3].text["type"] != "end" || !strings.Contains(evs[3].text["reason"].(string), "not visible") {
+		t.Errorf("never visible: %+v", evs)
+	}
+	ws.CloseNow()
+
 	// The machine ends a stream.
+	termHidden = 30 * time.Minute
 	ws, _, err = api.terminal(sid, "observe")
 	if err != nil {
 		t.Fatal(err)

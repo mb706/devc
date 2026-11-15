@@ -129,7 +129,14 @@ The proxy must:
   per address; without the header every client counts as one);
 - pass the original `Host` header;
 - pass WebSocket upgrades (machines connect to `/machine`);
-- not buffer responses (`/api/stream` is a stream of server-sent events).
+- not buffer responses (`/api/stream` is a stream of server-sent events);
+- **not log the enrolment path**: `/enroll/<token>` carries a token that is
+  the credential until it is used or expires (up to 15 minutes), and a token
+  in an access log, an error log or a log of upstream requests could be used
+  by whoever reads that log. The configurations below switch logging off for
+  that path. (The hub's own access log leaves the token out, and the token of
+  a notification button travels in a request header, which proxies do not
+  log by default; do not add request headers to a log format.)
 
 ### Caddy
 
@@ -144,9 +151,11 @@ hub.example.org {
 	request_body {
 		max_size 1MB
 	}
-	# The enrolment path needs no client certificate.
+	# The enrolment path needs no client certificate, and its token must
+	# not reach a log.
 	@enrol path_regexp ^/enroll/[A-Za-z0-9_-]{43}$
 	handle @enrol {
+		log_skip
 		reverse_proxy 127.0.0.1:8443 {
 			header_up -X-Devc-Client-Cert
 			header_up X-Real-IP {remote_host}
@@ -173,8 +182,10 @@ original `Host` header and proxies WebSockets without further settings.
 Caddy leaves the certificate placeholder unreplaced, which is why the
 enrolment path removes the header instead. With client authentication Caddy
 requires the TLS server name to match the `Host` header, so the public name
-must be a DNS name, not an IP address. Caddy versions before 2.8 spell the
-trust pool `trusted_ca_cert_file /etc/devc-hub/ca.crt`.
+must be a DNS name, not an IP address. Caddy writes no access log unless a
+`log` directive asks for one; `log_skip` keeps enrolment requests out of it
+when one is configured. Caddy versions before 2.8 spell the trust pool
+`trusted_ca_cert_file /etc/devc-hub/ca.crt` and `log_skip` as `skip_log`.
 
 ### nginx
 
@@ -198,8 +209,12 @@ server {
 
     client_max_body_size 1m;
 
-    # Without a certificate only the enrolment path reaches the hub.
+    # Without a certificate only the enrolment path reaches the hub. Its
+    # token must not reach a log: no access log, and the error log (which
+    # quotes the request line when the hub cannot be reached) goes nowhere.
     location ~ "^/enroll/[A-Za-z0-9_-]{43}$" {
+        access_log off;
+        error_log /dev/null;
         proxy_pass http://127.0.0.1:8443;
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;
@@ -226,7 +241,9 @@ server {
 ```
 
 `$ssl_client_escaped_cert` is the URL-encoded PEM of the verified
-certificate; without one nginx does not send the header at all. nginx
+certificate; without one nginx does not send the header at all. An error
+for the enrolment path is lost with its error log; `devc hub serve` logs
+every enrolment it refuses or completes (without the token). nginx
 inherits `proxy_set_header` lines only into blocks that have none of their
 own, so every location lists all of them: a location that sets only
 `Upgrade` would pass a client's own `X-Devc-Client-Cert` through.
@@ -236,6 +253,9 @@ behind them: without a certificate the API gets 404, also with a forged
 certificate header; a device without login gets 401 and with login 200; the
 enrolment path without a certificate answers only while a token is
 outstanding, and only for the exact path; a forged `X-Real-IP` is replaced.
+With the logging rules, an enrolment request that nginx could not pass on
+(502) left no line in its access or error log, while other requests were
+logged; Caddy accepted its configuration (`caddy validate`).
 
 ## 4. Notifications through ntfy
 
@@ -262,13 +282,22 @@ while a logged-in client follows that session's events:
 - a click opens the session in the web app (`<public_url>/#/s/<machine>/<session>`);
 - for a question with one or two options, one button per option, plus
   **Open**. An option button answers the question directly: it posts to
-  `<public_url>/api/act/<token>` with a single-use token, valid for one hour
-  and bound to that one answer. It needs the device certificate but no login.
+  `<public_url>/api/act` with a single-use token, valid for one hour and
+  bound to that one answer, in the `X-Devc-Action` header (never in the URL,
+  which proxies log). It needs the device certificate but no login.
 - When the session leaves that state (answered elsewhere, marked seen), the
   message is cleared.
 
 ntfy calls have a timeout and are retried a few times; a slow or unreachable
-ntfy server never holds up the hub.
+ntfy server never holds up the hub. The hub keeps a durable record per
+notifying state: *pending* until it is published, *sent*, then *cleared*.
+A publish or a clear that fails is retried with a growing pause (up to 15
+minutes), also after the hub restarts; a state that ends before its message
+went out is dropped. A hub that is not (yet) a machine's notifier records
+the states as pending, and when the machine names it notifier (because the
+first hub went away) it sends those that are still current. So a question
+that reaches the second hub during a hand-over is not lost; at worst both
+hubs notify it.
 
 **On a phone without Google services** (GrapheneOS, LineageOS without
 microG):
@@ -366,13 +395,20 @@ devc hub doctor
   (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`). It lasts 30 days
   without use. The hub stores only a hash of it.
 - Five failed logins in a row with one device certificate lock that
-  certificate's logins for 15 minutes; other devices can still log in. Every
-  attempt is logged, never the password.
+  certificate's logins for 15 minutes; other devices can still log in. A
+  certificate has one login attempt at a time (a second one gets 429), and
+  at most two logins hash a password at once with eight more waiting (429
+  beyond that), so parallel attempts cannot get past the lock. Every attempt
+  is logged, never the password.
 - Failed and unauthenticated requests are rate-limited per certificate and per
-  address (429 with `Retry-After`).
+  address (429 with `Retry-After`). At most 64 requests without a login
+  session (logins, buttons, the app's files, enrolment) are served at once,
+  and a request body must arrive within 10 seconds.
+- Open connections (machine links, event streams, terminals) end when their
+  certificate is revoked and when it expires.
 - The access log has the time, the certificate's name, the address, the
   method, the path and the status; never bodies, cookies or tokens (the
-  tokens in enrolment and button paths are left out).
+  token in enrolment paths is left out; button tokens are in a header).
 - `devc hub doctor` checks that nothing in the hub directory is readable or
   writable by others (the CA key, the database and `hub.toml` not even by the
   group), that a password is set, that the public URL is `https`, and that
@@ -395,7 +431,7 @@ type into online sessions, but cannot leave the boxes.
 ## 9. The API
 
 JSON over HTTPS for device certificates (`machine` certificates may only use
-`/machine`). Every endpoint but `POST /api/login` and `POST /api/act/<token>`
+`/machine`). Every endpoint but `POST /api/login` and `POST /api/act`
 needs a login session bound to the request's certificate (401 with
 `"login": true` otherwise). State-changing requests must carry
 `X-Devc-Request: 1`, an `Origin` equal to the hub's public origin, and an
@@ -421,13 +457,26 @@ sent; every response carries a content security policy for the web app
 | `GET /api/projects?machine=` | per machine (all, or the one named): `online` and its projects with box state, default branch, harnesses (`ready`: installed in the box), worktrees (branch, `dirty`, ahead/behind the banked branch and the upstream's default branch, live sessions), live and needs-you counts |
 | `GET /api/changes/<machine>/<session>?scope=snapshot\|branch` | files changed with a diffstat and the unified diff (at most 384 KiB, `truncated`), computed on the machine's relay: `snapshot` the uncommitted work of the worktree's last snapshot against the commit it was made on (`stale` when the branch has moved since), `branch` the worktree's branch against the upstream's default branch from their merge base |
 | `GET /api/terminal/<machine>/<session>?mode=observe\|control` | a WebSocket to the session's tmux window (below) |
-| `POST /api/act/<token>` | a notification button: needs the device certificate and `X-Devc-Request: 1`, no session; performs the one answer the token is bound to and answers with a short text |
+| `POST /api/act` | a notification button: needs the device certificate, `X-Devc-Request: 1` and the button's token in `X-Devc-Action`, no session; performs the one answer the token is bound to and answers with a short text |
 | `GET /enroll/<token>`, `POST /enroll/<token>` | enrolment (no certificate needed): a device's bundle, or a machine's certificate for `{"csr"}` |
 
 A session summary is the session's view with `machine`, `stale` (its machine
-is offline), `requests` (pending requests) and `section` (its inbox section,
-empty when it is not in the inbox). A command for an offline machine fails at
-once with status 503; the hub does not queue.
+was offline when the summary was made; the machine list is current),
+`requests` (pending requests) and `section` (its inbox section, empty when
+it is not in the inbox). A command for an offline machine fails at once with
+status 503; the hub does not queue. When the machine may have received a
+command but no answer came (it went offline during the call, or did not
+answer in time), the error body says `"uncertain": true`: keep the command's
+ID, ask for its receipt (`GET /api/commands/<machine>/<id>`; 404 means it
+never arrived) or send it again with the same ID, which the machine applies
+once. A decision the machine cannot take now (its request executor is full)
+gets 429 and the request stays pending. The hub names the session's project
+(`ref`) on every call to the machine about a session; a client may give
+`ref` in a command's `params`, else the hub fills it in.
+
+`?before=<seq>` pages always end right below `before` and join the previous
+page without a gap, also when the machine returns its events in several
+reads.
 
 The stream sends `session`, `session.removed`, `machine`, `request` and
 `request.removed` messages to everyone, and `event` and `session.reset` messages
@@ -435,7 +484,9 @@ for the sessions named in the query (up to 32). Every message has an `id`; a
 client that reconnects with `Last-Event-ID` (browsers do this by themselves)
 gets exactly the messages after it. A stream without an ID starts with a
 `ready` message at the present; one whose ID the hub no longer has gets
-`reset` and should read its lists again. Snapshots (`/api/inbox`,
+`reset` and should read its lists again, also when the hub's change log
+moves past a stream that is open but slow to read. A client should then stop
+the stream, read the snapshot and resume from the snapshot's `stream_id`. Snapshots (`/api/inbox`,
 `/api/sessions`, …) carry `stream_id`, the ID to resume the stream from.
 While a stream names a session, the hub sends no notifications for it.
 
@@ -444,7 +495,9 @@ text messages `{"type":"open","cols","rows","mode"}`, `{"type":"size",…}`
 when the window changes size, `{"type":"ping"}` every 25 seconds and
 `{"type":"end","reason"}` before it closes. The browser sends
 `{"type":"input","data"}` (control mode only; in observe mode it ends the
-stream) and `{"type":"visible","visible"}`. The machine runs the box's tmux
+stream) and `{"type":"visible","visible"}`, which it should send as soon as
+the socket opens: until it says visible, the hub counts the page as hidden.
+The machine runs the box's tmux
 client with the flags `read-only` and `ignore-size` (in control mode only
 `ignore-size`): a terminal never resizes the pane. `mode=control` is refused
 with 403 unless `hub.toml` has `[terminal] control = true`, and ends at once
