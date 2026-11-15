@@ -106,6 +106,45 @@ func fails(e *itest.Env, ref, script string) bool {
 	return e.Run("run", ref, "--", "sh", "-c", script).ExitCode != 0
 }
 
+// expectAllFail runs each script as dev in the box; every one must fail.
+func expectAllFail(t *testing.T, e *itest.Env, ref, what string, scripts []string) {
+	t.Helper()
+	for _, script := range scripts {
+		if !fails(e, ref, script) {
+			t.Errorf("from the box, %q worked %s", script, what)
+		}
+	}
+}
+
+// layoutEscapes are box commands against the layout of a data project
+// (project directory bdir, data root data/, zones raw, scratch, results):
+// moving or removing the vault, the data root or a zone directory, and
+// listing or entering the vault. Shared by the data tests and the escape
+// suite.
+func layoutEscapes(bdir string) []string {
+	return []string{
+		"mv " + bdir + "/.devc " + bdir + "/x", "rmdir " + bdir + "/.devc", "ls " + bdir + "/.devc", "cd " + bdir + "/.devc",
+		"mv " + bdir + "/data " + bdir + "/d2", "rmdir " + bdir + "/data",
+		"mv " + bdir + "/data/raw " + bdir + "/data/r2", "mv " + bdir + "/data/scratch " + bdir + "/data/s2",
+		"mv " + bdir + "/data/results " + bdir + "/data/r3", "rmdir " + bdir + "/data/scratch",
+	}
+}
+
+// sealedEscapes are box commands against a sealed entry: delete,
+// overwrite, append, truncate, rename, chmod, replace, add and remove
+// files. file and nested are a file directly in the entry and one in a
+// subdirectory.
+func sealedEscapes(entry, file, nested string) []string {
+	parent := entry[:strings.LastIndex(entry, "/")]
+	return []string{
+		"rm -rf " + entry, "mv " + entry + " " + parent + "/x", "chmod u+w " + entry, "chmod u+w " + entry + "/" + file,
+		"echo x > " + entry + "/" + file, "truncate -s 0 " + entry + "/" + file, "echo x >> " + entry + "/" + file,
+		"touch " + entry + "/new", "rm " + entry + "/" + nested, "mv " + entry + "/" + file + " " + entry + "/moved",
+		"mkdir " + parent + "/decoy && { mv -T " + parent + "/decoy " + entry + "; r=$?; rmdir " + parent + "/decoy 2>/dev/null; exit $r; }",
+		"ln -sfn /tmp " + entry,
+	}
+}
+
 // TestData covers work order C06 section 6, items 1-7 and 9-12; item 8
 // (reflink) is skipped on filesystems that cannot clone files.
 func TestData(t *testing.T) {
@@ -142,16 +181,7 @@ func TestData(t *testing.T) {
 	if got := boxSh(t, e, ref, "cd "+bdir+" && stat -c '%u:%g %a' . .devc data data/raw data/scratch data/results | tr '\\n' ' '"); got != "2000:1000 1770 2000:2000 700 2000:1000 1770 1000:1000 755 2000:1000 775 2000:1000 1770" {
 		t.Errorf("box view: %q", got)
 	}
-	for _, script := range []string{
-		"mv " + bdir + "/.devc " + bdir + "/x", "rmdir " + bdir + "/.devc", "ls " + bdir + "/.devc",
-		"mv " + bdir + "/data " + bdir + "/d2", "rmdir " + bdir + "/data",
-		"mv " + bdir + "/data/raw " + bdir + "/data/r2", "mv " + bdir + "/data/scratch " + bdir + "/data/s2",
-		"mv " + bdir + "/data/results " + bdir + "/data/r3", "rmdir " + bdir + "/data/scratch",
-	} {
-		if !fails(e, ref, script) {
-			t.Errorf("from the box, %q worked", script)
-		}
-	}
+	expectAllFail(t, e, ref, "on the data layout", layoutEscapes(bdir))
 
 	// 2. Input zone: read-only in the box, writable from the host.
 	if !fails(e, ref, "touch "+bdir+"/data/raw/x") {
@@ -177,14 +207,7 @@ func TestData(t *testing.T) {
 		t.Errorf("seal: %q", res.Stdout)
 	}
 	r1 := bdir + "/data/results/run1"
-	for _, script := range []string{
-		"rm -rf " + r1, "mv " + r1 + " " + bdir + "/data/results/x", "chmod u+w " + r1, "chmod u+w " + r1 + "/a.txt",
-		"truncate -s 0 " + r1 + "/a.txt", "echo x >> " + r1 + "/a.txt", "touch " + r1 + "/new", "rm " + r1 + "/sub/b.txt",
-	} {
-		if !fails(e, ref, script) {
-			t.Errorf("from the box, %q worked on a sealed entry", script)
-		}
-	}
+	expectAllFail(t, e, ref, "on a sealed entry", sealedEscapes(r1, "a.txt", "sub/b.txt"))
 	if got := boxSh(t, e, ref, "cat "+r1+"/a.txt && mkdir "+bdir+"/data/results/run2 && echo ok"); got != "hello\nok" {
 		t.Errorf("reading and a new sibling: %q", got)
 	}

@@ -65,8 +65,8 @@ type Engine interface {
 	// returns its exit code.
 	ExecInteractive(ctx context.Context, o ExecOptions) (int, error)
 	// Unshare runs a host command inside the engine's user namespace, where
-	// the user is root and subordinate IDs are mapped.
-	Unshare(ctx context.Context, args []string) (execx.Result, error)
+	// the user is root and subordinate IDs are mapped. stdin may be nil.
+	Unshare(ctx context.Context, args []string, stdin io.Reader) (execx.Result, error)
 
 	// Run starts a throwaway container and captures its output; a non-zero
 	// exit returns *execx.ExitError.
@@ -245,20 +245,42 @@ func (c Container) Name() string {
 // ContainerInfo is the subset of `podman container inspect` devc needs. Raw
 // keeps the full object for later chunks.
 type ContainerInfo struct {
-	ID            string            `json:"Id"`
-	Name          string            `json:"Name"`
-	Image         string            `json:"Image"` // image ID
-	ImageName     string            `json:"ImageName"`
-	Created       time.Time         `json:"Created"`
-	State         ContainerState    `json:"State"`
-	Mounts        []MountInfo       `json:"Mounts"`
-	HostConfig    HostConfig        `json:"HostConfig"`
-	EffectiveCaps []string          `json:"EffectiveCaps"`
-	BoundingCaps  []string          `json:"BoundingCaps"`
-	User          string            `json:"-"` // Config.User
-	Env           []string          `json:"-"` // Config.Env
-	Labels        map[string]string `json:"-"`
-	Raw           json.RawMessage   `json:"-"`
+	ID            string         `json:"Id"`
+	Name          string         `json:"Name"`
+	Image         string         `json:"Image"` // image ID
+	ImageName     string         `json:"ImageName"`
+	Created       time.Time      `json:"Created"`
+	State         ContainerState `json:"State"`
+	Mounts        []MountInfo    `json:"Mounts"`
+	HostConfig    HostConfig     `json:"HostConfig"`
+	EffectiveCaps []string       `json:"EffectiveCaps"`
+	BoundingCaps  []string       `json:"BoundingCaps"`
+	// NetworkSettings.SandboxKey is the path of the container's network
+	// namespace once it is initialised (empty for --network none on some
+	// engines, and before init).
+	NetworkSettings NetworkSettings `json:"NetworkSettings"`
+	// ResolvConfPath and HostsPath are the files the engine bind-mounts at
+	// /etc/resolv.conf and /etc/hosts. They are written at init; once the
+	// box runs, it can change them.
+	ResolvConfPath string            `json:"ResolvConfPath"`
+	HostsPath      string            `json:"HostsPath"`
+	GraphDriver    GraphDriver       `json:"GraphDriver"`
+	User           string            `json:"-"` // Config.User
+	Env            []string          `json:"-"` // Config.Env
+	Labels         map[string]string `json:"-"`
+	Raw            json.RawMessage   `json:"-"`
+}
+
+// NetworkSettings is the part of a container's network settings devc uses.
+type NetworkSettings struct {
+	SandboxKey string `json:"SandboxKey"`
+}
+
+// GraphDriver describes a container's root filesystem; Data holds
+// MergedDir for overlay storage.
+type GraphDriver struct {
+	Name string            `json:"Name"`
+	Data map[string]string `json:"Data"`
 }
 
 // MountInfo is one entry of a container's Mounts.

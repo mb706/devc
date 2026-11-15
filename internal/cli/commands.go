@@ -17,8 +17,10 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
 
+	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/doctor"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/toolbox"
 	"github.com/mb706/devc/internal/version"
 )
 
@@ -35,22 +37,33 @@ func newVersionCmd(a *app) *cobra.Command {
 }
 
 func newDoctorCmd(a *app) *cobra.Command {
-	var asJSON bool
+	var asJSON, fix bool
 	cmd := &cobra.Command{
-		Use:   "doctor",
+		Use:   "doctor [--fix]",
 		Short: "Check host requirements",
-		Long:  "Check the host requirements devc depends on. Nothing is changed; fixes are printed as hints.",
-		Args:  noArgs,
+		Long: "Check the host requirements devc depends on and print hints for what needs attention. The check " +
+			"overlay-statx starts a short-lived probe container from the toolbox. Without --fix nothing else is changed.\n\n" +
+			"--fix does what needs no root (creates devc's state, runtime and projects directories and syncs the toolbox) " +
+			"and prints the commands that need root as one shell script to review and run with sudo.",
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, probs, err := a.load()
 			if err != nil {
 				return err
 			}
 			a.warnProblems(probs)
+			tb := toolbox.New(c.Paths.ToolboxDir())
+			if fix {
+				if err := a.doctorFix(c, tb); err != nil {
+					return err
+				}
+			}
 			name, uid := currentUser(a.getenv)
 			eng := a.engine(c)
 			h := doctor.NewHost(a.runner, eng, name, uid, c.Paths.ProjectsRoot(), c.Paths.StateDir())
 			h.Getenv = a.getenv
+			h.HelperRootfs = tb.HelperRootfs()
+			h.AuxSecurityOpts = tb.AuxSecurityOpts(selinuxDisabled(c))
 			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Minute)
 			defer cancel()
 			checks := doctor.Run(ctx, h)
@@ -61,6 +74,13 @@ func newDoctorCmd(a *app) *cobra.Command {
 			} else if err := doctor.WriteTable(a.stdout, checks); err != nil {
 				return err
 			}
+			if fix && !asJSON {
+				if script := doctor.RootScript(checks); script != "" {
+					fmt.Fprintf(a.stdout, "\nThese fixes need root. Review the script, save it and run it with 'sudo sh':\n\n%s", script)
+				} else {
+					fmt.Fprintln(a.stdout, "\nNothing needs root.")
+				}
+			}
 			if doctor.Failed(checks) {
 				return exitCode(1)
 			}
@@ -68,7 +88,48 @@ func newDoctorCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the checks as JSON")
+	cmd.Flags().BoolVar(&fix, "fix", false, "apply the fixes that need no root and print the rest as a script")
 	return cmd
+}
+
+// selinuxDisabled reports whether boxes and auxiliary containers run with
+// label=disable (an SELinux host in mode disable).
+func selinuxDisabled(c *config.Config) bool {
+	_, err := os.Stat("/sys/fs/selinux/enforce")
+	return err == nil && c.Global.SELinux.Mode == config.SELinuxDisable
+}
+
+// doctorFix creates devc's directories and syncs the toolbox.
+func (a *app) doctorFix(c *config.Config, tb *toolbox.Toolbox) error {
+	p := c.Paths
+	if err := p.Ensure(p.StateDir()); err != nil {
+		return fmt.Errorf("creating the state directory: %w", err)
+	}
+	fmt.Fprintf(a.stderr, "devc: state directory %s\n", p.StateDir())
+	if rt, err := p.RuntimeDir(); err == nil {
+		if err := p.Ensure(rt); err != nil {
+			return fmt.Errorf("creating the runtime directory: %w", err)
+		}
+		fmt.Fprintf(a.stderr, "devc: runtime directory %s\n", rt)
+	} else {
+		fmt.Fprintf(a.stderr, "devc: warning: %v\n", err)
+	}
+	if err := os.MkdirAll(p.ProjectsRoot(), 0o755); err != nil {
+		return fmt.Errorf("creating the projects root: %w", err)
+	}
+	fmt.Fprintf(a.stderr, "devc: projects root %s\n", p.ProjectsRoot())
+	exe, err := a.executable()
+	if err != nil {
+		return fmt.Errorf("locating the devc executable: %w", err)
+	}
+	if err := p.Ensure(tb.Dir); err != nil {
+		return err
+	}
+	if _, err := tb.Sync(exe, version.Version); err != nil {
+		return fmt.Errorf("syncing the toolbox: %w", err)
+	}
+	fmt.Fprintf(a.stderr, "devc: toolbox synced in %s\n", tb.Dir)
+	return nil
 }
 
 // currentUser returns the login name and UID. os/user reads /etc/passwd

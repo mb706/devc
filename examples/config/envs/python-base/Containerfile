@@ -1,0 +1,36 @@
+# Python with uv on Ubuntu 24.04, with the general tools of devc v1's base
+# image. Ported without the Node.js, Claude Code and Codex installation
+# (devc installs harnesses into its toolbox), the user account (devc maps
+# UID 1000 to `dev` itself; Ubuntu's own `ubuntu` user is renamed) and the
+# dotfiles (they come from <config>/dotfiles/).
+FROM docker.io/library/ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Tools. sudo is left out (nothing can gain privileges in a box; use
+# `devc root`), and so is tmux (devc brings its own).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl wget git openssh-client gnupg \
+    build-essential pkg-config \
+    python3 python3-venv python3-pip \
+    ripgrep jq unzip zip rsync less vim nano \
+    procps fzf zsh man-db gh aggregate \
+    htop parallel \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# git-delta
+ARG GIT_DELTA_VERSION=0.18.2
+RUN ARCH=$(dpkg --print-architecture) \
+ && wget -O /tmp/git-delta.deb \
+      "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" \
+ && dpkg -i /tmp/git-delta.deb \
+ && rm /tmp/git-delta.deb
+
+# uv and uvx. Replace "latest" by a version for reproducible builds.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+# Copies rather than hard links: the uv cache (~/.cache, a realm-wide
+# mount) and the project are different filesystems.
+ENV UV_LINK_MODE=copy \
+    EDITOR=vim \
+    VISUAL=vim

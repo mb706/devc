@@ -331,7 +331,7 @@ func TestInstructions(t *testing.T) {
 	if i0 != 0 || !(i0 < i1 && i1 < i2 && i2 < i3) {
 		t.Errorf("order wrong:\n%s", got)
 	}
-	for _, want := range []string{"project demo/hello.", "The project directory is /w/demo/hello.", "- Network: the network is not restricted.",
+	for _, want := range []string{"project demo/hello.", "The project directory is /w/demo/hello.", "- Network: the internet is reachable, but the host, its local network and other private addresses are not.",
 		"Private notes for this project are in /ctx/notes.", "Long-term memory belongs in /ctx/memory."} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
@@ -356,7 +356,7 @@ func TestInstructions(t *testing.T) {
 		}
 	}
 	other, _ := Instructions(e.cfg, e.resolved(t, "other/tools"), e.manifest(t, "codex"))
-	if !strings.Contains(other, "- Network: the network is not restricted.") || strings.Contains(other, "REALM DEMO") {
+	if !strings.Contains(other, "- Network: the internet is reachable") || strings.Contains(other, "REALM DEMO") {
 		t.Errorf("other/tools:\n%s", other)
 	}
 }
@@ -594,14 +594,22 @@ func TestContributeRejectsNestedHomes(t *testing.T) {
 	}
 }
 
-// TestNetworkSentence: a level that is not enforced is never described as
-// restricting anything.
+// TestNetworkSentence: the description states the level in force, and a
+// level that is not enforced is never described as restricting anything.
 func TestNetworkSentence(t *testing.T) {
 	e := setup(t, nil)
 	r := e.resolved(t, "demo/hello")
+	r.Network = "allowlist"
+	if d := NewData(r, e.manifest(t, "claude")); strings.Contains(d.NetworkSentence, "only") || !strings.Contains(d.NetworkSentence, "not restricted") {
+		t.Errorf("allowlist: %q", d.NetworkSentence)
+	}
 	r.Network = "internet"
-	if d := NewData(r, e.manifest(t, "claude")); strings.Contains(d.NetworkSentence, "are not") || !strings.Contains(d.NetworkSentence, "not restricted") {
+	if d := NewData(r, e.manifest(t, "claude")); !strings.Contains(d.NetworkSentence, "the internet is reachable") || !strings.Contains(d.NetworkSentence, "private addresses are not") {
 		t.Errorf("internet: %q", d.NetworkSentence)
+	}
+	r.Network = "open"
+	if d := NewData(r, e.manifest(t, "claude")); d.NetworkSentence != "the network is not restricted: the host's local network and services are reachable too." {
+		t.Errorf("open: %q", d.NetworkSentence)
 	}
 	r.Network = "none"
 	if d := NewData(r, e.manifest(t, "claude")); d.NetworkSentence != "there is no network access." {

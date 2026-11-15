@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -46,12 +47,18 @@ func newBoxCmd(a *app) *cobra.Command {
 			// SIGHUP must not end the box.
 			signal.Ignore(syscall.SIGHUP)
 			var mounts []string
-			if info, err := boxside.ReadInfo("/"); err == nil {
+			info, err := boxside.ReadInfo("/")
+			if err == nil {
 				mounts = info.HomeMounts
 			} else {
+				// The level is unknown: NetworkCheck then insists on the
+				// rules of level internet (fail closed).
 				fmt.Fprintf(a.stderr, "devc box init: warning: %v\n", err)
+				info = nil
 			}
-			return boxside.Init(ctx, boxside.DefaultInitOptions(a.stderr, mounts))
+			o := boxside.DefaultInitOptions(a.stderr, mounts)
+			o.CheckNetwork = boxside.NetworkCheck(info, nil)
+			return boxside.Init(ctx, o)
 		},
 	}
 
@@ -243,7 +250,7 @@ func newBoxCmd(a *app) *cobra.Command {
 	}
 
 	subs := []*cobra.Command{initCmd, fixIdentity, shell, selftest, probe, launch, hook,
-		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker, dataWorker}
+		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker, dataWorker, newBoxDialCmd(a), newBoxCanaryCmd(a), newStatxWorkerCmd(a)}
 	return group("box", "Commands that run inside a box (internal)", true, append(subs, newBoxGitCmds(a)...)...)
 }
 
@@ -421,4 +428,73 @@ func (a *app) launchEnv() boxside.LaunchEnv {
 		self = r
 	}
 	return boxside.LaunchEnv{Root: "/", Environ: os.Environ(), Self: self, Stderr: a.stderr, NewSession: names.NewSessionID}
+}
+
+// newBoxDialCmd is `devc box dial <addr>`, run by the host's forwarder
+// through nsenter in the box's user and network namespaces. It runs in the
+// host's mount namespace, so it does not require a box description.
+func newBoxDialCmd(a *app) *cobra.Command {
+	return &cobra.Command{
+		Use:    "dial <ip:port>",
+		Short:  "Relay standard input and output to a TCP address (used by devc forward)",
+		Args:   cobra.ExactArgs(1),
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+			defer stop()
+			return boxside.Dial(ctx, args[0], os.Stdin, os.Stdout)
+		},
+	}
+}
+
+// newBoxCanaryCmd is `devc box net-canary`, run by the host after it
+// started a box of level internet.
+func newBoxCanaryCmd(a *app) *cobra.Command {
+	var port int
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:    "net-canary --port <port> <ipv4>...",
+		Short:  "Try to connect to the host; print the outcomes as JSON",
+		Args:   cobra.ArbitraryArgs,
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := requireBox(a.getenv); err != nil {
+				return err
+			}
+			reached, err := boxside.NetCanary(cmd.Context(), args, port, timeout, nil, a.stdout)
+			if err != nil {
+				return err
+			}
+			if reached {
+				return exitCode(1)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&port, "port", 0, "TCP port of the host's listener")
+	cmd.Flags().DurationVar(&timeout, "timeout", 3*time.Second, "time allowed for each connection")
+	return cmd
+}
+
+// newStatxWorkerCmd is `devc box statx-worker`, which runs in the helper
+// container for the doctor check overlay-statx: it asks statx() for the
+// birth time of a file of the container's root filesystem. On hosts with
+// an affected fuse-overlayfs the call never returns.
+func newStatxWorkerCmd(a *app) *cobra.Command {
+	return &cobra.Command{
+		Use:    "statx-worker",
+		Short:  "Ask statx() for the birth time of /bin/devc (helper container only)",
+		Args:   noArgs,
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := boxside.RequireHelper(a.getenv, "/"); err != nil {
+				return err
+			}
+			if err := boxside.StatxBirth("/bin/devc"); err != nil {
+				return err
+			}
+			fmt.Fprintln(a.stdout, "statx ok")
+			return nil
+		},
+	}
 }

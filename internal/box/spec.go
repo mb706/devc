@@ -116,6 +116,9 @@ type Spec struct {
 	SecurityOpts []string
 	Limits       []string
 	Network      []string
+	// NetRules is set for levels whose firewall rules the host installs
+	// between init and start (internet).
+	NetRules bool
 	// Devices are passed with --device (GPU, KVM); GroupAdd with
 	// --group-add.
 	Devices  []string
@@ -244,7 +247,7 @@ func BuildSpec(in Inputs, contribs ...Contributor) (*Spec, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.Network = net.Args
+	s.Network, s.NetRules = net.Args, net.Rules
 
 	if r.Capabilities.Nested {
 		return nil, fmt.Errorf("capabilities.nested = true is not implemented yet: boxes cannot create user namespaces; remove the setting")

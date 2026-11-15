@@ -167,7 +167,7 @@ func TestLifecycleCalls(t *testing.T) {
 	if err := p.Start(ctx, "--all"); err == nil {
 		t.Error("option-like name accepted")
 	}
-	if _, err := p.Unshare(ctx, []string{"rm", "-rf", "/x"}); err != nil {
+	if _, err := p.Unshare(ctx, []string{"rm", "-rf", "/x"}, nil); err != nil {
 		t.Error(err)
 	}
 	for _, c := range f.Calls() {

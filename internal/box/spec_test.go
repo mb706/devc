@@ -232,13 +232,11 @@ func TestSpecRejects(t *testing.T) {
 	if _, err := BuildSpec(in); err == nil {
 		t.Error("unknown network level accepted")
 	}
-	// Levels without enforcement fail closed (finding A5).
-	for _, level := range []string{"internet", "allowlist"} {
-		in = baseInputs(t, baseResolved())
-		in.Resolved.Network = level
-		if _, err := BuildSpec(in); err == nil || !strings.Contains(err.Error(), "not implemented yet") {
-			t.Errorf("network %s: %v", level, err)
-		}
+	// A level without enforcement fails closed (finding A5).
+	in = baseInputs(t, baseResolved())
+	in.Resolved.Network = "allowlist"
+	if _, err := BuildSpec(in); err == nil || !strings.Contains(err.Error(), "not available yet") {
+		t.Errorf("network allowlist: %v", err)
 	}
 	// Nested containers are not implemented (finding C2).
 	in = baseInputs(t, baseResolved())

@@ -173,7 +173,7 @@ func TestListingsJSON(t *testing.T) {
 	}
 	code, out, _ = run(t, nil, "env", "ls", "--json")
 	var envs []envRow
-	if err := json.Unmarshal([]byte(out), &envs); code != 0 || err != nil || len(envs) != 1 || !envs[0].HasContainerfile {
+	if err := json.Unmarshal([]byte(out), &envs); code != 0 || err != nil || len(envs) != 3 || envs[0].Name != "base" || !envs[0].HasContainerfile {
 		t.Errorf("env ls: %d %v %+v", code, err, envs)
 	}
 	if code, _, errOut := run(t, nil, "project", "ls", "--realm", "missing"); code != 1 || !strings.Contains(errOut, "no realm") {
@@ -194,7 +194,7 @@ func TestConfigShow(t *testing.T) {
 		t.Errorf("project: %d %v %v", code, err, r)
 	}
 	code, out, _ = run(t, nil, "config", "show", "other/tools")
-	if code != 0 || !strings.Contains(out, `network = "open"`) {
+	if code != 0 || !strings.Contains(out, `network = "internet"`) {
 		t.Errorf("toml: %d %q", code, out)
 	}
 	if code, _, errOut := run(t, nil, "config", "show", "nope"); code != 1 || !strings.Contains(errOut, "no project named") {

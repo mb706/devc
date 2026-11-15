@@ -1,6 +1,7 @@
 package boxside
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -74,6 +75,8 @@ func SelfTest(info *Info, probe func(name string) (string, error)) []Check {
 	}
 	ok, detail = socketsWork()
 	add("sockets", ok, "%s", detail)
+	ok, detail = nftablesCheck()
+	add("nftables", ok, "%s", detail)
 
 	for _, d := range []struct{ id, dir string }{{"toolbox-ro", "/opt/devc"}, {"etc-ro", EtcDir}} {
 		err := tryCreate(d.dir)
@@ -93,6 +96,8 @@ func SelfTest(info *Info, probe func(name string) (string, error)) []Check {
 	}
 	return cs
 }
+
+func nativeEndian() binary.ByteOrder { return binary.NativeEndian }
 
 func errText(err error) string {
 	if err == nil {
@@ -235,4 +240,93 @@ func tryCreate(dir string) error {
 	}
 	f.Close()
 	return os.Remove(p)
+}
+
+// Netlink constants of nftables (linux/netfilter/nfnetlink.h,
+// nf_tables.h).
+const (
+	nfnlSubsysNftables = 10
+	nftMsgNewTable     = 0
+	nftMsgGetTable     = 1
+)
+
+// nftablesCheck asks the kernel, over netlink, to list the nftables
+// tables and to create one. Both must be refused with EPERM: without
+// CAP_NET_ADMIN a box process can neither read nor change the firewall
+// rules devc installs in its network namespace.
+func nftablesCheck() (bool, string) {
+	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_NETFILTER)
+	if err != nil {
+		return true, "netfilter netlink socket refused: " + errText(err)
+	}
+	defer unix.Close(fd)
+	tv := unix.Timeval{Sec: 2}
+	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
+	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		return true, "netfilter netlink bind refused: " + errText(err)
+	}
+	var results []string
+	ok := true
+	for i, m := range []struct {
+		name  string
+		typ   uint16
+		flags uint16
+	}{
+		{"list", nfnlSubsysNftables<<8 | nftMsgGetTable, unix.NLM_F_REQUEST | unix.NLM_F_DUMP},
+		{"create", nfnlSubsysNftables<<8 | nftMsgNewTable, unix.NLM_F_REQUEST | unix.NLM_F_ACK | unix.NLM_F_CREATE},
+	} {
+		e := netlinkAsk(fd, m.typ, m.flags, uint32(i+1))
+		ok = ok && e == unix.EPERM
+		results = append(results, m.name+": "+errText(errnoErr(e)))
+	}
+	return ok, "nftables " + strings.Join(results, ", ") + " (want EPERM)"
+}
+
+// netlinkAsk sends one netfilter message (header and an nfgenmsg for
+// AF_INET) and returns the error the kernel answers with; 0 means it did
+// not refuse.
+func netlinkAsk(fd int, typ, flags uint16, seq uint32) syscall.Errno {
+	msg := make([]byte, unix.NLMSG_HDRLEN+4)
+	ne := nativeEndian()
+	ne.PutUint32(msg[0:], uint32(len(msg)))
+	ne.PutUint16(msg[4:], typ)
+	ne.PutUint16(msg[6:], flags)
+	ne.PutUint32(msg[8:], seq)
+	msg[unix.NLMSG_HDRLEN] = unix.AF_INET
+	if err := unix.Sendto(fd, msg, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		var en syscall.Errno
+		if errors.As(err, &en) {
+			return en
+		}
+		return unix.EIO
+	}
+	buf := make([]byte, 65536)
+	for {
+		n, _, err := unix.Recvfrom(fd, buf, 0)
+		if err != nil {
+			var en syscall.Errno
+			if errors.As(err, &en) {
+				return en
+			}
+			return unix.EIO
+		}
+		for off := 0; off+unix.NLMSG_HDRLEN <= n; {
+			l := int(ne.Uint32(buf[off:]))
+			t := ne.Uint16(buf[off+4:])
+			if l < unix.NLMSG_HDRLEN || off+l > n {
+				return unix.EIO
+			}
+			switch t {
+			case unix.NLMSG_ERROR:
+				if l < unix.NLMSG_HDRLEN+4 {
+					return unix.EIO
+				}
+				code := int32(ne.Uint32(buf[off+unix.NLMSG_HDRLEN:]))
+				return syscall.Errno(-code)
+			case unix.NLMSG_DONE:
+				return 0
+			}
+			off += (l + 3) &^ 3
+		}
+	}
 }

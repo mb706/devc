@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/flock"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/toolbox"
@@ -70,6 +73,11 @@ type Manager struct {
 	StartHooks []StartHook
 	// Now is the clock for the root log.
 	Now func() time.Time
+	// Net installs and verifies the rules of level internet; nil uses
+	// netpolicy's defaults with Engine. HostAddrs lists the host's
+	// addresses for the canary (netpolicy.HostAddrs when nil).
+	Net       *netpolicy.Installer
+	HostAddrs func() ([]netip.Addr, error)
 
 	facts *HostFacts // cached for the lifetime of the manager (one command)
 }
@@ -127,6 +135,8 @@ type plan struct {
 	spec     *Spec
 	runtime  string
 	inputs   Inputs
+	// net is what the host learnt between init and start (level internet).
+	net *netpolicy.Facts
 }
 
 func (m *Manager) plan(ctx context.Context, ref names.ProjectRef, ensure, build bool) (*plan, error) {
@@ -271,27 +281,130 @@ func (m *Manager) up(ctx context.Context, ref names.ProjectRef, o UpOptions) err
 		m.printf("devc: %s is already running\n", name)
 		return nil
 	case ci.State.Running:
-		// Started outside this invocation but never reported ready: finish
-		// the start, but leave a container this invocation did not start
-		// alone if that fails.
+		// Started outside this invocation but never reported ready. A box
+		// of level internet without devc's rules is stopped (it would stop
+		// itself at the sentinel check) and started properly.
+		if pl.spec.NetRules {
+			if err := m.installer().Verify(ctx, ci.NetworkSettings.SandboxKey); err != nil {
+				m.printf("devc: %s is running without devc's network rules (%v); stopping it\n", name, err)
+				if err := m.Engine.Stop(ctx, name, 10*time.Second); err != nil {
+					return fmt.Errorf("stopping %s: %w", name, err)
+				}
+				return m.startStopped(ctx, pl)
+			}
+			// The rules are there. Its hosts file is box-writable by now,
+			// so the canary tries the host's own addresses only.
+			pl.net = &netpolicy.Facts{Namespace: ci.NetworkSettings.SandboxKey}
+		}
+		// Finish the start, but leave a container this invocation did not
+		// start alone if that fails.
 		m.printf("devc: %s is running but has not reported ready; finishing its start\n", name)
 		if err := m.afterStart(ctx, pl); err != nil {
 			return fmt.Errorf("%w\n%s is still running; restart it with 'devc down %s' and 'devc up %s'", err, name, ref, ref)
 		}
 		return nil
 	default:
-		if err := m.publish(ctx, pl); err != nil {
-			return m.rollback(ctx, pl, rollbackCleanOnly, err)
+		return m.startStopped(ctx, pl)
+	}
+}
+
+// startStopped starts an existing, stopped box; a failure stops it again.
+func (m *Manager) startStopped(ctx context.Context, pl *plan) error {
+	if err := m.publish(ctx, pl); err != nil {
+		return m.rollback(ctx, pl, rollbackCleanOnly, err)
+	}
+	m.printf("devc: starting %s\n", pl.spec.Name)
+	if err := m.startBox(ctx, pl); err != nil {
+		return m.rollback(ctx, pl, rollbackStop, fmt.Errorf("starting the box: %w", err))
+	}
+	if err := m.afterStart(ctx, pl); err != nil {
+		return m.rollback(ctx, pl, rollbackStop, err)
+	}
+	return nil
+}
+
+func (m *Manager) installer() *netpolicy.Installer {
+	if m.Net != nil {
+		return m.Net
+	}
+	return &netpolicy.Installer{Engine: m.Engine, HostAddrs: m.HostAddrs}
+}
+
+// startBox starts a created or stopped container. For level internet it
+// is the sequence of spec section 11: `init` (which creates a fresh network
+// namespace, also for a container that ran before), read the namespace
+// and the resolvers from the engine, install the rules from the host, and
+// only then `start`. No box process runs before the rules are in place.
+func (m *Manager) startBox(ctx context.Context, pl *plan) error {
+	name := pl.spec.Name
+	if pl.spec.NetRules {
+		ci, err := m.Engine.Inspect(ctx, name)
+		if err != nil {
+			return err
 		}
-		m.printf("devc: starting %s\n", name)
-		if err := m.Engine.Start(ctx, name); err != nil {
-			return m.rollback(ctx, pl, rollbackStop, fmt.Errorf("starting the box: %w", err))
+		// A container left initialised (devc stopped between init and
+		// start) has its namespace already and has run nothing; the
+		// engine refuses a second init, and the rules replace any table.
+		if ci.State.Status != "initialized" {
+			if err := m.Engine.Init(ctx, name); err != nil {
+				return fmt.Errorf("initialising the box for its network rules: %w", err)
+			}
+			if ci, err = m.Engine.Inspect(ctx, name); err != nil {
+				return err
+			}
 		}
-		if err := m.afterStart(ctx, pl); err != nil {
-			return m.rollback(ctx, pl, rollbackStop, err)
+		facts, err := netpolicy.Gather(&ci)
+		if err != nil {
+			return err
 		}
+		if err := m.installer().Install(ctx, facts); err != nil {
+			return err
+		}
+		pl.net = &facts
+	}
+	return m.Engine.Start(ctx, name)
+}
+
+// checkNetwork is the outside check of level internet: the host listens
+// on all its addresses for a moment while the box tries to reach them and
+// the engine's host alias. A connection that gets through, by the box's
+// report or by the listener's count, fails the start.
+func (m *Manager) checkNetwork(ctx context.Context, pl *plan) error {
+	hostAddrs := m.HostAddrs
+	if hostAddrs == nil {
+		hostAddrs = netpolicy.HostAddrs
+	}
+	host, err := hostAddrs()
+	if err != nil {
+		return err
+	}
+	var alias []netip.Addr
+	if pl.net != nil {
+		alias = pl.net.HostAlias
+	}
+	addrs := netpolicy.CanaryAddrs(host, alias)
+	if len(addrs) == 0 {
+		m.printf("devc: warning: the host has no IPv4 address to test the network rules against\n")
 		return nil
 	}
+	canary, err := netpolicy.OpenCanary()
+	if err != nil {
+		return err
+	}
+	cmd := []string{paths.InBoxHelper, "box", "net-canary", "--port", strconv.Itoa(canary.Port())}
+	for _, a := range addrs {
+		cmd = append(cmd, a.String())
+	}
+	res, err := m.Engine.Exec(ctx, engine.ExecOptions{Container: pl.spec.Name, Workdir: "/", Cmd: cmd, Timeout: time.Minute})
+	accepted := canary.Close()
+	var ee *execx.ExitError
+	if err != nil && !(errors.As(err, &ee) && ee.Result.ExitCode == 1) {
+		return fmt.Errorf("running the network check in %s: %w%s", pl.spec.Name, err, outputTail(res))
+	}
+	if err := netpolicy.EvaluateCanary(res.Stdout, addrs, canary.Port(), accepted); err != nil {
+		return fmt.Errorf("network check of %s failed: %w; the rules of level internet are not effective, so the box is not started", pl.spec.Name, err)
+	}
+	return nil
 }
 
 // publish writes everything a starting box needs on the host: /etc/devc,
@@ -327,9 +440,7 @@ func (m *Manager) createAndStart(ctx context.Context, pl *plan) error {
 	if _, err := m.Engine.Create(ctx, pl.spec.Args()); err != nil {
 		return m.rollback(ctx, pl, rollbackCleanOnly, fmt.Errorf("creating the box: %w", err))
 	}
-	// Network rules for the internet level will be installed here, between
-	// init and start (C07).
-	if err := m.Engine.Start(ctx, pl.spec.Name); err != nil {
+	if err := m.startBox(ctx, pl); err != nil {
 		return m.rollback(ctx, pl, rollbackRemove, fmt.Errorf("starting the box: %w", err))
 	}
 	if err := m.afterStart(ctx, pl); err != nil {
@@ -433,6 +544,11 @@ func (m *Manager) afterStart(ctx context.Context, pl *plan) error {
 	ready := filepath.Join(pl.runtime, "ready")
 	for i := 0; ; i++ {
 		if fi, err := os.Lstat(ready); err == nil && fi.Mode().IsRegular() {
+			if pl.spec.NetRules {
+				if err := m.checkNetwork(ctx, pl); err != nil {
+					return err
+				}
+			}
 			m.printf("devc: %s is ready\n", name)
 			m.afterReady(ctx, pl.spec.Ref, name)
 			return nil

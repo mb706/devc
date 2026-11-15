@@ -26,7 +26,11 @@ type InitOptions struct {
 	// SeedRoot prefixes the paths of harness seeds ("/" in a box); empty
 	// skips seeding.
 	SeedRoot string
-	Log      io.Writer
+	// CheckNetwork, when set, must succeed before the box reports ready
+	// (the sentinel of level internet); its failure ends init with an
+	// error, which stops the box.
+	CheckNetwork func(context.Context) error
+	Log          io.Writer
 }
 
 // DefaultInitOptions are the paths used in a box. mountPoints comes from
@@ -46,6 +50,18 @@ func Init(ctx context.Context, o InitOptions) error {
 	logf := func(format string, args ...any) {
 		if o.Log != nil {
 			fmt.Fprintf(o.Log, "devc box init: "+format+"\n", args...)
+		}
+	}
+	// A marker from an earlier run must not survive a start that fails
+	// (devc removes it before starting, a plain `podman start` does not).
+	if err := os.Remove(filepath.Join(o.Run, ReadyFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing the old readiness marker: %w", err)
+	}
+	// Fail closed first: a box of level internet that was started without
+	// devc's rules (a plain `podman start`) never comes up.
+	if o.CheckNetwork != nil {
+		if err := o.CheckNetwork(ctx); err != nil {
+			return err
 		}
 	}
 	for _, err := range PrepareHome(o) {

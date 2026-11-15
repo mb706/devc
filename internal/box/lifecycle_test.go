@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,10 +19,13 @@ import (
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/paths"
 )
 
 type rig struct {
+	// rules is what the fake nft was last given.
+	rules  string
 	t      *testing.T
 	base   string
 	cfgDir string
@@ -67,9 +71,24 @@ func newRig(t *testing.T) *rig {
 	}
 	r.load()
 	r.m.Executable = exe
+	// Level internet: Init writes the engine files, nft keeps what it was
+	// given, and the canary in the box reaches nothing.
+	r.eng.UserData = filepath.Join(base, "userdata")
+	r.eng.ResolvConf = "nameserver 10.0.2.3\n"
+	r.eng.Hosts = "192.168.1.5 host.containers.internal\n"
+	r.eng.UnshareFunc = func(args []string, stdin string) (execx.Result, error) {
+		if slices.Contains(args, "-f") {
+			r.rules = stdin
+			return execx.Result{}, nil
+		}
+		return execx.Result{Stdout: []byte(r.rules)}, nil
+	}
 	// Box init: the fake engine has no processes, so the identity fix
 	// stands in for it and writes the readiness marker.
 	r.eng.ExecFunc = func(o engine.ExecOptions) (execx.Result, error) {
+		if len(o.Cmd) > 4 && o.Cmd[1] == "box" && o.Cmd[2] == "net-canary" {
+			return canaryReport(o.Cmd[4], o.Cmd[5:], "unreachable"), nil
+		}
 		if slices.Equal(o.Cmd, []string{"/opt/devc/bin/devc", "box", "fix-identity"}) {
 			ref := hello
 			for _, p := range r.m.Config.Projects("") {
@@ -118,7 +137,20 @@ func (r *rig) load() {
 	m.LookPath = func(string) (string, error) { return "", errors.New("not found") }
 	m.ReadyTimeout = 2 * time.Second
 	m.Now = func() time.Time { return time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC) }
+	m.HostAddrs = func() ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr("192.168.1.5")}, nil }
+	m.Net = &netpolicy.Installer{Engine: r.eng, HostAddrs: m.HostAddrs,
+		LookPath: func(n string) (string, error) { return "/usr/sbin/" + n, nil }}
 	r.m = m
+}
+
+// canaryReport is the box's answer to net-canary with every address given
+// the same result.
+func canaryReport(port string, addrs []string, result string) execx.Result {
+	var probes []string
+	for _, a := range addrs {
+		probes = append(probes, fmt.Sprintf(`{"addr":"%s:%s","result":"%s"}`, a, port, result))
+	}
+	return execx.Result{Stdout: []byte("[" + strings.Join(probes, ",") + "]\n")}
 }
 
 func (r *rig) verbs() []string {
@@ -135,7 +167,8 @@ func TestUpCreatesAndIsIdempotent(t *testing.T) {
 	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
 		t.Fatalf("up: %v\n%s", err, r.out)
 	}
-	if got := r.verbs(); !slices.Equal(got, []string{"build", "create", "start"}) {
+	// Level internet (the example's default): init, rules, start.
+	if got := r.verbs(); !slices.Equal(got, []string{"build", "create", "init", "start"}) {
 		t.Errorf("engine calls: %v", r.eng.Log)
 	}
 	ci, err := r.m.Find(ctx, hello)
@@ -145,7 +178,7 @@ func TestUpCreatesAndIsIdempotent(t *testing.T) {
 	if ci.Labels[LabelRealm] != "demo" || ci.Labels[LabelProject] != "hello" || ci.Labels[LabelRole] != RoleBox || len(ci.Labels[LabelConfigHash]) != 64 {
 		t.Errorf("labels: %v", ci.Labels)
 	}
-	if len(r.eng.Execs) != 1 || r.eng.Execs[0].User != "0" || r.eng.Execs[0].Privileged || r.eng.Execs[0].Workdir != "/" ||
+	if len(r.eng.Execs) != 2 || r.eng.Execs[0].User != "0" || r.eng.Execs[0].Privileged || r.eng.Execs[0].Workdir != "/" ||
 		!slices.Contains(r.eng.Execs[0].Env, "PATH="+RootPATH) || !slices.Contains(r.eng.Execs[0].Env, "HOME=/root") {
 		t.Errorf("identity fix: %+v", r.eng.Execs)
 	}
@@ -203,11 +236,13 @@ func TestUpStartsStoppedBox(t *testing.T) {
 	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.verbs(); !slices.Equal(got, []string{"start"}) {
+	// A stopped box of level internet gets a fresh namespace and the rules
+	// again: init before start, never a plain start.
+	if got := r.verbs(); !slices.Equal(got, []string{"init", "start"}) {
 		t.Errorf("engine calls: %v", r.eng.Log)
 	}
-	if len(r.eng.Execs) != 2 {
-		t.Errorf("identity fix after the second start missing: %d execs", len(r.eng.Execs))
+	if len(r.eng.Execs) != 4 {
+		t.Errorf("identity fix and canary after the second start missing: %d execs", len(r.eng.Execs))
 	}
 }
 
@@ -239,7 +274,7 @@ func TestUpDrift(t *testing.T) {
 	if err := r.m.Up(ctx, hello, UpOptions{Recreate: true}); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.verbs(); !slices.Equal(got, []string{"rm", "create", "start"}) {
+	if got := r.verbs(); !slices.Equal(got, []string{"rm", "create", "init", "start"}) {
 		t.Errorf("recreate: %v", r.eng.Log)
 	}
 	if args := r.eng.CreateArgs["devc-demo-hello"]; !slices.Contains(args, "2g") {
@@ -353,8 +388,14 @@ func TestRemoveWithHome(t *testing.T) {
 	}
 	// The home is deleted from the helper container, never by a host tool
 	// walking it (finding A8).
-	if len(r.eng.Unshares) != 0 || len(r.eng.Runs) != 1 {
-		t.Fatalf("unshares %q, runs %d", r.eng.Unshares, len(r.eng.Runs))
+	// (The only unshares are the network rules of the earlier start.)
+	for _, u := range r.eng.Unshares {
+		if !slices.Contains(u, "/usr/sbin/nft") {
+			t.Errorf("unshare %q", u)
+		}
+	}
+	if len(r.eng.Runs) != 1 {
+		t.Fatalf("runs %d", len(r.eng.Runs))
 	}
 	o := r.eng.Runs[0]
 	if o.Rootfs != r.m.Toolbox.HelperRootfs() || o.Network != "none" || !o.CapDropAll || !slices.Equal(o.CapAdd, []string{"DAC_OVERRIDE", "FOWNER"}) ||
@@ -524,7 +565,7 @@ func TestUpRollsBack(t *testing.T) {
 			t.Fatal("up succeeded")
 		}
 		ci := r.eng.Containers["devc-demo-hello"]
-		if ci.State.Running || !slices.Equal(r.verbs(), []string{"start", "stop"}) || !slices.Equal(h.calls, []string{"cleanup hello"}) {
+		if ci.State.Running || !slices.Equal(r.verbs(), []string{"init", "start", "stop"}) || !slices.Equal(h.calls, []string{"cleanup hello"}) {
 			t.Errorf("after the failed start: running %v, %v, hooks %q", ci.State.Running, r.eng.Log, h.calls)
 		}
 		// The next up starts it again instead of trusting it.
@@ -552,7 +593,8 @@ func TestRunningButNotReady(t *testing.T) {
 	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(r.out.String(), "already running") || len(r.eng.Execs) != n+1 || !strings.Contains(r.out.String(), "is ready") {
+	// Identity fix and canary; the rules were verified from the host.
+	if strings.Contains(r.out.String(), "already running") || len(r.eng.Execs) != n+2 || !strings.Contains(r.out.String(), "is ready") {
 		t.Errorf("up on a running box that is not ready: %d execs\n%s", len(r.eng.Execs)-n, r.out)
 	}
 	// If it still does not become ready, up fails but leaves the container
@@ -661,7 +703,7 @@ func TestImageSources(t *testing.T) {
 	if err := r.m.Rebuild(ctx, hello); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.verbs(); !slices.Equal(got, []string{"build", "rm", "create", "start"}) {
+	if got := r.verbs(); !slices.Equal(got, []string{"build", "rm", "create", "init", "start"}) {
 		t.Errorf("rebuild: %v", r.eng.Log)
 	}
 
@@ -779,4 +821,134 @@ func TestStopHooks(t *testing.T) {
 	if err != nil || !strings.Contains(string(b), "source-file -q ~/.tmux.conf") {
 		t.Errorf("tmux.conf: %v %s", err, b)
 	}
+}
+
+// TestInternetLevel: the start sequence of level internet (spec 11):
+// create, init, rules installed from the host into the namespace the
+// engine reports, verification, start; then the canary. Every failure
+// leaves no running box.
+func TestInternetLevel(t *testing.T) {
+	ctx := context.Background()
+	r := newRig(t)
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Fatalf("up: %v\n%s", err, r.out)
+	}
+	args := r.eng.CreateArgs["devc-demo-hello"]
+	if !slices.Contains(args, "net.ipv6.conf.all.disable_ipv6=1") || !slices.Contains(args, "net.ipv6.conf.default.disable_ipv6=1") || slices.Contains(args, "--network") {
+		t.Errorf("create arguments: %q", args)
+	}
+	if len(r.eng.Unshares) != 2 || !strings.HasPrefix(r.eng.Unshares[0][1], "--net=/run/user/1000/netns/netns-fake-") {
+		t.Fatalf("unshares: %q", r.eng.Unshares)
+	}
+	if want := netpolicy.Rules([]netip.Addr{netip.MustParseAddr("10.0.2.3")}, []netip.Addr{netip.MustParseAddr("192.168.1.5")}); r.eng.UnshareInputs[0] != want {
+		t.Errorf("rules:\n%s", r.eng.UnshareInputs[0])
+	}
+	canary := r.eng.Execs[1]
+	if canary.User != "" || !slices.Equal(canary.Cmd[:4], []string{"/opt/devc/bin/devc", "box", "net-canary", "--port"}) || canary.Cmd[5] != "192.168.1.5" || len(canary.Cmd) != 6 {
+		t.Errorf("canary: %+v", canary)
+	}
+
+	// The canary reaches the host: the box is removed again.
+	t.Run("canary connects", func(t *testing.T) {
+		r := newRig(t)
+		orig := r.eng.ExecFunc
+		r.eng.ExecFunc = func(o engine.ExecOptions) (execx.Result, error) {
+			if len(o.Cmd) > 4 && o.Cmd[2] == "net-canary" {
+				res := canaryReport(o.Cmd[4], o.Cmd[5:], "connected")
+				return res, &execx.ExitError{Result: execx.Result{ExitCode: 1}}
+			}
+			return orig(o)
+		}
+		err := r.m.Up(ctx, hello, UpOptions{})
+		if err == nil || !strings.Contains(err.Error(), "reached 192.168.1.5") || !strings.Contains(err.Error(), "not effective") {
+			t.Fatalf("up: %v", err)
+		}
+		if _, ok := r.eng.Containers["devc-demo-hello"]; ok {
+			t.Error("box left behind")
+		}
+	})
+	// nft fails: the container is removed and never started.
+	t.Run("rules fail", func(t *testing.T) {
+		r := newRig(t)
+		r.eng.UnshareFunc = func([]string, string) (execx.Result, error) {
+			return execx.Result{ExitCode: 1, Stderr: []byte("nft: Operation not permitted")}, &execx.ExitError{Result: execx.Result{ExitCode: 1}}
+		}
+		err := r.m.Up(ctx, hello, UpOptions{})
+		if err == nil || !strings.Contains(err.Error(), "installing the network rules") || !strings.Contains(err.Error(), "Operation not permitted") {
+			t.Fatalf("up: %v", err)
+		}
+		if slices.Contains(r.verbs(), "start") || len(r.eng.Containers) != 0 {
+			t.Errorf("engine calls %v, containers %v", r.eng.Log, r.eng.Containers)
+		}
+	})
+	// The engine reports no namespace.
+	t.Run("no namespace", func(t *testing.T) {
+		r := newRig(t)
+		r.eng.Errors["init"] = errors.New("cannot init")
+		if err := r.m.Up(ctx, hello, UpOptions{}); err == nil || !strings.Contains(err.Error(), "cannot init") || len(r.eng.Containers) != 0 {
+			t.Fatalf("up: %v, %v", err, r.eng.Containers)
+		}
+	})
+	// A box of level internet that was started outside devc (no rules in
+	// its namespace) is stopped and started through the full sequence.
+	t.Run("started outside devc", func(t *testing.T) {
+		r := newRig(t)
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		rt, _ := r.m.Config.Paths.BoxRuntimeDir(names.BoxID(hello))
+		_ = os.Remove(filepath.Join(rt, "ready"))
+		r.rules = "" // a fresh namespace: nft lists nothing
+		r.eng.Log = nil
+		r.out.Reset()
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatalf("up: %v\n%s", err, r.out)
+		}
+		if got := r.verbs(); !slices.Equal(got, []string{"stop", "init", "start"}) || !strings.Contains(r.out.String(), "without devc's network rules") {
+			t.Errorf("engine calls %v\n%s", r.eng.Log, r.out)
+		}
+	})
+	// A container left initialised by an interrupted start is started
+	// without a second init (the engine would refuse it).
+	t.Run("left initialised", func(t *testing.T) {
+		r := newRig(t)
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.m.Down(ctx, hello); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.eng.Init(ctx, "devc-demo-hello"); err != nil {
+			t.Fatal(err)
+		}
+		r.eng.Log, r.rules = nil, ""
+		r.eng.Errors["init"] = errors.New("container state improper")
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatalf("up: %v\n%s", err, r.out)
+		}
+		if got := r.verbs(); !slices.Equal(got, []string{"start"}) || !strings.Contains(r.rules, "table inet devc") {
+			t.Errorf("engine calls %v, rules %q", r.eng.Log, r.rules)
+		}
+	})
+	// allowlist is refused before anything is created.
+	t.Run("allowlist", func(t *testing.T) {
+		r := newRig(t)
+		r.writeConfig("realms/demo/projects/hello/project.toml", "[network]\nlevel = \"allowlist\"\n")
+		r.load()
+		if err := r.m.Up(ctx, hello, UpOptions{}); err == nil || !strings.Contains(err.Error(), "not available yet") || len(r.eng.Containers) != 0 {
+			t.Fatalf("up: %v", err)
+		}
+	})
+	// Levels none and open need no rules and no canary.
+	t.Run("none", func(t *testing.T) {
+		r := newRig(t)
+		r.writeConfig("realms/demo/projects/hello/project.toml", "[network]\nlevel = \"none\"\n")
+		r.load()
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(r.verbs(), "init") || len(r.eng.Unshares) != 0 || len(r.eng.Execs) != 1 {
+			t.Errorf("engine calls %v, unshares %v, execs %d", r.eng.Log, r.eng.Unshares, len(r.eng.Execs))
+		}
+	})
 }

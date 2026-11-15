@@ -112,15 +112,28 @@ func stdoutIsTerminal() bool {
 }
 
 func newLifecycleCmds(a *app) []*cobra.Command {
-	var upRecreate, upBuild bool
+	var upRecreate, upBuild, upAll bool
 	up := &cobra.Command{
-		Use:   "up [<realm>/<project>]",
+		Use:   "up [<realm>/<project>] [--all]",
 		Short: "Create or start a project's box",
 		Long: "Create or start the box of a project (by default the one containing the current directory). " +
 			"The toolbox is synced and the image built or pulled when missing. If the box exists but was created " +
-			"from a different definition, up says so and exits 1 unless --recreate is given.",
+			"from a different definition, up says so and exits 1 unless --recreate is given. Boxes of network level " +
+			"internet get their firewall rules before they start, and a check from outside afterwards. --all starts " +
+			"every box that exists (after a reboot, for example); it creates none.",
 		Args: maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if upAll {
+				if len(args) > 0 {
+					return usageErrorf("--all takes no project")
+				}
+				return a.forAllBoxes(cmd, false, func(ctx context.Context, e *boxEnv, ref names.ProjectRef) error {
+					if err := a.requireRelay(e, ref); err != nil {
+						return err
+					}
+					return e.mgr.Up(ctx, ref, box.UpOptions{Recreate: upRecreate, Build: upBuild})
+				})
+			}
 			return a.withBox(cmd, args, func(ctx context.Context, e *boxEnv, ref names.ProjectRef) error {
 				if err := a.requireRelay(e, ref); err != nil {
 					return err
@@ -131,17 +144,29 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 	}
 	up.Flags().BoolVar(&upRecreate, "recreate", false, "remove and recreate the box (home, project and state are kept)")
 	up.Flags().BoolVar(&upBuild, "build", false, "rebuild the env image first")
+	up.Flags().BoolVar(&upAll, "all", false, "start every existing box of the configuration")
 
+	var downAll bool
 	down := &cobra.Command{
-		Use:   "down [<realm>/<project>]",
+		Use:   "down [<realm>/<project>] [--all]",
 		Short: "Stop a project's box",
+		Long:  "Stop a project's box; --all stops every running box of the configuration.",
 		Args:  maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if downAll {
+				if len(args) > 0 {
+					return usageErrorf("--all takes no project")
+				}
+				return a.forAllBoxes(cmd, true, func(ctx context.Context, e *boxEnv, ref names.ProjectRef) error {
+					return e.mgr.Down(ctx, ref)
+				})
+			}
 			return a.withBox(cmd, args, func(ctx context.Context, e *boxEnv, ref names.ProjectRef) error {
 				return e.mgr.Down(ctx, ref)
 			})
 		},
 	}
+	down.Flags().BoolVar(&downAll, "all", false, "stop every running box of the configuration")
 
 	var rmHome bool
 	rm := &cobra.Command{
@@ -301,6 +326,46 @@ func (a *app) withBox(cmd *cobra.Command, args []string, fn func(context.Context
 	ctx, cancel := context.WithTimeout(cmd.Context(), lifecycleTimeout)
 	defer cancel()
 	return a.boxError(e.cfg, fn(ctx, e, ref))
+}
+
+// forAllBoxes runs fn for every configured project whose box exists (with
+// running set: whose box runs), continuing after failures; it fails when
+// any project failed.
+func (a *app) forAllBoxes(cmd *cobra.Command, running bool, fn func(context.Context, *boxEnv, names.ProjectRef) error) error {
+	e, err := a.boxEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), lifecycleTimeout)
+	defer cancel()
+	failed, done := 0, 0
+	for _, p := range e.cfg.Projects("") {
+		ref := p.Ref()
+		ci, err := e.mgr.Find(ctx, ref)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "devc: %s: %s\n", ref, errText(err))
+			failed++
+			continue
+		}
+		if ci == nil || (running && !ci.State.Running) {
+			continue
+		}
+		done++
+		if err := a.boxError(e.cfg, fn(ctx, e, ref)); err != nil {
+			if !errors.Is(err, exitCode(1)) {
+				fmt.Fprintf(a.stderr, "devc: %s: %s\n", ref, errText(err))
+			}
+			failed++
+		}
+	}
+	if done == 0 && failed == 0 {
+		fmt.Fprintln(a.stderr, "devc: no box to act on")
+	}
+	if failed > 0 {
+		fmt.Fprintf(a.stderr, "devc: %d box(es) failed\n", failed)
+		return exitCode(1)
+	}
+	return nil
 }
 
 func (a *app) withExec(cmd *cobra.Command, args []string, fn func(context.Context, *boxEnv, names.ProjectRef, box.ExecOptions) (int, error)) error {

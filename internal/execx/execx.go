@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -162,6 +163,31 @@ func (c Cmd) Environ(base []string) []string {
 		}
 	}
 	return out
+}
+
+// sbinDirs are searched after PATH: nft and sshd live there and are often
+// missing from a user's PATH.
+var sbinDirs = []string{"/usr/sbin", "/sbin", "/usr/local/sbin"}
+
+// LookPath finds an executable in PATH or, failing that, in the sbin
+// directories, and returns its absolute path.
+func LookPath(name string) (string, error) {
+	if p, err := exec.LookPath(name); err == nil {
+		if abs, err := filepath.Abs(p); err == nil {
+			return abs, nil
+		}
+		return p, nil
+	}
+	if strings.Contains(name, "/") {
+		return "", fmt.Errorf("%s: %w", name, exec.ErrNotFound)
+	}
+	for _, d := range sbinDirs {
+		p := filepath.Join(d, name)
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0 {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("%s: %w", name, exec.ErrNotFound)
 }
 
 // WorkDir is the directory c runs in: c.Dir, or "/" when it is empty.

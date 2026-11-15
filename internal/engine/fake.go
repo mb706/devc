@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -39,15 +41,26 @@ type Fake struct {
 	ExecFunc func(ExecOptions) (execx.Result, error)
 	// Execs records every exec.
 	Execs []ExecOptions
-	// UnshareFunc answers Unshare; nil succeeds.
-	UnshareFunc func(args []string) (execx.Result, error)
+	// UnshareFunc answers Unshare (with the input read from stdin); nil
+	// succeeds.
+	UnshareFunc func(args []string, stdin string) (execx.Result, error)
 	Unshares    [][]string
+	// UnshareInputs records what each Unshare call read from stdin.
+	UnshareInputs []string
+	// UserData, when set, is a directory where Init writes each container's
+	// resolv.conf and hosts files (ResolvConf and Hosts), as Podman does.
+	UserData   string
+	ResolvConf string
+	Hosts      string
 	// RunFunc answers Run and RunStream; nil succeeds with no output.
 	RunFunc func(RunOptions) (execx.Result, error)
 	// Runs records every throwaway container.
 	Runs []RunOptions
 	// Errors make the named lifecycle verb fail ("create", "start", …).
 	Errors map[string]error
+	// OnStart, when set, adjusts a container's state after Start (for
+	// example to make it exit at once).
+	OnStart func(ci *ContainerInfo)
 
 	seq int
 }
@@ -190,6 +203,7 @@ func (f *Fake) Create(_ context.Context, args []string) (string, error) {
 	defer f.mu.Unlock()
 	ci := ContainerInfo{Labels: map[string]string{}, State: ContainerState{Status: "created"}}
 	var positional []string
+	rootfs := false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		next := func() string {
@@ -213,8 +227,13 @@ func (f *Fake) Create(_ context.Context, args []string) (string, error) {
 			ci.User = next()
 		case a == "--env":
 			ci.Env = append(ci.Env, next())
-		case a == "--hostname", a == "--tz", a == "--workdir", a == "--network", a == "--memory", a == "--pids-limit", a == "--passwd-entry",
-			a == "--entrypoint", a == "--device", a == "--group-add":
+		case a == "--network":
+			ci.HostConfig.NetworkMode = next()
+		case a == "--hostname", a == "--tz", a == "--workdir", a == "--memory", a == "--pids-limit", a == "--passwd-entry",
+			a == "--entrypoint", a == "--device", a == "--group-add", a == "--sysctl":
+			next()
+		case a == "--rootfs":
+			rootfs = true
 			next()
 		case strings.HasPrefix(a, "-"):
 		default:
@@ -231,7 +250,7 @@ func (f *Fake) Create(_ context.Context, args []string) (string, error) {
 	if _, ok := f.Containers[ci.Name]; ok {
 		return "", fmt.Errorf("fake create: the container name %q is already in use", ci.Name)
 	}
-	if len(positional) > 0 {
+	if len(positional) > 0 && !rootfs {
 		ci.ImageName = positional[0]
 		img, ok := f.Images[positional[0]]
 		if !ok {
@@ -280,9 +299,31 @@ func (f *Fake) transition(verb, name string, fn func(*ContainerInfo)) error {
 	return nil
 }
 
-// Init implements Engine.
+// Init implements Engine. Like Podman it creates a new network namespace
+// (a fake path) and, when UserData is set, writes the resolver and hosts
+// files.
 func (f *Fake) Init(_ context.Context, name string) error {
-	return f.transition("init", name, func(ci *ContainerInfo) { ci.State.Status = "initialized" })
+	var werr error
+	err := f.transition("init", name, func(ci *ContainerInfo) {
+		ci.State.Status = "initialized"
+		f.seq++
+		ci.NetworkSettings.SandboxKey = fmt.Sprintf("/run/user/1000/netns/netns-fake-%d", f.seq)
+		if f.UserData == "" {
+			return
+		}
+		dir := filepath.Join(f.UserData, ci.ID)
+		if werr = os.MkdirAll(dir, 0o755); werr != nil {
+			return
+		}
+		ci.ResolvConfPath, ci.HostsPath = filepath.Join(dir, "resolv.conf"), filepath.Join(dir, "hosts")
+		if werr = os.WriteFile(ci.ResolvConfPath, []byte(f.ResolvConf), 0o644); werr == nil {
+			werr = os.WriteFile(ci.HostsPath, []byte(f.Hosts), 0o644)
+		}
+	})
+	if err != nil {
+		return err
+	}
+	return werr
 }
 
 // Start implements Engine.
@@ -290,6 +331,9 @@ func (f *Fake) Start(_ context.Context, name string) error {
 	return f.transition("start", name, func(ci *ContainerInfo) {
 		f.seq++
 		ci.State = ContainerState{Status: "running", Running: true, Pid: 1000 + f.seq, Started: time.Now().UTC()}
+		if f.OnStart != nil {
+			f.OnStart(ci)
+		}
 	})
 }
 
@@ -352,15 +396,24 @@ func (f *Fake) ExecInteractive(_ context.Context, o ExecOptions) (int, error) {
 }
 
 // Unshare implements Engine.
-func (f *Fake) Unshare(_ context.Context, args []string) (execx.Result, error) {
+func (f *Fake) Unshare(_ context.Context, args []string, stdin io.Reader) (execx.Result, error) {
+	in := ""
+	if stdin != nil {
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return execx.Result{}, err
+		}
+		in = string(b)
+	}
 	f.mu.Lock()
 	f.Unshares = append(f.Unshares, append([]string(nil), args...))
+	f.UnshareInputs = append(f.UnshareInputs, in)
 	fn := f.UnshareFunc
 	f.mu.Unlock()
 	if fn == nil {
 		return execx.Result{}, nil
 	}
-	return fn(args)
+	return fn(args, in)
 }
 
 func (f *Fake) run(o RunOptions) (execx.Result, error) {

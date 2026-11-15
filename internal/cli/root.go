@@ -192,6 +192,10 @@ func newRoot(a *app) *cobra.Command {
 		newBoxCmd(a),
 		newSecretCmd(a),
 		newLoginCmd(a),
+		newForwardCmd(a),
+		newInitCmd(a),
+		newEditorCmd(a, "cursor", "Cursor"),
+		newEditorCmd(a, "code", "VS Code"),
 	)
 	root.AddCommand(newLifecycleCmds(a)...)
 	root.AddCommand(newHarnessCmds(a)...)

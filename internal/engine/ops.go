@@ -355,9 +355,12 @@ func (p *Podman) ExecInteractive(ctx context.Context, o ExecOptions) (int, error
 }
 
 // Unshare implements Engine.
-func (p *Podman) Unshare(ctx context.Context, args []string) (execx.Result, error) {
+func (p *Podman) Unshare(ctx context.Context, args []string, stdin io.Reader) (execx.Result, error) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return execx.Result{}, errors.New("unshare: invalid command")
 	}
-	return p.Runner.Run(ctx, execx.Cmd{Name: p.Bin, Args: append([]string{"unshare", "--"}, args...), Dir: "/", Timeout: lifecycleTimeout})
+	if stdin == nil {
+		stdin = strings.NewReader("")
+	}
+	return p.Runner.Run(ctx, execx.Cmd{Name: p.Bin, Args: append([]string{"unshare", "--"}, args...), Dir: "/", Stdin: stdin, Timeout: lifecycleTimeout})
 }

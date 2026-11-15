@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -47,6 +46,9 @@ type Check struct {
 	Status Status `json:"status"`
 	Detail string `json:"detail"`
 	Hint   string `json:"hint,omitempty"`
+	// RootFix are shell commands, to be run as root, that fix the problem;
+	// `devc doctor --fix` prints them as one script.
+	RootFix []string `json:"root_fix,omitempty"`
 }
 
 // Host is everything the checks look at. Production values come from
@@ -71,6 +73,17 @@ type Host struct {
 	StateDir     string
 	// Timeout bounds each external command; zero means 15 seconds.
 	Timeout time.Duration
+
+	// HelperRootfs is the toolbox's helper root filesystem and
+	// AuxSecurityOpts the security options of auxiliary containers; the
+	// overlay-statx probe runs there. An empty HelperRootfs skips it.
+	HelperRootfs    string
+	AuxSecurityOpts []string
+	// StatxTimeout bounds the probe (DefaultStatxTimeout when zero).
+	StatxTimeout time.Duration
+	// KillFuse ends the fuse-overlayfs process of a hung probe container
+	// (KillFuseOverlayfs in production).
+	KillFuse func(containerID, upperDir string) error
 }
 
 // NewHost returns a Host for the real machine.
@@ -84,6 +97,7 @@ func NewHost(runner execx.Runner, eng engine.Engine, user string, uid int, proje
 		Access:       unix.Access,
 		FSType:       FSType,
 		Reflink:      ReflinkProbe,
+		KillFuse:     KillFuseOverlayfs,
 		User:         user,
 		UID:          uid,
 		ProjectsRoot: projectsRoot,
@@ -91,26 +105,8 @@ func NewHost(runner execx.Runner, eng engine.Engine, user string, uid int, proje
 	}
 }
 
-// sbinDirs are searched after PATH: nft and sshd live there and are often
-// missing from a user's PATH.
-var sbinDirs = []string{"/usr/sbin", "/sbin", "/usr/local/sbin"}
-
 // LookPath finds an executable in PATH or in the sbin directories.
-func LookPath(name string) (string, error) {
-	if p, err := exec.LookPath(name); err == nil {
-		return p, nil
-	}
-	if strings.Contains(name, "/") {
-		return "", fmt.Errorf("%s: %w", name, exec.ErrNotFound)
-	}
-	for _, d := range sbinDirs {
-		p := filepath.Join(d, name)
-		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0 {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("%s: %w", name, exec.ErrNotFound)
-}
+func LookPath(name string) (string, error) { return execx.LookPath(name) }
 
 func (h *Host) path(p string) string {
 	return filepath.Join(h.Root, p)
@@ -163,7 +159,7 @@ func Run(ctx context.Context, h *Host) []Check {
 	}
 	checks := []func(context.Context, *Host, *engineState) Check{
 		checkEngine, checkRootless, checkSubIDs, checkLinger, checkRuntimeDir, checkTools,
-		checkNetBackend, checkStorage, checkSELinux, checkAppArmor, checkProjectsFS,
+		checkNetBackend, checkStorage, checkOverlayStatx, checkSELinux, checkAppArmor, checkProjectsFS,
 		checkCgroups, checkKVM, checkGPU,
 	}
 	out := make([]Check, 0, len(checks))
@@ -298,6 +294,11 @@ func checkSubIDs(_ context.Context, h *Host, es *engineState) Check {
 	c.Detail += fmt.Sprintf("; at least %d of each are needed", minSubIDs)
 	c.Hint = fmt.Sprintf("sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 %s\n"+
 		"(pick a range that does not overlap other users' entries), then: podman system migrate", h.User)
+	c.RootFix = []string{
+		"# subordinate IDs: check that 100000-165535 overlaps no other user's range in /etc/subuid and /etc/subgid",
+		"usermod --add-subuids 100000-165535 --add-subgids 100000-165535 " + shQuote(h.User),
+		"# afterwards, as " + h.User + ": podman system migrate",
+	}
 	return c
 }
 
@@ -325,6 +326,7 @@ func checkLinger(ctx context.Context, h *Host, _ *engineState) Check {
 		return c
 	}
 	c.Status, c.Detail, c.Hint = Warn, "disabled", hint
+	c.RootFix = []string{"loginctl enable-linger " + shQuote(h.User)}
 	return c
 }
 
@@ -488,6 +490,11 @@ func checkSELinux(ctx context.Context, h *Host, _ *engineState) Check {
 	c.Hint = fmt.Sprintf("sudo semanage fcontext -a -t container_file_t '%s(/.*)?'\n"+
 		"sudo semanage fcontext -a -t container_file_t '%s(/.*)?'\n"+
 		"sudo restorecon -R %s %s", h.ProjectsRoot, h.StateDir, h.ProjectsRoot, h.StateDir)
+	c.RootFix = []string{
+		"semanage fcontext -a -t container_file_t " + shQuote(h.ProjectsRoot+"(/.*)?"),
+		"semanage fcontext -a -t container_file_t " + shQuote(h.StateDir+"(/.*)?"),
+		"restorecon -R " + shQuote(h.ProjectsRoot) + " " + shQuote(h.StateDir),
+	}
 	return c
 }
 
@@ -516,10 +523,15 @@ func checkAppArmor(_ context.Context, h *Host, es *engineState) Check {
 	}
 	c.Status = Warn
 	c.Detail = fmt.Sprintf("restriction on; %s is not covered by an AppArmor profile that allows user namespaces", bin)
-	c.Hint = fmt.Sprintf("if rootless containers fail with permission errors, create /etc/apparmor.d/devc-podman:\n"+
-		"abi <abi/4.0>,\ninclude <tunables/global>\n"+
-		"profile devc-podman %s flags=(unconfined) {\n  userns,\n  include if exists <local/devc-podman>\n}\n"+
-		"then: sudo apparmor_parser -r /etc/apparmor.d/devc-podman", bin)
+	profile := fmt.Sprintf("abi <abi/4.0>,\ninclude <tunables/global>\n"+
+		"profile devc-podman %s flags=(unconfined) {\n  userns,\n  include if exists <local/devc-podman>\n}\n", bin)
+	c.Hint = "if rootless containers fail with permission errors, create /etc/apparmor.d/devc-podman:\n" + profile +
+		"then: sudo apparmor_parser -r /etc/apparmor.d/devc-podman"
+	c.RootFix = []string{
+		"# AppArmor: allow user namespaces for " + bin + " (only needed if rootless containers fail)",
+		"cat > /etc/apparmor.d/devc-podman <<'EOF'\n" + profile + "EOF",
+		"apparmor_parser -r /etc/apparmor.d/devc-podman",
+	}
 	return c
 }
 
@@ -608,6 +620,12 @@ func checkCgroups(_ context.Context, h *Host, es *engineState) Check {
 		"sudo mkdir -p /etc/systemd/system/user@.service.d\n" +
 		"printf '[Service]\\nDelegate=cpu cpuset io memory pids\\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf\n" +
 		"sudo systemctl daemon-reload, then log in again"
+	rootFix := []string{
+		"# cgroup delegation (log in again afterwards)",
+		"mkdir -p /etc/systemd/system/user@.service.d",
+		"printf '[Service]\\nDelegate=cpu cpuset io memory pids\\n' > /etc/systemd/system/user@.service.d/delegate.conf",
+		"systemctl daemon-reload",
+	}
 	if !h.exists("/sys/fs/cgroup/cgroup.controllers") {
 		c.Status, c.Detail = Warn, "cgroup v1 or no unified hierarchy: memory and pids limits will not apply"
 		c.Hint = "boot with systemd.unified_cgroup_hierarchy=1"
@@ -622,6 +640,7 @@ func checkCgroups(_ context.Context, h *Host, es *engineState) Check {
 		raw, err := h.readSmall(p)
 		if err != nil {
 			c.Status, c.Detail, c.Hint = Warn, "cgroup v2, but the user's delegated controllers are unknown: "+err.Error(), hint
+			c.RootFix = rootFix
 			return c
 		}
 		ctrls, source = strings.Fields(raw), "user@"+strconv.Itoa(h.UID)+".service"
@@ -636,6 +655,7 @@ func checkCgroups(_ context.Context, h *Host, es *engineState) Check {
 		c.Status = Warn
 		c.Detail = fmt.Sprintf("cgroup v2; %s not delegated (%s reports: %s): limits will not apply", strings.Join(missing, " and "), source, strings.Join(ctrls, " "))
 		c.Hint = hint
+		c.RootFix = rootFix
 		return c
 	}
 	c.Status, c.Detail = OK, fmt.Sprintf("cgroup v2; delegated: %s", strings.Join(ctrls, " "))
@@ -676,4 +696,32 @@ func checkGPU(_ context.Context, h *Host, _ *engineState) Check {
 	}
 	c.Status, c.Detail = Skip, "no NVIDIA CDI specification"
 	return c
+}
+
+// shQuote quotes s for a POSIX shell.
+func shQuote(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./=:@") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// RootScript collects the root commands of the checks that need
+// attention into one shell script for the user to review and run with
+// sudo; it is empty when nothing needs root.
+func RootScript(cs []Check) string {
+	var b strings.Builder
+	for _, c := range cs {
+		if len(c.RootFix) == 0 || c.Status == OK || c.Status == Skip {
+			continue
+		}
+		fmt.Fprintf(&b, "\n# %s (%s): %s\n", c.ID, c.Status, c.Title)
+		for _, l := range c.RootFix {
+			b.WriteString(l + "\n")
+		}
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "#!/bin/sh\n# Root commands printed by 'devc doctor --fix'. Review them, then run: sudo sh <this file>\nset -e\n" + b.String()
 }

@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
@@ -42,11 +44,20 @@ func newFixture(t *testing.T) *fixture {
 	f.write(t, "sys/fs/cgroup/cgroup.controllers", "cpuset cpu io memory pids\n")
 	f.run.On("loginctl", "show-user").Stdout("yes\n")
 	f.run.On("git", "--version").Stdout("git version 2.43.0\n")
+	helper := filepath.Join(f.root, "toolbox", "helper-rootfs")
+	f.write(t, "toolbox/helper-rootfs/bin/devc", "#!fake\n")
+	// The probe container exits at once with status 0.
+	f.eng.OnStart = func(ci *engine.ContainerInfo) {
+		ci.State.Running, ci.State.Status, ci.State.ExitCode = false, "exited", 0
+	}
 	f.h = &Host{
-		Runner: f.run,
-		Engine: f.eng,
-		Root:   f.root,
-		Getenv: func(k string) string { return f.env[k] },
+		HelperRootfs:    helper,
+		AuxSecurityOpts: []string{"no-new-privileges"},
+		StatxTimeout:    500 * time.Millisecond,
+		Runner:          f.run,
+		Engine:          f.eng,
+		Root:            f.root,
+		Getenv:          func(k string) string { return f.env[k] },
 		LookPath: func(n string) (string, error) {
 			if f.tools[n] {
 				return "/usr/bin/" + n, nil
@@ -96,7 +107,7 @@ func expect(t *testing.T, c Check, status Status, detail string) {
 func TestAllOK(t *testing.T) {
 	f := newFixture(t)
 	cs := Run(context.Background(), f.h)
-	want := []string{"engine", "rootless", "subids", "linger", "runtime-dir", "tools", "netbackend", "storage",
+	want := []string{"engine", "rootless", "subids", "linger", "runtime-dir", "tools", "netbackend", "storage", "overlay-statx",
 		"selinux", "apparmor-userns", "projects-fs", "cgroups", "kvm", "gpu"}
 	if len(cs) != len(want) {
 		t.Fatalf("%d checks", len(cs))
@@ -434,5 +445,115 @@ func TestRealProbes(t *testing.T) {
 	}
 	if _, err := LookPath("devc-no-such-tool"); !errors.Is(err, execx.ErrNotFound) {
 		t.Errorf("LookPath(missing) = %v", err)
+	}
+}
+
+func TestOverlayStatx(t *testing.T) {
+	f := newFixture(t)
+	expect(t, f.check(t, "overlay-statx"), OK, "returned in")
+	// The probe is a helper container that devc removes again.
+	if len(f.eng.Containers) != 0 {
+		t.Errorf("containers left: %v", f.eng.Containers)
+	}
+	verbs := strings.Join(f.eng.Log, ",")
+	if !strings.Contains(verbs, "create devc-doctor-statx-") || !strings.Contains(verbs, "rm devc-doctor-statx-") {
+		t.Errorf("engine calls: %v", f.eng.Log)
+	}
+
+	// The worker hangs: the check fails after its time limit, ends the
+	// container's fuse-overlayfs and removes the container.
+	f.eng.Log = nil
+	var killed []string
+	f.eng.OnStart = func(ci *engine.ContainerInfo) { ci.GraphDriver.Data = map[string]string{"UpperDir": "/upper"} }
+	f.h.KillFuse = func(id, upper string) error {
+		killed = append(killed, id+" "+upper)
+		return nil
+	}
+	start := time.Now()
+	c := f.check(t, "overlay-statx")
+	expect(t, c, Fail, "did not return within 500ms")
+	if time.Since(start) > 5*time.Second || !strings.Contains(c.Hint, "native overlay") {
+		t.Errorf("took %s, hint %q", time.Since(start), c.Hint)
+	}
+	if len(killed) != 1 || !strings.HasSuffix(killed[0], " /upper") || len(f.eng.Containers) != 0 {
+		t.Errorf("killed %v, containers %v", killed, f.eng.Containers)
+	}
+	// A container that cannot be removed is reported.
+	f.eng.Errors["rm"] = errors.New("busy")
+	c = f.check(t, "overlay-statx")
+	if !strings.Contains(c.Detail, "could not be removed") {
+		t.Errorf("detail: %q", c.Detail)
+	}
+	delete(f.eng.Errors, "rm")
+	f.eng.Containers = map[string]engine.ContainerInfo{}
+
+	// A failing worker is a warning; no toolbox skips the probe.
+	f.eng.OnStart = func(ci *engine.ContainerInfo) {
+		ci.State.Running, ci.State.Status, ci.State.ExitCode = false, "exited", 1
+	}
+	expect(t, f.check(t, "overlay-statx"), Warn, "exit status 1")
+	f.h.HelperRootfs = filepath.Join(f.root, "missing")
+	expect(t, f.check(t, "overlay-statx"), Skip, "not synced")
+}
+
+func TestOverlayStatxArgs(t *testing.T) {
+	f := newFixture(t)
+	f.check(t, "overlay-statx")
+	for name, args := range f.eng.CreateArgs {
+		t.Errorf("container %s left with %v", name, args)
+	}
+	var args []string
+	f.eng.OnStart = func(ci *engine.ContainerInfo) {
+		for _, a := range f.eng.CreateArgs {
+			args = a
+		}
+		ci.State.Running, ci.State.Status = false, "exited"
+	}
+	f.check(t, "overlay-statx")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--network none", "--cap-drop=ALL", "--security-opt no-new-privileges", "--label devc.role=aux",
+		"type=tmpfs,destination=/target", "--env DEVC_HELPER=1", "--rootfs " + f.h.HelperRootfs + ":O /bin/devc box statx-worker"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("probe arguments lack %q: %s", want, joined)
+		}
+	}
+	if slices.Contains(args, "--rm") {
+		t.Error("the probe must not use --rm: devc watches and removes it")
+	}
+}
+
+func TestFuseServes(t *testing.T) {
+	id := strings.Repeat("ab", 32)
+	if !fuseServes([]string{"fuse-overlayfs", "-o", "lowerdir=/x,upperdir=/s/overlay-containers/" + id + "/rootfs/upper", "/s/overlay-containers/" + id + "/rootfs/merge"}, id, "") {
+		t.Error("rootfs overlay not matched")
+	}
+	if !fuseServes([]string{"fuse-overlayfs", "-o", "lowerdir=/l,upperdir=/s/overlay/123/diff,workdir=/w", "/m"}, id, "/s/overlay/123/diff") {
+		t.Error("image overlay not matched")
+	}
+	if fuseServes([]string{"fuse-overlayfs", "-o", "lowerdir=/l,upperdir=/s/overlay/1234/diff", "/m"}, id, "/s/overlay/123/diff") {
+		t.Error("prefix of another upper directory matched")
+	}
+	if err := KillFuseOverlayfs("../x", ""); err == nil {
+		t.Error("bad id accepted")
+	}
+}
+
+func TestRootScript(t *testing.T) {
+	f := newFixture(t)
+	if s := RootScript(Run(context.Background(), f.h)); s != "" {
+		t.Errorf("script on a healthy host:\n%s", s)
+	}
+	f.run.On("loginctl", "show-user").Stdout("no\n")
+	f.write(t, "etc/subuid", "")
+	f.eng.InfoVal.UIDMap = nil
+	f.h.User = "o'brien"
+	s := RootScript(Run(context.Background(), f.h))
+	for _, want := range []string{"#!/bin/sh", "set -e", "loginctl enable-linger 'o'\\''brien'", "usermod --add-subuids 100000-165535 --add-subgids 100000-165535 'o'\\''brien'"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("script lacks %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "sudo ") && !strings.Contains(s, "run: sudo sh") {
+		t.Errorf("commands in the root script use sudo:\n%s", s)
 	}
 }

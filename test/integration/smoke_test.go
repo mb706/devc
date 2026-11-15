@@ -40,8 +40,8 @@ func TestSmoke(t *testing.T) {
 		byID[c.ID] = c.Status
 		t.Logf("doctor %-16s %-4s %s", c.ID, c.Status, c.Detail)
 	}
-	if len(checks) != 14 {
-		t.Errorf("doctor reported %d checks, want 14", len(checks))
+	if len(checks) != 15 {
+		t.Errorf("doctor reported %d checks, want 15", len(checks))
 	}
 	// Integration tests need a working rootless engine.
 	for _, id := range []string{"engine", "rootless", "runtime-dir"} {

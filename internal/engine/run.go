@@ -172,6 +172,22 @@ func (o RunOptions) Args() ([]string, error) {
 	return append(args, o.Cmd...), nil
 }
 
+// CreateArgs returns the arguments of `podman create` (after the
+// subcommand) for a container named name with o's settings: the same as
+// Args without "run --rm", for containers that must be watched and removed
+// by the caller (a probe that may hang).
+func (o RunOptions) CreateArgs(name string) ([]string, error) {
+	if err := checkContainerName(name); err != nil {
+		return nil, err
+	}
+	args, err := o.Args()
+	if err != nil {
+		return nil, err
+	}
+	// Args starts with "run", "--rm".
+	return append([]string{"--name", name}, args[2:]...), nil
+}
+
 var (
 	capRE    = regexp.MustCompile(`^[A-Z][A-Z_]{1,30}$`)
 	userNSRE = regexp.MustCompile(`^[a-z][a-z-]*(:[a-z]+=[0-9]+(,[a-z]+=[0-9]+)*)?$`)

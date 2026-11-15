@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/sys/unix"
 )
 
 // HelperTarget is where the helper container mounts the tree a worker
@@ -45,4 +47,16 @@ func ClearDir(dir string) error {
 		}
 	}
 	return first
+}
+
+// StatxBirth asks statx() for the birth time of path. Some fuse-overlayfs
+// versions never answer that request for files in a lower layer; the
+// doctor check overlay-statx runs this in the helper container under a
+// time limit.
+func StatxBirth(path string) error {
+	var st unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_STATX_SYNC_AS_STAT, unix.STATX_BTIME, &st); err != nil {
+		return fmt.Errorf("statx %s: %w", path, err)
+	}
+	return nil
 }

@@ -72,8 +72,8 @@ type DataFacts struct {
 var networkSentences = map[string]string{
 	"none":      "there is no network access.",
 	"allowlist": "only an allowlist of hosts is reachable; ask the user if you need another one.",
-	"internet":  "the internet is reachable, but the host's local network and other private addresses are not.",
-	"open":      "the network is not restricted.",
+	"internet":  "the internet is reachable, but the host, its local network and other private addresses are not. DNS works; IPv6 is off. To serve something to the user, listen on 127.0.0.1 in the box and ask the user to run `devc forward <port>`.",
+	"open":      "the network is not restricted: the host's local network and services are reachable too.",
 }
 
 // NewData collects the template data of a project and harness.

@@ -130,7 +130,7 @@ func newRealmAddCmd(a *app) *cobra.Command {
 		Use:   "add <name> [--network level] [--description text]",
 		Short: "Write a minimal realm.toml for a new realm",
 		Long: "Create realms/<name>/realm.toml in the configuration directory. Without --network the realm uses the " +
-			"default level, internet, which devc refuses until its firewall rules exist; use --network open or none until then.",
+			"default level, internet: the internet is reachable, the host and private networks are not.",
 		Args: exactArgs(1, "devc realm add <name>"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]

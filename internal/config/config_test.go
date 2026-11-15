@@ -112,7 +112,7 @@ func TestExampleLoadsCleanly(t *testing.T) {
 	}
 	check("realms", realms, "demo", "other")
 	check("projects", projects, "demo/analysis", "demo/hello", "other/tools")
-	check("envs", envs, "base")
+	check("envs", envs, "base", "python-base", "r-base")
 	check("harnesses", harnesses, "claude", "codex")
 	if n := len(c.Projects("demo")); n != 2 {
 		t.Errorf("Projects(demo) has %d entries", n)
@@ -171,7 +171,7 @@ func TestResolved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hello.Env != "base" || hello.Image != "" || hello.Network != "open" || hello.Box.Memory != "16g" ||
+	if hello.Env != "base" || hello.Image != "" || hello.Network != "internet" || hello.Box.Memory != "16g" ||
 		hello.Box.Pids != 4096 || hello.MemoryGroup != "hello" || hello.Data.Enabled || hello.BoxName != "devc-demo-hello" ||
 		hello.Git.BranchPrefix != "agent/" || hello.Git.UserEmail != "demo@example.org" || hello.Grants.GitHub != "relay" ||
 		len(hello.Harnesses) != 2 || hello.Harnesses[1].AuthMethod != "shared-home" || hello.Harnesses[0].Secret != "claude-token" ||
@@ -185,14 +185,14 @@ func TestResolved(t *testing.T) {
 		t.Errorf("analysis: %+v", an)
 	}
 	tools, _ := c.Resolved(names.ProjectRef{Realm: "other", Project: "tools"})
-	if tools.Env != "" || tools.Image == "" || tools.Network != "open" || tools.Git.BranchPrefix != "" {
+	if tools.Env != "" || tools.Image == "" || tools.Network != "internet" || tools.Git.BranchPrefix != "" {
 		t.Errorf("tools: %+v", tools)
 	}
 	if _, err := c.Resolved(names.ProjectRef{Realm: "demo", Project: "nope"}); err == nil {
 		t.Error("Resolved of a missing project succeeded")
 	}
-	// A realm without network.default still defaults to "internet" (which
-	// devc up refuses until C07); limits can be switched off explicitly.
+	// A realm without network.default defaults to "internet"; limits can
+	// be switched off explicitly.
 	{
 		dir := copyExample(t)
 		write(t, dir, "realms/other/realm.toml", "")
