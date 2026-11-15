@@ -197,6 +197,7 @@ func newRoot(a *app) *cobra.Command {
 	root.AddCommand(newHarnessCmds(a)...)
 	root.AddCommand(newSessionCmds(a)...)
 	root.AddCommand(newGitCmds(a)...)
+	root.AddCommand(newDataCmds(a)...)
 	existing := map[string]bool{"help": true}
 	for _, c := range root.Commands() {
 		existing[c.Name()] = true

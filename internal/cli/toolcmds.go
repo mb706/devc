@@ -83,6 +83,11 @@ func newToolboxCmd(a *app) *cobra.Command {
 			default:
 				fmt.Fprintf(a.stdout, "tmux     %s\n", info.Tmux)
 			}
+			if info.Restic == "" {
+				fmt.Fprintf(a.stdout, "restic   missing (needed by the restic savepoint driver: 'devc toolbox install restic')\n")
+			} else {
+				fmt.Fprintf(a.stdout, "restic   %s\n", info.Restic)
+			}
 			if len(info.Shims) > 0 {
 				fmt.Fprintf(a.stdout, "shims    %s\n", strings.Join(info.Shims, " "))
 			}
@@ -93,7 +98,20 @@ func newToolboxCmd(a *app) *cobra.Command {
 		},
 	}
 	ls.Flags().BoolVar(&lsJSON, "json", false, "print JSON")
-	return group("toolbox", "Manage the toolbox mounted into every box", false, sync, ls, newToolboxBuildCmd(a))
+	install := &cobra.Command{
+		Use:   "install restic",
+		Short: "Download and install a pinned tool (restic, for savepoints)",
+		Long: "Download the pinned restic release for this architecture, verify its SHA-256 and install it in the toolbox. " +
+			"Downloads are cached by checksum in $DEVC_DOWNLOAD_CACHE (default ~/.cache/devc/downloads).",
+		Args: exactArgs(1, "devc toolbox install restic"),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if args[0] != "restic" {
+				return usageErrorf("devc toolbox install knows only restic, not %q", args[0])
+			}
+			return a.installRestic(cmd)
+		},
+	}
+	return group("toolbox", "Manage the toolbox mounted into every box", false, sync, ls, newToolboxBuildCmd(a), install)
 }
 
 func okText(ok bool) string {

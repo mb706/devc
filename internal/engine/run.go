@@ -40,7 +40,11 @@ type RunOptions struct {
 	// (without the CAP_ prefix).
 	CapDropAll bool
 	CapAdd     []string
-	Mounts     []RunMount
+	// UserNS is the user-namespace mode (--userns=<value>), "" for the
+	// engine default. The helper container uses the box's mapping
+	// (keep-id:uid=1000,gid=1000) so that in-box UIDs mean the same host IDs.
+	UserNS string
+	Mounts []RunMount
 	// Tmpfs lists empty tmpfs mounts (absolute paths).
 	Tmpfs   []string
 	Env     []string // "KEY=value"
@@ -108,6 +112,12 @@ func (o RunOptions) Args() ([]string, error) {
 		}
 		args = append(args, "--cap-add="+c)
 	}
+	if o.UserNS != "" {
+		if !userNSRE.MatchString(o.UserNS) {
+			return nil, fmt.Errorf("invalid user namespace mode %q", o.UserNS)
+		}
+		args = append(args, "--userns="+o.UserNS)
+	}
 	for _, m := range o.Mounts {
 		for _, p := range []string{m.Source, m.Target} {
 			if !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsAny(p, ",\"\n\r\x00") {
@@ -162,7 +172,10 @@ func (o RunOptions) Args() ([]string, error) {
 	return append(args, o.Cmd...), nil
 }
 
-var capRE = regexp.MustCompile(`^[A-Z][A-Z_]{1,30}$`)
+var (
+	capRE    = regexp.MustCompile(`^[A-Z][A-Z_]{1,30}$`)
+	userNSRE = regexp.MustCompile(`^[a-z][a-z-]*(:[a-z]+=[0-9]+(,[a-z]+=[0-9]+)*)?$`)
+)
 
 func (o RunOptions) stdin() io.Reader {
 	if o.Stdin != nil {

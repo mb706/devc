@@ -154,10 +154,13 @@ func New(t *testing.T) *Env {
 	if err := renameForTests(e.ConfigDir); err != nil {
 		t.Fatalf("renaming the test configuration: %v", err)
 	}
-	// Files created by in-box root belong to subordinate IDs; hand
-	// everything back to the user before t.TempDir removes it.
+	// Files created by in-box root or the vault belong to subordinate IDs;
+	// hand everything back to the user, and make sealed (read-only)
+	// directories writable again, before t.TempDir removes it. find does
+	// not follow symlinks.
 	t.Cleanup(func() {
 		_ = exec.Command(Engine(), "unshare", "chown", "-R", "0:0", base).Run()
+		_ = exec.Command(Engine(), "unshare", "find", base, "-type", "d", "!", "-perm", "-u=rwx", "-exec", "chmod", "u+rwx", "{}", "+").Run()
 	})
 	t.Cleanup(func() { RemoveTestContainers(t) })
 	for _, d := range []string{e.StateDir, e.RuntimeDir, e.ProjectsRoot} {
@@ -374,6 +377,8 @@ func (e *Env) environ() []string {
 		"DEVC_STATE_DIR="+e.StateDir,
 		"DEVC_RUNTIME_DIR="+e.RuntimeDir,
 		"DEVC_TEST_RUN="+Nonce,
+		// Pinned downloads (restic) are fetched once and reused by every run.
+		"DEVC_DOWNLOAD_CACHE="+filepath.Join(CacheDir(), "downloads"),
 	)
 }
 

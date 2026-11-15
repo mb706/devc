@@ -259,6 +259,21 @@ func TestRunArgs(t *testing.T) {
 	if err != nil || !slices.Equal(got, want) {
 		t.Errorf("helper args:\n%q\nwant\n%q (%v)", got, want, err)
 	}
+
+	// The data workers use the box's user namespace; --rootfs stays last.
+	h.UserNS, h.User = "keep-id:uid=1000,gid=1000", "0:0"
+	got, err = h.Args()
+	want = []string{"run", "--rm", "--http-proxy=false", "--network", "none", "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE", "--userns=keep-id:uid=1000,gid=1000",
+		"--mount", "type=bind,source=/h,destination=/target", "--user", "0:0", "--rootfs", "/tb/helper-rootfs:O", "/bin/devc", "box", "rm-worker"}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("worker args:\n%q\nwant\n%q (%v)", got, want, err)
+	}
+	for _, bad := range []string{"host --privileged", "keep-id:uid=1000,gid=x", "--x", "Keep-id"} {
+		h.UserNS = bad
+		if _, err := h.Args(); err == nil {
+			t.Errorf("user namespace %q accepted", bad)
+		}
+	}
 }
 
 // TestExtraLabels: labels of the engine reach containers and images, and

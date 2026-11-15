@@ -66,6 +66,8 @@ type Manager struct {
 	Cleaners  []Cleaner
 	// StopHooks run around stopping a box (sessions, context commit).
 	StopHooks []StopHook
+	// StartHooks run once a box this command started is ready (data links).
+	StartHooks []StartHook
 	// Now is the clock for the root log.
 	Now func() time.Time
 
@@ -432,6 +434,7 @@ func (m *Manager) afterStart(ctx context.Context, pl *plan) error {
 	for i := 0; ; i++ {
 		if fi, err := os.Lstat(ready); err == nil && fi.Mode().IsRegular() {
 			m.printf("devc: %s is ready\n", name)
+			m.afterReady(ctx, pl.spec.Ref, name)
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -446,6 +449,15 @@ func (m *Manager) afterStart(ctx context.Context, pl *plan) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// afterReady runs the start hooks; failures are warnings.
+func (m *Manager) afterReady(ctx context.Context, ref names.ProjectRef, name string) {
+	for _, h := range m.StartHooks {
+		if err := h.AfterStart(ctx, ref, name); err != nil {
+			m.printf("devc: warning: %s\n", proto.PrintableText(err.Error()))
 		}
 	}
 }

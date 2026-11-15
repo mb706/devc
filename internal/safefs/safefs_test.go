@@ -293,3 +293,75 @@ func TestRemoveFile(t *testing.T) {
 		t.Errorf("top-level file: %v", err)
 	}
 }
+
+func TestDirOperations(t *testing.T) {
+	r, base := fixture(t)
+	d, err := r.Dir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	// Symlinks and non-directories are refused, never followed.
+	for _, name := range []string{"dirlink", "link-out", "ok.txt", "fifo"} {
+		if sub, err := d.Sub(name); err == nil {
+			sub.Close()
+			t.Errorf("Sub(%q) worked", name)
+		}
+	}
+	for _, name := range []string{"", ".", "..", "a/b"} {
+		if _, err := d.Lstat(name); !errors.Is(err, ErrBadName) {
+			t.Errorf("Lstat(%q) = %v", name, err)
+		}
+	}
+	if _, err := d.Walk("dirlink/inner.txt"); err == nil {
+		t.Error("Walk through a symlink worked")
+	}
+	if _, err := r.Dir("dirlink"); err == nil {
+		t.Error("Root.Dir through a symlink worked")
+	}
+	for _, name := range []string{"link-in", "fifo", "sub"} {
+		if f, err := d.OpenFile(name, os.O_RDONLY, 0); err == nil {
+			f.Close()
+			t.Errorf("OpenFile(%q) worked", name)
+		}
+	}
+	// MkdirAll refuses a symlink on the way.
+	if _, _, err := d.MkdirAll("dirlink/new", 0o755); err == nil {
+		t.Error("MkdirAll through a symlink worked")
+	}
+	nd, created, err := d.MkdirAll("a/b/c", 0o755)
+	if err != nil || len(created) != 3 || created[2] != "a/b/c" {
+		t.Fatalf("MkdirAll: %v %v", created, err)
+	}
+	nd.Close()
+	// Rename never replaces.
+	sub, _ := d.Sub("sub")
+	defer sub.Close()
+	if err := d.Rename("ok.txt", sub, "inner.txt"); err == nil {
+		t.Error("Rename replaced an existing entry")
+	}
+	if err := d.Rename("link-out", sub, "moved-link"); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := os.Readlink(filepath.Join(base, "root", "sub", "moved-link")); l != "../outside/secret" {
+		t.Errorf("moved link %q", l)
+	}
+	// RemoveAll deletes links, not their targets.
+	os.Symlink(filepath.Join(base, "outside"), filepath.Join(base, "root", "a", "b", "out"))
+	if err := d.RemoveAll("a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "outside", "secret")); err != nil {
+		t.Errorf("RemoveAll followed a link: %v", err)
+	}
+	if err := d.RemoveAll("does-not-exist"); err != nil {
+		t.Errorf("RemoveAll of a missing entry: %v", err)
+	}
+	ents, err := d.Entries(-1)
+	if err != nil || len(ents) == 0 {
+		t.Fatalf("entries: %v %v", ents, err)
+	}
+	if _, err := d.Entries(1); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("entry limit: %v", err)
+	}
+}

@@ -9,8 +9,9 @@ You are running inside a devc box: a sandboxed container for the project {{.Real
 - Private notes for this project are in {{.Notes}}. They are not part of the repository; never copy them into commits. Long-term memory belongs in {{.Memory}}.
 - Tools under /opt/devc are managed from the host. Do not try to update them.
 {{- if .Data}}
-- Data: the project's data lives in {{.Data.Root}} (each worktree has a `data` symlink to it).
+- Data: the project's data lives in {{.Data.Root}}, shared by all worktrees (each worktree has a `data` symlink to it; it is excluded from git).
 {{- if .Data.Inputs}} Inputs ({{join .Data.Inputs ", "}}) are read-only.{{end}}
-{{- if .Data.Sealed}} Sealed directories ({{join .Data.Sealed ", "}}) cannot be changed; ask the user to unseal one if needed.{{end}}
-{{- if .Data.Work}} Put new results in {{join .Data.Work ", "}}.{{else}} Put new results outside the input and sealed directories.{{end}}
+{{- if .Data.Work}} Put new results in {{join .Data.Work ", "}}.{{end}}
+{{- if .Data.Sealed}} In {{join .Data.Sealed ", "}}, create one new directory per run; the user seals a finished run with `devc seal <path>`, after which it can be read but not changed, moved or deleted (not even by you). Never write into a sealed directory; if one must change, ask the user to unseal it.{{end}}
+{{- if not .Data.Work}}{{if not .Data.Sealed}} Put new results outside the input directories.{{end}}{{end}}
 {{- end}}

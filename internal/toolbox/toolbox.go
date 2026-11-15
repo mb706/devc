@@ -13,6 +13,7 @@
 //	helper-rootfs/bin/devc  hard link to (or copy of) the current binary; nothing else
 //	seccomp.json            the box profile (seccomp.go)
 //	tmux/, bin/tmux, terminfo/   the static tmux (tmux.go)
+//	restic/                 the pinned restic for savepoints (restic.go)
 //	harness/, shims/        harness installations (harness.go)
 //
 // Installers and the tmux build run in throwaway containers with the box
@@ -183,12 +184,15 @@ type Info struct {
 	Seccomp bool     `json:"seccomp"`
 	// Tmux is the installed tmux version ("" when missing); TmuxPinned is
 	// the version this devc builds.
-	Tmux       string   `json:"tmux"`
-	TmuxPinned string   `json:"tmux_pinned"`
-	TmuxRecipe string   `json:"tmux_recipe"`
-	Terminfo   bool     `json:"terminfo"`
-	Shims      []string `json:"shims"`
-	Problems   []string `json:"problems"`
+	Tmux       string `json:"tmux"`
+	TmuxPinned string `json:"tmux_pinned"`
+	TmuxRecipe string `json:"tmux_recipe"`
+	Terminfo   bool   `json:"terminfo"`
+	// Restic is the installed restic version ("" when missing).
+	Restic       string   `json:"restic"`
+	ResticPinned string   `json:"restic_pinned"`
+	Shims        []string `json:"shims"`
+	Problems     []string `json:"problems"`
 }
 
 // List reports what is installed. A toolbox that was never synced yields
@@ -196,6 +200,8 @@ type Info struct {
 func (t *Toolbox) List() (Info, error) {
 	in := Info{Dir: t.Dir, Builds: []string{}, Shims: []string{}, Problems: []string{}, TmuxPinned: TmuxVersion, TmuxRecipe: TmuxRecipe()}
 	in.Tmux = t.InstalledTmux()
+	in.Restic, _ = t.InstalledRestic()
+	in.ResticPinned = ResticVersion
 	if fi, err := os.Stat(t.TerminfoDir()); err == nil && fi.IsDir() {
 		in.Terminfo = true
 	}

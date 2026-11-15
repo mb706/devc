@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/mb706/devc/internal/boxside"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/engine"
@@ -66,10 +68,48 @@ func prepareDirs(p *paths.Paths, s *Spec, runtimeDir string) error {
 // ensureProjectDir creates <projects_root>/<realm>/<project> with mode 0755
 // without following a symlink below the projects root: the engine would
 // follow one when mounting. The projects root itself is the user's choice
-// and may be a symlink.
+// and may be a symlink. The realm directory above is made private (0700):
+// sealed data is readable by everyone who can reach it, so nobody else on
+// the host may (work order C06 section 1).
 func ensureProjectDir(p *paths.Paths, dir string) error {
-	if err := paths.EnsureBeneath(p.ProjectsRoot(), dir, 0o755); err != nil {
+	if err := EnsureProjectDir(p, dir); err != nil {
 		return fmt.Errorf("creating the project directory: %w", err)
+	}
+	return nil
+}
+
+// EnsureProjectDir creates dir (a project directory or a path below one)
+// beneath the projects root and makes the realm directory 0700.
+func EnsureProjectDir(p *paths.Paths, dir string) error {
+	root := p.ProjectsRoot()
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("%s is not below the projects root %s", dir, root)
+	}
+	realm := filepath.Join(root, strings.SplitN(filepath.ToSlash(rel), "/", 2)[0])
+	if err := paths.EnsureBeneath(root, realm, 0o700); err != nil {
+		return err
+	}
+	if err := privateDir(realm); err != nil {
+		return err
+	}
+	return paths.EnsureBeneath(root, dir, 0o755)
+}
+
+// privateDir sets mode 0700 on a host-owned directory through a descriptor
+// opened without following a symlink.
+func privateDir(dir string) error {
+	f, err := os.OpenFile(dir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if fi.Mode().Perm() != 0o700 {
+		return f.Chmod(0o700)
 	}
 	return nil
 }
@@ -160,6 +200,7 @@ func writeEtc(p *paths.Paths, r *config.Resolved, version string, homeMounts []s
 		// For worktrees created in the box (the harness worktree hook).
 		BranchPrefix: r.Git.BranchPrefix,
 		DataRoot:     r.Data.Root,
+		DataLinks:    r.Data.Enabled,
 	}
 	b, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {

@@ -349,7 +349,8 @@ func TestInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"- Data: the project's data lives in /w/demo/analysis/data", "Inputs (/w/demo/analysis/data/raw) are read-only.",
-		"Sealed directories (/w/demo/analysis/data/results) cannot be changed", "Put new results in /w/demo/analysis/data/scratch."} {
+		"In /w/demo/analysis/data/results, create one new directory per run; the user seals a finished run with `devc seal <path>`",
+		"Put new results in /w/demo/analysis/data/scratch."} {
 		if !strings.Contains(an, want) {
 			t.Errorf("missing %q in:\n%s", want, an)
 		}

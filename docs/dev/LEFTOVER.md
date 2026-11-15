@@ -148,3 +148,19 @@ Other checks and deferred work:
 | Relay tags are refs/tags = the upstream as last fetched; `pull` does not prune deleted upstream tags (it prunes deleted branches) | nothing |
 | Relay garbage: `gc.auto = 0`, nothing ever runs `git gc` on relays, and bank refs are never pruned | a retention design (with C17) |
 | A bank applies at most 1000 changed branches and 1000 new tags (the rest wait for the next bank); a box can still make the fetch itself large | a size limit on fetched packs, if needed |
+
+### From C06
+
+| Item | Needs |
+|---|---|
+| The `reflink` savepoint driver (FICLONE copies in `.devc/savepoints/`, probe, read-only vault-owned result, restore from it) is unit-tested with a substitute clone function only; the projects filesystem here is ext4, so `TestData/reflink` skips and `auto` always falls back to restic | a btrfs or XFS projects filesystem |
+| `borg` is accepted by the configuration but `devc save` refuses it with a clear message | an implementation (auxiliary image) if anyone wants it |
+| Helper containers and restic runs get the box's SELinux options (`label=level:<realm level>`, or `label=disable` in disable mode); never run on an SELinux host | a Fedora machine, enforcing |
+| Known and accepted limits of sealing: a process in the box that already holds a writable descriptor of a file keeps it after sealing (and can write until it closes it); sealing protects against the box only, never against the host user, who can unseal, delete or change anything; FIFOs, sockets and devices inside a sealed entry are skipped (left to the box user, but immovable inside the read-only directory); a file hard-linked from elsewhere in the project is sealed under every name | documentation (C07) |
+| Sealing changes ownership in place and has no undo log: a worker killed half-way leaves the top of the entry sealed and part of the tree unsealed; sealing again (a no-op on the record) re-walks and completes it | nothing (documented) |
+| Savepoints do not keep owner write bits of reflink copies (the copy is read-only); a restore gives every file owner write and every directory owner rwx, and the box user owns everything restored | nothing (documented) |
+| restic exit status 3 (some files unreadable) still records the savepoint, with a warning; files the box made unreadable even to itself (mode 000) are therefore missing from restic savepoints | nothing (documented) |
+| A project whose `[data]` section is removed keeps its vault-owned project directory, `.devc/` and data root; devc does not hand them back | a decision (`devc data teardown`?) |
+| A project directory whose `.devc` was created by the box (possible before C06, when the project directory was box-owned) is refused by setup until the user moves it away | nothing (documented) |
+| Data commands hold the box lock: a long `devc save` or `restore` makes `up`, `bank` and other commands on that box wait (up to 10 minutes, then they fail) | a decision, if it bothers anyone |
+| restic prunes only in `devc data gc`; retention after `save` only forgets snapshots, so the repository grows until the next gc | the banking timer could run `data gc` (C08) |

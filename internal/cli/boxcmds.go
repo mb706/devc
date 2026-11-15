@@ -13,6 +13,7 @@ import (
 
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
+	"github.com/mb706/devc/internal/data"
 	"github.com/mb706/devc/internal/gitx"
 	"github.com/mb706/devc/internal/harness"
 	"github.com/mb706/devc/internal/names"
@@ -27,9 +28,10 @@ const lifecycleTimeout = 3 * time.Hour
 // boxEnv is what the lifecycle commands share: configuration, engine and
 // the box manager.
 type boxEnv struct {
-	cfg *config.Config
-	mgr *box.Manager
-	git *gitx.Service
+	cfg  *config.Config
+	mgr  *box.Manager
+	git  *gitx.Service
+	data *data.Service
 }
 
 func (a *app) boxEnv() (*boxEnv, error) {
@@ -48,7 +50,13 @@ func (a *app) boxEnv() (*boxEnv, error) {
 	m.Contributors = append(m.Contributors, hooks)
 	m.Preparers = append(m.Preparers, hooks)
 	m.Cleaners = append(m.Cleaners, hooks)
-	e := &boxEnv{cfg: c, mgr: m, git: a.gitService(c, m.Engine)}
+	e := &boxEnv{cfg: c, mgr: m, git: a.gitService(c, m.Engine), data: a.dataService(c, m.Engine, m.Toolbox, exe)}
+	// Data zones: input mounts, layout setup before start, worktree links
+	// after (work order C06).
+	dh := &data.BoxHooks{Service: e.data}
+	m.Contributors = append(m.Contributors, dh)
+	m.Preparers = append(m.Preparers, dh)
+	m.StartHooks = append(m.StartHooks, dh)
 	repo, err := a.ctxRepo(c, m.Engine)
 	if err != nil {
 		return nil, err

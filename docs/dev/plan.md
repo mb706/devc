@@ -172,8 +172,10 @@ Model: the box sees the relay as `origin`. Refs in the relay are in spec section
 |---|---|
 | C08 Daemon core | `proto`, daemon with Unix-socket API, box channel, continuous ingestion, event streams, CLI through the daemon, systemd unit. |
 | C09 Status and input | `box pty` status wrapper, commands with receipts, paste adapter with input gate, structured adapters for Claude Code, Codex and pi (unverifiable here; behind one interface). |
-| C10 Relay service, gate, requests | Real `git-remote-devc`, banking after turns, relay update policy, SSH gate, on-demand secrets, requests with risk classes. |
-| C11 Hub | Hub server, CA tooling, machine and user listeners, projections, inbox, pairing and passkeys, ntfy, `join`, several hubs. |
+| C10a Relay service, requests | Real `git-remote-devc`, banking after turns, relay update policy, requests with risk classes, on-demand secrets. |
+| C10b SSH gate | Master connections, gate over the box channel, box-side SSH configuration, read-only profile. |
+| C11a Hub core | Hub server, CA tooling, machine link, projections, inbox, HTTP API, several hubs. |
+| C11b Hub access | Login (password and TOTP; passkeys deferred), devices, enrolment, ntfy, hardening. |
 | C12 Web app | Inbox, session, project and draft screens, observing terminal, embedded assets. |
 | **Review C** | then fix chunk C12r. |
 

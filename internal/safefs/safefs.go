@@ -7,6 +7,12 @@
 // redirect a read with symlinks or "..". Only regular files are read, always
 // with a size cap. There is deliberately no fallback to path-based opens: if
 // openat2 is unavailable, every operation fails.
+//
+// Dir (dir.go) adds the write-side operations the helper container's
+// workers need on such trees (re-owning, modes, mkdir, rename, delete): each
+// takes a single path component relative to an open directory descriptor
+// and never follows a symlink, so a tree is walked descriptor by descriptor
+// and a symlink in it is only ever acted on as the link itself.
 package safefs
 
 import (

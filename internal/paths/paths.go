@@ -324,7 +324,23 @@ func (p *Paths) NoHooksDir() string { return filepath.Join(p.LocalDir(), "git", 
 // TmpDir is for short-lived host directories (temporary homes for logins).
 func (p *Paths) TmpDir() string        { return filepath.Join(p.LocalDir(), "tmp") }
 func (p *Paths) SavepointsDir() string { return filepath.Join(p.LocalDir(), "savepoints") }
-func (p *Paths) CacheDir() string      { return filepath.Join(p.stateDir, "cache") }
+
+// SavepointIndex lists a project's savepoints (one JSON object per line);
+// it is host-owned durable state, outside every box's reach.
+func (p *Paths) SavepointIndex(r names.ProjectRef) string {
+	return filepath.Join(p.DurableRealmDir(r.Realm), "savepoints", must(names.KindProject, r.Project)+".jsonl")
+}
+
+// ResticRepo is the restic repository of a project's savepoints.
+func (p *Paths) ResticRepo(r names.ProjectRef) string {
+	return filepath.Join(p.SavepointsDir(), must(names.KindRealm, r.Realm), must(names.KindProject, r.Project), "restic")
+}
+
+// ResticCache is restic's cache for a project's repository.
+func (p *Paths) ResticCache(r names.ProjectRef) string {
+	return filepath.Join(p.CacheDir(), "restic", must(names.KindRealm, r.Realm), must(names.KindProject, r.Project))
+}
+func (p *Paths) CacheDir() string { return filepath.Join(p.stateDir, "cache") }
 func (p *Paths) RealmPkgCacheDir(realm string) string {
 	return filepath.Join(p.CacheDir(), "realms", must(names.KindRealm, realm), "pkg")
 }

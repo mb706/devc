@@ -129,9 +129,9 @@ type Spec struct {
 	seccompDigest string
 }
 
-// Contributor adds mounts, environment or labels to a spec. Later chunks
-// register contributors for harness state (C03) and data zones (C06), so
-// the argument list stays in one place.
+// Contributor adds mounts, environment or labels to a spec. Harness state
+// (C03) and data zones (C06) are contributed, so the argument list stays in
+// one place.
 type Contributor interface {
 	Contribute(in *Inputs, s *Spec) error
 }
@@ -156,6 +156,12 @@ type Cleaner interface {
 type StopHook interface {
 	BeforeStop(ctx context.Context, ref names.ProjectRef, container string) error
 	AfterStop(ctx context.Context, ref names.ProjectRef, stopped bool) error
+}
+
+// StartHook runs after a box this command created or started has become
+// ready (with the box lock held). Its errors are reported as warnings.
+type StartHook interface {
+	AfterStart(ctx context.Context, ref names.ProjectRef, container string) error
 }
 
 // ContributorFunc adapts a function to Contributor.

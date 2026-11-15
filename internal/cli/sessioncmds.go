@@ -20,6 +20,7 @@ import (
 	"github.com/mb706/devc/internal/boxside"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/ctxrepo"
+	"github.com/mb706/devc/internal/data"
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/gitx"
 	"github.com/mb706/devc/internal/names"
@@ -583,6 +584,9 @@ func (a *app) startSession(cmd *cobra.Command, id string, refArgs, harnessArgs [
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), lifecycleTimeout)
 	defer cancel()
+	if err := a.saveBeforeSession(ctx, e, r); err != nil {
+		return err
+	}
 	name, err := e.mgr.EnsureRunning(ctx, ref)
 	if err != nil {
 		return a.boxError(e.cfg, err)
@@ -626,6 +630,32 @@ func (a *app) startSession(cmd *cobra.Command, id string, refArgs, harnessArgs [
 	}
 	if code != 0 {
 		return exitCode(code)
+	}
+	return nil
+}
+
+// saveBeforeSession takes a savepoint before a session when the project
+// asks for one (data.savepoints.before_session) and none is recent. A
+// failure stops the session from starting: the protection was asked for.
+func (a *app) saveBeforeSession(ctx context.Context, e *boxEnv, r *config.Resolved) error {
+	if !r.Data.Enabled || !r.Data.Savepoints.BeforeSession {
+		return nil
+	}
+	p, err := data.ProjectOf(e.cfg.Paths, r)
+	if err != nil {
+		return err
+	}
+	unlock, err := a.lockBox(ctx, e, p.Ref, 0)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	sp, err := e.data.BeforeSession(ctx, p)
+	if err != nil {
+		return fmt.Errorf("taking the savepoint before the session (data.savepoints.before_session): %w", err)
+	}
+	if sp != nil {
+		fmt.Fprintf(a.stderr, "devc: saved %s before the session (%s)\n", sp.ID, sp.Driver)
 	}
 	return nil
 }

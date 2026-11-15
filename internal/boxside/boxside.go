@@ -7,9 +7,10 @@
 // list and stop tmux windows, a self-test of the hardening, and the git
 // work that must happen in the box (snapshot commits, worktrees, the
 // repository report, the worktree hook and the stub remote helper
-// git-remote-devc). Two workers run outside boxes: rm-worker in the helper
-// container and the context worker in the context container
-// (internal/ctxrepo).
+// git-remote-devc), and the worktree links to the data root. Workers run
+// outside boxes: rm-worker and the data workers (seal, trash, savepoints,
+// restore) in the helper container, the context worker in the context
+// container (internal/ctxrepo).
 //
 // Security rules: code here runs in the box and trusts nothing the box can
 // write. It reads its own description only from /etc/devc, which the host
@@ -21,7 +22,9 @@
 // never prints and never fails. tmux runs with argument vectors and an
 // environment without per-session variables (internal/tmux). The context
 // worker walks a box-written tree through safefs and never lets git look
-// at it. The git commands here run box git on the box's own repository;
+// at it. The data workers resolve every path beneath the mounted project
+// directory descriptor by descriptor (safefs.Dir) and never act on anything
+// reached through a symlink. The git commands here run box git on the box's own repository;
 // their JSON reports are decoded strictly and validated by the host.
 package boxside
 
@@ -64,6 +67,9 @@ type Info struct {
 	// DataRoot is the data directory beside main/, never a worktree name.
 	BranchPrefix string `json:"branch_prefix,omitempty"`
 	DataRoot     string `json:"data_root,omitempty"`
+	// DataLinks is set when the project defines data zones: worktrees get
+	// a `data` link to the data root.
+	DataLinks bool `json:"data_links,omitempty"`
 }
 
 // InfoSchema is the current version of box.json.

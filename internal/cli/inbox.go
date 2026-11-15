@@ -218,8 +218,32 @@ func newBoxCmd(a *app) *cobra.Command {
 		},
 	}
 
+	// data-worker runs in the helper container: seal, unseal, trash,
+	// savepoint copies and restores below the project directory mounted at
+	// /target (work order C06). The request comes on stdin as JSON.
+	dataWorker := &cobra.Command{
+		Use:    "data-worker",
+		Short:  "Carry out one data request read from stdin (helper container only)",
+		Args:   noArgs,
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := boxside.RequireHelper(a.getenv, "/"); err != nil {
+				return err
+			}
+			req, err := boxside.ReadDataRequest(cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
+			res, err := boxside.NewDataWorker().Run(req)
+			if err != nil {
+				return err
+			}
+			return writeJSON(a.stdout, res)
+		},
+	}
+
 	subs := []*cobra.Command{initCmd, fixIdentity, shell, selftest, probe, launch, hook,
-		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker}
+		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker, dataWorker}
 	return group("box", "Commands that run inside a box (internal)", true, append(subs, newBoxGitCmds(a)...)...)
 }
 

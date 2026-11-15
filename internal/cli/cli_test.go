@@ -61,6 +61,17 @@ func TestUsageErrors(t *testing.T) {
 		{"login", "demo"},
 		{"login", "status"},
 		{"toolbox", "build", "nonsense"},
+		{"toolbox", "install", "borg"},
+		{"seal"},
+		{"seal", "results/x", "demo/analysis", "extra"},
+		{"save", "a", "demo/analysis", "extra"},
+		{"save", "Bad", "demo/analysis"},
+		{"restore"},
+		{"data", "nonsense"},
+		{"data", "rm"},
+		{"data", "unseal", "a", "b", "c"},
+		{"data", "trash", "restore"},
+		{"data", "trash", "empty", "--older-than", "soon"},
 	} {
 		code, _, errOut := run(t, nil, args...)
 		if code != 2 || !strings.Contains(errOut, "--help") {
@@ -195,5 +206,14 @@ func TestStateDirFlag(t *testing.T) {
 	code, out, _ := run(t, nil, "--state-dir", "/tmp/devc-state-x", "config", "show", "--json")
 	if code != 0 || !strings.Contains(out, `"state_dir": "/tmp/devc-state-x"`) {
 		t.Errorf("--state-dir: %d %q", code, out)
+	}
+}
+
+// TestDataWorkerOutsideHelper: the data worker refuses to run anywhere but
+// in the helper container.
+func TestDataWorkerOutsideHelper(t *testing.T) {
+	code, _, errOut := run(t, nil, "box", "data-worker")
+	if code != 1 || !strings.Contains(errOut, "helper container") {
+		t.Errorf("data-worker on the host: %d %q", code, errOut)
 	}
 }

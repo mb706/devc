@@ -18,6 +18,7 @@ import (
 
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
+	"github.com/mb706/devc/internal/data"
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/gitx"
@@ -446,7 +447,24 @@ func (a *app) projectBox(ctx context.Context, e *boxEnv, ref names.ProjectRef, d
 	if err != nil {
 		return err
 	}
-	return e.git.InitBox(ctx, p, def)
+	if err := e.git.InitBox(ctx, p, def); err != nil {
+		return err
+	}
+	// The new main worktree gets its link to the data root (C06).
+	if p.Resolved.Data.Enabled {
+		dp, err := data.ProjectOf(e.cfg.Paths, p.Resolved)
+		if err != nil {
+			return err
+		}
+		rep, err := e.data.Links(ctx, dp, p.Container)
+		if err != nil {
+			return err
+		}
+		for _, sk := range rep.Skipped {
+			fmt.Fprintf(a.stderr, "devc: %s: no data link in %s\n", ref, sk)
+		}
+	}
+	return nil
 }
 
 // --- bank, pull, push, log, diff ---

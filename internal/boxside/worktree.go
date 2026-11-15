@@ -22,6 +22,8 @@ type AddWorktreeOptions struct {
 	// Start is where a new branch starts (default origin/HEAD, else HEAD).
 	Start    string
 	DataRoot string
+	// DataLink gives the worktree the `data` link to the data root.
+	DataLink bool
 }
 
 // AddWorktree creates the sibling worktree /w/<r>/<p>/<name> (work order
@@ -42,6 +44,19 @@ func (r *Repo) AddWorktree(o AddWorktreeOptions) (string, bool, error) {
 			return w.Path, false, nil
 		}
 	}
+	dir, created, err := r.addWorktree(o, dir)
+	if err == nil && created && o.DataLink {
+		if err := r.excludeDataLink(); err != nil {
+			return dir, created, err
+		}
+		if _, _, err := r.dataLink(dir, o.DataRoot); err != nil {
+			return dir, created, fmt.Errorf("creating the data link: %w", err)
+		}
+	}
+	return dir, created, err
+}
+
+func (r *Repo) addWorktree(o AddWorktreeOptions, dir string) (string, bool, error) {
 	if _, err := os.Lstat(dir); err == nil {
 		return "", false, fmt.Errorf("%s exists and is not a worktree of this project: move it away first", dir)
 	}
@@ -68,7 +83,7 @@ func (r *Repo) AddWorktree(o AddWorktreeOptions) (string, bool, error) {
 	if strings.HasPrefix(start, "-") || strings.ContainsAny(start, " \t\n\x00") {
 		return "", false, fmt.Errorf("invalid start point %q", start)
 	}
-	_, err = r.git("worktree", "add", "--quiet", "--no-track", "-b", branch, dir, start)
+	_, err := r.git("worktree", "add", "--quiet", "--no-track", "-b", branch, dir, start)
 	return dir, err == nil, err
 }
 
@@ -238,7 +253,7 @@ func (r *Repo) WorktreeHook(kind string, info *Info, stdin io.Reader, stdout io.
 		if name == "" {
 			return errors.New("the hook input names no worktree")
 		}
-		dir, _, err := r.AddWorktree(AddWorktreeOptions{Name: name, Prefix: info.BranchPrefix, DataRoot: info.DataRoot})
+		dir, _, err := r.AddWorktree(AddWorktreeOptions{Name: name, Prefix: info.BranchPrefix, DataRoot: info.DataRoot, DataLink: info.DataLinks})
 		if err != nil {
 			return err
 		}

@@ -56,7 +56,7 @@ func newBoxGitCmds(a *app) []*cobra.Command {
 				return err
 			}
 			dir, created, err := repo.AddWorktree(boxside.AddWorktreeOptions{Name: args[0], Branch: addBranch, Prefix: info.BranchPrefix,
-				Start: addStart, DataRoot: info.DataRoot})
+				Start: addStart, DataRoot: info.DataRoot, DataLink: info.DataLinks})
 			if err != nil {
 				return err
 			}
@@ -140,5 +140,24 @@ func newBoxGitCmds(a *app) []*cobra.Command {
 			return writeJSON(a.stdout, repo.State())
 		},
 	}
-	return []*cobra.Command{snapshot, worktree, hook, state}
+	links := &cobra.Command{
+		Use:   "data-links",
+		Short: "Give every worktree a data link to the data root; print a JSON report",
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			repo, info, err := a.boxRepo()
+			if err != nil {
+				return err
+			}
+			if !info.DataLinks {
+				return writeJSON(a.stdout, boxside.DataLinksReport{Created: []string{}, Skipped: []string{}})
+			}
+			rep, err := repo.EnsureDataLinks(info.DataRoot)
+			if err != nil {
+				return err
+			}
+			return writeJSON(a.stdout, rep)
+		},
+	}
+	return []*cobra.Command{snapshot, worktree, hook, state, links}
 }
