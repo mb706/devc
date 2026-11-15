@@ -8,8 +8,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 |---|---|---|
 | C01 Foundation | done | e7adb01 |
 | C02 Boxes | done | 912d91c |
-| C03 Harnesses | in progress | |
-| Review A + C03r | pending | |
+| C03 Harnesses | done | 46799df |
+| Review A + C03r | in progress | |
 | C04 Sessions | pending | |
 | C05 Git | pending | |
 | C06 Data | pending | |

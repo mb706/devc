@@ -22,7 +22,7 @@ These implement rules R1–R6 of the spec. A violation is a bug even if everythi
 1. **Policy comes only from the config directory.** Never read settings from a project directory, a box home, or anything else a box can write.
 2. **Box-writable data is hostile input.** That covers the project directory, box homes, the runtime directory and spool, and harness state.
    - Host code never executes anything from there and never runs git, an interpreter or a build tool with such a directory as working directory.
-   - Host code does not walk project trees. Operations on them run inside the box (`podman exec`) or in the helper container.
+   - Host code does not walk project trees. Operations on them run inside the box (`podman exec`) or in the helper container. One exception: `restorecon -R` on SELinux hosts, a system tool that does not follow symlinks and only changes labels.
    - Where the host must read a single file from such a place (spool files, for example), open it through `internal/safefs`: resolved beneath a directory file descriptor with no symlinks, regular files only, with a size cap. Parse strictly and validate every field.
    - Never join a box-supplied name into a host path without validating it first.
 3. **No shell interpolation.** Start subprocesses with argument vectors. Do not build `sh -c` strings from values on the host. Inside boxes prefer argument vectors too.
