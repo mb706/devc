@@ -4,21 +4,49 @@
 // devc environment (config copied from examples/config, temporary state,
 // runtime and projects directories) and runs the devc binary named by
 // DEVC_BIN in it. Tests never touch ~/.config/devc or ~/.local/share/devc.
+//
+// The copied configuration is renamed so that test boxes cannot collide
+// with real ones: realm demo becomes itdemo, other becomes itother, and env
+// base becomes itbase. Box containers are therefore named devc-it…, and
+// every container labelled devc.realm=itdemo or itother belongs to the
+// tests and is removed after each test.
 package itest
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// Names used by the test configuration.
+const (
+	RealmA  = "itdemo"
+	RealmB  = "itother"
+	EnvBase = "itbase"
+	// BaseImage is the env image built once per test run.
+	BaseImage = "localhost/devc-env/" + EnvBase + ":latest"
+)
+
+// TestRealms are the realms whose containers the tests own.
+var TestRealms = []string{RealmA, RealmB}
+
+// Engine is the container engine the tests use.
+func Engine() string {
+	if e := os.Getenv("DEVC_ENGINE"); e != "" {
+		return e
+	}
+	return "podman"
+}
 
 // Env is one isolated devc environment.
 type Env struct {
@@ -87,6 +115,16 @@ func New(t *testing.T) *Env {
 	if err := copyTree(filepath.Join(e.Repo, "examples", "config"), e.ConfigDir); err != nil {
 		t.Fatalf("copying the example configuration: %v", err)
 	}
+	if err := renameForTests(e.ConfigDir); err != nil {
+		t.Fatalf("renaming the test configuration: %v", err)
+	}
+	// Files created by in-box root belong to subordinate IDs; hand
+	// everything back to the user before t.TempDir removes it.
+	t.Cleanup(func() {
+		_ = exec.Command(Engine(), "unshare", "chown", "-R", "0:0", base).Run()
+	})
+	t.Cleanup(func() { RemoveTestContainers(t) })
+	RemoveTestContainers(t)
 	for _, d := range []string{e.StateDir, e.RuntimeDir, e.ProjectsRoot} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
@@ -107,6 +145,145 @@ func New(t *testing.T) *Env {
 		t.Fatal(err)
 	}
 	return e
+}
+
+var (
+	envLineRE  = regexp.MustCompile(`(?m)^(\s*(?:default_env|env)\s*=\s*)"base"`)
+	fromTrixie = regexp.MustCompile(`(?m)^FROM docker\.io/library/debian:trixie-slim$`)
+)
+
+// renameForTests applies the renames described in the package comment.
+//
+// It also builds the base env from Debian bookworm instead of trixie: on
+// the development host, statx() on files of an image layer hangs inside
+// fuse-overlayfs 1.17 with libfuse 3.18, and trixie's apt verifies
+// signatures with sqv, which calls statx. Bookworm's apt uses gpgv. See
+// docs/dev/LEFTOVER.md.
+func renameForTests(dir string) error {
+	for _, r := range [][2]string{
+		{"realms/demo", "realms/" + RealmA},
+		{"realms/other", "realms/" + RealmB},
+		{"envs/base", "envs/" + EnvBase},
+	} {
+		if err := os.Rename(filepath.Join(dir, r[0]), filepath.Join(dir, r[1])); err != nil {
+			return err
+		}
+	}
+	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		out := envLineRE.ReplaceAll(b, []byte(`${1}"`+EnvBase+`"`))
+		if filepath.Base(p) == "Containerfile" {
+			out = fromTrixie.ReplaceAll(out, []byte("FROM docker.io/library/debian:bookworm-slim"))
+		}
+		if bytes.Equal(out, b) {
+			return nil
+		}
+		return os.WriteFile(p, out, 0o644)
+	})
+}
+
+// RemoveTestContainers force-removes every container of the test realms.
+func RemoveTestContainers(t *testing.T) {
+	t.Helper()
+	for _, realm := range TestRealms {
+		out, err := exec.Command(Engine(), "ps", "-a", "--filter", "label=devc.realm="+realm, "--format", "{{.Names}}").Output()
+		if err != nil {
+			t.Logf("listing test containers: %v", err)
+			continue
+		}
+		for _, name := range strings.Fields(string(out)) {
+			if !strings.HasPrefix(name, "devc-"+realm+"-") {
+				continue
+			}
+			if out, err := exec.Command(Engine(), "rm", "--force", "--time", "2", name).CombinedOutput(); err != nil {
+				t.Logf("removing %s: %v: %s", name, err, out)
+			}
+		}
+	}
+}
+
+// Podman runs the engine directly, for inspecting what devc did.
+func Podman(t *testing.T, args ...string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, Engine(), args...).Output()
+	if err != nil {
+		var xe *exec.ExitError
+		if errors.As(err, &xe) {
+			t.Fatalf("%s %s: %v: %s", Engine(), strings.Join(args, " "), err, xe.Stderr)
+		}
+		t.Fatalf("%s %s: %v", Engine(), strings.Join(args, " "), err)
+	}
+	return string(out)
+}
+
+var (
+	baseOnce sync.Once
+	baseErr  error
+)
+
+// EnsureBaseImage builds the base env image once per test run, in the
+// given environment, and fails the test if that is impossible.
+func EnsureBaseImage(t *testing.T, e *Env) {
+	t.Helper()
+	baseOnce.Do(func() {
+		old := e.Timeout
+		e.Timeout = 20 * time.Minute
+		defer func() { e.Timeout = old }()
+		res := e.Run("env", "build", EnvBase)
+		if res.ExitCode != 0 {
+			baseErr = fmt.Errorf("devc env build %s: exit %d\n%s", EnvBase, res.ExitCode, res.Stderr)
+		}
+	})
+	if baseErr != nil {
+		t.Fatal(baseErr)
+	}
+}
+
+// Images tags the tests may create. Tags under localhost/devc-env/it are
+// always removed at the end of a run; pulled images only if they were
+// absent when the run started.
+var (
+	OwnImages    = []string{BaseImage, "localhost/devc-env/ituid:latest"}
+	PulledImages = []string{"docker.io/library/debian:bookworm-slim", "docker.io/library/debian:trixie-slim"}
+)
+
+func imageExists(ref string) bool {
+	return exec.Command(Engine(), "image", "exists", ref).Run() == nil
+}
+
+// SnapshotImages records which pulled images exist before the run.
+func SnapshotImages() map[string]bool {
+	m := map[string]bool{}
+	for _, ref := range PulledImages {
+		m[ref] = imageExists(ref)
+	}
+	return m
+}
+
+// CleanupImages removes the images the run created.
+func CleanupImages(before map[string]bool) {
+	var refs []string
+	refs = append(refs, OwnImages...)
+	for _, ref := range PulledImages {
+		if !before[ref] {
+			refs = append(refs, ref)
+		}
+	}
+	for _, ref := range refs {
+		if imageExists(ref) {
+			if out, err := exec.Command(Engine(), "rmi", ref).CombinedOutput(); err != nil {
+				fmt.Fprintf(os.Stderr, "itest: removing image %s: %v: %s\n", ref, err, out)
+			}
+		}
+	}
 }
 
 func copyTree(src, dst string) error {
@@ -165,11 +342,18 @@ func (e *Env) environ() []string {
 // the test only if devc could not be started or timed out.
 func (e *Env) Run(args ...string) Result {
 	e.t.Helper()
+	return e.RunIn(e.Repo, "", args...)
+}
+
+// RunIn runs devc in directory dir with stdin as its input.
+func (e *Env) RunIn(dir, stdin string, args ...string) Result {
+	e.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), e.Timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, e.Bin, args...)
 	cmd.Env = e.environ()
-	cmd.Dir = e.Repo
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()

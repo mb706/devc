@@ -265,48 +265,6 @@ func newProjectCmd(a *app) *cobra.Command {
 	return group("project", "Manage projects", false, ls)
 }
 
-type envRow struct {
-	Name             string `json:"name"`
-	HasContainerfile bool   `json:"has_containerfile"`
-	Base             string `json:"base"`
-	Description      string `json:"description"`
-	Dir              string `json:"dir"`
-}
-
-func newEnvCmd(a *app) *cobra.Command {
-	var asJSON bool
-	ls := &cobra.Command{
-		Use:   "ls",
-		Short: "List envs (image recipes)",
-		Args:  noArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			c, probs, err := a.load()
-			if err != nil {
-				return err
-			}
-			a.warnProblems(probs)
-			rows := []envRow{}
-			for _, e := range c.Envs() {
-				rows = append(rows, envRow{Name: e.Name, HasContainerfile: e.HasContainerfile, Base: e.Base, Description: e.Description, Dir: e.Dir})
-			}
-			if asJSON {
-				return writeJSON(a.stdout, rows)
-			}
-			tw := table(a.stdout, "ENV", "SOURCE", "DESCRIPTION")
-			for _, e := range rows {
-				src := "Containerfile"
-				if !e.HasContainerfile {
-					src = "image " + e.Base
-				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\n", e.Name, src, e.Description)
-			}
-			return tw.Flush()
-		},
-	}
-	ls.Flags().BoolVar(&asJSON, "json", false, "print JSON")
-	return group("env", "Manage envs", false, ls)
-}
-
 func table(w io.Writer, headers ...string) *tabwriter.Writer {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, strings.Join(headers, "\t"))

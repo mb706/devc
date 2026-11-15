@@ -14,6 +14,7 @@ import (
 // Enumerations, as documented in the work order and the example files.
 var (
 	networkLevels    = []string{"none", "allowlist", "internet", "open"}
+	selinuxModes     = []string{SELinuxLabels, SELinuxDisable}
 	savepointDrivers = []string{"auto", "reflink", "restic", "borg", "none"}
 	mountModes       = []string{"ro", "rw"}
 	installMethods   = []string{"script", "none"}
@@ -190,6 +191,7 @@ func validateGlobal(c *Config, ps *problems) {
 	if g.Box.Shell != "" {
 		k.command("box.shell", g.Box.Shell)
 	}
+	k.enum("selinux.mode", g.SELinux.Mode, selinuxModes)
 	for i, h := range g.Hubs {
 		key := idx("hubs", i) + ".url"
 		u, err := url.Parse(h.URL)
@@ -320,18 +322,6 @@ func validateEnv(e *Env, ps *problems) {
 	for _, n := range sortedKeys(e.Build.Args) {
 		if !envVarRE.MatchString(n) {
 			k.bad("build.args", "%q is not a valid build argument name", n)
-		}
-	}
-	for i, l := range e.RootLog {
-		key := idx("root_log", i)
-		if l.Time.IsZero() {
-			k.bad(key+".time", "missing")
-		}
-		if _, err := names.Parse(l.Box); err != nil {
-			k.bad(key+".box", "%v", err)
-		}
-		if len(l.Command) == 0 {
-			k.bad(key+".command", "must not be empty")
 		}
 	}
 }

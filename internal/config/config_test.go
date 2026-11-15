@@ -390,7 +390,12 @@ func TestBrokenConfigurations(t *testing.T) {
 		{"manifest reserved bin", set("harness/pi.toml", "id = \"pi\"\nbin = \"devc-x\"\n[home]\ndir = \".pi\"\n"), "harness/pi.toml", "bin", "reserved for devc"},
 		{"manifest duplicate bin", set("harness/pi.toml", "id = \"pi\"\nbin = \"claude\"\n[home]\ndir = \".pi\"\n"), "harness/pi.toml", "bin", "also the bin of harness \"claude\""},
 		{"manifest bin", set("harness/pi.toml", "id = \"pi\"\nbin = \"../pi\"\n[home]\ndir = \".pi\"\n"), "harness/pi.toml", "bin", "not a valid command name"},
-		{"root log box", set("envs/base/env.toml", "[[root_log]]\ntime = 2026-11-14T12:00:00Z\nbox = \"nobox\"\ncommand = [\"true\"]\n"), "envs/base/env.toml", "root_log[0].box", "expected <realm>/<project>"},
+		{"root log is no longer in env.toml", set("envs/base/env.toml", "[[root_log]]\ntime = 2026-11-14T12:00:00Z\nbox = \"demo/hello\"\ncommand = [\"true\"]\n"), "envs/base/env.toml", "root_log", "unknown key"},
+		{"selinux mode", set("config.toml", "default_env = \"base\"\n[selinux]\nmode = \"permissive\"\n"), "config.toml", "selinux.mode", "not one of labels, disable"},
+		{"realm name with dash", func(t *testing.T, d string) {
+			os.MkdirAll(filepath.Join(d, "realms", "my-realm"), 0o755)
+			os.WriteFile(filepath.Join(d, "realms", "my-realm", "realm.toml"), nil, 0o644)
+		}, "realms/my-realm", "", "invalid realm name"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

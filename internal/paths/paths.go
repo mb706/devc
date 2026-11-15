@@ -208,7 +208,12 @@ func (p *Paths) EnvContainerfile(env string) string {
 	return filepath.Join(p.EnvDir(env), "Containerfile")
 }
 func (p *Paths) EnvFile(env string) string { return filepath.Join(p.EnvDir(env), "env.toml") }
-func (p *Paths) RealmsDir() string         { return filepath.Join(p.configDir, "realms") }
+
+// EnvRootLog is where `devc root` appends the commands run in boxes of an
+// env, one JSON object per line. It is the only file devc writes below the
+// config directory.
+func (p *Paths) EnvRootLog(env string) string { return filepath.Join(p.EnvDir(env), "root-log.jsonl") }
+func (p *Paths) RealmsDir() string            { return filepath.Join(p.configDir, "realms") }
 func (p *Paths) RealmDir(realm string) string {
 	return filepath.Join(p.RealmsDir(), must(names.KindRealm, realm))
 }
@@ -237,6 +242,16 @@ func (p *Paths) HarnessStateDir(realm, harness string) string {
 }
 func (p *Paths) ContextDir(realm string) string {
 	return filepath.Join(p.DurableRealmDir(realm), "context")
+}
+
+// NotesDir is mounted at /ctx/notes in the project's box.
+func (p *Paths) NotesDir(r names.ProjectRef) string {
+	return filepath.Join(p.ContextDir(r.Realm), "notes", must(names.KindProject, r.Project))
+}
+
+// MemoryDir is mounted at /ctx/memory in every box of the memory group.
+func (p *Paths) MemoryDir(realm, group string) string {
+	return filepath.Join(p.ContextDir(realm), "memory", must(names.KindGroup, group))
 }
 func (p *Paths) RelayDir(realm string) string {
 	return filepath.Join(p.DurableRealmDir(realm), "relay")
@@ -321,7 +336,7 @@ func (p *Paths) SpoolDir(boxID string) (string, error) {
 }
 
 func must(kind, name string) string {
-	if !names.Valid(name) {
+	if !names.ValidKind(kind, name) {
 		panic(fmt.Sprintf("paths: unvalidated %s name %q", kind, name))
 	}
 	return name

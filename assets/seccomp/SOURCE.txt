@@ -1,0 +1,14 @@
+default.json is the default seccomp profile of containers/common, unmodified.
+
+Source:  https://raw.githubusercontent.com/podman-container-tools/container-libs/common/v0.67.1/common/pkg/seccomp/seccomp.json
+Project: containers/common, now developed in the container-libs repository
+         (github.com/podman-container-tools/container-libs, formerly github.com/containers/container-libs)
+Version: common/v0.67.1 (the version Podman 5.8.3 is built with: go.podman.io/common v0.67.1)
+SHA-256: 2598b3b98e6970f37f917e210202fa8976aefcd99abf8955803a6e35bba17eb4
+Licence: Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0),
+         see common/LICENSE in the source repository.
+
+devc does not ship this file as is. internal/toolbox derives the box profile from it in code
+(no user namespaces, no AF_ALG sockets) and writes the result to <toolbox>/seccomp.json.
+To update: replace default.json with the file from a newer release, update this note, and run
+the toolbox unit tests; they check that the derivation still applies and changes nothing else.

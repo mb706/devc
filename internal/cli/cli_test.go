@@ -3,10 +3,13 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mb706/devc/internal/execx"
 )
 
 func run(t *testing.T, env map[string]string, args ...string) (int, string, string) {
@@ -21,7 +24,10 @@ func run(t *testing.T, env map[string]string, args ...string) (int, string, stri
 	if _, ok := env["DEVC_CONFIG_DIR"]; !ok {
 		env["DEVC_CONFIG_DIR"] = filepath.Join("..", "..", "examples", "config")
 	}
-	code := Main(args, &out, &errb, func(k string) string { return env[k] })
+	a := &app{stdout: &out, stderr: &errb, getenv: func(k string) string { return env[k] }, runner: execx.NewFake(),
+		executable: func() (string, error) { return "", errors.New("no executable in tests") },
+		getwd:      func() (string, error) { return "/", nil }, isTerminal: func() bool { return false }}
+	code := a.main(args)
 	return code, out.String(), errb.String()
 }
 
@@ -40,6 +46,12 @@ func TestUsageErrors(t *testing.T) {
 		{"version", "--no-such-flag"},
 		{"config", "show", "a/b", "c/d"},
 		{"project", "ls", "--realm", "Bad"},
+		{"run", "demo/hello", "ls"},
+		{"run", "demo/hello", "other/tools", "--", "ls"},
+		{"root", "--"},
+		{"up", "a/b", "c/d"},
+		{"env", "build"},
+		{"env", "build", "Bad"},
 	} {
 		code, _, errOut := run(t, nil, args...)
 		if code != 2 || !strings.Contains(errOut, "--help") {
@@ -54,8 +66,41 @@ func TestUsageErrors(t *testing.T) {
 	if code, _, _ := run(t, nil, "box"); code != 0 {
 		t.Errorf("box: exit %d", code)
 	}
-	if _, out, _ := run(t, nil, "--help"); strings.Contains(out, "box ") || !strings.Contains(out, "doctor") {
-		t.Errorf("help lists box or misses doctor:\n%s", out)
+	if _, out, _ := run(t, nil, "--help"); strings.Contains(out, "\n  box ") || !strings.Contains(out, "doctor") || !strings.Contains(out, "\n  up ") {
+		t.Errorf("help lists box or misses doctor or up:\n%s", out)
+	}
+}
+
+func TestBoxCommandsRefuseOnHost(t *testing.T) {
+	for _, sub := range []string{"init", "fix-identity", "shell", "selftest"} {
+		code, _, errOut := run(t, nil, "box", sub)
+		if code != 1 || !strings.Contains(errOut, "only inside a devc box") {
+			t.Errorf("box %s: exit %d, %q", sub, code, errOut)
+		}
+	}
+}
+
+func TestLifecycleRefusesBrokenConfig(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "realms", "r", "projects", "p"), 0o755)
+	os.WriteFile(filepath.Join(dir, "realms", "r", "realm.toml"), []byte(""), 0o644)
+	os.WriteFile(filepath.Join(dir, "realms", "r", "projects", "p", "project.toml"), []byte("image = \"debian\"\n[box]\nmemory = \"lots\"\n"), 0o644)
+	for _, args := range [][]string{{"up", "r/p"}, {"rebuild", "r/p"}, {"sh", "r/p"}, {"run", "r/p", "--", "true"}, {"root", "r/p", "--", "true"}} {
+		a := &app{getenv: func(k string) string {
+			return map[string]string{"HOME": t.TempDir(), "DEVC_CONFIG_DIR": dir, "XDG_RUNTIME_DIR": t.TempDir()}[k]
+		}}
+		var out, errb bytes.Buffer
+		a.stdout, a.stderr, a.runner = &out, &errb, execx.NewFake()
+		a.executable = func() (string, error) { return "/nonexistent/devc", nil }
+		a.getwd = func() (string, error) { return "/", nil }
+		a.isTerminal = func() bool { return false }
+		code := a.main(args)
+		if code != 1 || !strings.Contains(errb.String(), "box.memory") || !strings.Contains(errb.String(), "fix them first") {
+			t.Errorf("%v: exit %d\n%s", args, code, errb.String())
+		}
+		for _, c := range a.runner.(*execx.Fake).Calls() {
+			t.Errorf("%v ran %s despite configuration problems", args, c)
+		}
 	}
 }
 

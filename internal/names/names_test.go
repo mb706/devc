@@ -14,7 +14,7 @@ func TestValid(t *testing.T) {
 		if !Valid(s) {
 			t.Errorf("Valid(%q) = false, want true", s)
 		}
-		if err := Check(KindRealm, s); err != nil {
+		if err := Check(KindProject, s); err != nil {
 			t.Errorf("Check(%q) = %v", s, err)
 		}
 	}
@@ -22,9 +22,32 @@ func TestValid(t *testing.T) {
 		if Valid(s) {
 			t.Errorf("Valid(%q) = true, want false", s)
 		}
-		if err := Check(KindRealm, s); err == nil {
+		if err := Check(KindProject, s); err == nil {
 			t.Errorf("Check(%q) = nil, want error", s)
 		}
+	}
+}
+
+func TestRealmNames(t *testing.T) {
+	good := []string{"a", "0", "work", "work2", strings.Repeat("x", 32)}
+	bad := []string{"", "my-realm", "a.b", "a_b", "Work", "-a", strings.Repeat("x", 33), "ä"}
+	for _, s := range good {
+		if err := Check(KindRealm, s); err != nil || !ValidRealm(s) || !ValidKind(KindRealm, s) {
+			t.Errorf("realm %q rejected: %v", s, err)
+		}
+	}
+	for _, s := range bad {
+		if err := Check(KindRealm, s); err == nil || ValidRealm(s) || ValidKind(KindRealm, s) {
+			t.Errorf("realm %q accepted", s)
+		}
+	}
+	if err := Check(KindRealm, "my-realm"); err == nil || !strings.Contains(err.Error(), "character '-' at position 3") {
+		t.Errorf("message: %v", err)
+	}
+	// The ambiguity the rule removes: realm "a-b" + project "c" and realm
+	// "a" + project "b-c" would both be devc-a-b-c.
+	if _, err := Parse("a-b/c"); err == nil {
+		t.Error("Parse accepted a realm with '-'")
 	}
 }
 

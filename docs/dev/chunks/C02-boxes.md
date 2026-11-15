@@ -16,6 +16,9 @@ After this chunk a project's box can be built, created, entered and recreated, w
 
   `labels` (default) expects the file-context rule from `devc doctor` and mounts without relabelling. `disable` adds `--security-opt label=disable` to boxes; it is the escape hatch for machines where the rule has not been set up, and `devc up` prints a one-line warning when it is used.
 
+- **Realm names.** Box names `devc-<realm>-<project>` are ambiguous when a realm name contains `-`. Restrict realm names to `^[a-z0-9]{1,32}$` (letters and digits only), in `names` and in config validation, and update the example configuration if needed. In addition, whenever a container is found by name, verify its `devc.realm` and `devc.project` labels and refuse to act on a container that devc did not create for that project.
+- **Fail closed on configuration problems.** Commands that create, start or change a box must refuse when `Config.ProblemsFor(ref)` reports anything, and print those problems.
+
 ## 2. Engine wrapper
 
 Extend `internal/engine` with what this chunk needs: image exists / inspect (ID, environment, created), build, pull, create, init, start, stop, remove, exec (captured and interactive, with user, working directory, environment, privileged flag), unshare (run a command in the user namespace), and container inspect fields for state, PID, labels, mounts and security options. Keep the fake in step.

@@ -128,6 +128,9 @@ func TestLayout(t *testing.T) {
 		p.EnvDir("base"):                          c + "/envs/base",
 		p.EnvContainerfile("base"):                c + "/envs/base/Containerfile",
 		p.EnvFile("base"):                         c + "/envs/base/env.toml",
+		p.EnvRootLog("base"):                      c + "/envs/base/root-log.jsonl",
+		p.NotesDir(r):                             s + "/durable/realms/work/context/notes/foo",
+		p.MemoryDir("work", "shared"):             s + "/durable/realms/work/context/memory/shared",
 		p.RealmDir("work"):                        c + "/realms/work",
 		p.RealmFile("work"):                       c + "/realms/work/realm.toml",
 		p.ProjectDefDir(r):                        c + "/realms/work/projects/foo",
@@ -160,11 +163,12 @@ func TestLayout(t *testing.T) {
 func TestUnvalidatedNamesPanic(t *testing.T) {
 	p, _ := Resolve(Options{Home: "/h", Getenv: env(nil)})
 	for name, f := range map[string]func(){
-		"realm":   func() { p.RealmDir("../etc") },
-		"project": func() { p.HostProjectDir(names.ProjectRef{Realm: "a", Project: "b/../../c"}) },
-		"session": func() { p.JournalFile(names.ProjectRef{Realm: "a", Project: "b"}, "../x") },
-		"boxid":   func() { _, _ = p.BoxRuntimeDir("../../x") },
-		"harness": func() { p.BaselineDir("") },
+		"realm":           func() { p.RealmDir("../etc") },
+		"realm with dash": func() { p.RealmDir("a-b") },
+		"project":         func() { p.HostProjectDir(names.ProjectRef{Realm: "a", Project: "b/../../c"}) },
+		"session":         func() { p.JournalFile(names.ProjectRef{Realm: "a", Project: "b"}, "../x") },
+		"boxid":           func() { _, _ = p.BoxRuntimeDir("../../x") },
+		"harness":         func() { p.BaselineDir("") },
 	} {
 		func() {
 			defer func() {

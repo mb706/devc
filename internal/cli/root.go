@@ -46,6 +46,9 @@ type app struct {
 	stdout, stderr io.Writer
 	getenv         func(string) string
 	runner         execx.Runner
+	executable     func() (string, error)
+	getwd          func() (string, error)
+	isTerminal     func() bool
 }
 
 func (a *app) paths() (*paths.Paths, error) {
@@ -89,7 +92,15 @@ func display(c *config.Config, file string) string {
 
 // Main runs the CLI and returns the process exit status.
 func Main(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
-	a := &app{stdout: stdout, stderr: stderr, getenv: getenv, runner: execx.Real{}}
+	a := &app{stdout: stdout, stderr: stderr, getenv: getenv, runner: execx.Real{},
+		executable: os.Executable, getwd: os.Getwd, isTerminal: stdinIsTerminal}
+	return a.main(args)
+}
+
+// main runs the command tree with the app's environment; tests call it with
+// fakes.
+func (a *app) main(args []string) int {
+	stdout, stderr := a.stdout, a.stderr
 	root := newRoot(a)
 	root.SetArgs(args)
 	root.SetOut(stdout)
@@ -152,8 +163,10 @@ func newRoot(a *app) *cobra.Command {
 		newRealmCmd(a),
 		newProjectCmd(a),
 		newEnvCmd(a),
+		newToolboxCmd(a),
 		newBoxCmd(a),
 	)
+	root.AddCommand(newLifecycleCmds(a)...)
 	return root
 }
 
@@ -186,11 +199,4 @@ func maxArgs(n int) cobra.PositionalArgs {
 		}
 		return nil
 	}
-}
-
-// newBoxCmd is the hidden group for subcommands that run inside a box
-// (plan 3.3). Later chunks add init, launch, hook, session, snapshot, dial
-// and the helper-container workers.
-func newBoxCmd(_ *app) *cobra.Command {
-	return group("box", "Commands that run inside a box (internal)", true)
 }

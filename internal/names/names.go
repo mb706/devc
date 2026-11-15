@@ -28,16 +28,41 @@ const (
 // MaxLen is the longest valid name.
 const MaxLen = 63
 
-var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+// MaxRealmLen is the longest valid realm name.
+const MaxRealmLen = 32
+
+var (
+	nameRE  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+	realmRE = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
+)
 
 // Valid reports whether s matches ^[a-z0-9][a-z0-9._-]{0,62}$.
 func Valid(s string) bool {
 	return nameRE.MatchString(s)
 }
 
-// Check returns nil if s is a valid name, otherwise an error naming the kind
-// and the first offending part of s.
+// ValidRealm reports whether s matches ^[a-z0-9]{1,32}$. Realm names are
+// stricter than other names: box names are "devc-<realm>-<project>", and a
+// realm containing "-" would make two different projects share a name.
+func ValidRealm(s string) bool {
+	return realmRE.MatchString(s)
+}
+
+// ValidKind applies the rule for kind: the realm rule for KindRealm, the
+// general name rule otherwise.
+func ValidKind(kind, s string) bool {
+	if kind == KindRealm {
+		return ValidRealm(s)
+	}
+	return Valid(s)
+}
+
+// Check returns nil if s is a valid name of the given kind, otherwise an
+// error naming the kind and the first offending part of s.
 func Check(kind, s string) error {
+	if kind == KindRealm {
+		return checkRealm(s)
+	}
 	if Valid(s) {
 		return nil
 	}
@@ -59,6 +84,27 @@ func Check(kind, s string) error {
 	}
 	return fmt.Errorf("invalid %s name %q: %s (allowed: a-z, 0-9, '.', '_', '-'; first character a-z or 0-9; at most %d characters)",
 		kind, s, reason, MaxLen)
+}
+
+func checkRealm(s string) error {
+	if ValidRealm(s) {
+		return nil
+	}
+	var reason string
+	switch {
+	case s == "":
+		reason = "it is empty"
+	case len(s) > MaxRealmLen:
+		reason = fmt.Sprintf("it is %d characters long, the limit is %d", len(s), MaxRealmLen)
+	default:
+		for i, r := range s {
+			if !(r < 0x80 && isLowerAlnum(byte(r))) {
+				reason = fmt.Sprintf("character %q at position %d is not allowed", r, i+1)
+				break
+			}
+		}
+	}
+	return fmt.Errorf("invalid realm name %q: %s (allowed: a-z and 0-9 only, at most %d characters)", s, reason, MaxRealmLen)
 }
 
 func isLowerAlnum(b byte) bool {

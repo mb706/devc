@@ -337,14 +337,15 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 // GlobalView is config.toml with defaults applied plus the effective roots;
 // it is what `devc config show` prints without a project.
 type GlobalView struct {
-	ConfigDir    string    `toml:"config_dir" json:"config_dir"`
-	StateDir     string    `toml:"state_dir" json:"state_dir"`
-	RuntimeDir   string    `toml:"runtime_dir" json:"runtime_dir"`
-	ProjectsRoot string    `toml:"projects_root" json:"projects_root"`
-	Engine       string    `toml:"engine" json:"engine"`
-	DefaultEnv   string    `toml:"default_env" json:"default_env"`
-	Box          GlobalBox `toml:"box" json:"box"`
-	Hubs         []Hub     `toml:"hubs" json:"hubs"`
+	ConfigDir    string        `toml:"config_dir" json:"config_dir"`
+	StateDir     string        `toml:"state_dir" json:"state_dir"`
+	RuntimeDir   string        `toml:"runtime_dir" json:"runtime_dir"`
+	ProjectsRoot string        `toml:"projects_root" json:"projects_root"`
+	Engine       string        `toml:"engine" json:"engine"`
+	DefaultEnv   string        `toml:"default_env" json:"default_env"`
+	Box          GlobalBox     `toml:"box" json:"box"`
+	SELinux      GlobalSELinux `toml:"selinux" json:"selinux"`
+	Hubs         []Hub         `toml:"hubs" json:"hubs"`
 }
 
 // View returns the global view. An unresolvable runtime directory is shown
@@ -363,6 +364,7 @@ func (c *Config) View() GlobalView {
 		Engine:       c.Global.Engine,
 		DefaultEnv:   c.Global.DefaultEnv,
 		Box:          c.Global.Box,
+		SELinux:      c.Global.SELinux,
 		Hubs:         hubs,
 	}
 }

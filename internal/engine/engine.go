@@ -3,10 +3,11 @@
 // shelling out through internal/execx and parsing JSON, and Fake implements
 // it for tests. No Podman Go bindings are used.
 //
-// Security rules: every call is an argument vector (README rule 3); names
-// and label values passed in are validated so they cannot be read as
-// options. Later chunks add create, start, stop, remove, exec, build, init
-// and unshare to the interface.
+// Security rules: every call is an argument vector (README rule 3); names,
+// image references and label values passed in are validated so they cannot
+// be read as options. Every engine command runs with "/" as its working
+// directory, so no engine call ever starts inside a box-writable directory
+// (rule 2).
 package engine
 
 import (
@@ -14,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strconv"
@@ -26,6 +28,9 @@ import (
 // ErrNoSuchContainer is returned by Inspect for a missing container.
 var ErrNoSuchContainer = errors.New("no such container")
 
+// ErrNoSuchImage is returned by ImageInspect for a missing image.
+var ErrNoSuchImage = errors.New("no such image")
+
 // Engine is the set of engine operations devc uses.
 type Engine interface {
 	// Binary is the engine command, for messages and for callers that must
@@ -36,6 +41,32 @@ type Engine interface {
 	Ps(ctx context.Context, opts PsOptions) ([]Container, error)
 	Inspect(ctx context.Context, name string) (ContainerInfo, error)
 	Exists(ctx context.Context, name string) (bool, error)
+
+	// ImageInspect returns ErrNoSuchImage (wrapped) for a missing image.
+	ImageInspect(ctx context.Context, ref string) (ImageInfo, error)
+	ImageExists(ctx context.Context, ref string) (bool, error)
+	// Build and Pull stream the engine's progress output to out.
+	Build(ctx context.Context, o BuildOptions, out io.Writer) error
+	Pull(ctx context.Context, ref string, out io.Writer) error
+
+	// Create runs `create` with args (everything after the subcommand) and
+	// returns the new container's ID.
+	Create(ctx context.Context, args []string) (string, error)
+	Init(ctx context.Context, name string) error
+	Start(ctx context.Context, name string) error
+	Stop(ctx context.Context, name string, timeout time.Duration) error
+	// Remove force-removes a container, stopping it first if needed.
+	Remove(ctx context.Context, name string) error
+
+	// Exec runs a command in a running container and captures its output;
+	// a non-zero exit returns *execx.ExitError.
+	Exec(ctx context.Context, o ExecOptions) (execx.Result, error)
+	// ExecInteractive connects the command to the terminal (or o.Stdin) and
+	// returns its exit code.
+	ExecInteractive(ctx context.Context, o ExecOptions) (int, error)
+	// Unshare runs a host command inside the engine's user namespace, where
+	// the user is root and subordinate IDs are mapped.
+	Unshare(ctx context.Context, args []string) (execx.Result, error)
 }
 
 // Version is the engine client version.
@@ -207,14 +238,41 @@ func (c Container) Name() string {
 // ContainerInfo is the subset of `podman container inspect` devc needs. Raw
 // keeps the full object for later chunks.
 type ContainerInfo struct {
-	ID        string            `json:"Id"`
-	Name      string            `json:"Name"`
-	Image     string            `json:"Image"`
-	ImageName string            `json:"ImageName"`
-	Created   time.Time         `json:"Created"`
-	State     ContainerState    `json:"State"`
-	Labels    map[string]string `json:"-"`
-	Raw       json.RawMessage   `json:"-"`
+	ID            string            `json:"Id"`
+	Name          string            `json:"Name"`
+	Image         string            `json:"Image"` // image ID
+	ImageName     string            `json:"ImageName"`
+	Created       time.Time         `json:"Created"`
+	State         ContainerState    `json:"State"`
+	Mounts        []MountInfo       `json:"Mounts"`
+	HostConfig    HostConfig        `json:"HostConfig"`
+	EffectiveCaps []string          `json:"EffectiveCaps"`
+	BoundingCaps  []string          `json:"BoundingCaps"`
+	User          string            `json:"-"` // Config.User
+	Env           []string          `json:"-"` // Config.Env
+	Labels        map[string]string `json:"-"`
+	Raw           json.RawMessage   `json:"-"`
+}
+
+// MountInfo is one entry of a container's Mounts.
+type MountInfo struct {
+	Type        string   `json:"Type"`
+	Source      string   `json:"Source"`
+	Destination string   `json:"Destination"`
+	RW          bool     `json:"RW"`
+	Options     []string `json:"Options"`
+}
+
+// HostConfig holds the security and resource settings of a container.
+type HostConfig struct {
+	SecurityOpt []string `json:"SecurityOpt"`
+	CapAdd      []string `json:"CapAdd"`
+	CapDrop     []string `json:"CapDrop"`
+	Privileged  bool     `json:"Privileged"`
+	Memory      int64    `json:"Memory"`
+	PidsLimit   int64    `json:"PidsLimit"`
+	NetworkMode string   `json:"NetworkMode"`
+	Init        bool     `json:"Init"`
 }
 
 type ContainerState struct {
@@ -241,12 +299,14 @@ func ParseInspect(data []byte) (ContainerInfo, error) {
 	var cfg struct {
 		Config struct {
 			Labels map[string]string `json:"Labels"`
+			User   string            `json:"User"`
+			Env    []string          `json:"Env"`
 		} `json:"Config"`
 	}
 	if err := json.Unmarshal(raws[0], &cfg); err != nil {
 		return ContainerInfo{}, fmt.Errorf("parsing container labels: %w", err)
 	}
-	ci.Labels = cfg.Config.Labels
+	ci.Labels, ci.User, ci.Env = cfg.Config.Labels, cfg.Config.User, cfg.Config.Env
 	ci.Raw = raws[0]
 	return ci, nil
 }
@@ -284,7 +344,7 @@ var _ Engine = (*Podman)(nil)
 func (p *Podman) Binary() string { return p.Bin }
 
 func (p *Podman) run(ctx context.Context, args ...string) (execx.Result, error) {
-	return p.Runner.Run(ctx, execx.Cmd{Name: p.Bin, Args: args, Timeout: p.Timeout})
+	return p.Runner.Run(ctx, execx.Cmd{Name: p.Bin, Args: args, Timeout: p.Timeout, Dir: "/"})
 }
 
 // Version implements Engine.

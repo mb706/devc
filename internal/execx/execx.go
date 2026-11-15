@@ -44,6 +44,9 @@ type Cmd struct {
 	// Env holds "KEY=value" additions to the inherited environment.
 	Env   []string
 	Stdin io.Reader
+	// Stdout and Stderr redirect the output of Interactive (default: the
+	// process's own). Run ignores them and captures instead.
+	Stdout, Stderr io.Writer
 	// Timeout overrides DefaultTimeout for Run. For Interactive a zero
 	// timeout means no limit beyond the context.
 	Timeout time.Duration
@@ -190,7 +193,13 @@ func (r Real) Interactive(ctx context.Context, c Cmd) (int, error) {
 		cmd.Stdin = c.Stdin
 	}
 	cmd.Stdout = os.Stdout
+	if c.Stdout != nil {
+		cmd.Stdout = c.Stdout
+	}
 	cmd.Stderr = os.Stderr
+	if c.Stderr != nil {
+		cmd.Stderr = c.Stderr
+	}
 	slog.Debug("exec interactive", "cmd", c.String(), "dir", c.Dir)
 	err := cmd.Run()
 	code := -1

@@ -1,0 +1,101 @@
+// Package boxside is everything the devc binary does inside a box, reached
+// through the hidden `devc box …` commands (plan 3.3): the container's main
+// process (init), the identity fix run by `devc up`, the login shell used by
+// `devc sh`, and a self-test of the hardening.
+//
+// Security rules: code here runs in the box and trusts nothing the box can
+// write. It reads its own description only from /etc/devc, which the host
+// renders and mounts read-only, and it never talks to the host except
+// through files in /run/devc that the host reads with internal/safefs.
+package boxside
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+// Paths inside the box.
+const (
+	EtcDir       = "/etc/devc"
+	InfoFile     = "/etc/devc/box.json"
+	DotfilesDir  = "/etc/devc/dotfiles"
+	RunDir       = "/run/devc"
+	ReadyFile    = "ready"
+	SpoolDirName = "spool"
+)
+
+// Info is /etc/devc/box.json, written by the host at every `devc up`.
+type Info struct {
+	Schema      int    `json:"schema"`
+	Realm       string `json:"realm"`
+	Project     string `json:"project"`
+	BoxName     string `json:"box_name"`
+	ProjectDir  string `json:"project_dir"`
+	Home        string `json:"home"`
+	Toolbox     string `json:"toolbox"`
+	Runtime     string `json:"runtime"`
+	Notes       string `json:"notes"`
+	Memory      string `json:"memory"`
+	Network     string `json:"network"`
+	Shell       string `json:"shell"` // configured shell; empty means pick one
+	DevcVersion string `json:"devc_version"`
+}
+
+// InfoSchema is the current version of box.json.
+const InfoSchema = 1
+
+// ReadInfo reads box.json below root ("/" in a box).
+func ReadInfo(root string) (*Info, error) {
+	b, err := os.ReadFile(filepath.Join(root, InfoFile))
+	if err != nil {
+		return nil, err
+	}
+	var in Info
+	if err := json.Unmarshal(b, &in); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", InfoFile, err)
+	}
+	if in.Schema != InfoSchema {
+		return nil, fmt.Errorf("%s has schema %d, this devc understands %d: run 'devc up' on the host", InfoFile, in.Schema, InfoSchema)
+	}
+	return &in, nil
+}
+
+// shellCandidates are tried in order when no shell is configured.
+var shellCandidates = []string{"zsh", "bash", "sh"}
+
+// Conventional locations first: on merged-/usr systems /bin/bash and
+// /usr/bin/bash are the same file, and /bin/bash is what users expect.
+var shellDirs = []string{"/bin", "/usr/bin", "/usr/local/bin"}
+
+// ChooseShell returns the configured shell if it is an executable file in
+// the box, otherwise the first of zsh, bash and sh found, otherwise /bin/sh.
+// root prefixes every path ("/" in a box).
+func ChooseShell(root, configured string) string {
+	exe := func(p string) bool {
+		fi, err := os.Stat(filepath.Join(root, p))
+		return err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0
+	}
+	if configured != "" {
+		if filepath.IsAbs(configured) {
+			if exe(configured) {
+				return configured
+			}
+		} else {
+			for _, d := range shellDirs {
+				if p := filepath.Join(d, configured); exe(p) {
+					return p
+				}
+			}
+		}
+	}
+	for _, name := range shellCandidates {
+		for _, d := range shellDirs {
+			if p := filepath.Join(d, name); exe(p) {
+				return p
+			}
+		}
+	}
+	return "/bin/sh"
+}

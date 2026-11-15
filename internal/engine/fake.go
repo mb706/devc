@@ -2,14 +2,22 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"sort"
+	"strings"
 	"sync"
+	"time"
+
+	"github.com/mb706/devc/internal/execx"
 )
 
 // Fake is an in-memory Engine for tests of code built on top of the engine.
 // Set the exported fields; errors, when set, are returned by the matching
-// method.
+// method. Create parses --name and --label from its arguments, so the
+// lifecycle can be exercised without Podman.
 type Fake struct {
 	mu sync.Mutex
 
@@ -20,11 +28,29 @@ type Fake struct {
 	InfoErr      error
 	Containers   map[string]ContainerInfo // by name
 	ContainerErr error                    // returned by Ps, Inspect and Exists
+	Images       map[string]ImageInfo     // by reference
+	// CreateArgs records the arguments of the last Create per container.
+	CreateArgs map[string][]string
+	// Builds records every build.
+	Builds []BuildOptions
+	// Log records lifecycle calls as "verb name" ("create devc-a-b", …).
+	Log []string
+	// ExecFunc answers Exec and ExecInteractive; nil succeeds with no output.
+	ExecFunc func(ExecOptions) (execx.Result, error)
+	// Execs records every exec.
+	Execs []ExecOptions
+	// UnshareFunc answers Unshare; nil succeeds.
+	UnshareFunc func(args []string) (execx.Result, error)
+	Unshares    [][]string
+	// Errors make the named lifecycle verb fail ("create", "start", …).
+	Errors map[string]error
+
+	seq int
 }
 
 var _ Engine = (*Fake)(nil)
 
-// NewFake returns a rootless Podman 5.8.0 with no containers.
+// NewFake returns a rootless Podman 5.8.0 with no containers or images.
 func NewFake() *Fake {
 	return &Fake{
 		Bin:        "podman",
@@ -34,6 +60,9 @@ func NewFake() *Fake {
 			StorageDriver: "overlay", CgroupVersion: "v2", CgroupControllers: []string{"cpu", "memory", "pids"},
 		},
 		Containers: map[string]ContainerInfo{},
+		Images:     map[string]ImageInfo{},
+		CreateArgs: map[string][]string{},
+		Errors:     map[string]error{},
 	}
 }
 
@@ -93,4 +122,238 @@ func (f *Fake) Exists(_ context.Context, name string) (bool, error) {
 	}
 	_, ok := f.Containers[name]
 	return ok, nil
+}
+
+// ImageInspect implements Engine.
+func (f *Fake) ImageInspect(_ context.Context, ref string) (ImageInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Errors["image-inspect"]; err != nil {
+		return ImageInfo{}, err
+	}
+	ii, ok := f.Images[ref]
+	if !ok {
+		return ImageInfo{}, fmt.Errorf("%s: %w", ref, ErrNoSuchImage)
+	}
+	return ii, nil
+}
+
+// ImageExists implements Engine.
+func (f *Fake) ImageExists(_ context.Context, ref string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.Images[ref]
+	return ok, nil
+}
+
+func (f *Fake) newID(seed string) string {
+	f.seq++
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%d", seed, f.seq)))
+	return hex.EncodeToString(sum[:])
+}
+
+// Build implements Engine: it records the options and tags a new image.
+func (f *Fake) Build(_ context.Context, o BuildOptions, _ io.Writer) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Log = append(f.Log, "build "+o.Tag)
+	if err := f.Errors["build"]; err != nil {
+		return err
+	}
+	f.Builds = append(f.Builds, o)
+	f.Images[o.Tag] = ImageInfo{ID: f.newID(o.Tag), Created: time.Now().UTC(), RepoTags: []string{o.Tag}, Labels: o.Labels,
+		Env: []string{"PATH=/usr/local/bin:/usr/bin:/bin"}}
+	return nil
+}
+
+// Pull implements Engine: the image appears.
+func (f *Fake) Pull(_ context.Context, ref string, _ io.Writer) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Log = append(f.Log, "pull "+ref)
+	if err := f.Errors["pull"]; err != nil {
+		return err
+	}
+	f.Images[ref] = ImageInfo{ID: f.newID(ref), Created: time.Now().UTC(), RepoTags: []string{ref},
+		Env: []string{"PATH=/usr/local/bin:/usr/bin:/bin"}}
+	return nil
+}
+
+// Create implements Engine. The container's name, labels, image and mounts
+// are taken from args.
+func (f *Fake) Create(_ context.Context, args []string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ci := ContainerInfo{Labels: map[string]string{}, State: ContainerState{Status: "created"}}
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		next := func() string {
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			return ""
+		}
+		switch {
+		case a == "--name":
+			ci.Name = next()
+		case a == "--label":
+			k, v, _ := strings.Cut(next(), "=")
+			ci.Labels[k] = v
+		case a == "--mount":
+			ci.Mounts = append(ci.Mounts, parseFakeMount(next()))
+		case a == "--security-opt":
+			ci.HostConfig.SecurityOpt = append(ci.HostConfig.SecurityOpt, next())
+		case a == "--user":
+			ci.User = next()
+		case a == "--env":
+			ci.Env = append(ci.Env, next())
+		case a == "--hostname", a == "--tz", a == "--workdir", a == "--network", a == "--memory", a == "--pids-limit", a == "--passwd-entry":
+			next()
+		case strings.HasPrefix(a, "-"):
+		default:
+			positional = append(positional, a)
+		}
+	}
+	f.Log = append(f.Log, "create "+ci.Name)
+	if err := f.Errors["create"]; err != nil {
+		return "", err
+	}
+	if ci.Name == "" {
+		return "", fmt.Errorf("fake create: no --name")
+	}
+	if _, ok := f.Containers[ci.Name]; ok {
+		return "", fmt.Errorf("fake create: the container name %q is already in use", ci.Name)
+	}
+	if len(positional) > 0 {
+		ci.ImageName = positional[0]
+		img, ok := f.Images[positional[0]]
+		if !ok {
+			return "", fmt.Errorf("fake create: %s: %w", positional[0], ErrNoSuchImage)
+		}
+		ci.Image = img.ID
+	}
+	ci.ID = f.newID(ci.Name)
+	ci.Created = time.Now().UTC()
+	f.Containers[ci.Name] = ci
+	f.CreateArgs[ci.Name] = append([]string(nil), args...)
+	return ci.ID, nil
+}
+
+func parseFakeMount(s string) MountInfo {
+	m := MountInfo{RW: true}
+	for _, kv := range strings.Split(s, ",") {
+		k, v, _ := strings.Cut(kv, "=")
+		switch k {
+		case "type":
+			m.Type = v
+		case "source", "src":
+			m.Source = v
+		case "destination", "dst", "target":
+			m.Destination = v
+		case "ro", "readonly":
+			m.RW = v == "false"
+		}
+	}
+	return m
+}
+
+func (f *Fake) transition(verb, name string, fn func(*ContainerInfo)) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Log = append(f.Log, verb+" "+name)
+	if err := f.Errors[verb]; err != nil {
+		return err
+	}
+	ci, ok := f.Containers[name]
+	if !ok {
+		return fmt.Errorf("%s: %w", name, ErrNoSuchContainer)
+	}
+	fn(&ci)
+	f.Containers[name] = ci
+	return nil
+}
+
+// Init implements Engine.
+func (f *Fake) Init(_ context.Context, name string) error {
+	return f.transition("init", name, func(ci *ContainerInfo) { ci.State.Status = "initialized" })
+}
+
+// Start implements Engine.
+func (f *Fake) Start(_ context.Context, name string) error {
+	return f.transition("start", name, func(ci *ContainerInfo) {
+		f.seq++
+		ci.State = ContainerState{Status: "running", Running: true, Pid: 1000 + f.seq, Started: time.Now().UTC()}
+	})
+}
+
+// Stop implements Engine.
+func (f *Fake) Stop(_ context.Context, name string, _ time.Duration) error {
+	return f.transition("stop", name, func(ci *ContainerInfo) {
+		ci.State.Status, ci.State.Running, ci.State.Pid = "exited", false, 0
+	})
+}
+
+// Remove implements Engine.
+func (f *Fake) Remove(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Log = append(f.Log, "rm "+name)
+	if err := f.Errors["rm"]; err != nil {
+		return err
+	}
+	if _, ok := f.Containers[name]; !ok {
+		return fmt.Errorf("%s: %w", name, ErrNoSuchContainer)
+	}
+	delete(f.Containers, name)
+	delete(f.CreateArgs, name)
+	return nil
+}
+
+func (f *Fake) exec(o ExecOptions) (execx.Result, error) {
+	f.mu.Lock()
+	f.Execs = append(f.Execs, o)
+	fn := f.ExecFunc
+	ci, ok := f.Containers[o.Container]
+	f.mu.Unlock()
+	if !ok || !ci.State.Running {
+		return execx.Result{ExitCode: 125}, fmt.Errorf("fake exec: container %s is not running", o.Container)
+	}
+	if fn == nil {
+		return execx.Result{}, nil
+	}
+	return fn(o)
+}
+
+// Exec implements Engine.
+func (f *Fake) Exec(_ context.Context, o ExecOptions) (execx.Result, error) {
+	if _, err := o.Args(); err != nil {
+		return execx.Result{}, err
+	}
+	return f.exec(o)
+}
+
+// ExecInteractive implements Engine.
+func (f *Fake) ExecInteractive(_ context.Context, o ExecOptions) (int, error) {
+	if _, err := o.Args(); err != nil {
+		return -1, err
+	}
+	res, err := f.exec(o)
+	if ee, ok := err.(*execx.ExitError); ok {
+		return ee.Result.ExitCode, nil
+	}
+	return res.ExitCode, err
+}
+
+// Unshare implements Engine.
+func (f *Fake) Unshare(_ context.Context, args []string) (execx.Result, error) {
+	f.mu.Lock()
+	f.Unshares = append(f.Unshares, append([]string(nil), args...))
+	fn := f.UnshareFunc
+	f.mu.Unlock()
+	if fn == nil {
+		return execx.Result{}, nil
+	}
+	return fn(args)
 }

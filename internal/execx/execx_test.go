@@ -142,6 +142,15 @@ func TestRealInteractiveExitCode(t *testing.T) {
 	}
 }
 
+func TestRealInteractiveWriters(t *testing.T) {
+	var out, errb strings.Builder
+	code, err := Real{}.Interactive(context.Background(), Cmd{Name: "sh", Args: []string{"-c", "echo out; echo err >&2"},
+		Stdin: strings.NewReader(""), Stdout: &out, Stderr: &errb})
+	if err != nil || code != 0 || out.String() != "out\n" || errb.String() != "err\n" {
+		t.Errorf("Interactive = %d, %v, %q, %q", code, err, out.String(), errb.String())
+	}
+}
+
 func TestCmdString(t *testing.T) {
 	c := Cmd{Name: "podman", Args: []string{"run", "a b", "", "--env=TOKEN=abc"}, Redact: []string{"abc"}}
 	if got := c.String(); got != `podman run "a b" "" --env=TOKEN=[redacted]` {

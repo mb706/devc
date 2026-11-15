@@ -1,20 +1,33 @@
 package config
 
-import "time"
-
 // The structs below mirror the TOML files one to one. Fields tagged
 // toml:"-" are filled in by the loader. Defaults are set by the default*
 // functions before decoding, so a key absent from a file keeps its default.
 
 // Global is config.toml.
 type Global struct {
-	ProjectsRoot string    `toml:"projects_root" json:"projects_root"`
-	StateDir     string    `toml:"state_dir" json:"state_dir"`
-	Engine       string    `toml:"engine" json:"engine"`
-	DefaultEnv   string    `toml:"default_env" json:"default_env"`
-	Box          GlobalBox `toml:"box" json:"box"`
-	Hubs         []Hub     `toml:"hubs" json:"hubs"`
+	ProjectsRoot string        `toml:"projects_root" json:"projects_root"`
+	StateDir     string        `toml:"state_dir" json:"state_dir"`
+	Engine       string        `toml:"engine" json:"engine"`
+	DefaultEnv   string        `toml:"default_env" json:"default_env"`
+	Box          GlobalBox     `toml:"box" json:"box"`
+	SELinux      GlobalSELinux `toml:"selinux" json:"selinux"`
+	Hubs         []Hub         `toml:"hubs" json:"hubs"`
 }
+
+// GlobalSELinux selects how boxes are labelled on SELinux hosts. "labels"
+// expects the file-context rule printed by `devc doctor` and mounts without
+// relabelling; "disable" runs boxes with label=disable, the escape hatch for
+// machines where the rule is not set up. Ignored on hosts without SELinux.
+type GlobalSELinux struct {
+	Mode string `toml:"mode" json:"mode"`
+}
+
+// SELinux modes.
+const (
+	SELinuxLabels  = "labels"
+	SELinuxDisable = "disable"
+)
 
 type GlobalBox struct {
 	Memory string `toml:"memory" json:"memory"`
@@ -31,6 +44,7 @@ func defaultGlobal() Global {
 		ProjectsRoot: "~/devc",
 		Engine:       "podman",
 		Box:          GlobalBox{Memory: "16g", Pids: 4096},
+		SELinux:      GlobalSELinux{Mode: SELinuxLabels},
 	}
 }
 
@@ -167,28 +181,22 @@ func defaultProject() Project {
 	}
 }
 
-// Env is envs/<env>/: a Containerfile and/or env.toml.
+// Env is envs/<env>/: a Containerfile and/or env.toml. `devc root` appends
+// to root-log.jsonl beside them rather than editing env.toml, so files the
+// user writes are never rewritten by devc.
 type Env struct {
 	Name             string `toml:"-" json:"name"`
 	Dir              string `toml:"-" json:"dir"`
 	File             string `toml:"-" json:"-"` // env.toml, may not exist
 	HasContainerfile bool   `toml:"-" json:"has_containerfile"`
 
-	Description string         `toml:"description" json:"description"`
-	Base        string         `toml:"base" json:"base"`
-	Build       EnvBuild       `toml:"build" json:"build"`
-	RootLog     []RootLogEntry `toml:"root_log" json:"root_log,omitempty"`
+	Description string   `toml:"description" json:"description"`
+	Base        string   `toml:"base" json:"base"`
+	Build       EnvBuild `toml:"build" json:"build"`
 }
 
 type EnvBuild struct {
 	Args map[string]string `toml:"args" json:"args,omitempty"`
-}
-
-// RootLogEntry records a `devc root` command for folding into the Containerfile.
-type RootLogEntry struct {
-	Time    time.Time `toml:"time" json:"time"`
-	Box     string    `toml:"box" json:"box"`
-	Command []string  `toml:"command" json:"command"`
 }
 
 // Harness is a plugin manifest (spec 7.2), built in or from <config>/harness/.
