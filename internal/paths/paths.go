@@ -286,6 +286,19 @@ func (p *Paths) SecretsDir(realm string) string {
 func (p *Paths) NodeDir() string  { return filepath.Join(p.DurableDir(), "node") }
 func (p *Paths) LocalDir() string { return filepath.Join(p.stateDir, "local") }
 
+// NodeHubsDir holds this machine's credentials for each hub it joined
+// (work order C11a), one directory per hub named by hubnode.ID.
+func (p *Paths) NodeHubsDir() string { return filepath.Join(p.NodeDir(), "hubs") }
+
+// NodeHubDir is the credentials directory of one hub; id is 16 lower-case
+// hex characters (a hash of the hub's URL).
+func (p *Paths) NodeHubDir(id string) string {
+	if len(id) != 16 || strings.Trim(id, "0123456789abcdef") != "" {
+		panic(fmt.Sprintf("paths: invalid hub ID %q", id))
+	}
+	return filepath.Join(p.NodeHubsDir(), id)
+}
+
 // ReceiptsDir holds the daemon's command receipts (work order C09).
 func (p *Paths) ReceiptsDir() string { return filepath.Join(p.LocalDir(), "receipts") }
 func (p *Paths) BoxLocalDir(r names.ProjectRef) string {

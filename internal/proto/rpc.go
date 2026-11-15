@@ -203,6 +203,10 @@ type Options struct {
 	// peer; otherwise they become "internal error". Only for peers that
 	// may see host details (the same user on the daemon socket).
 	ExposeErrors bool
+	// Workers is how many requests are served at once (default 1: one at a
+	// time, in arrival order). A peer that forwards independent calls (the
+	// hub) needs more, so that a long command.get does not hold up the rest.
+	Workers int
 	// Context is the parent of the connection's context.
 	Context context.Context
 	// Log receives problems with the peer (nil: discarded).
@@ -242,6 +246,9 @@ func NewConn(rwc io.ReadWriteCloser, o Options) *Conn {
 	}
 	if o.WriteTimeout <= 0 {
 		o.WriteTimeout = 30 * time.Second
+	}
+	if o.Workers <= 0 {
+		o.Workers = 1
 	}
 	parent := o.Context
 	if parent == nil {
@@ -284,6 +291,19 @@ func (c *Conn) Get(key string) any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.values[key]
+}
+
+// Claim sets key to true unless it is set already, and reports whether it
+// did: an atomic once-per-connection guard for handlers that may run
+// concurrently (Options.Workers).
+func (c *Conn) Claim(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.values[key]; ok {
+		return false
+	}
+	c.values[key] = true
+	return true
 }
 
 // Close closes the connection; pending calls fail with ErrClosed.
@@ -387,14 +407,30 @@ func (c *Conn) safeNotify(h NotifyHandler, params json.RawMessage) {
 	h(c.ctx, c, params)
 }
 
+// serveLoop runs the workers; once the reader has ended and every queued
+// request is answered, the connection closes.
 func (c *Conn) serveLoop() {
+	var wg sync.WaitGroup
+	for range c.opts.Workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.worker()
+		}()
+	}
+	wg.Wait()
+	if c.ctx.Err() == nil {
+		c.closeWith(io.EOF)
+	}
+}
+
+func (c *Conn) worker() {
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
 		case m, ok := <-c.reqs:
 			if !ok {
-				c.closeWith(io.EOF)
 				return
 			}
 			resp := c.serve(m)
@@ -561,7 +597,19 @@ func DecodeParams(params json.RawMessage, v any) error {
 }
 
 // DecodeResult decodes a raw result strictly (for results from a hostile
-// peer).
+// peer): unknown fields and trailing data are refused. Unlike parameters, a
+// result may be any JSON value (boxes.list returns an array).
 func DecodeResult(raw json.RawMessage, v any) error {
-	return decodeStrict(raw, v)
+	if t := bytes.TrimSpace(raw); len(t) == 0 || string(t) == "null" {
+		return errors.New("no result")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("data after the JSON value")
+	}
+	return nil
 }

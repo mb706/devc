@@ -204,12 +204,19 @@ func validateGlobal(c *Config, ps *problems) {
 	}
 	k.enum("selinux.mode", g.SELinux.Mode, selinuxModes)
 	k.enum("secrets.delivery", g.Secrets.Delivery, []string{DeliveryFiles, DeliveryDaemon})
+	seenHubs := map[string]bool{}
 	for i, h := range g.Hubs {
 		key := idx("hubs", i) + ".url"
 		u, err := url.Parse(h.URL)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
-			k.bad(key, "%q must be an https:// URL with a host and no user information", h.URL)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			k.bad(key, "%q must be an https:// URL with a host and no user information, query or fragment", h.URL)
+			continue
 		}
+		norm := strings.TrimRight(u.String(), "/")
+		if seenHubs[norm] {
+			k.bad(key, "%q is listed twice", h.URL)
+		}
+		seenHubs[norm] = true
 	}
 }
 

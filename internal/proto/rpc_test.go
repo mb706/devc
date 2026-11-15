@@ -341,3 +341,86 @@ func TestSessionViewApply(t *testing.T) {
 		t.Errorf("after the end: %+v", v)
 	}
 }
+
+func TestWorkersAndClaim(t *testing.T) {
+	a, b := net.Pipe()
+	release := make(chan struct{})
+	var claims sync.WaitGroup
+	won := make(chan bool, 8)
+	srv := NewConn(a, Options{Workers: 4, Handlers: map[string]Handler{
+		"slow": func(context.Context, *Conn, json.RawMessage) (any, error) { <-release; return "slow", nil },
+		"fast": func(context.Context, *Conn, json.RawMessage) (any, error) { return "fast", nil },
+		"claim": func(_ context.Context, c *Conn, _ json.RawMessage) (any, error) {
+			won <- c.Claim("k")
+			claims.Done()
+			return nil, nil
+		},
+	}})
+	defer srv.Close()
+	cl := NewConn(b, Options{})
+	defer cl.Close()
+	ctx := context.Background()
+	slow := make(chan error, 1)
+	go func() { slow <- cl.Call(ctx, "slow", nil, nil) }()
+	time.Sleep(50 * time.Millisecond)
+	// With several workers a quick call is not held up by a slow one.
+	fctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	var s string
+	if err := cl.Call(fctx, "fast", nil, &s); err != nil || s != "fast" {
+		t.Errorf("fast call behind a slow one: %q %v", s, err)
+	}
+	cancel()
+	close(release)
+	if err := <-slow; err != nil {
+		t.Error(err)
+	}
+	// Claim succeeds exactly once per key, also concurrently.
+	claims.Add(8)
+	for range 8 {
+		go cl.Call(ctx, "claim", nil, nil)
+	}
+	claims.Wait()
+	n := 0
+	for range 8 {
+		if <-won {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("claimed %d times", n)
+	}
+}
+
+func TestDecodeResult(t *testing.T) {
+	var list []int
+	if err := DecodeResult(json.RawMessage(`[1,2]`), &list); err != nil || len(list) != 2 {
+		t.Errorf("array: %v %v", list, err)
+	}
+	var obj struct{ A int }
+	for _, bad := range []string{`null`, ``, `{"A":1,"B":2}`, `{"A":1} {}`, `[1]`} {
+		if err := DecodeResult(json.RawMessage(bad), &obj); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if err := DecodeResult(json.RawMessage(` {"A":1} `), &obj); err != nil || obj.A != 1 {
+		t.Errorf("object: %v", err)
+	}
+}
+
+func TestHubHello(t *testing.T) {
+	ok := HubHello{Protocol: HubProtocol, Name: "host", Version: "v1", Instance: "0123abcd"}
+	if err := ok.Validate(); err != nil {
+		t.Error(err)
+	}
+	for _, h := range []HubHello{
+		{Protocol: 2, Name: "host", Version: "v1", Instance: "ab"},
+		{Protocol: HubProtocol, Name: "ho\x1bst", Version: "v1", Instance: "ab"},
+		{Protocol: HubProtocol, Name: strings.Repeat("h", 256), Version: "v1", Instance: "ab"},
+		{Protocol: HubProtocol, Name: "host", Version: "v1", Instance: "AB"},
+		{Protocol: HubProtocol, Name: "host", Version: "v1", Instance: ""},
+	} {
+		if h.Validate() == nil {
+			t.Errorf("accepted %+v", h)
+		}
+	}
+}

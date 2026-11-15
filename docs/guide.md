@@ -62,9 +62,9 @@ create or start a box refuses while that project's configuration has a
 problem.
 
 Some keys are accepted for features that are not available yet and have no
-effect: `grants.ssh`, `grants.github`, `box.ports`, `[data.remotes]`,
-`[sync]`, `[[hubs]]`. `build_from_repo`, `network = "allowlist"` and
-`capabilities.nested` are refused with a message.
+effect: `grants.github`, `box.ports`, `[data.remotes]`, `[sync]`.
+`build_from_repo`, `network = "allowlist"` and `capabilities.nested` are
+refused with a message.
 
 State lives in `~/.local/share/devc` (`--state-dir`, `DEVC_STATE_DIR` or
 `state_dir`): `durable/` holds what is worth backing up (relays, journals,
@@ -262,6 +262,27 @@ from a hub. Pending requests expire after seven days. An approved package
 request runs the manager's install command through `devc root`, so it is
 recorded in the env's root log. Requests need the daemon; without it, `devc
 request` tells the agent to ask you directly.
+
+### Hubs
+
+A hub is a server your machines report to, so that you can see and steer
+the sessions of every machine from one place (the web app follows). Machines
+dial out to it; it needs no access to them. Setting one up, with or without a
+reverse proxy, is described in [hub-deployment.md](hub-deployment.md). On a
+machine:
+
+```sh
+devc join https://hub.example.org --cert laptop.crt --key laptop.key [--ca ca.crt]
+devc hub status            # each hub, connected or not, and which one notifies
+devc leave https://hub.example.org
+```
+
+`devc join` stores the certificate under `durable/node/hubs/` and adds the hub
+to `config.toml`; the daemon connects within seconds and keeps the connection
+while it runs. A hub can read the sessions' events, type into sessions, start
+and stop them, and decide low-risk requests; it cannot stop the daemon, run
+anything on the host, change the configuration, or approve high-risk
+requests.
 
 ## Git: relay, bank, pull, push
 

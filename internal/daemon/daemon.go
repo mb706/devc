@@ -17,7 +17,10 @@
 // are attributed by the channel they arrive on. Configuration comes only
 // from the config directory (rule 1). The API socket is 0600 in a 0700
 // directory: the same user is the only client. Host commands run with an
-// argument vector from / (rule 3).
+// argument vector from / (rule 3). The daemon dials out to the hubs listed
+// in config.toml (hublink.go); a hub may call only the allowlisted,
+// box-scoped methods of hubMethods, with origin hub, and sees no host
+// paths.
 package daemon
 
 import (
@@ -151,6 +154,7 @@ type Daemon struct {
 	requests   *requestService
 	turns      *turnBanker
 	fetchLimit *rateLimit
+	hubs       *hubManager
 	wg         sync.WaitGroup
 }
 
@@ -217,6 +221,7 @@ func New(o Options) (*Daemon, error) {
 		procDir: o.ProcDir, runtime: rt, boxes: map[names.ProjectRef]*boxInfo{}, windows: map[names.ProjectRef]map[string]string{},
 		warnings: map[names.ProjectRef]*pendingWarn{}, hub: newHub(o.Log, instance), fetchLimit: newRateLimit(fetchThroughEvery)}
 	d.requests = newRequestService(d)
+	d.hubs = newHubManager(d)
 	d.turns = newTurnBanker(d, o.TurnBankInterval)
 	d.hub.onTurnEnd = d.turns.turnEnded
 	return d, nil
@@ -293,6 +298,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.goSafe("journals", d.journalLoop)
 	d.goSafe("reconcile", d.reconcileLoop)
 	d.goSafe("housekeeping", d.housekeepingLoop)
+	d.hubs.start(d.ctx)
 	<-d.ctx.Done()
 	d.log.Info("daemon stopping")
 	ln.Close()
@@ -384,6 +390,7 @@ func (d *Daemon) reload(force bool) error {
 	d.env, d.stamp = e, stamp
 	d.mu.Unlock()
 	d.hub.setProjects(c.Paths, refs)
+	d.hubs.sync(c)
 	if !force {
 		d.log.Info("configuration reloaded", "projects", len(refs))
 	}
@@ -413,6 +420,8 @@ func (d *Daemon) watchLoop() {
 		if err := d.watchOnce(d.ctx); err != nil && d.ctx.Err() == nil {
 			d.log.Warn("listing boxes", "err", err)
 		}
+		// A new `devc join` for a listed hub changes only its credentials.
+		d.hubs.sync(nil)
 	})
 }
 

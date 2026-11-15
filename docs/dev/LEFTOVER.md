@@ -257,3 +257,19 @@ Other checks and deferred work:
 | A grant added while a box runs needs `devc up --recreate` (the configuration mount changes the box definition); a removed grant closes the gate at once. `devc request grant ssh <host>` is still "not available yet" (C10a) | the grant decision of C10a |
 | If the gate's host key is deleted, the next `devc up` of a box with a grant makes a new one, and boxes that are running keep the old one in their known-hosts file until they restart (their ssh then refuses the gate with a host key warning) | nothing |
 | When the daemon stops (or the box's channel goes) it sends SIGTERM to the gate sshd processes it started; the remote command should then see its input close, as when a direct SSH connection drops. Not tried with a session open | a long-running `ssh <host> sleep 600` from a box while the daemon stops |
+
+### From C11a
+
+| Item | Needs |
+|---|---|
+| **Login, devices, enrolment and notifications** are C11b. Until then any valid device certificate may use the whole API; the session check goes into `hub.Server.checkUser`, the one place every `/api/` request passes. `hub.role` is recorded (`machines.notifier`) but nothing notifies yet | C11b |
+| **PKCS#12 bundles on real devices.** Bundles decode with go-pkcs12 (modern and `--legacy-p12`); importing one into Android, iOS, Firefox or Chrome and reaching the hub with it was not tried (no phone or desktop browser here) | a phone and a desktop browser |
+| **Direct TLS with browsers.** The direct mode serves HTTP/1.1 only (the machines' WebSocket needs it; Go's server would offer h2 to browsers otherwise). A browser over HTTP/1.1 holds at most six connections per host, which an app with several event streams may hit; behind a proxy the browser side is HTTP/2 | C12: decide whether to enable h2 for browsers in direct mode |
+| **Server certificate renewal.** A certificate from a public CA given with `--tls-cert` is read at start; renewing it needs a restart of the hub (behind a proxy the proxy renews) | a reload on SIGHUP, if wanted |
+| **Machines behind an HTTP proxy.** The machine side uses `HTTPS_PROXY` from the environment (Go's `ProxyFromEnvironment`); not tried | a network that needs one |
+| **Proxy configurations** were checked with nginx 1.28.0 and Caddy 2.10.0 containers (host network) on loopback, by a script, not by the integration suite (it would pull two images every run). Caddy with client authentication insists that the TLS server name equals the `Host` header, so its public name must be a DNS name | nothing (re-run by hand when the configurations change) |
+| **A compromised machine** can fill its own part of the hub: at most 20,000 sessions per machine (`hub.MaxMachineSessions`), 500 events or 1 MiB per session, a change log of 20,000 entries; sessions that ended more than 30 days ago are pruned hourly. It cannot write another machine's rows | nothing |
+| **Old ended sessions** outside the 30-day window are neither subscribed to nor listed; a `seen` recorded for such a session on the machine reaches a hub only if the hub still holds it | nothing |
+| **Paging backwards** (`?before=`) asks the machine with `events.read` from `before − limit − 1`, which relies on a session's seqs being consecutive (they are, by construction of the journal) | nothing |
+| **SELinux not tried.** Nothing new crosses the box boundary: the hub link is a TCP connection of the daemon on the host | a Fedora machine, enforcing |
+| **Binary size.** modernc.org/sqlite makes `bin/devc` about 19 MB (stripped); every machine carries the hub's code | a decision, if size matters (a build tag for a machine-only binary) |

@@ -45,6 +45,8 @@ func (d *Daemon) handlers() map[string]proto.Handler {
 		proto.MethodRequestsList: d.apiRequests,
 		// Decisions on this socket come from this machine: origin local.
 		proto.MethodRequestsDecide: d.decideHandler(proto.OriginLocal),
+
+		proto.MethodHubsStatus: d.apiHubs,
 	}
 }
 
@@ -270,10 +272,9 @@ func (d *Daemon) apiSubscribe(_ context.Context, c *proto.Conn, params json.RawM
 	if err := proto.DecodeParams(params, &p); err != nil {
 		return nil, err
 	}
-	if c.Get("subscribed") != nil {
+	if !c.Claim("subscribed") {
 		return nil, proto.Errorf(proto.CodeRefused, "this connection already has a subscription")
 	}
-	c.Set("subscribed", true)
 	if err := d.hub.subscribe(c, p); err != nil {
 		return nil, err
 	}
