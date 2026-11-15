@@ -218,3 +218,49 @@ func TestSwapToSymlinkAfterOpen(t *testing.T) {
 		t.Error("read through a swapped-in symlink succeeded")
 	}
 }
+
+func TestMkdirAll(t *testing.T) {
+	r, base := fixture(t)
+	root := filepath.Join(base, "root")
+	if err := r.MkdirAll("a/b/c", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(filepath.Join(root, "a", "b", "c")); err != nil || !fi.IsDir() || fi.Mode().Perm()&0o077 != 0 {
+		t.Errorf("a/b/c: %v %v", fi, err)
+	}
+	if err := r.MkdirAll("a/b/c", 0o700); err != nil {
+		t.Errorf("existing directories: %v", err)
+	}
+	if err := r.MkdirAll(".", 0o700); err != nil {
+		t.Errorf("the root itself: %v", err)
+	}
+	// A symlink anywhere on the way is refused, and nothing is created
+	// where it points.
+	for _, rel := range []string{"dirlink/x", "dirlink", "link-out/x", "ok.txt/x", "sub/../sub/y", "/abs"} {
+		err := r.MkdirAll(rel, 0o700)
+		if err == nil {
+			t.Errorf("MkdirAll(%q) succeeded", rel)
+		}
+		if rel == "dirlink/x" && !strings.Contains(err.Error(), "symlink") {
+			t.Errorf("MkdirAll(%q): %v, want a symlink message", rel, err)
+		}
+		if rel == "ok.txt/x" && !strings.Contains(err.Error(), "regular file") {
+			t.Errorf("MkdirAll(%q): %v, want a regular-file message", rel, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "sub", "x")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a directory was created through the symlink: %v", err)
+	}
+	if err := r.RequireDirs("a/b"); err != nil {
+		t.Errorf("RequireDirs(a/b): %v", err)
+	}
+	if err := r.RequireDirs("a/missing"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("RequireDirs(a/missing): %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "a", "missing")); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("RequireDirs created a directory")
+	}
+	if err := r.RequireDirs("dirlink"); err == nil {
+		t.Error("RequireDirs accepted a symlink")
+	}
+}

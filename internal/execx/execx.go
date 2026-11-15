@@ -38,8 +38,9 @@ var ErrNotFound = exec.ErrNotFound
 type Cmd struct {
 	Name string
 	Args []string
-	// Dir is the working directory; empty means the current one. Never set
-	// it to a box-writable directory (README rule 2).
+	// Dir is the working directory; empty means "/", never the caller's
+	// current directory, which may lie in a project (README rule 2). Never
+	// set it to a box-writable directory.
 	Dir string
 	// Env holds "KEY=value" additions to the inherited environment.
 	Env   []string
@@ -137,9 +138,17 @@ type Real struct{}
 
 var _ Runner = Real{}
 
+// WorkDir is the directory c runs in: c.Dir, or "/" when it is empty.
+func (c Cmd) WorkDir() string {
+	if c.Dir == "" {
+		return "/"
+	}
+	return c.Dir
+}
+
 func (Real) command(ctx context.Context, c Cmd) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
-	cmd.Dir = c.Dir
+	cmd.Dir = c.WorkDir()
 	if len(c.Env) > 0 {
 		cmd.Env = append(os.Environ(), c.Env...)
 	}
@@ -169,7 +178,7 @@ func (r Real) Run(ctx context.Context, c Cmd) (Result, error) {
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	slog.Debug("exec", "cmd", c.String(), "dir", c.Dir)
+	slog.Debug("exec", "cmd", c.String(), "dir", c.WorkDir())
 	start := time.Now()
 	err := cmd.Run()
 	res := Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Truncated: stdout.truncated || stderr.truncated, ExitCode: -1}
@@ -200,7 +209,7 @@ func (r Real) Interactive(ctx context.Context, c Cmd) (int, error) {
 	if c.Stderr != nil {
 		cmd.Stderr = c.Stderr
 	}
-	slog.Debug("exec interactive", "cmd", c.String(), "dir", c.Dir)
+	slog.Debug("exec interactive", "cmd", c.String(), "dir", c.WorkDir())
 	err := cmd.Run()
 	code := -1
 	if cmd.ProcessState != nil {

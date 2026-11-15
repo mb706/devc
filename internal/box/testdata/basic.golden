@@ -20,6 +20,8 @@ seccomp=/home/u/.local/share/devc/toolbox/seccomp.json
 4096
 --memory
 16g
+--entrypoint
+/opt/devc/bin/devc
 --workdir
 /w/demo/hello
 --env
@@ -36,6 +38,8 @@ DEVC_REALM=demo
 DEVC_PROJECT=hello
 --env
 PATH=/opt/devc/shims:/opt/devc/bin:/home/dev/.local/bin:/usr/local/bin:/usr/bin:/bin
+--env
+TERMINFO_DIRS=/opt/devc/terminfo:
 --mount
 type=bind,source=/home/u/devc/demo/hello,destination=/w/demo/hello
 --mount
@@ -59,9 +63,7 @@ devc.project=hello
 --label
 devc.role=box
 --label
-devc.confighash=72031d60a6097c42011dabfb436f5c979e0e4e6e11ebced8f83767d686b287de
+devc.confighash=d739a4a009b92ff3301d23d39df3d3f6a3ea01ba95ac0d422f1f0cbe871d679d
 localhost/devc-env/base:latest
-/opt/devc/bin/devc
 box
 init
-# warning: network level "internet" is not enforced yet: this box has the engine's default, unrestricted network (LAN and host services included) until a later devc version adds the rules

@@ -6,7 +6,11 @@ user_email = "demo@example.org"
 branch_prefix = "agent/"       # prefix for task branches
 
 [network]
-default = "internet"           # none | allowlist | internet | open
+# none | allowlist | internet | open. The default is "internet", but devc
+# refuses "internet" and "allowlist" until their firewall rules exist (C07);
+# until then this example says "open" explicitly: the box may reach the LAN
+# and host services.
+default = "open"
 
 [selinux]
 level = ""                     # for example "s0:c100,c200"; only used on SELinux hosts

@@ -127,7 +127,7 @@ func newEnvCmd(a *app) *cobra.Command {
 				return err
 			}
 			a.warnProblems(probs)
-			eng := engine.NewPodman(c.Global.Engine, a.runner)
+			eng := a.engine(c)
 			ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 			defer cancel()
 			rows := []envRow{}
@@ -209,7 +209,7 @@ func newEnvCmd(a *app) *cobra.Command {
 				}
 				return fmt.Errorf("env %s has configuration problems; fix them first", e.Name)
 			}
-			eng := engine.NewPodman(c.Global.Engine, a.runner)
+			eng := a.engine(c)
 			fmt.Fprintf(a.stderr, "devc: building env %s as %s\n", e.Name, box.EnvImageTag(e.Name))
 			if err := box.BuildEnv(cmd.Context(), eng, c, e, box.BuildEnvOptions{NoCache: noCache, Pull: pull}, a.stderr); err != nil {
 				return err

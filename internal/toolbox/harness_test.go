@@ -189,7 +189,7 @@ func TestGC(t *testing.T) {
 	}
 	os.MkdirAll(filepath.Join(tb.HarnessDir("fake"), "v", "not-a-stamp"), 0o755)
 	os.Symlink("v/"+stamps[1], filepath.Join(tb.HarnessDir("fake"), "current"))
-	removed, err := tb.GC("fake")
+	removed, err := tb.GC("fake", GCKeep{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,6 +201,139 @@ func TestGC(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tb.HarnessDir("fake"), "v", "not-a-stamp")); err != nil {
 		t.Error("gc removed a directory it does not own")
+	}
+}
+
+// TestGCKeepsVersionsInUse: versions named by launch descriptions and
+// versions that were current since the oldest running box started stay
+// (finding E1).
+func TestGCKeepsVersionsInUse(t *testing.T) {
+	tb := New(t.TempDir())
+	day := func(d int) time.Time { return time.Date(2026, 1, d, 0, 0, 0, 0, time.UTC) }
+	var stamps []string
+	for i := range 7 {
+		s := day(i + 1).Format("20060102T150405Z")
+		stamps = append(stamps, s)
+		os.MkdirAll(filepath.Join(tb.HarnessDir("fake"), "v", s), 0o755)
+	}
+	os.Symlink("v/"+stamps[6], filepath.Join(tb.HarnessDir("fake"), "current"))
+	// The history knows the real switch times of the later versions: v3
+	// (stamp day 3) only became current on day 4 at noon, v4 on day 5.
+	for _, e := range []struct {
+		at    time.Time
+		stamp string
+	}{{day(4).Add(12 * time.Hour), stamps[2]}, {day(5), stamps[3]}, {day(6), stamps[4]}, {day(6).Add(time.Hour), stamps[5]}, {day(7), stamps[6]}} {
+		if err := tb.appendHistory("fake", e.stamp, e.at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The oldest running box started on day 4 at 06:00: v2 (current then,
+	// since the stamp time of day 2 and until v3's switch at noon) and every
+	// later version may still run. v1 is named by a launch description.
+	removed, err := tb.GC("fake", GCKeep{Named: map[string]bool{stamps[0]: true}, Since: day(4).Add(6 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("removed %v", removed)
+	}
+	// Without the description and with the box started on day 6 at 00:30,
+	// v1 to v3 go (v4 became current on day 5, v5 on day 6 at 00:00, which
+	// was current at 00:30).
+	removed, err = tb.GC("fake", GCKeep{Since: day(6).Add(30 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(removed, []string{stamps[0], stamps[1], stamps[2], stamps[3]}) {
+		t.Errorf("removed %v", removed)
+	}
+	if vs, _ := tb.Versions("fake"); !slices.Equal(vs, stamps[4:]) {
+		t.Errorf("kept %v", vs)
+	}
+	if StampOfExe("fake", "/opt/devc/harness/fake/v/"+stamps[4]+"/bin/fake") != stamps[4] ||
+		StampOfExe("fake", "/opt/devc/harness/fake/current/bin/fake") != "" || StampOfExe("fake", "/opt/devc/harness/other/v/"+stamps[4]+"/x") != "" {
+		t.Error("StampOfExe")
+	}
+}
+
+// TestInstallPublication: the metadata is written first and current is
+// switched last; if the switch fails the previous state is restored
+// (finding B2).
+func TestInstallPublication(t *testing.T) {
+	e := newInstallEnv(t)
+	m := fakeManifest("script")
+	first, err := e.in.Install(context.Background(), m, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(filepath.Join(e.tb.HarnessDir("fake"), "installed.json"))
+	e.now = e.now.Add(time.Hour)
+	orig := switchSymlink
+	defer func() { switchSymlink = orig }()
+	var metaAtSwitch []byte
+	switchSymlink = func(target, path string) (bool, error) {
+		metaAtSwitch, _ = os.ReadFile(filepath.Join(e.tb.HarnessDir("fake"), "installed.json"))
+		return false, fmt.Errorf("disk full")
+	}
+	if _, err := e.in.Install(context.Background(), m, ""); err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("install: %v", err)
+	}
+	if !strings.Contains(string(metaAtSwitch), "20261115T110000Z") {
+		t.Errorf("the metadata was not written before the switch: %s", metaAtSwitch)
+	}
+	after, _ := os.ReadFile(filepath.Join(e.tb.HarnessDir("fake"), "installed.json"))
+	if string(after) != string(before) {
+		t.Errorf("installed.json not restored:\n%s", after)
+	}
+	if in, err := e.tb.ReadInstalled("fake"); err != nil || in.Stamp != first.Stamp {
+		t.Errorf("ReadInstalled after the failure: %+v %v", in, err)
+	}
+	if vs, _ := e.tb.Versions("fake"); !slices.Equal(vs, []string{first.Stamp}) {
+		t.Errorf("versions: %v", vs)
+	}
+	// The very first installation failing leaves no metadata behind.
+	e2 := newInstallEnv(t)
+	if _, err := e2.in.Install(context.Background(), m, ""); err == nil {
+		t.Fatal("install succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(e2.tb.HarnessDir("fake"), "installed.json")); !os.IsNotExist(err) {
+		t.Errorf("installed.json after a failed first install: %v", err)
+	}
+	switchSymlink = orig
+	// A successful install records the switch.
+	if _, err := e2.in.Install(context.Background(), m, ""); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := e2.tb.readHistory("fake"); len(h) != 1 || h[0].Stamp != "20261115T100000Z" {
+		t.Errorf("history: %+v", h)
+	}
+}
+
+// TestInstallVersion: a requested version reaches the installer through
+// an argument or an environment variable, or is refused (finding B5).
+func TestInstallVersion(t *testing.T) {
+	e := newInstallEnv(t)
+	m := fakeManifest("script")
+	m.Install.Args = nil
+	m.Install.Env = map[string]string{"PREFIX": "{dir}/x", "PIN": "{version}"}
+	if _, err := e.in.Install(context.Background(), m, "1.2.3"); err != nil {
+		t.Fatal(err)
+	}
+	if env := e.eng.Runs[0].Env; !slices.Contains(env, "PIN=1.2.3") {
+		t.Errorf("env with a version: %q", env)
+	}
+	e.now = e.now.Add(time.Hour)
+	if _, err := e.in.Install(context.Background(), m, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, kv := range e.eng.Runs[2].Env {
+		if strings.HasPrefix(kv, "PIN=") {
+			t.Errorf("PIN set without a version: %q", kv)
+		}
+	}
+	m.Install.Env = map[string]string{"PREFIX": "{dir}/x"}
+	if _, err := e.in.Install(context.Background(), m, "1.2.3"); err == nil || !strings.Contains(err.Error(), "cannot pass a version") {
+		t.Errorf("version without a placeholder: %v", err)
 	}
 }
 

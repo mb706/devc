@@ -29,11 +29,20 @@ const (
 	SELinuxDisable = "disable"
 )
 
+// GlobalBox holds the default limits. Memory is a size or "none"; Pids is
+// a positive number or -1. "none" and -1 switch the limit off explicitly:
+// a limit that is configured but cannot be applied fails the box.
 type GlobalBox struct {
 	Memory string `toml:"memory" json:"memory"`
 	Pids   int    `toml:"pids" json:"pids"`
 	Shell  string `toml:"shell" json:"shell"`
 }
+
+// NoLimit switches the memory limit off; NoPidsLimit the PID limit.
+const (
+	NoLimit     = "none"
+	NoPidsLimit = -1
+)
 
 type Hub struct {
 	URL string `toml:"url" json:"url"`
@@ -158,6 +167,7 @@ type Capabilities struct {
 	KVM    bool `toml:"kvm" json:"kvm"`
 }
 
+// ProjectBox overrides the global limits; empty Memory and Pids 0 inherit.
 type ProjectBox struct {
 	Memory string `toml:"memory" json:"memory"`
 	Pids   int    `toml:"pids" json:"pids"`
@@ -266,9 +276,21 @@ type HarnessAuth struct {
 type HarnessBaseline struct {
 	Settings     *BaselineSettings     `toml:"settings" json:"settings,omitempty"`
 	Instructions *BaselineInstructions `toml:"instructions" json:"instructions,omitempty"`
+	// Files are further files rendered from a template alone; the user's
+	// baseline settings are not merged into them (Codex's requirements).
+	Files []BaselineFile `toml:"files" json:"files,omitempty"`
 }
 
 type BaselineSettings struct {
+	Path     string `toml:"path" json:"path"`
+	Format   string `toml:"format" json:"format"`
+	Template string `toml:"template" json:"template"`
+	// Also lists further paths that receive the same rendered settings.
+	Also []string `toml:"also" json:"also,omitempty"`
+}
+
+// BaselineFile is one file of HarnessBaseline.Files.
+type BaselineFile struct {
 	Path     string `toml:"path" json:"path"`
 	Format   string `toml:"format" json:"format"`
 	Template string `toml:"template" json:"template"`

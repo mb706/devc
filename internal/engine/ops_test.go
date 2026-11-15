@@ -76,7 +76,7 @@ func TestBuildArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"build", "--file", "/cfg/envs/base/Containerfile", "--tag", "localhost/devc-env/base:latest",
+	want := []string{"build", "--http-proxy=false", "--file", "/cfg/envs/base/Containerfile", "--tag", "localhost/devc-env/base:latest",
 		"--label", "devc.env=base", "--label", "devc.role=env", "--build-arg", "A=x y", "--build-arg", "B=2",
 		"--no-cache", "--pull=missing", "/cfg/envs/base"}
 	if !slices.Equal(args, want) {
@@ -225,7 +225,7 @@ func TestRunArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"run", "--rm", "--pull=missing", "--label", "devc.role=aux", "--network", "none", "--security-opt", "no-new-privileges",
+	want := []string{"run", "--rm", "--pull=missing", "--http-proxy=false", "--label", "devc.role=aux", "--network", "none", "--security-opt", "no-new-privileges",
 		"--mount", "type=bind,source=/a,destination=/b,ro", "--mount", "type=tmpfs,destination=/opt", "--env", "HOME=/h", "--workdir", "/h", "-i", "-t", "--detach-keys=",
 		"localhost/devc-aux/installer:latest", "bash", "-c", "x"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
@@ -239,9 +239,56 @@ func TestRunArgs(t *testing.T) {
 		"env":     {Image: "img", Env: []string{"A B=1"}, Cmd: []string{"a"}},
 		"secopt":  {Image: "img", SecurityOpts: []string{"--privileged"}, Cmd: []string{"a"}},
 		"tmpfs":   {Image: "img", Tmpfs: []string{"/"}, Cmd: []string{"a"}},
+		"both":    {Image: "img", Rootfs: "/r", Cmd: []string{"a"}},
+		"neither": {Cmd: []string{"a"}},
+		"rootfs":  {Rootfs: "/r:O", Cmd: []string{"a"}},
+		"cap":     {Image: "img", CapAdd: []string{"ALL --privileged"}, Cmd: []string{"a"}},
 	} {
 		if _, err := bad.Args(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+
+	// The helper container: a root filesystem behind an overlay, no
+	// capabilities but the named ones.
+	h := RunOptions{Rootfs: "/tb/helper-rootfs", Network: "none", CapDropAll: true, CapAdd: []string{"DAC_OVERRIDE"},
+		Mounts: []RunMount{{Source: "/h", Target: "/target"}}, Cmd: []string{"/bin/devc", "box", "rm-worker"}}
+	got, err = h.Args()
+	want = []string{"run", "--rm", "--http-proxy=false", "--network", "none", "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE",
+		"--mount", "type=bind,source=/h,destination=/target", "--rootfs", "/tb/helper-rootfs:O", "/bin/devc", "box", "rm-worker"}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("helper args:\n%q\nwant\n%q (%v)", got, want, err)
+	}
+}
+
+// TestExtraLabels: labels of the engine reach containers and images, and
+// create puts them before the definition so the box's hash is unaffected.
+func TestExtraLabels(t *testing.T) {
+	f := execx.NewFake()
+	f.On("podman")
+	p := NewPodman("podman", f)
+	p.ExtraLabels = TestRunLabels("abc123")
+	ctx := context.Background()
+	if _, err := p.Create(ctx, []string{"--name", "x", "img"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(ctx, RunOptions{Image: "img", Labels: map[string]string{"devc.role": "aux"}, Cmd: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Build(ctx, BuildOptions{ContextDir: "/c", File: "/c/f", Tag: "t"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.Calls()
+	if got := calls[0].Args; !slices.Equal(got, []string{"create", "--label", "devc.test=1", "--label", "devc.test.run=abc123", "--name", "x", "img"}) {
+		t.Errorf("create: %q", got)
+	}
+	for _, c := range calls[1:] {
+		j := strings.Join(c.Args, " ")
+		if !strings.Contains(j, "--label devc.test.run=abc123") || !strings.Contains(j, "--label devc.test=1") {
+			t.Errorf("%s: no test labels", j)
+		}
+	}
+	if TestRunLabels("") != nil || TestRunLabels("A B") != nil {
+		t.Error("an invalid nonce gave labels")
 	}
 }

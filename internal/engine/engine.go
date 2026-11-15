@@ -336,6 +336,33 @@ type Podman struct {
 	Runner execx.Runner
 	// Timeout for quick queries; zero means execx.DefaultTimeout.
 	Timeout time.Duration
+	// ExtraLabels are added to every container and image this engine
+	// creates. They are not part of a box's definition (the configuration
+	// hash). The integration tests use them to mark what a run created
+	// (see TestRunLabels).
+	ExtraLabels map[string]string
+}
+
+// TestRunEnv names the environment variable through which the integration
+// tests give each run a nonce. When it holds a valid nonce, TestRunLabels
+// returns the labels every object created in that run carries.
+const TestRunEnv = "DEVC_TEST_RUN"
+
+// LabelTest and LabelTestRun mark objects created by an integration test run.
+const (
+	LabelTest    = "devc.test"
+	LabelTestRun = "devc.test.run"
+)
+
+var testRunRE = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
+
+// TestRunLabels returns the labels for a test-run nonce, or nil when the
+// value is empty or not a valid nonce.
+func TestRunLabels(nonce string) map[string]string {
+	if !testRunRE.MatchString(nonce) {
+		return nil
+	}
+	return map[string]string{LabelTest: "1", LabelTestRun: nonce}
 }
 
 // NewPodman returns an engine using bin (default "podman") through runner.

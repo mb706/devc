@@ -31,7 +31,7 @@ func baseResolved() *config.Resolved {
 	ref := names.ProjectRef{Realm: "demo", Project: "hello"}
 	return &config.Resolved{
 		Realm: "demo", Project: "hello", BoxName: names.BoxName(ref), BoxID: names.BoxID(ref),
-		Env: "base", MemoryGroup: "hello", Network: "internet",
+		Env: "base", MemoryGroup: "hello", Network: "open",
 		Box:    config.ResolvedBox{Memory: "16g", Pids: 4096},
 		Mounts: []config.Mount{},
 	}
@@ -108,6 +108,9 @@ func TestSpecGolden(t *testing.T) {
 		r.Network = "open"
 		r.SELinuxLevel = "s0:c1,c2" // ignored when labelling is disabled
 		r.Image, r.Env = "docker.io/library/debian:trixie-slim", ""
+		// Without delegated controllers the limits must be switched off
+		// explicitly.
+		r.Box.Memory, r.Box.Pids = config.NoLimit, config.NoPidsLimit
 		in := baseInputs(t, r)
 		in.Host = HostFacts{SELinux: true}
 		in.SELinuxMode = config.SELinuxDisable
@@ -147,10 +150,17 @@ func TestSpecProperties(t *testing.T) {
 			t.Errorf("missing %s", want)
 		}
 	}
-	if args[len(args)-4] != "localhost/devc-env/base:latest" || !slices.Equal(args[len(args)-3:], []string{"/opt/devc/bin/devc", "box", "init"}) {
-		t.Errorf("tail: %q", args[len(args)-4:])
+	// devc's init is the entrypoint, whatever the image declares.
+	if args[len(args)-3] != "localhost/devc-env/base:latest" || !slices.Equal(args[len(args)-2:], []string{"box", "init"}) {
+		t.Errorf("tail: %q", args[len(args)-3:])
 	}
-	hashLabel := args[len(args)-5]
+	if i := slices.Index(args, "--entrypoint"); i < 0 || args[i+1] != "/opt/devc/bin/devc" {
+		t.Errorf("entrypoint: %q", args)
+	}
+	if !slices.Contains(args, "TERMINFO_DIRS=/opt/devc/terminfo:") {
+		t.Errorf("no TERMINFO_DIRS: %q", args)
+	}
+	hashLabel := args[len(args)-4]
 	if !strings.HasPrefix(hashLabel, LabelConfigHash+"=") || strings.TrimPrefix(hashLabel, LabelConfigHash+"=") != s.Hash() {
 		t.Errorf("hash label %q", hashLabel)
 	}
@@ -221,6 +231,74 @@ func TestSpecRejects(t *testing.T) {
 	in.Resolved.Network = "lan"
 	if _, err := BuildSpec(in); err == nil {
 		t.Error("unknown network level accepted")
+	}
+	// Levels without enforcement fail closed (finding A5).
+	for _, level := range []string{"internet", "allowlist"} {
+		in = baseInputs(t, baseResolved())
+		in.Resolved.Network = level
+		if _, err := BuildSpec(in); err == nil || !strings.Contains(err.Error(), "not implemented yet") {
+			t.Errorf("network %s: %v", level, err)
+		}
+	}
+	// Nested containers are not implemented (finding C2).
+	in = baseInputs(t, baseResolved())
+	in.Resolved.Capabilities.Nested = true
+	if _, err := BuildSpec(in); err == nil || !strings.Contains(err.Error(), "nested") {
+		t.Errorf("nested: %v", err)
+	}
+}
+
+// TestSpecLimits: a configured limit that cannot be applied fails; "none"
+// and -1 switch a limit off (finding A7).
+func TestSpecLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		memory      string
+		pids        int
+		controllers []string
+		want        []string // limit arguments, nil for an error
+	}{
+		{"both", "8g", 100, []string{"memory", "pids"}, []string{"--pids-limit", "100", "--memory", "8g"}},
+		{"no memory controller", "8g", 100, []string{"pids"}, nil},
+		{"no pids controller", "8g", 100, []string{"memory"}, nil},
+		{"memory off", "none", 100, []string{"pids"}, []string{"--pids-limit", "100"}},
+		{"pids off", "8g", -1, []string{"memory"}, []string{"--memory", "8g"}},
+		{"both off", "none", -1, nil, []string{}},
+	} {
+		r := baseResolved()
+		r.Box.Memory, r.Box.Pids = tc.memory, tc.pids
+		in := baseInputs(t, r)
+		in.Host.Controllers = tc.controllers
+		s, err := BuildSpec(in)
+		switch {
+		case tc.want == nil && (err == nil || !strings.Contains(err.Error(), "not delegated")):
+			t.Errorf("%s: %v, want an error", tc.name, err)
+		case tc.want != nil && err != nil:
+			t.Errorf("%s: %v", tc.name, err)
+		case tc.want != nil && !slices.Equal(append([]string{}, s.Limits...), tc.want):
+			t.Errorf("%s: limits %q, want %q", tc.name, s.Limits, tc.want)
+		}
+	}
+}
+
+// TestSpecDevices: gpu and kvm add their devices (finding C2; not testable
+// on this host beyond the arguments).
+func TestSpecDevices(t *testing.T) {
+	r := baseResolved()
+	r.Capabilities.GPU, r.Capabilities.KVM = true, true
+	s, err := BuildSpec(baseInputs(t, r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := strings.Join(s.Args(), " ")
+	for _, want := range []string{"--device nvidia.com/gpu=all", "--device /dev/kvm", "--group-add keep-groups"} {
+		if !strings.Contains(j, want) {
+			t.Errorf("missing %q in %s", want, j)
+		}
+	}
+	plain, _ := BuildSpec(baseInputs(t, baseResolved()))
+	if strings.Contains(strings.Join(plain.Args(), " "), "--device") || plain.Hash() == s.Hash() {
+		t.Error("devices without the capabilities, or no hash change")
 	}
 }
 

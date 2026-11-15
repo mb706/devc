@@ -5,16 +5,22 @@
 // runtime and projects directories) and runs the devc binary named by
 // DEVC_BIN in it. Tests never touch ~/.config/devc or ~/.local/share/devc.
 //
-// The copied configuration is renamed so that test boxes cannot collide
-// with real ones: realm demo becomes itdemo, other becomes itother, and env
-// base becomes itbase. Box containers are therefore named devc-it…, and
-// every container labelled devc.realm=itdemo or itother belongs to the
-// tests and is removed after each test.
+// Ownership (finding D1). Every run draws a random nonce. The copied
+// configuration is renamed with it, so test objects can collide neither
+// with real ones nor with a concurrent run: realm demo becomes
+// itdemo<nonce>, other becomes itother<nonce>, env base becomes
+// itbase<nonce> (boxes devc-itdemo<nonce>-…, images
+// localhost/devc-env/itbase<nonce>). devc gets the nonce in DEVC_TEST_RUN
+// and labels every container and image it creates with devc.test=1 and
+// devc.test.run=<nonce>. Cleanup removes exactly the objects carrying this
+// run's label, nothing else.
 package itest
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -22,23 +28,37 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// Names used by the test configuration.
-const (
-	RealmA  = "itdemo"
-	RealmB  = "itother"
-	EnvBase = "itbase"
+// Nonce identifies this run of the integration tests.
+var Nonce = newNonce()
+
+func newNonce() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// Names used by the test configuration, unique to this run.
+var (
+	RealmA  = "itdemo" + Nonce
+	RealmB  = "itother" + Nonce
+	EnvBase = "itbase" + Nonce
+	// EnvUID is an extra env some tests write.
+	EnvUID = "ituid" + Nonce
 	// BaseImage is the env image built once per test run.
 	BaseImage = "localhost/devc-env/" + EnvBase + ":latest"
 )
 
-// TestRealms are the realms whose containers the tests own.
-var TestRealms = []string{RealmA, RealmB}
+// LabelRun is the label devc puts on everything this run creates.
+const LabelRun = "devc.test.run"
 
 // Engine is the container engine the tests use.
 func Engine() string {
@@ -94,24 +114,40 @@ func RepoRoot(t *testing.T) string {
 var projectsRootRE = regexp.MustCompile(`(?m)^projects_root\s*=.*$`)
 
 // New creates an environment from examples/config. Everything lives in
-// t.TempDir() and is removed when the test ends, also on failure.
+// t.TempDir(), except the runtime directory, which is below
+// $XDG_RUNTIME_DIR (a tmpfs: devc refuses to deliver secrets elsewhere);
+// both are removed when the test ends, also on failure.
 func New(t *testing.T) *Env {
 	t.Helper()
 	bin := os.Getenv("DEVC_BIN")
 	if bin == "" {
 		t.Fatal("DEVC_BIN is not set; run the integration tests with ./dev itest")
 	}
+	xdg := os.Getenv("XDG_RUNTIME_DIR")
+	if xdg == "" {
+		t.Fatal("XDG_RUNTIME_DIR is not set; the tests need a tmpfs runtime directory")
+	}
 	base := t.TempDir()
+	run, err := os.MkdirTemp(xdg, "devc-it-"+Nonce+"-")
+	if err != nil {
+		t.Fatal(err)
+	}
 	e := &Env{
 		t:            t,
 		Bin:          bin,
 		Repo:         RepoRoot(t),
 		ConfigDir:    filepath.Join(base, "config"),
 		StateDir:     filepath.Join(base, "state"),
-		RuntimeDir:   filepath.Join(base, "run"),
+		RuntimeDir:   run,
 		ProjectsRoot: filepath.Join(base, "projects"),
 		Timeout:      2 * time.Minute,
 	}
+	t.Cleanup(func() {
+		_ = exec.Command(Engine(), "unshare", "chown", "-R", "0:0", run).Run()
+		if err := os.RemoveAll(run); err != nil {
+			t.Logf("removing %s: %v", run, err)
+		}
+	})
 	if err := copyTree(filepath.Join(e.Repo, "examples", "config"), e.ConfigDir); err != nil {
 		t.Fatalf("copying the example configuration: %v", err)
 	}
@@ -124,7 +160,6 @@ func New(t *testing.T) *Env {
 		_ = exec.Command(Engine(), "unshare", "chown", "-R", "0:0", base).Run()
 	})
 	t.Cleanup(func() { RemoveTestContainers(t) })
-	RemoveTestContainers(t)
 	for _, d := range []string{e.StateDir, e.RuntimeDir, e.ProjectsRoot} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
@@ -176,22 +211,18 @@ func renameForTests(dir string) error {
 	})
 }
 
-// RemoveTestContainers force-removes every container of the test realms.
+// RemoveTestContainers force-removes the containers this run created:
+// exactly those labelled with its nonce.
 func RemoveTestContainers(t *testing.T) {
 	t.Helper()
-	for _, realm := range TestRealms {
-		out, err := exec.Command(Engine(), "ps", "-a", "--filter", "label=devc.realm="+realm, "--format", "{{.Names}}").Output()
-		if err != nil {
-			t.Logf("listing test containers: %v", err)
-			continue
-		}
-		for _, name := range strings.Fields(string(out)) {
-			if !strings.HasPrefix(name, "devc-"+realm+"-") {
-				continue
-			}
-			if out, err := exec.Command(Engine(), "rm", "--force", "--time", "2", name).CombinedOutput(); err != nil {
-				t.Logf("removing %s: %v: %s", name, err, out)
-			}
+	out, err := exec.Command(Engine(), "ps", "-a", "--filter", "label="+LabelRun+"="+Nonce, "--format", "{{.ID}}").Output()
+	if err != nil {
+		t.Logf("listing test containers: %v", err)
+		return
+	}
+	for _, id := range strings.Fields(string(out)) {
+		if out, err := exec.Command(Engine(), "rm", "--force", "--time", "2", id).CombinedOutput(); err != nil {
+			t.Logf("removing container %s: %v: %s", id, err, out)
 		}
 	}
 }
@@ -235,13 +266,12 @@ func EnsureBaseImage(t *testing.T, e *Env) {
 	}
 }
 
-// Images tags the tests may create. Tags under localhost/devc-env/it are
-// always removed at the end of a run; pulled images only if they were
-// absent when the run started.
+// Images. Every image devc builds in this run carries the run's label and
+// is removed at the end, except the installer image, which is a cache
+// shared with real use (as is the tmux build in DEVC_ITEST_CACHE). Pulled
+// images are removed only if they were absent when the run started.
 var (
-	OwnImages = []string{BaseImage, "localhost/devc-env/ituid:latest"}
-	// The installer image localhost/devc-aux/installer stays cached
-	// between runs; so does the tmux build in DEVC_ITEST_CACHE.
+	KeptImages   = []string{"localhost/devc-aux/installer:latest"}
 	PulledImages = []string{"docker.io/library/debian:bookworm-slim", "docker.io/library/debian:trixie-slim", "docker.io/library/alpine:3.24.4"}
 )
 
@@ -261,7 +291,21 @@ func SnapshotImages() map[string]bool {
 // CleanupImages removes the images the run created.
 func CleanupImages(before map[string]bool) {
 	var refs []string
-	refs = append(refs, OwnImages...)
+	out, err := exec.Command(Engine(), "image", "ls", "--filter", "label="+LabelRun+"="+Nonce, "--format", "{{.ID}} {{.Repository}}:{{.Tag}}").Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "itest: listing this run's images: %v\n", err)
+	}
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		id, ref, ok := strings.Cut(l, " ")
+		switch {
+		case !ok:
+		case slices.Contains(KeptImages, ref):
+		case ref == "<none>:<none>":
+			refs = append(refs, id)
+		default:
+			refs = append(refs, ref)
+		}
+	}
 	for _, ref := range PulledImages {
 		if !before[ref] {
 			refs = append(refs, ref)
@@ -325,6 +369,7 @@ func (e *Env) environ() []string {
 		"DEVC_CONFIG_DIR="+e.ConfigDir,
 		"DEVC_STATE_DIR="+e.StateDir,
 		"DEVC_RUNTIME_DIR="+e.RuntimeDir,
+		"DEVC_TEST_RUN="+Nonce,
 	)
 }
 

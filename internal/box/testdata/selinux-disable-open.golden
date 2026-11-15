@@ -18,6 +18,8 @@ no-new-privileges
 seccomp=/home/u/.local/share/devc/toolbox/seccomp.json
 --security-opt
 label=disable
+--entrypoint
+/opt/devc/bin/devc
 --workdir
 /w/demo/hello
 --env
@@ -34,6 +36,8 @@ DEVC_REALM=demo
 DEVC_PROJECT=hello
 --env
 PATH=/opt/devc/shims:/opt/devc/bin:/home/dev/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+--env
+TERMINFO_DIRS=/opt/devc/terminfo:
 --mount
 type=bind,source=/home/u/devc/demo/hello,destination=/w/demo/hello
 --mount
@@ -57,10 +61,8 @@ devc.project=hello
 --label
 devc.role=box
 --label
-devc.confighash=6c139d04db74c899ea823f96982143f9d69b4f72ec62d35e247a9998e63de82d
+devc.confighash=fbcfae8b05268eff75b58682d5a193dd51915b413f079631a2546936f9cfe1d4
 docker.io/library/debian:trixie-slim
-/opt/devc/bin/devc
 box
 init
 # warning: SELinux labelling is disabled for boxes (selinux.mode = "disable" in config.toml): the box is not confined by SELinux
-# warning: the cgroup controller(s) pids and memory are not delegated to this user: the box runs without that limit (see 'devc doctor')

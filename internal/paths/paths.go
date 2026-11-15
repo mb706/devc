@@ -10,11 +10,13 @@ package paths
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/safefs"
 )
 
 // Environment variables that override the roots.
@@ -292,6 +294,12 @@ func (p *Paths) BoxHomeDir(r names.ProjectRef) string {
 	return filepath.Join(p.BoxLocalDir(r), "home")
 }
 
+// BoxLockFile serialises the lifecycle operations of one box across devc
+// processes. It sits beside the home, not in it, so no box can reach it.
+func (p *Paths) BoxLockFile(r names.ProjectRef) string {
+	return filepath.Join(p.BoxLocalDir(r), "lock")
+}
+
 // BoxEtcDir holds the files rendered for /etc/devc.
 func (p *Paths) BoxEtcDir(r names.ProjectRef) string {
 	return filepath.Join(p.BoxLocalDir(r), "etc")
@@ -382,6 +390,12 @@ func must(kind, name string) string {
 // that contains it). dir must lie within the state, runtime or config root;
 // parents above the root are created with mode 0755. An existing dir is left
 // as it is, but it must be a directory and not a symlink.
+//
+// Below the root every component is created with mkdirat relative to its
+// parent's descriptor and resolved without following symlinks (safefs), so
+// a symlink planted in a box-writable part of the state directory (harness
+// state, homes) can never redirect the creation elsewhere. The root itself
+// comes from flags, the environment or config.toml and may be a symlink.
 func (p *Paths) Ensure(dir string) error {
 	dir = filepath.Clean(dir)
 	var root string
@@ -394,18 +408,35 @@ func (p *Paths) Ensure(dir string) error {
 	if root == "" {
 		return fmt.Errorf("refusing to create %s: it is outside the devc state, runtime and config directories", dir)
 	}
+	return EnsureBeneath(root, dir, 0o700)
+}
+
+// EnsureBeneath creates dir below the trusted directory root (made with
+// mode if missing, its parents with 0755), every component below root with
+// mode and without following symlinks.
+func EnsureBeneath(root, dir string, mode os.FileMode) error {
+	root, dir = filepath.Clean(root), filepath.Clean(dir)
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return fmt.Errorf("refusing to create %s: it is not below %s", dir, root)
+	}
 	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(root), err)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating %s: %w", dir, err)
+	if err := os.Mkdir(root, mode); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("creating %s: %w", root, err)
 	}
-	fi, err := os.Lstat(dir)
+	real, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("resolving %s: %w", root, err)
+	}
+	r, err := safefs.OpenRoot(real)
 	if err != nil {
 		return err
 	}
-	if !fi.IsDir() {
-		return fmt.Errorf("%s exists and is not a directory", dir)
+	defer r.Close()
+	if err := r.MkdirAll(filepath.ToSlash(rel), mode); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
 	}
 	return nil
 }

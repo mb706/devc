@@ -32,6 +32,7 @@ import (
 	"github.com/mb706/devc/assets"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/paths"
 )
 
@@ -87,8 +88,10 @@ func NewData(r *config.Resolved, m *config.Harness) Data {
 		Helper: paths.InBoxHelper, Notes: paths.InBoxNotes, Memory: paths.InBoxMemory,
 		Network: r.Network, NetworkSentence: networkSentences[r.Network],
 	}
-	if d.NetworkSentence == "" {
-		d.NetworkSentence = "level " + r.Network + "."
+	// The description must match the level in force: a level devc cannot
+	// enforce yet never gets a box, and is never described as restricted.
+	if !netpolicy.Enforced(r.Network) || d.NetworkSentence == "" {
+		d.NetworkSentence = "level " + r.Network + " is not enforced; assume the network is not restricted."
 	}
 	if r.Data.Enabled {
 		join := func(ps []string) []string {
@@ -428,6 +431,25 @@ func dropNulls(v map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+// RenderBaselineFile renders one of a manifest's baseline.files from its
+// template alone and checks that it parses in its format.
+func RenderBaselineFile(c *config.Config, r *config.Resolved, m *config.Harness, f config.BaselineFile, instructions string) ([]byte, error) {
+	src, err := templateSource(c, m, f.Template)
+	if err != nil {
+		return nil, err
+	}
+	d := NewData(r, m)
+	d.Instructions = instructions
+	out, err := execTemplate(f.Template, src, d)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := parseSettings(f.Template, f.Format, []byte(out)); err != nil {
+		return nil, fmt.Errorf("the template %s did not render valid %s: %w", f.Template, f.Format, err)
+	}
+	return []byte(out), nil
 }
 
 // RenderSeed renders one seed template; JSON seeds are checked and

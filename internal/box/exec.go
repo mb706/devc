@@ -21,22 +21,44 @@ type ExecOptions struct {
 	TTY bool
 }
 
-// EnsureRunning starts the box when it is not running (through Up, so
-// drift and configuration problems stop it) and returns its name.
+// EnsureRunning starts the box when it is not running and ready (through
+// the same path as Up, so drift and configuration problems stop it) and
+// returns its name. The box lock is released before the caller execs.
 func (m *Manager) EnsureRunning(ctx context.Context, ref names.ProjectRef) (string, error) {
 	if err := m.checkProblems(ref); err != nil {
 		return "", err
 	}
+	unlock, err := m.lockBox(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	ci, err := m.Find(ctx, ref)
 	if err != nil {
 		return "", err
 	}
-	if ci == nil || !ci.State.Running {
-		if err := m.Up(ctx, ref, UpOptions{}); err != nil {
+	if ci == nil || !ci.State.Running || !m.isReady(ref) {
+		if err := m.up(ctx, ref, UpOptions{}); err != nil {
 			return "", err
 		}
 	}
 	return names.BoxName(ref), nil
+}
+
+// RootPATH is the PATH of every command devc runs as root in a box: the
+// image's system directories only. Nothing the box can write (the home's
+// ~/.local/bin, the project) is searched, so a program planted there can
+// never run with root's capabilities.
+const RootPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// rootExec is the base of every root exec in a box: a fixed PATH, root's
+// own HOME and "/" as working directory, never the box-writable project.
+func rootExec(container string, cmd []string, extraEnv ...string) engine.ExecOptions {
+	return engine.ExecOptions{
+		Container: container, User: "0", Workdir: "/",
+		Env: append([]string{"PATH=" + RootPATH, "HOME=/root"}, extraEnv...),
+		Cmd: cmd,
+	}
 }
 
 func (m *Manager) workdir(ref names.ProjectRef, cwd string) string {
@@ -88,7 +110,9 @@ type RootLogEntry struct {
 
 // Root runs argv as root with full capabilities (podman exec --user 0
 // --privileged) and records it in the env's root log first, so the command
-// can later be folded into the Containerfile.
+// can later be folded into the Containerfile. It runs from "/" with
+// RootPATH and HOME=/root (finding A1): a bare command name never resolves
+// to something the box planted.
 func (m *Manager) Root(ctx context.Context, ref names.ProjectRef, argv []string, o ExecOptions) (int, error) {
 	if len(argv) == 0 {
 		return -1, fmt.Errorf("no command given")
@@ -106,10 +130,9 @@ func (m *Manager) Root(ctx context.Context, ref names.ProjectRef, argv []string,
 			return -1, err
 		}
 	}
-	return m.Engine.ExecInteractive(ctx, engine.ExecOptions{
-		Container: name, User: "0", Privileged: true, Interactive: true, TTY: o.TTY, Env: terminalEnv,
-		Workdir: m.workdir(ref, o.Cwd), Cmd: argv,
-	})
+	eo := rootExec(name, argv, terminalEnv...)
+	eo.Privileged, eo.Interactive, eo.TTY = true, true, o.TTY
+	return m.Engine.ExecInteractive(ctx, eo)
 }
 
 func (m *Manager) appendRootLog(env string, ref names.ProjectRef, argv []string) error {

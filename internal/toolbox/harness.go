@@ -17,10 +17,13 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/mb706/devc/assets"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
+	"github.com/mb706/devc/internal/flock"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
 )
@@ -30,10 +33,13 @@ import (
 //	harness/<id>/v/<stamp>/        one installation; HOME of the installer is <stamp>/home
 //	harness/<id>/current -> v/<stamp>
 //	harness/<id>/installed.json    what current is
+//	harness/<id>/history.jsonl     when each version became current
 //	shims/<bin> -> ../bin/devc     for every installed harness
 //
-// Shims and launch descriptions reach the executable through current, so a
-// new installation never changes files a running session has open.
+// Launch descriptions name the concrete version directory (finding E1), so
+// a session keeps running the version it started with; a new installation
+// never changes files a running session has open, and gc keeps every
+// version a box may still run.
 
 // InstallerImage is the auxiliary image installers and logins run in.
 const InstallerImage = "localhost/devc-aux/installer:latest"
@@ -81,8 +87,27 @@ type Installed struct {
 	Time      time.Time `json:"time"`
 }
 
+// publishLockTimeout bounds the wait for the short publication step of an
+// installation (metadata and current).
+const publishLockTimeout = 30 * time.Second
+
+// lockPublish takes the lock that makes the two-step publication of an
+// installation (installed.json, then current) atomic for readers.
+func (t *Toolbox) lockPublish(id string, shared bool) (func(), error) {
+	p := filepath.Join(t.HarnessDir(id), ".publish.lock")
+	if _, err := os.Lstat(t.HarnessDir(id)); errors.Is(err, fs.ErrNotExist) {
+		return func() {}, nil
+	}
+	return flock.Acquire(context.Background(), p, flock.Options{Shared: shared, Timeout: publishLockTimeout})
+}
+
 // ReadInstalled returns the current installation of a harness, or nil.
 func (t *Toolbox) ReadInstalled(id string) (*Installed, error) {
+	unlock, err := t.lockPublish(id, true)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	b, err := os.ReadFile(filepath.Join(t.HarnessDir(id), "installed.json"))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -133,12 +158,41 @@ func (t *Toolbox) IsInstalled(m *config.Harness) (bool, error) {
 	return in != nil, err
 }
 
-// InBoxExe is the harness's real executable as the box sees it.
+// InBoxExe is the harness's real executable as the box sees it, through
+// current. Logins use it; launch descriptions use CurrentExe.
 func InBoxExe(m *config.Harness) string {
 	if m.Install.Method == "none" {
 		return m.Install.Exe
 	}
 	return path.Join(paths.InBoxHarnessCurrent(m.ID), m.Install.Exe)
+}
+
+// CurrentExe returns the harness's executable in the concrete version
+// directory of the current installation, as the box sees it, and whether
+// the harness can be launched at all.
+func (t *Toolbox) CurrentExe(m *config.Harness) (string, bool, error) {
+	if m.Install.Method == "none" {
+		return m.Install.Exe, m.Install.Exe != "", nil
+	}
+	in, err := t.ReadInstalled(m.ID)
+	if err != nil || in == nil {
+		return "", false, err
+	}
+	return path.Join(paths.InBoxHarnessVersionDir(m.ID, in.Stamp), m.Install.Exe), true, nil
+}
+
+// StampOfExe returns the version stamp named by an in-box executable path
+// of harness id (as written by CurrentExe), or "" when it names none.
+func StampOfExe(id, exe string) string {
+	rest, ok := strings.CutPrefix(exe, path.Join(paths.InBoxHarnessRoot, id, "v")+"/")
+	if !ok {
+		return ""
+	}
+	stamp, _, _ := strings.Cut(rest, "/")
+	if !ValidStamp(stamp) {
+		return ""
+	}
+	return stamp
 }
 
 // EnsureShim creates shims/<bin> -> ../bin/devc.
@@ -249,6 +303,41 @@ func (in *Installer) newStamp(id string) string {
 	}
 }
 
+// HasVersionPlaceholder reports whether a manifest can pass a requested
+// version to its installer: "{version}" in an argument or an environment
+// value.
+func HasVersionPlaceholder(in config.HarnessInstall) bool {
+	for _, a := range in.Args {
+		if strings.Contains(a, "{version}") {
+			return true
+		}
+	}
+	for _, v := range in.Env {
+		if strings.Contains(v, "{version}") {
+			return true
+		}
+	}
+	return false
+}
+
+// SubstituteEnv builds the installer environment: "{dir}" becomes the
+// version directory and "{version}" the requested version; without a
+// version, variables whose value contains the placeholder are left out.
+func SubstituteEnv(env map[string]string, dir, version string) []string {
+	var out []string
+	for _, k := range sortedKeys(env) {
+		v := env[k]
+		if strings.Contains(v, "{version}") {
+			if version == "" {
+				continue
+			}
+			v = strings.ReplaceAll(v, "{version}", version)
+		}
+		out = append(out, k+"="+strings.ReplaceAll(v, "{dir}", dir))
+	}
+	return out
+}
+
 // SubstituteArgs replaces {version} in the installer arguments; without a
 // version, arguments that contain the placeholder are dropped.
 func SubstituteArgs(args []string, version string) []string {
@@ -291,6 +380,10 @@ func (in *Installer) Install(ctx context.Context, m *config.Harness, version str
 	if version != "" && m.Install.Method == "local" {
 		return nil, fmt.Errorf("harness %s is installed from a local file; --version does not apply", m.ID)
 	}
+	if version != "" && !HasVersionPlaceholder(m.Install) {
+		// Recording a version the installer never saw would be a lie.
+		return nil, fmt.Errorf("the %s manifest cannot pass a version to its installer (no {version} in install.args or install.env); install without --version", m.ID)
+	}
 	hdir := in.Toolbox.HarnessDir(m.ID)
 	if err := mkdirs(filepath.Join(in.Toolbox.Dir, "harness"), hdir, filepath.Join(hdir, "v")); err != nil {
 		return nil, err
@@ -322,9 +415,7 @@ func (in *Installer) Install(ctx context.Context, m *config.Harness, version str
 	switch m.Install.Method {
 	case "script":
 		env := []string{"HOME=" + path.Join(boxDir, "home"), "DEVC_INSTALL_DIR=" + boxDir}
-		for _, k := range sortedKeys(m.Install.Env) {
-			env = append(env, k+"="+strings.ReplaceAll(m.Install.Env[k], "{dir}", boxDir))
-		}
+		env = append(env, SubstituteEnv(m.Install.Env, boxDir, version)...)
 		cmd := append([]string{"bash", "-c", installScript, "devc-install", m.Install.URL}, SubstituteArgs(m.Install.Args, version)...)
 		in.printf("devc: installing %s from %s\n", m.ID, m.Install.URL)
 		code, err := in.Engine.RunStream(ctx, engine.RunOptions{
@@ -376,17 +467,100 @@ func (in *Installer) Install(ctx context.Context, m *config.Harness, version str
 	if err != nil {
 		return nil, err
 	}
-	if _, err := symlinkAtomic("v/"+stamp, filepath.Join(hdir, "current")); err != nil {
-		return nil, err
-	}
-	if err := writeAtomic(filepath.Join(hdir, "installed.json"), append(b, '\n'), 0o644); err != nil {
+	if err := in.Toolbox.publish(m.ID, stamp, append(b, '\n')); err != nil {
 		return nil, err
 	}
 	ok = true
+	if err := in.Toolbox.appendHistory(m.ID, stamp, inst.Time); err != nil {
+		in.printf("devc: warning: recording the installation of %s: %v (harness gc may keep versions longer)\n", m.ID, err)
+	}
 	if err := in.Toolbox.EnsureShim(m.Bin); err != nil {
 		return inst, err
 	}
 	return inst, nil
+}
+
+// Hooks for failure injection in tests.
+var (
+	writeMetadata = writeAtomic
+	switchSymlink = symlinkAtomic
+)
+
+// publish makes stamp the current installation: the metadata first, the
+// current link last (finding B2). If switching the link fails, the
+// previous metadata is restored, so installed.json and current always
+// agree for readers, who take the publish lock shared.
+func (t *Toolbox) publish(id, stamp string, meta []byte) error {
+	unlock, err := t.lockPublish(id, false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	hdir := t.HarnessDir(id)
+	file := filepath.Join(hdir, "installed.json")
+	prev, err := os.ReadFile(file)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err := writeMetadata(file, meta, 0o644); err != nil {
+		return fmt.Errorf("writing installed.json of %s: %w", id, err)
+	}
+	if _, err := switchSymlink("v/"+stamp, filepath.Join(hdir, "current")); err != nil {
+		var rerr error
+		if prev != nil {
+			rerr = writeAtomic(file, prev, 0o644)
+		} else {
+			rerr = os.Remove(file)
+		}
+		if rerr != nil {
+			return fmt.Errorf("switching %s to %s: %w (restoring installed.json also failed: %v)", id, stamp, err, rerr)
+		}
+		return fmt.Errorf("switching %s to %s: %w", id, stamp, err)
+	}
+	return nil
+}
+
+// historyEntry is one line of history.jsonl.
+type historyEntry struct {
+	Time  time.Time `json:"time"`
+	Stamp string    `json:"stamp"`
+}
+
+func (t *Toolbox) appendHistory(id, stamp string, at time.Time) error {
+	b, err := json.Marshal(historyEntry{Time: at.UTC(), Stamp: stamp})
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(t.HarnessDir(id), "history.jsonl"), os.O_WRONLY|os.O_APPEND|os.O_CREATE|unix.O_NOFOLLOW, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// readHistory returns the recorded switches of a harness, oldest first.
+func (t *Toolbox) readHistory(id string) ([]historyEntry, error) {
+	b, err := os.ReadFile(filepath.Join(t.HarnessDir(id), "history.jsonl"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []historyEntry
+	for _, l := range strings.Split(string(b), "\n") {
+		var e historyEntry
+		if strings.TrimSpace(l) == "" || json.Unmarshal([]byte(l), &e) != nil || !ValidStamp(e.Stamp) {
+			continue
+		}
+		out = append(out, e)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	return out, nil
 }
 
 func firstLine(s string) string {
@@ -431,9 +605,20 @@ func removeTree(dir string) error {
 	return os.RemoveAll(dir)
 }
 
-// GC removes the version directories of a harness other than current and
-// the two newest, and returns the stamps it removed.
-func (t *Toolbox) GC(id string) ([]string, error) {
+// GCKeep is what garbage collection must keep beyond current and the two
+// newest versions (finding E1).
+type GCKeep struct {
+	// Named are the stamps that launch descriptions name.
+	Named map[string]bool
+	// Since is when the oldest running box started; every version that was
+	// current at any time since then may still run in a session. Zero
+	// means no box is running.
+	Since time.Time
+}
+
+// GC removes the version directories of a harness other than current, the
+// two newest and those keep protects, and returns the stamps it removed.
+func (t *Toolbox) GC(id string, keep GCKeep) ([]string, error) {
 	hdir := t.HarnessDir(id)
 	if _, err := os.Stat(hdir); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -447,16 +632,28 @@ func (t *Toolbox) GC(id string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	keep := map[string]bool{}
+	hist, err := t.readHistory(id)
+	if err != nil {
+		return nil, err
+	}
+	kept := map[string]bool{}
 	if cur, err := os.Readlink(filepath.Join(hdir, "current")); err == nil {
-		keep[strings.TrimPrefix(cur, "v/")] = true
+		kept[strings.TrimPrefix(cur, "v/")] = true
 	}
 	for i := len(vs) - 1; i >= 0 && i >= len(vs)-2; i-- {
-		keep[vs[i]] = true
+		kept[vs[i]] = true
+	}
+	for s := range keep.Named {
+		kept[s] = true
+	}
+	if !keep.Since.IsZero() {
+		for _, s := range currentSince(vs, hist, keep.Since) {
+			kept[s] = true
+		}
 	}
 	var removed []string
 	for _, v := range vs {
-		if keep[v] {
+		if kept[v] {
 			continue
 		}
 		if err := removeTree(filepath.Join(hdir, "v", v)); err != nil {
@@ -465,6 +662,42 @@ func (t *Toolbox) GC(id string) ([]string, error) {
 		removed = append(removed, v)
 	}
 	return removed, nil
+}
+
+// currentSince returns the versions among vs that were current at some
+// time at or after since: the one current at that moment and every later
+// one. Switch times come from the history; a version installed before the
+// history existed counts as switched at its stamp's time.
+func currentSince(vs []string, hist []historyEntry, since time.Time) []string {
+	type sw struct {
+		at    time.Time
+		stamp string
+	}
+	var sws []sw
+	recorded := map[string]bool{}
+	for _, e := range hist {
+		sws = append(sws, sw{e.Time, e.Stamp})
+		recorded[e.Stamp] = true
+	}
+	for _, v := range vs {
+		if recorded[v] {
+			continue
+		}
+		at, err := time.Parse("20060102T150405Z", strings.SplitN(v, "-", 2)[0])
+		if err != nil {
+			continue
+		}
+		sws = append(sws, sw{at, v})
+	}
+	sort.SliceStable(sws, func(i, j int) bool { return sws[i].at.Before(sws[j].at) })
+	var out []string
+	for i, s := range sws {
+		// s was current from s.at until the next switch.
+		if i+1 == len(sws) || sws[i+1].at.After(since) {
+			out = append(out, s.stamp)
+		}
+	}
+	return out
 }
 
 // InstalledHarnesses lists the ids with a harness directory in the toolbox.

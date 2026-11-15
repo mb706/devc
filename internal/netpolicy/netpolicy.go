@@ -3,9 +3,10 @@
 // arguments; firewall rules, the forwarder, the gateway and exceptions are
 // added here by later chunks.
 //
-// Security rules: enforcement sits outside the box (R6). Until the
-// `internet` and `allowlist` levels are enforced, BoxArgs says so in a
-// warning that devc up prints; it never pretends a level is in force.
+// Security rules: enforcement sits outside the box (R6), and a level that
+// cannot be enforced fails closed (README rule 6). Until C07 installs the
+// rules, `internet` and `allowlist` are refused rather than silently given
+// an unrestricted network; only `none` and an explicit `open` work.
 package netpolicy
 
 import "fmt"
@@ -22,11 +23,10 @@ const (
 type Decision struct {
 	// Args are added to `podman create`; empty means the engine default.
 	Args []string
-	// Warning, when set, is printed by devc up.
-	Warning string
 }
 
-// BoxArgs returns the decision for a level.
+// BoxArgs returns the decision for a level, or an error for a level that
+// cannot be enforced yet.
 func BoxArgs(level string) (Decision, error) {
 	switch level {
 	case None:
@@ -34,8 +34,16 @@ func BoxArgs(level string) (Decision, error) {
 	case Open:
 		return Decision{}, nil
 	case Internet, Allowlist:
-		return Decision{Warning: fmt.Sprintf("network level %q is not enforced yet: this box has the engine's default, unrestricted network "+
-			"(LAN and host services included) until a later devc version adds the rules", level)}, nil
+		return Decision{}, fmt.Errorf("network level %q is not implemented yet and devc does not fall back to an unrestricted network: "+
+			"set the level to \"none\", or to \"open\" if this box may reach the LAN and host services "+
+			"(network.level in project.toml or network.default in realm.toml)", level)
 	}
 	return Decision{}, fmt.Errorf("unknown network level %q", level)
+}
+
+// Enforced reports whether boxes of this level can be created; the
+// sandbox description must only ever describe such a level.
+func Enforced(level string) bool {
+	_, err := BoxArgs(level)
+	return err == nil
 }

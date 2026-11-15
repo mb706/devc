@@ -171,7 +171,7 @@ func TestResolved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hello.Env != "base" || hello.Image != "" || hello.Network != "internet" || hello.Box.Memory != "16g" ||
+	if hello.Env != "base" || hello.Image != "" || hello.Network != "open" || hello.Box.Memory != "16g" ||
 		hello.Box.Pids != 4096 || hello.MemoryGroup != "hello" || hello.Data.Enabled || hello.BoxName != "devc-demo-hello" ||
 		hello.Git.BranchPrefix != "agent/" || hello.Git.UserEmail != "demo@example.org" || hello.Grants.GitHub != "relay" ||
 		len(hello.Harnesses) != 2 || hello.Harnesses[1].AuthMethod != "shared-home" || hello.Harnesses[0].Secret != "claude-token" ||
@@ -190,6 +190,21 @@ func TestResolved(t *testing.T) {
 	}
 	if _, err := c.Resolved(names.ProjectRef{Realm: "demo", Project: "nope"}); err == nil {
 		t.Error("Resolved of a missing project succeeded")
+	}
+	// A realm without network.default still defaults to "internet" (which
+	// devc up refuses until C07); limits can be switched off explicitly.
+	{
+		dir := copyExample(t)
+		write(t, dir, "realms/other/realm.toml", "")
+		write(t, dir, "realms/other/projects/tools/project.toml", "image = \"debian\"\n[box]\nmemory = \"none\"\npids = -1\n")
+		c, probs := load(t, dir)
+		if len(probs) != 0 {
+			t.Fatal(probs)
+		}
+		tools, _ := c.Resolved(names.ProjectRef{Realm: "other", Project: "tools"})
+		if tools.Network != "internet" || tools.Box.Memory != "none" || tools.Box.Pids != -1 {
+			t.Errorf("tools with limits off: %+v", tools)
+		}
 	}
 
 	// Realm overrides of harness authentication.
@@ -364,7 +379,17 @@ func TestBrokenConfigurations(t *testing.T) {
 		{"ssh alias", add(hello, "[grants]\nssh = [\"-oProxyCommand=x\"]"), hello, "grants.ssh[0]", "not a valid SSH host alias"},
 		{"box memory", add(hello, "[box]\nmemory = \"16 GB\""), hello, "box.memory", "not a size"},
 		{"global memory", set("config.toml", "default_env = \"base\"\n[box]\nmemory = \"lots\"\n"), "config.toml", "box.memory", "not a size"},
-		{"negative pids", add(hello, "[box]\npids = -1"), hello, "box.pids", "must not be negative"},
+		{"negative pids", add(hello, "[box]\npids = -2"), hello, "box.pids", "not a limit"},
+		{"global pids zero", set("config.toml", "default_env = \"base\"\n[box]\npids = 0\n"), "config.toml", "box.pids", "-1"},
+		{"manifest shared nests", set("harness/pi.toml", minimalManifest("pi")+"shared = [\"state\", \"state/p/child\"]\n"), "harness/pi.toml", "home.shared[1]", "nest"},
+		{"manifest per_box nests", set("harness/pi.toml", minimalManifest("pi")+"strategy = \"shared\"\nper_box = [\"a/b\", \"a\"]\n"), "harness/pi.toml", "home.per_box[1]", "nest"},
+		{"manifest shared home itself", set("harness/pi.toml", minimalManifest("pi")+"shared = [\".\"]\n"), "harness/pi.toml", "home.shared[0]", "not the home itself"},
+		{"manifest shared-home with private", set("harness/pi.toml", minimalManifest("pi")+"[auth]\nmethod = \"shared-home\"\n"), "harness/pi.toml", "auth.method", "home.strategy \"shared\""},
+		{"realm shared-home with private", set("realms/other/realm.toml", "[harness.claude]\nauth = \"shared-home\"\n"), "realms/other/realm.toml", "harness.claude.auth", "home.strategy \"shared\""},
+		{"broken override blocks its users", set("harness/codex.toml", "id = \"codex\"\nbin = [\n"), tools, "harnesses[0]", "failed to load"},
+		{"manifest baseline file format", set("harness/pi.toml", minimalManifest("pi")+"[[baseline.files]]\npath = \"/etc/pi/r.toml\"\nformat = \"ini\"\ntemplate = \"r.tmpl\"\n"), "harness/pi.toml", "baseline.files[0].format", "not one of"},
+		{"manifest baseline file elsewhere", set("harness/pi.toml", minimalManifest("pi")+"[baseline.settings]\npath = \"/etc/pi/s.json\"\nformat = \"json\"\n[[baseline.files]]\npath = \"/etc/pj/r.toml\"\nformat = \"toml\"\ntemplate = \"r.tmpl\"\n"), "harness/pi.toml", "baseline.files[0].path", "same directory"},
+		{"manifest baseline also clash", set("harness/pi.toml", minimalManifest("pi")+"[baseline.settings]\npath = \"/etc/pi/s.json\"\nformat = \"json\"\nalso = [\"/etc/pi/s.json\"]\n"), "harness/pi.toml", "baseline.settings.also[0]", "already used"},
 		{"port range", add(hello, "[box]\nports = [0]"), hello, "box.ports[0]", "not a port number"},
 		{"selinux level", set("realms/other/realm.toml", "[selinux]\nlevel = \"s1:c5\"\n"), "realms/other/realm.toml", "selinux.level", "does not match"},
 		{"hub url", set("config.toml", "default_env = \"base\"\n[[hubs]]\nurl = \"http://hub.example.org\"\n"), "config.toml", "hubs[0].url", "https://"},
@@ -420,5 +445,58 @@ func TestBrokenConfigurations(t *testing.T) {
 				t.Errorf("  %s", p)
 			}
 		})
+	}
+}
+
+// TestBrokenOverride: a user manifest that exists but fails to load replaces
+// the built-in manifest anyway, and its problems block every project that
+// uses the id (finding A4).
+func TestBrokenOverride(t *testing.T) {
+	dir := copyExample(t)
+	write(t, dir, "harness/codex.toml", "id = \"codex\"\n[home\n")
+	c, _ := load(t, dir)
+	if _, ok := c.Harness("codex"); ok {
+		t.Fatal("the built-in codex manifest is still selected")
+	}
+	tools := names.ProjectRef{Realm: "other", Project: "tools"}
+	got := c.ProblemsFor(tools)
+	var syntax, ref bool
+	for _, p := range got {
+		syntax = syntax || strings.HasSuffix(p.File, "harness/codex.toml")
+		ref = ref || (p.Key == "harnesses[0]" && strings.Contains(p.Message, "failed to load"))
+	}
+	if !syntax || !ref {
+		t.Errorf("ProblemsFor(tools) = %v", got)
+	}
+	if hp := c.HarnessProblems("codex"); len(hp) == 0 {
+		t.Error("HarnessProblems(codex) is empty")
+	}
+	if hp := c.HarnessProblems("claude"); len(hp) != 0 {
+		t.Errorf("HarnessProblems(claude) = %v", hp)
+	}
+	// analysis does not use codex and is not blocked by it.
+	if got := c.ProblemsFor(names.ProjectRef{Realm: "demo", Project: "analysis"}); len(got) != 0 {
+		t.Errorf("ProblemsFor(analysis) = %v", got)
+	}
+
+	// An id mismatch is just as authoritative.
+	write(t, dir, "harness/codex.toml", minimalManifest("other"))
+	if c, _ := load(t, dir); len(c.ProblemsFor(tools)) == 0 {
+		t.Error("a manifest with the wrong id did not block its users")
+	}
+
+	// A manifest directory that cannot be listed blocks every project with
+	// harnesses.
+	if os.Getuid() != 0 {
+		write(t, dir, "harness/codex.toml", minimalManifest("codex"))
+		hd := filepath.Join(dir, "harness")
+		if err := os.Chmod(hd, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(hd, 0o755)
+		c, _ := load(t, dir)
+		if got := c.ProblemsFor(names.ProjectRef{Realm: "demo", Project: "analysis"}); len(got) == 0 {
+			t.Error("an unreadable manifest directory did not block a project")
+		}
 	}
 }

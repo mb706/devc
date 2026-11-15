@@ -160,6 +160,8 @@ func typeName(mode uint32) string {
 		return "block device"
 	case unix.S_IFLNK:
 		return "symlink"
+	case unix.S_IFREG:
+		return "regular file"
 	}
 	return "unknown type"
 }
@@ -219,6 +221,89 @@ func (r *Root) ReadFrom(rel string, offset, max int64) ([]byte, int64, error) {
 		return nil, offset, fmt.Errorf("reading %s: %w", f.Name(), err)
 	}
 	return buf[:got], offset + int64(got), nil
+}
+
+// MkdirAll creates rel and every missing parent beneath the root with mode
+// (minus the umask). Each component is resolved on its own, relative to the
+// descriptor of its parent, with the resolve flags of this package, and
+// created with mkdirat, which never follows a symlink: a symlink or any
+// other non-directory anywhere on the way is refused, never followed. rel
+// "." only checks the root.
+func (r *Root) MkdirAll(rel string, mode os.FileMode) error {
+	return r.walkDirs(rel, mode, true)
+}
+
+// RequireDirs checks, like MkdirAll but without creating anything, that
+// every component of rel is a real directory beneath the root.
+func (r *Root) RequireDirs(rel string) error {
+	return r.walkDirs(rel, 0, false)
+}
+
+func (r *Root) walkDirs(rel string, mode os.FileMode, create bool) error {
+	if rel == "." {
+		return nil
+	}
+	if err := checkRel(rel); err != nil {
+		return &fs.PathError{Op: "safefs: mkdir", Path: r.join(rel), Err: err}
+	}
+	cur, err := unix.Dup(r.fd)
+	if err != nil {
+		return &fs.PathError{Op: "safefs: mkdir", Path: r.name, Err: err}
+	}
+	defer func() { unix.Close(cur) }()
+	done := ""
+	for _, c := range strings.Split(rel, "/") {
+		if c == "" || c == "." {
+			continue
+		}
+		done = path.Join(done, c)
+		next, err := openDirAt(cur, c)
+		if errors.Is(err, unix.ENOENT) && create {
+			if err := unix.Mkdirat(cur, c, uint32(mode.Perm())); err != nil && !errors.Is(err, unix.EEXIST) {
+				return &fs.PathError{Op: "safefs: mkdir", Path: r.join(done), Err: err}
+			}
+			next, err = openDirAt(cur, c)
+		}
+		if err != nil {
+			return &fs.PathError{Op: "safefs: mkdir", Path: r.join(done), Err: describeDir(cur, c, err)}
+		}
+		unix.Close(cur)
+		cur = next
+	}
+	return nil
+}
+
+// openDirAt opens the single component name below dirfd as an O_PATH
+// directory descriptor without following symlinks.
+func openDirAt(dirfd int, name string) (int, error) {
+	how := unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC), Resolve: resolveFlags}
+	for {
+		fd, err := unix.Openat2(dirfd, name, &how)
+		switch {
+		case err == nil:
+			return fd, nil
+		case errors.Is(err, unix.EINTR), errors.Is(err, unix.EAGAIN):
+			continue
+		case errors.Is(err, unix.ENOSYS):
+			return -1, ErrUnsupported
+		}
+		return -1, err
+	}
+}
+
+// describeDir explains why a component could not be used as a directory.
+func describeDir(dirfd int, name string, err error) error {
+	if !errors.Is(err, unix.ELOOP) && !errors.Is(err, unix.ENOTDIR) {
+		return describe(err)
+	}
+	var st unix.Stat_t
+	if unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW) != nil {
+		return fmt.Errorf("not a directory: %w", err)
+	}
+	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return fmt.Errorf("it is a symlink, which is refused rather than followed: %w", err)
+	}
+	return fmt.Errorf("it is a %s, not a directory: %w", typeName(st.Mode), err)
 }
 
 // Entry is one directory entry as stored, without following symlinks.

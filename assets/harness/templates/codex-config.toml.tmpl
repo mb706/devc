@@ -1,31 +1,9 @@
-# Rendered by devc. Codex reads this file as its system configuration layer.
+# Rendered by devc. The same content is Codex's system configuration layer
+# (/etc/codex/config.toml) and its managed defaults
+# (/etc/codex/managed_config.toml). Hooks and the enforced constraints are
+# in /etc/codex/requirements.toml.
 sandbox_mode = "danger-full-access"
 approval_policy = "never"
 check_for_update_on_startup = false
 cli_auth_credentials_store = "file"
 developer_instructions = {{toml .Instructions}}
-
-[[hooks.SessionStart]]
-[[hooks.SessionStart.hooks]]
-type = "command"
-command = {{toml (hook "SessionStart")}}
-
-[[hooks.UserPromptSubmit]]
-[[hooks.UserPromptSubmit.hooks]]
-type = "command"
-command = {{toml (hook "UserPromptSubmit")}}
-
-[[hooks.Stop]]
-[[hooks.Stop.hooks]]
-type = "command"
-command = {{toml (hook "Stop")}}
-
-[[hooks.PermissionRequest]]
-[[hooks.PermissionRequest.hooks]]
-type = "command"
-command = {{toml (hook "PermissionRequest")}}
-
-[[hooks.SessionEnd]]
-[[hooks.SessionEnd.hooks]]
-type = "command"
-command = {{toml (hook "SessionEnd")}}

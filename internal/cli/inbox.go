@@ -196,7 +196,23 @@ func newBoxCmd(a *app) *cobra.Command {
 		},
 	}
 
-	return group("box", "Commands that run inside a box (internal)", true, initCmd, fixIdentity, shell, selftest, probe, launch, hook)
+	// rm-worker runs in the helper container (plan 3.3), not in a box: it
+	// empties the one tree mounted at /target, so the host never walks a
+	// box-written tree itself (finding A8).
+	rmWorker := &cobra.Command{
+		Use:    "rm-worker",
+		Short:  "Delete everything below /target (helper container only)",
+		Args:   noArgs,
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := boxside.RequireHelper(a.getenv, "/"); err != nil {
+				return err
+			}
+			return boxside.ClearDir(boxside.HelperTarget)
+		},
+	}
+
+	return group("box", "Commands that run inside a box (internal)", true, initCmd, fixIdentity, shell, selftest, probe, launch, hook, rmWorker)
 }
 
 // launchEnv is the launcher's view of this process.

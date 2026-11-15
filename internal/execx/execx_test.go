@@ -135,6 +135,33 @@ func TestRealRun(t *testing.T) {
 	}
 }
 
+// TestWorkDir: without an explicit directory every command runs in "/",
+// never in the caller's current directory (which may be a project).
+func TestWorkDir(t *testing.T) {
+	t.Chdir(t.TempDir())
+	ctx := context.Background()
+	res, err := Real{}.Run(ctx, Cmd{Name: "pwd"})
+	if err != nil || strings.TrimSpace(string(res.Stdout)) != "/" {
+		t.Errorf("pwd without Dir = %q, %v", res.Stdout, err)
+	}
+	var out strings.Builder
+	if _, err := (Real{}).Interactive(ctx, Cmd{Name: "pwd", Stdin: strings.NewReader(""), Stdout: &out}); err != nil || strings.TrimSpace(out.String()) != "/" {
+		t.Errorf("interactive pwd without Dir = %q, %v", out.String(), err)
+	}
+	dir := t.TempDir()
+	res, err = Real{}.Run(ctx, Cmd{Name: "pwd", Dir: dir})
+	if err != nil || strings.TrimSpace(string(res.Stdout)) != dir {
+		t.Errorf("pwd with Dir = %q, %v", res.Stdout, err)
+	}
+	f := NewFake()
+	f.On("git")
+	_, _ = f.Run(ctx, Cmd{Name: "git"})
+	_, _ = f.Interactive(ctx, Cmd{Name: "git", Dir: "/srv"})
+	if c := f.Calls(); c[0].Dir != "/" || c[1].Dir != "/srv" {
+		t.Errorf("fake recorded directories %q, %q", c[0].Dir, c[1].Dir)
+	}
+}
+
 func TestRealInteractiveExitCode(t *testing.T) {
 	code, err := Real{}.Interactive(context.Background(), Cmd{Name: "sh", Args: []string{"-c", "exit 7"}, Stdin: strings.NewReader("")})
 	if err != nil || code != 7 {

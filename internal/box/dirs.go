@@ -16,6 +16,7 @@ import (
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
+	"github.com/mb706/devc/internal/safefs"
 )
 
 // DetectHost reads the host facts that change box arguments. root prefixes
@@ -62,23 +63,12 @@ func prepareDirs(p *paths.Paths, s *Spec, runtimeDir string) error {
 }
 
 // ensureProjectDir creates <projects_root>/<realm>/<project> with mode 0755
-// and checks that neither it nor its realm directory is a symlink: the
-// engine would follow one when mounting.
+// without following a symlink below the projects root: the engine would
+// follow one when mounting. The projects root itself is the user's choice
+// and may be a symlink.
 func ensureProjectDir(p *paths.Paths, dir string) error {
-	root := p.ProjectsRoot()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := paths.EnsureBeneath(p.ProjectsRoot(), dir, 0o755); err != nil {
 		return fmt.Errorf("creating the project directory: %w", err)
-	}
-	rel, err := filepath.Rel(root, dir)
-	if err != nil {
-		return err
-	}
-	cur := root
-	for _, c := range strings.Split(rel, string(filepath.Separator)) {
-		cur = filepath.Join(cur, c)
-		if err := checkRealDir(cur); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -98,8 +88,12 @@ func checkRealDir(p string) error {
 // another mount has a real directory at that place in the parent's host
 // source. The parent may be box-writable (the home holds .cache): a symlink
 // planted there would redirect the nested mount anywhere inside the box,
-// for example over /opt/devc. It runs only while the box is stopped, so the
-// box cannot race it.
+// for example over /opt/devc. Every component is created and checked
+// beneath a descriptor of the parent's source without following symlinks
+// (safefs), right before the box is created or started, while the box
+// itself is stopped. A realm-shared parent (a shared harness home) can
+// still be changed by another running box of the realm between this check
+// and the mount; that stays within one trust domain (LEFTOVER).
 func prepareMountPoints(s *Spec) error {
 	for _, m := range s.Mounts {
 		var parent *Mount
@@ -116,39 +110,22 @@ func prepareMountPoints(s *Spec) error {
 		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
 			return fmt.Errorf("mount %s inside %s: bad relative path", m.Target, parent.Target)
 		}
-		cur := parent.Source
-		for _, c := range strings.Split(rel, "/") {
-			cur = filepath.Join(cur, c)
-			fi, err := os.Lstat(cur)
-			if errors.Is(err, fs.ErrNotExist) {
-				if parent.ReadOnly {
-					return fmt.Errorf("mount point %s for %s is missing in the read-only %s", cur, m.Target, parent.Source)
-				}
-				if err := os.Mkdir(cur, 0o755); err != nil {
-					return fmt.Errorf("creating mount point %s: %w", cur, err)
-				}
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			if !fi.IsDir() {
-				return fmt.Errorf("mount point %s for %s is a %s, not a directory: remove it (for example with 'devc rm --home' or by hand) and try again",
-					cur, m.Target, describeMode(fi.Mode()))
-			}
+		root, err := safefs.OpenRoot(parent.Source)
+		if err != nil {
+			return fmt.Errorf("mount point for %s: %w", m.Target, err)
+		}
+		if parent.ReadOnly {
+			err = root.RequireDirs(rel)
+		} else {
+			err = root.MkdirAll(rel, 0o755)
+		}
+		root.Close()
+		if err != nil {
+			return fmt.Errorf("mount point for %s in %s: %w; remove the entry (for example with 'devc rm --home' or by hand) and try again",
+				m.Target, parent.Source, err)
 		}
 	}
 	return nil
-}
-
-func describeMode(m fs.FileMode) string {
-	switch {
-	case m&fs.ModeSymlink != 0:
-		return "symlink"
-	case m.IsRegular():
-		return "regular file"
-	}
-	return m.Type().String()
 }
 
 // writeEtc renders /etc/devc for a box: box.json and a copy of the
@@ -184,32 +161,38 @@ func writeEtc(p *paths.Paths, r *config.Resolved, version string, homeMounts []s
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(filepath.Join(dir, "box.json"), append(b, '\n'), 0o644); err != nil {
+	if err := WriteFileAtomic(filepath.Join(dir, "box.json"), append(b, '\n'), 0o644); err != nil {
 		return err
 	}
 
-	next := filepath.Join(dir, ".dotfiles.new")
-	if err := os.RemoveAll(next); err != nil {
+	// Unique staging names: two devc processes never share one, even if
+	// they ran without the box lock.
+	next, err := os.MkdirTemp(dir, ".dotfiles-new-")
+	if err != nil {
 		return err
 	}
-	if err := os.Mkdir(next, 0o755); err != nil {
+	defer os.RemoveAll(next)
+	if err := os.Chmod(next, 0o755); err != nil {
 		return err
 	}
 	if err := copyDotfiles(p.DotfilesDir(), next); err != nil {
 		return fmt.Errorf("copying dotfiles: %w", err)
 	}
-	final := filepath.Join(dir, "dotfiles")
-	old := filepath.Join(dir, ".dotfiles.old")
-	if err := os.RemoveAll(old); err != nil {
+	return ReplaceDir(next, filepath.Join(dir, "dotfiles"))
+}
+
+// ReplaceDir moves the freshly written directory src over dst, keeping the
+// old dst under a unique name until the switch is done.
+func ReplaceDir(src, dst string) error {
+	old, err := os.MkdirTemp(filepath.Dir(dst), "."+filepath.Base(dst)+"-old-")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(final, old); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	defer os.RemoveAll(old)
+	if err := os.Rename(dst, filepath.Join(old, "d")); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if err := os.Rename(next, final); err != nil {
-		return err
-	}
-	return os.RemoveAll(old)
+	return os.Rename(src, dst)
 }
 
 // copyDotfiles copies regular files and directories from the trusted
@@ -255,13 +238,24 @@ func copyDotfiles(src, dst string) error {
 	})
 }
 
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	tmp := filepath.Join(filepath.Dir(path), ".tmp-"+filepath.Base(path))
-	_ = os.Remove(tmp)
-	if err := os.WriteFile(tmp, data, mode); err != nil {
+// WriteFileAtomic writes data to a uniquely named temporary file beside
+// path and renames it into place.
+func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-"+filepath.Base(path)+"-")
+	if err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, mode); err != nil {
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

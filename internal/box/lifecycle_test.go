@@ -144,7 +144,8 @@ func TestUpCreatesAndIsIdempotent(t *testing.T) {
 	if ci.Labels[LabelRealm] != "demo" || ci.Labels[LabelProject] != "hello" || ci.Labels[LabelRole] != RoleBox || len(ci.Labels[LabelConfigHash]) != 64 {
 		t.Errorf("labels: %v", ci.Labels)
 	}
-	if len(r.eng.Execs) != 1 || r.eng.Execs[0].User != "0" || r.eng.Execs[0].Privileged {
+	if len(r.eng.Execs) != 1 || r.eng.Execs[0].User != "0" || r.eng.Execs[0].Privileged || r.eng.Execs[0].Workdir != "/" ||
+		!slices.Contains(r.eng.Execs[0].Env, "PATH="+RootPATH) || !slices.Contains(r.eng.Execs[0].Env, "HOME=/root") {
 		t.Errorf("identity fix: %+v", r.eng.Execs)
 	}
 	p := r.m.Config.Paths
@@ -323,21 +324,56 @@ func TestRemoveWithHome(t *testing.T) {
 	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	home := r.m.Config.Paths.BoxHomeDir(hello)
+	if err := os.MkdirAll(filepath.Join(home, "deep", "er"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc", filepath.Join(home, "link")); err != nil {
+		t.Fatal(err)
+	}
+	// The helper worker, emulated: it empties the mounted directory.
+	r.eng.RunFunc = func(o engine.RunOptions) (execx.Result, error) {
+		if o.Rootfs != "" && len(o.Mounts) == 1 && o.Mounts[0].Target == HelperTarget {
+			des, _ := os.ReadDir(o.Mounts[0].Source)
+			for _, de := range des {
+				_ = os.RemoveAll(filepath.Join(o.Mounts[0].Source, de.Name()))
+			}
+		}
+		return execx.Result{}, nil
+	}
 	if err := r.m.Remove(ctx, hello, false); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.eng.Unshares) != 0 {
+	if len(r.eng.Runs) != 0 {
 		t.Error("home removed without --home")
 	}
 	if err := r.m.Remove(ctx, hello, true); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"rm", "-rf", "--", r.m.Config.Paths.BoxHomeDir(hello)}
-	if len(r.eng.Unshares) != 1 || !slices.Equal(r.eng.Unshares[0], want) {
-		t.Errorf("unshare calls: %q", r.eng.Unshares)
+	// The home is deleted from the helper container, never by a host tool
+	// walking it (finding A8).
+	if len(r.eng.Unshares) != 0 || len(r.eng.Runs) != 1 {
+		t.Fatalf("unshares %q, runs %d", r.eng.Unshares, len(r.eng.Runs))
+	}
+	o := r.eng.Runs[0]
+	if o.Rootfs != r.m.Toolbox.HelperRootfs() || o.Network != "none" || !o.CapDropAll || !slices.Equal(o.CapAdd, []string{"DAC_OVERRIDE", "FOWNER"}) ||
+		o.Mounts[0].Source != home || o.Labels[LabelRole] != RoleHelper || !slices.Equal(o.Cmd, []string{"/bin/devc", "box", "rm-worker"}) ||
+		!slices.Contains(o.SecurityOpts, "no-new-privileges") {
+		t.Errorf("helper container: %+v", o)
+	}
+	if _, err := os.Lstat(home); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("home still exists: %v", err)
 	}
 	if !strings.Contains(r.out.String(), "does not exist") {
 		t.Errorf("second rm output: %s", r.out)
+	}
+	// A failing worker leaves the home and reports the failure.
+	_ = os.MkdirAll(filepath.Join(home, "x"), 0o755)
+	r.eng.RunFunc = func(engine.RunOptions) (execx.Result, error) {
+		return execx.Result{ExitCode: 1}, &execx.ExitError{Result: execx.Result{ExitCode: 1}}
+	}
+	if err := r.m.Remove(ctx, hello, true); err == nil {
+		t.Error("a failed worker was not reported")
 	}
 }
 
@@ -364,8 +400,10 @@ func TestRunAndRoot(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Errorf("root = %d, %v", code, err)
 	}
+	// Root runs from / with the image's system PATH only (finding A1).
 	last = r.eng.Execs[len(r.eng.Execs)-1]
-	if last.Workdir != "/w/demo/hello" || last.User != "0" || !last.Privileged || last.TTY {
+	if last.Workdir != "/" || last.User != "0" || !last.Privileged || last.TTY ||
+		!slices.Equal(last.Env, []string{"PATH=" + RootPATH, "HOME=/root", "TERM", "COLORTERM"}) {
 		t.Errorf("root exec: %+v", last)
 	}
 	b, err := os.ReadFile(filepath.Join(r.cfgDir, "envs", "base", "root-log.jsonl"))
@@ -429,6 +467,175 @@ func TestReadyTimeout(t *testing.T) {
 	err := r.m.Up(context.Background(), hello, UpOptions{})
 	if err == nil || !strings.Contains(err.Error(), "did not become ready") {
 		t.Errorf("up: %v", err)
+	}
+	if _, ok := r.eng.Containers["devc-demo-hello"]; ok {
+		t.Error("the box that never became ready was left behind")
+	}
+}
+
+// TestUpRollsBack: a failed creation or start leaves no container this
+// invocation created, stops one it started, and removes the delivered
+// secrets (finding B1).
+func TestUpRollsBack(t *testing.T) {
+	ctx := context.Background()
+	t.Run("start fails after create", func(t *testing.T) {
+		r := newRig(t)
+		h := &hookRecorder{}
+		r.m.Contributors, r.m.Preparers, r.m.Cleaners = []Contributor{h}, []Preparer{h}, []Cleaner{h}
+		r.eng.Errors["start"] = errors.New("boom")
+		if err := r.m.Up(ctx, hello, UpOptions{}); err == nil || !strings.Contains(err.Error(), "boom") {
+			t.Fatalf("up: %v", err)
+		}
+		if _, ok := r.eng.Containers["devc-demo-hello"]; ok || !slices.Contains(r.eng.Log, "rm devc-demo-hello") {
+			t.Errorf("container left behind: %v", r.eng.Log)
+		}
+		if !slices.Equal(h.calls, []string{"prepare hello .cache,.tool", "cleanup hello"}) {
+			t.Errorf("hooks: %q", h.calls)
+		}
+	})
+	t.Run("identity fix fails", func(t *testing.T) {
+		r := newRig(t)
+		r.eng.ExecFunc = func(engine.ExecOptions) (execx.Result, error) {
+			return execx.Result{ExitCode: 1}, &execx.ExitError{Result: execx.Result{ExitCode: 1}}
+		}
+		if err := r.m.Up(ctx, hello, UpOptions{}); err == nil || !strings.Contains(err.Error(), "fixing the user account") {
+			t.Fatalf("up: %v", err)
+		}
+		if _, ok := r.eng.Containers["devc-demo-hello"]; ok {
+			t.Error("container left behind")
+		}
+	})
+	t.Run("restart of a stopped box fails", func(t *testing.T) {
+		r := newRig(t)
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.m.Down(ctx, hello); err != nil {
+			t.Fatal(err)
+		}
+		h := &hookRecorder{}
+		r.m.Cleaners = []Cleaner{h}
+		orig := r.eng.ExecFunc
+		r.eng.ExecFunc = nil
+		r.m.ReadyTimeout = 300 * time.Millisecond
+		r.eng.Log = nil
+		if err := r.m.Up(ctx, hello, UpOptions{}); err == nil {
+			t.Fatal("up succeeded")
+		}
+		ci := r.eng.Containers["devc-demo-hello"]
+		if ci.State.Running || !slices.Equal(r.verbs(), []string{"start", "stop"}) || !slices.Equal(h.calls, []string{"cleanup hello"}) {
+			t.Errorf("after the failed start: running %v, %v, hooks %q", ci.State.Running, r.eng.Log, h.calls)
+		}
+		// The next up starts it again instead of trusting it.
+		r.eng.ExecFunc = orig
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// TestRunningButNotReady: a running box without the readiness marker is
+// not "already running"; up finishes its start (finding B1).
+func TestRunningButNotReady(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := r.m.Config.Paths.BoxRuntimeDir(names.BoxID(hello))
+	if err := os.Remove(filepath.Join(rt, "ready")); err != nil {
+		t.Fatal(err)
+	}
+	n := len(r.eng.Execs)
+	r.out.Reset()
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(r.out.String(), "already running") || len(r.eng.Execs) != n+1 || !strings.Contains(r.out.String(), "is ready") {
+		t.Errorf("up on a running box that is not ready: %d execs\n%s", len(r.eng.Execs)-n, r.out)
+	}
+	// If it still does not become ready, up fails but leaves the container
+	// it did not start alone.
+	_ = os.Remove(filepath.Join(rt, "ready"))
+	r.eng.ExecFunc = nil
+	r.m.ReadyTimeout = 300 * time.Millisecond
+	if err := r.m.Up(ctx, hello, UpOptions{}); err == nil || !strings.Contains(err.Error(), "devc down") {
+		t.Errorf("up: %v", err)
+	}
+	if ci := r.eng.Containers["devc-demo-hello"]; !ci.State.Running {
+		t.Error("a box this invocation did not start was stopped")
+	}
+}
+
+// TestDriftWritesNothing: a refused up changes no launch description,
+// baseline or secret (finding A3).
+func TestDriftWritesNothing(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	box := filepath.Join(r.m.Config.Paths.BoxEtcDir(hello), "box.json")
+	before, _ := os.ReadFile(box)
+	r.writeConfig("realms/demo/projects/hello/project.toml", "harnesses = [\"claude\"]\n[network]\nlevel = \"none\"\n")
+	r.load()
+	h := &hookRecorder{}
+	r.m.Preparers, r.m.Cleaners = []Preparer{h}, []Cleaner{h}
+	if err := r.m.Up(ctx, hello, UpOptions{}); !errors.Is(err, ErrDrift) {
+		t.Fatalf("up: %v", err)
+	}
+	after, _ := os.ReadFile(box)
+	if len(h.calls) != 0 || !bytes.Equal(before, after) {
+		t.Errorf("drift wrote files: hooks %q, box.json changed %v", h.calls, !bytes.Equal(before, after))
+	}
+}
+
+// TestBoxLock: lifecycle operations on one box wait for each other, with
+// a bounded wait (finding E2).
+func TestBoxLock(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	unlock, err := LockBox(ctx, r.m.Config.Paths, hello, time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.m.LockTimeout = 200 * time.Millisecond
+	for name, op := range map[string]func() error{
+		"up":   func() error { return r.m.Up(ctx, hello, UpOptions{}) },
+		"down": func() error { return r.m.Down(ctx, hello) },
+		"rm":   func() error { return r.m.Remove(ctx, hello, false) },
+		"run":  func() error { _, err := r.m.Run(ctx, hello, []string{"true"}, ExecOptions{}); return err },
+	} {
+		if err := op(); err == nil || !strings.Contains(err.Error(), "another devc command") {
+			t.Errorf("%s while locked: %v", name, err)
+		}
+	}
+	if len(r.eng.Log) != 0 {
+		t.Errorf("engine used while locked: %v", r.eng.Log)
+	}
+	// Another box is not affected.
+	if err := r.m.Up(ctx, names.ProjectRef{Realm: "other", Project: "tools"}, UpOptions{}); err != nil {
+		t.Errorf("other box: %v", err)
+	}
+	unlock()
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Errorf("up after unlock: %v", err)
+	}
+}
+
+// TestBrokenOverrideBlocksUp: a user manifest that fails to load stops
+// the boxes of projects using its id instead of falling back to the
+// built-in manifest (finding A4).
+func TestBrokenOverrideBlocksUp(t *testing.T) {
+	r := newRig(t)
+	r.writeConfig("harness/claude.toml", "id = \"claude\"\n[auth\n")
+	r.load()
+	var pe *ProblemsError
+	if err := r.m.Up(context.Background(), hello, UpOptions{}); !errors.As(err, &pe) {
+		t.Fatalf("up: %v", err)
+	}
+	if len(r.eng.Log) != 0 {
+		t.Errorf("engine used: %v", r.eng.Log)
 	}
 }
 
@@ -503,7 +710,8 @@ func TestPreparersAndCleaners(t *testing.T) {
 	if err := r.m.Remove(ctx, hello, false); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"prepare hello .cache,.tool", "prepare hello .cache,.tool", "cleanup hello", "cleanup hello"}
+	// The second up finds the box running and writes nothing.
+	want := []string{"prepare hello .cache,.tool", "cleanup hello", "cleanup hello"}
 	if !slices.Equal(h.calls, want) {
 		t.Errorf("calls %q, want %q", h.calls, want)
 	}

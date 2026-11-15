@@ -1,0 +1,38 @@
+# Rendered by devc: administrator requirements, which Codex enforces over
+# every user and project configuration (a conflicting value falls back to
+# an allowed one). The hooks here are managed: trusted by policy and not
+# removable by the user; [features] hooks = true keeps them on even if a
+# box disables hooks in its own config.toml.
+allowed_approval_policies = ["never"]
+allowed_sandbox_modes = ["danger-full-access"]
+
+[features]
+hooks = true
+
+[hooks]
+managed_dir = "/opt/devc/bin"
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = {{toml (hook "SessionStart")}}
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = {{toml (hook "UserPromptSubmit")}}
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = {{toml (hook "Stop")}}
+
+[[hooks.PermissionRequest]]
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = {{toml (hook "PermissionRequest")}}
+
+[[hooks.SessionEnd]]
+[[hooks.SessionEnd.hooks]]
+type = "command"
+command = {{toml (hook "SessionEnd")}}

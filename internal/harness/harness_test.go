@@ -108,11 +108,12 @@ func TestDescribe(t *testing.T) {
 		"realms/demo/projects/hello/project.toml": "harnesses = [\"claude\", \"codex\"]\n[grants]\nsecrets = [\"OPENAI_API_KEY\", \"deploy-key\"]\n",
 	})
 	r := e.resolved(t, "demo/hello")
-	l := Describe(r, e.manifest(t, "claude"), rhOf(r, "claude"))
+	const claudeExe = "/opt/devc/harness/claude/v/20260101T000000Z/home/.local/bin/claude"
+	l := Describe(r, e.manifest(t, "claude"), rhOf(r, "claude"), claudeExe)
 	if err := l.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if l.Exe != "/opt/devc/harness/claude/current/home/.local/bin/claude" || l.Bin != "claude" || l.Realm != "demo" ||
+	if l.Exe != claudeExe || l.Bin != "claude" || l.Realm != "demo" ||
 		l.Env["DISABLE_UPDATES"] != "1" || l.Env["CLAUDE_CONFIG_DIR"] != "/home/dev/.claude" ||
 		l.Auth.Method != "env-token" || l.Auth.Env != "CLAUDE_CODE_OAUTH_TOKEN" || l.Auth.File != "/run/devc-secrets/claude-token" ||
 		l.Home.Dir != "/home/dev/.claude" || !slices.Equal(l.Home.Shared, []string{"projects"}) || l.Hooks != "claude" {
@@ -124,11 +125,11 @@ func TestDescribe(t *testing.T) {
 	if len(l.Secrets) != 2 || l.Secrets[0].Env != "OPENAI_API_KEY" || l.Secrets[0].File != "/run/devc-secrets/OPENAI_API_KEY" || l.Secrets[1].Env != "" {
 		t.Errorf("granted secrets: %+v", l.Secrets)
 	}
-	cx := Describe(r, e.manifest(t, "codex"), rhOf(r, "codex"))
+	cx := Describe(r, e.manifest(t, "codex"), rhOf(r, "codex"), "/opt/devc/harness/codex/v/20260101T000000Z/home/.local/bin/codex")
 	if err := cx.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if cx.Auth.Method != "shared-home" || cx.Auth.File != "" || cx.Exe != "/opt/devc/harness/codex/current/home/.local/bin/codex" || cx.Home.Strategy != "shared" || len(cx.Home.PerBox) != 4 {
+	if cx.Auth.Method != "shared-home" || cx.Auth.File != "" || cx.Home.Strategy != "shared" || len(cx.Home.PerBox) != 4 {
 		t.Errorf("codex: %+v", cx)
 	}
 	// JSON round trip as the box reads it.
@@ -144,7 +145,7 @@ func TestDescribeRealmOverride(t *testing.T) {
 		"realms/demo/realm.toml": "[harness.claude]\nauth = \"api-key\"\nsecret = \"anthropic-key\"\n",
 	})
 	r := e.resolved(t, "demo/hello")
-	l := Describe(r, e.manifest(t, "claude"), rhOf(r, "claude"))
+	l := Describe(r, e.manifest(t, "claude"), rhOf(r, "claude"), "/usr/bin/claude")
 	if l.Auth.Method != "api-key" || l.Auth.File != "/run/devc-secrets/anthropic-key" || l.Auth.Env != "CLAUDE_CODE_OAUTH_TOKEN" {
 		t.Errorf("override: %+v", l.Auth)
 	}
@@ -246,7 +247,29 @@ func TestCodexSettings(t *testing.T) {
 			if !strings.Contains(di, "You are running inside a devc box") || !strings.HasSuffix(di, "quote \" and \\ and \x7f\n") {
 				t.Errorf("developer_instructions: %q", di)
 			}
-			hooks, _ := s["hooks"].(map[string]any)
+			if _, ok := s["hooks"]; ok {
+				t.Errorf("hooks in the settings; they belong in requirements.toml:\n%s", b)
+			}
+			// The enforced layer (finding C1).
+			f := m.Baseline.Files[0]
+			rb, err := RenderBaselineFile(e.cfg, r, m, f, instr)
+			if err != nil || f.Path != "/etc/codex/requirements.toml" {
+				t.Fatalf("requirements: %v %s", err, f.Path)
+			}
+			var req map[string]any
+			if _, err := toml.Decode(string(rb), &req); err != nil {
+				t.Fatalf("%v\n%s", err, rb)
+			}
+			if ap, _ := req["allowed_approval_policies"].([]any); len(ap) != 1 || ap[0] != "never" {
+				t.Errorf("allowed_approval_policies: %#v", req["allowed_approval_policies"])
+			}
+			if sm, _ := req["allowed_sandbox_modes"].([]any); len(sm) != 1 || sm[0] != "danger-full-access" {
+				t.Errorf("allowed_sandbox_modes: %#v", req["allowed_sandbox_modes"])
+			}
+			if f, _ := req["features"].(map[string]any); f["hooks"] != true {
+				t.Errorf("features.hooks not pinned: %#v", req["features"])
+			}
+			hooks, _ := req["hooks"].(map[string]any)
 			for _, ev := range []string{"SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest", "SessionEnd"} {
 				groups, _ := hooks[ev].([]map[string]any)
 				if len(groups) != 1 {
@@ -257,6 +280,9 @@ func TestCodexSettings(t *testing.T) {
 				if len(hs) != 1 || hs[0]["command"] != "/opt/devc/bin/devc box hook codex "+ev {
 					t.Errorf("hook %s: %#v", ev, groups)
 				}
+			}
+			if !slices.Equal(m.Baseline.Settings.Also, []string{"/etc/codex/managed_config.toml"}) {
+				t.Errorf("managed defaults: %v", m.Baseline.Settings.Also)
 			}
 		})
 	}
@@ -298,7 +324,7 @@ func TestInstructions(t *testing.T) {
 	if i0 != 0 || !(i0 < i1 && i1 < i2 && i2 < i3) {
 		t.Errorf("order wrong:\n%s", got)
 	}
-	for _, want := range []string{"project demo/hello.", "The project directory is /w/demo/hello.", "- Network: the internet is reachable",
+	for _, want := range []string{"project demo/hello.", "The project directory is /w/demo/hello.", "- Network: the network is not restricted.",
 		"Private notes for this project are in /ctx/notes.", "Long-term memory belongs in /ctx/memory."} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
@@ -421,6 +447,14 @@ func TestPrepareAndCleanup(t *testing.T) {
 	r := e.resolved(t, "demo/hello")
 	ref := names.ProjectRef{Realm: "demo", Project: "hello"}
 	in := &box.Inputs{Resolved: r, Paths: p}
+	// The test's runtime directory is not a tmpfs: delivery is refused
+	// unless explicitly allowed (finding A9).
+	if err := secrets.CheckMemoryFS(t.TempDir()); err == nil {
+		t.Log("the temporary directory is memory-backed; the refusal is not exercised")
+	} else if err := h.Prepare(context.Background(), in, &box.Spec{}); err == nil || !strings.Contains(err.Error(), "tmpfs") {
+		t.Errorf("delivery to a persistent directory: %v", err)
+	}
+	h.AllowPersistentSecrets = true
 	if err := h.Prepare(context.Background(), in, &box.Spec{}); err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +464,8 @@ func TestPrepareAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := &boxside.Launch{}
-	if err := json.Unmarshal(b, l); err != nil || l.Validate() != nil || l.Auth.File != "/run/devc-secrets/claude-token" {
+	if err := json.Unmarshal(b, l); err != nil || l.Validate() != nil || l.Auth.File != "/run/devc-secrets/claude-token" ||
+		l.Exe != "/opt/devc/harness/claude/v/20260101T000000Z/home/.local/bin/claude" {
 		t.Errorf("claude.json: %v %s", err, b)
 	}
 	if _, err := os.Stat(filepath.Join(etc, "codex.json")); err == nil {
@@ -439,7 +474,8 @@ func TestPrepareAndCleanup(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(etc, "claude", "seed", ".claude.json")); err != nil || !strings.Contains(string(b), "/w/demo/hello/main") {
 		t.Errorf("seed: %v %s", err, b)
 	}
-	for _, f := range []string{"baseline/claude/managed-settings.json", "baseline/claude/CLAUDE.md", "baseline/codex/config.toml"} {
+	for _, f := range []string{"baseline/claude/managed-settings.json", "baseline/claude/CLAUDE.md", "baseline/codex/config.toml",
+		"baseline/codex/managed_config.toml", "baseline/codex/requirements.toml"} {
 		if _, err := os.Stat(filepath.Join(p.BoxLocalDir(ref), f)); err != nil {
 			t.Errorf("baseline file %s: %v", f, err)
 		}
@@ -492,5 +528,75 @@ func TestPrepareAndCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(p.BoxLocalDir(ref), "baseline", "codex")); !os.IsNotExist(err) {
 		t.Errorf("stale codex baseline: %v", err)
+	}
+}
+
+// TestRefreshLaunches: after an update, existing launch descriptions name
+// the new version directory, and NamedVersions finds what they name
+// (finding E1).
+func TestRefreshLaunches(t *testing.T) {
+	e := setup(t, nil)
+	p := e.cfg.Paths
+	tb := toolbox.New(p.ToolboxDir())
+	installFake(t, tb, "claude")
+	h := &BoxHooks{Config: e.cfg, Toolbox: tb, Secrets: secrets.NewFileStore(p), AllowPersistentSecrets: true}
+	hello := names.ProjectRef{Realm: "demo", Project: "hello"}
+	if err := h.Prepare(context.Background(), &box.Inputs{Resolved: e.resolved(t, "demo/hello"), Paths: p}, &box.Spec{}); err != nil {
+		t.Fatal(err)
+	}
+	named, err := NamedVersions(p, "claude")
+	if err != nil || !named["20260101T000000Z"] || len(named) != 1 {
+		t.Fatalf("NamedVersions: %v %v", named, err)
+	}
+	// A second installation becomes current.
+	dir := tb.HarnessDir("claude")
+	_ = os.MkdirAll(filepath.Join(dir, "v", "20260202T000000Z"), 0o755)
+	_ = os.Remove(filepath.Join(dir, "current"))
+	_ = os.Symlink("v/20260202T000000Z", filepath.Join(dir, "current"))
+	b, _ := json.Marshal(toolbox.Installed{ID: "claude", Stamp: "20260202T000000Z", Version: "2.0", Method: "script"})
+	_ = os.WriteFile(filepath.Join(dir, "installed.json"), b, 0o644)
+	if err := h.RefreshLaunches(context.Background(), e.manifest(t, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	var l boxside.Launch
+	b, _ = os.ReadFile(filepath.Join(p.BoxEtcDir(hello), "harness", "claude.json"))
+	if err := json.Unmarshal(b, &l); err != nil || l.Exe != "/opt/devc/harness/claude/v/20260202T000000Z/home/.local/bin/claude" {
+		t.Errorf("after refresh: %v %s", err, l.Exe)
+	}
+	// Boxes without a description (analysis was never started) get none.
+	if _, err := os.Stat(filepath.Join(p.BoxEtcDir(names.ProjectRef{Realm: "demo", Project: "analysis"}), "harness", "claude.json")); err == nil {
+		t.Error("a description was written for a box that never had one")
+	}
+	if named, _ := NamedVersions(p, "claude"); !named["20260202T000000Z"] || named["20260101T000000Z"] {
+		t.Errorf("NamedVersions after refresh: %v", named)
+	}
+}
+
+// TestContributeRejectsNestedHomes: two harnesses whose homes nest cannot
+// share a box (finding A2).
+func TestContributeRejectsNestedHomes(t *testing.T) {
+	e := setup(t, map[string]string{
+		"harness/pi.toml":                         "id = \"pi\"\nbin = \"pi\"\n[install]\nexe = \"/usr/bin/pi\"\n[home]\ndir = \".claude/pi\"\n",
+		"realms/demo/projects/hello/project.toml": "harnesses = [\"claude\", \"pi\"]\n",
+	})
+	h := &BoxHooks{Config: e.cfg}
+	err := h.Contribute(&box.Inputs{Resolved: e.resolved(t, "demo/hello"), Paths: e.cfg.Paths}, &box.Spec{})
+	if err == nil || !strings.Contains(err.Error(), "overlapping home") {
+		t.Errorf("nested homes: %v", err)
+	}
+}
+
+// TestNetworkSentence: a level that is not enforced is never described as
+// restricting anything.
+func TestNetworkSentence(t *testing.T) {
+	e := setup(t, nil)
+	r := e.resolved(t, "demo/hello")
+	r.Network = "internet"
+	if d := NewData(r, e.manifest(t, "claude")); strings.Contains(d.NetworkSentence, "are not") || !strings.Contains(d.NetworkSentence, "not restricted") {
+		t.Errorf("internet: %q", d.NetworkSentence)
+	}
+	r.Network = "none"
+	if d := NewData(r, e.manifest(t, "claude")); d.NetworkSentence != "there is no network access." {
+		t.Errorf("none: %q", d.NetworkSentence)
 	}
 }

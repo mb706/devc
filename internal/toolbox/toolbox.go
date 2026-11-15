@@ -27,6 +27,7 @@ package toolbox
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -317,8 +318,8 @@ func symlinkAtomic(target, path string) (bool, error) {
 	if cur, err := os.Readlink(path); err == nil && cur == target {
 		return false, nil
 	}
-	tmp := filepath.Join(filepath.Dir(path), ".tmp-link-"+filepath.Base(path))
-	_ = os.Remove(tmp)
+	// A unique name: shims are created by concurrent devc up runs.
+	tmp := filepath.Join(filepath.Dir(path), ".tmp-link-"+filepath.Base(path)+"-"+randomSuffix())
 	if err := os.Symlink(target, tmp); err != nil {
 		return false, err
 	}
@@ -327,6 +328,15 @@ func symlinkAtomic(target, path string) (bool, error) {
 		return false, fmt.Errorf("installing %s: %w", path, err)
 	}
 	return true, nil
+}
+
+// randomSuffix makes temporary names unique across processes.
+func randomSuffix() string {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
 }
 
 // linkOrCopy makes dst a hard link to src, or a copy of data when linking
@@ -339,8 +349,7 @@ func linkOrCopy(src, dst string, data []byte) (bool, error) {
 	if b, err := os.Lstat(dst); err == nil && os.SameFile(a, b) {
 		return false, nil
 	}
-	tmp := filepath.Join(filepath.Dir(dst), ".tmp-"+filepath.Base(dst))
-	_ = os.Remove(tmp)
+	tmp := filepath.Join(filepath.Dir(dst), ".tmp-"+filepath.Base(dst)+"-"+randomSuffix())
 	if err := os.Link(src, tmp); err == nil {
 		if err := os.Rename(tmp, dst); err != nil {
 			_ = os.Remove(tmp)

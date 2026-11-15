@@ -194,7 +194,12 @@ func defaultIsENOSYS(p *Profile) bool {
 }
 
 // refuseSocketcall makes socketcall fail with EPERM (see the top of the
-// file), with the rule first in the list.
+// file), with the rule first in the list. Merely removing socketcall from
+// the allow lists, so that it falls to the default ENOSYS, was tried again
+// in C03r: runc then fails every container with "error adding seccomp rule
+// for syscall socket: file exists". SCMP_ACT_TRACE (ENOSYS without a
+// tracer) is not used either: a tracer inside the box could let the call
+// through.
 func refuseSocketcall(p *Profile) error {
 	removeUnconditional(p, []string{"socketcall"})
 	for _, s := range p.Syscalls {

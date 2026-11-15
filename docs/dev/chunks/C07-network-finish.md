@@ -6,7 +6,7 @@ After this chunk phase 1 is complete: boxes get the default network level for re
 
 ## 1. Network levels (`internal/netpolicy`)
 
-Replace the placeholder from C02.
+Replace the placeholder from C02. Since the fixes after review A, `internet` is refused outright and the example configuration and the tests set `open` explicitly. Once `internet` works, switch the example configuration back to the default (`internet`), keep `open` only in tests that need it, and make sure the generated sandbox description states the level actually in force.
 
 | Level | Implementation in this chunk |
 |---|---|

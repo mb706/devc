@@ -8,18 +8,24 @@ import (
 
 func TestBoxArgs(t *testing.T) {
 	d, err := BoxArgs(None)
-	if err != nil || !slices.Equal(d.Args, []string{"--network", "none"}) || d.Warning != "" {
+	if err != nil || !slices.Equal(d.Args, []string{"--network", "none"}) {
 		t.Errorf("none: %+v, %v", d, err)
 	}
 	d, err = BoxArgs(Open)
-	if err != nil || len(d.Args) != 0 || d.Warning != "" {
+	if err != nil || len(d.Args) != 0 {
 		t.Errorf("open: %+v, %v", d, err)
 	}
+	// Levels without enforcement fail closed.
 	for _, l := range []string{Internet, Allowlist} {
-		d, err = BoxArgs(l)
-		if err != nil || len(d.Args) != 0 || !strings.Contains(d.Warning, "not enforced yet") {
-			t.Errorf("%s: %+v, %v", l, d, err)
+		if _, err := BoxArgs(l); err == nil || !strings.Contains(err.Error(), "not implemented yet") {
+			t.Errorf("%s: %v", l, err)
 		}
+		if Enforced(l) {
+			t.Errorf("%s reported as enforced", l)
+		}
+	}
+	if !Enforced(None) || !Enforced(Open) {
+		t.Error("none or open reported as not enforced")
 	}
 	if _, err := BoxArgs("lan"); err == nil {
 		t.Error("unknown level accepted")

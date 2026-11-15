@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mb706/devc/internal/config"
+	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/paths"
 )
@@ -69,6 +70,15 @@ func (a *app) load() (*config.Config, []config.Problem, error) {
 	}
 	c, probs := config.Load(p)
 	return c, probs, nil
+}
+
+// engine returns the container engine of a configuration. When the
+// integration tests set DEVC_TEST_RUN, every object it creates carries
+// that run's labels, so the tests clean up only what they made.
+func (a *app) engine(c *config.Config) *engine.Podman {
+	eng := engine.NewPodman(c.Global.Engine, a.runner)
+	eng.ExtraLabels = engine.TestRunLabels(a.getenv(engine.TestRunEnv))
+	return eng
 }
 
 // warnProblems prints a one-line warning when the configuration has problems.

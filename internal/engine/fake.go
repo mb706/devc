@@ -213,7 +213,8 @@ func (f *Fake) Create(_ context.Context, args []string) (string, error) {
 			ci.User = next()
 		case a == "--env":
 			ci.Env = append(ci.Env, next())
-		case a == "--hostname", a == "--tz", a == "--workdir", a == "--network", a == "--memory", a == "--pids-limit", a == "--passwd-entry":
+		case a == "--hostname", a == "--tz", a == "--workdir", a == "--network", a == "--memory", a == "--pids-limit", a == "--passwd-entry",
+			a == "--entrypoint", a == "--device", a == "--group-add":
 			next()
 		case strings.HasPrefix(a, "-"):
 		default:

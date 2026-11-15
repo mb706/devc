@@ -68,6 +68,13 @@ func (k checker) size(key, v string) {
 	}
 }
 
+// memory checks a memory limit: a size, or "none" to switch it off.
+func (k checker) memory(key, v string) {
+	if v != NoLimit {
+		k.size(key, v)
+	}
+}
+
 func (k checker) envVar(key, v string) {
 	if !envVarRE.MatchString(v) {
 		k.bad(key, "%q is not a valid environment variable name", v)
@@ -184,9 +191,9 @@ func validateGlobal(c *Config, ps *problems) {
 			}
 		}
 	}
-	k.size("box.memory", g.Box.Memory)
-	if g.Box.Pids < 0 {
-		k.bad("box.pids", "must not be negative")
+	k.memory("box.memory", g.Box.Memory)
+	if g.Box.Pids == 0 || g.Box.Pids < NoPidsLimit {
+		k.bad("box.pids", "%d is not a limit: use a positive number, or -1 to run boxes without a PID limit", g.Box.Pids)
 	}
 	if g.Box.Shell != "" {
 		k.command("box.shell", g.Box.Shell)
@@ -266,11 +273,32 @@ func validateHarness(h *Harness, ps *problems) {
 		k.bad("home.dir", "must name a directory below /home/dev, not the home itself")
 	}
 	k.envMap("home.env", hm.Env)
-	for i, s := range hm.Shared {
-		k.relPath(idx("home.shared", i), s, "shared directory")
-	}
-	for i, s := range hm.PerBox {
-		k.relPath(idx("home.per_box", i), s, "per-box directory")
+	// Each entry becomes a writable mount. Entries that nest would let one
+	// box's mount source sit inside another box-writable tree, where a
+	// planted symlink could redirect the mount: they are refused.
+	for _, l := range []struct {
+		key, what string
+		list      []string
+	}{{"home.shared", "shared directory", hm.Shared}, {"home.per_box", "per-box directory", hm.PerBox}} {
+		var good []string
+		for i, s := range l.list {
+			if !k.relPath(idx(l.key, i), s, l.what) {
+				continue
+			}
+			if s == "." {
+				k.bad(idx(l.key, i), "must name a subdirectory of the harness home, not the home itself")
+				continue
+			}
+			for _, o := range good {
+				switch {
+				case o == s:
+					k.bad(idx(l.key, i), "%q is listed twice", s)
+				case nested(o, s), nested(s, o):
+					k.bad(idx(l.key, i), "%q and %q nest; the directories must not overlap", o, s)
+				}
+			}
+			good = append(good, s)
+		}
 	}
 	if hm.Strategy == "shared" && len(hm.Shared) > 0 {
 		k.bad("home.shared", "only applies to strategy \"private\"; with \"shared\" the whole directory is shared")
@@ -305,6 +333,9 @@ func validateHarness(h *Harness, ps *problems) {
 	if a.Secret != "" {
 		k.name("auth.secret", names.KindSecret, a.Secret)
 	}
+	if a.Method == "shared-home" && hm.Strategy != "shared" {
+		k.bad("auth.method", "%q needs home.strategy \"shared\": the login writes the realm's shared harness home, which a box with a private home never mounts", a.Method)
+	}
 
 	if s := h.Baseline.Settings; s != nil {
 		k.absPath("baseline.settings.path", s.Path, "settings path")
@@ -312,27 +343,34 @@ func validateHarness(h *Harness, ps *problems) {
 		if s.Template != "" {
 			k.template("baseline.settings.template", s.Template)
 		}
+		for i, a := range s.Also {
+			k.absPath(idx("baseline.settings.also", i), a, "settings path")
+		}
 	}
 	if in := h.Baseline.Instructions; in != nil {
 		k.absPath("baseline.instructions.path", in.Path, "instructions path")
 	}
+	for i, f := range h.Baseline.Files {
+		key := idx("baseline.files", i)
+		k.absPath(key+".path", f.Path, "baseline file path")
+		k.enum(key+".format", f.Format, baselineFormats)
+		k.template(key+".template", f.Template)
+	}
 	// The directory of the baseline paths is mounted read-only over the
 	// image, so it must be a dedicated directory, and one directory only.
 	var baseDir string
-	for _, p := range []struct{ key, path string }{
-		{"baseline.settings.path", pathOf(h.Baseline.Settings)},
-		{"baseline.instructions.path", pathOfInstr(h.Baseline.Instructions)},
-	} {
-		if p.path == "" {
-			continue
-		}
+	seenBase := map[string]bool{}
+	for _, p := range baselinePaths(h) {
 		d := path.Dir(p.path)
 		switch {
 		case baseDir != "" && d != baseDir:
-			k.bad(p.key, "must be in the same directory as baseline.settings.path (%s): that directory is mounted as a whole", baseDir)
+			k.bad(p.key, "must be in the same directory as the other baseline paths (%s): that directory is mounted as a whole", baseDir)
 		case strings.Count(d, "/") < 2 || reservedBaselineDir(d):
 			k.bad(p.key, "the directory %s is mounted read-only over the image; use a dedicated directory such as /etc/<harness>", d)
+		case seenBase[path.Base(p.path)]:
+			k.bad(p.key, "%s is already used by another baseline path", p.path)
 		}
+		seenBase[path.Base(p.path)] = true
 		if baseDir == "" {
 			baseDir = d
 		}
@@ -362,18 +400,25 @@ func validateHarness(h *Harness, ps *problems) {
 	}
 }
 
-func pathOf(s *BaselineSettings) string {
-	if s == nil {
-		return ""
-	}
-	return s.Path
-}
+type keyedPath struct{ key, path string }
 
-func pathOfInstr(s *BaselineInstructions) string {
-	if s == nil {
-		return ""
+// baselinePaths lists every file a harness's baseline renders, with the
+// manifest key it comes from.
+func baselinePaths(h *Harness) []keyedPath {
+	var out []keyedPath
+	if s := h.Baseline.Settings; s != nil {
+		out = append(out, keyedPath{"baseline.settings.path", s.Path})
+		for i, a := range s.Also {
+			out = append(out, keyedPath{idx("baseline.settings.also", i), a})
+		}
 	}
-	return s.Path
+	if in := h.Baseline.Instructions; in != nil {
+		out = append(out, keyedPath{"baseline.instructions.path", in.Path})
+	}
+	for i, f := range h.Baseline.Files {
+		out = append(out, keyedPath{idx("baseline.files", i) + ".path", f.Path})
+	}
+	return out
 }
 
 // reservedBaselineDir reports whether d is, contains or lies inside a path
@@ -420,7 +465,9 @@ func validateRealm(c *Config, r *Realm, ps *problems) {
 			continue
 		}
 		m, ok := c.harnesses[id]
-		if !ok {
+		if _, broken := c.overrides[id]; !ok && !broken {
+			// A user manifest that failed to load reports its own problems,
+			// which block every project using it.
 			k.bad(key, "no harness manifest with id %q", id)
 		}
 		o := r.Harness[id]
@@ -428,6 +475,9 @@ func validateRealm(c *Config, r *Realm, ps *problems) {
 			k.enum(key+".auth", o.Auth, authMethods)
 			if ok && (o.Auth == "env-token" || o.Auth == "api-key") && m.Auth.Env == "" {
 				k.bad(key+".auth", "%q needs auth.env in the %s manifest, which does not set it", o.Auth, id)
+			}
+			if ok && o.Auth == "shared-home" && m.Home.Strategy != "shared" {
+				k.bad(key+".auth", "%q needs home.strategy \"shared\" in the %s manifest: the login writes the realm's shared harness home, which its boxes never mount", o.Auth, id)
 			}
 		}
 		if o.Secret != "" {
@@ -469,7 +519,11 @@ func validateProject(c *Config, p *Project, ps *problems) {
 		key := idx("harnesses", i)
 		if k.name(key, names.KindHarness, h) {
 			if _, ok := c.harnesses[h]; !ok {
-				k.bad(key, "no harness manifest with id %q", h)
+				if file, broken := c.overrides[h]; broken {
+					k.bad(key, "the manifest %s failed to load (see its problems); devc does not fall back to the built-in %q", file, h)
+				} else {
+					k.bad(key, "no harness manifest with id %q", h)
+				}
 			}
 		}
 	}
@@ -515,10 +569,10 @@ func validateProject(c *Config, p *Project, ps *problems) {
 		k.enum("network.level", p.Network.Level, networkLevels)
 	}
 	if p.Box.Memory != "" {
-		k.size("box.memory", p.Box.Memory)
+		k.memory("box.memory", p.Box.Memory)
 	}
-	if p.Box.Pids < 0 {
-		k.bad("box.pids", "must not be negative")
+	if p.Box.Pids < NoPidsLimit {
+		k.bad("box.pids", "%d is not a limit: use a positive number, 0 for the global default, or -1 for no PID limit", p.Box.Pids)
 	}
 	seenPort := map[int]bool{}
 	for i, port := range p.Box.Ports {

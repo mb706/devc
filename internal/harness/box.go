@@ -2,12 +2,15 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
+	"time"
 
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/boxside"
@@ -19,8 +22,10 @@ import (
 )
 
 // Describe builds the launch description of an installed harness for a
-// project (work order C03 section 3).
-func Describe(r *config.Resolved, m *config.Harness, rh config.ResolvedHarness) *boxside.Launch {
+// project (work order C03 section 3). exe is the executable in the box,
+// in the concrete version directory of the current installation
+// (toolbox.CurrentExe), so a session keeps the version it started with.
+func Describe(r *config.Resolved, m *config.Harness, rh config.ResolvedHarness, exe string) *boxside.Launch {
 	home := path.Join(paths.InBoxHome, m.Home.Dir)
 	env := map[string]string{}
 	for k, v := range m.Env {
@@ -32,7 +37,7 @@ func Describe(r *config.Resolved, m *config.Harness, rh config.ResolvedHarness) 
 	l := &boxside.Launch{
 		Schema: boxside.LaunchSchema, ID: m.ID, Bin: m.Bin, Display: m.Display,
 		Realm: r.Realm, Project: r.Project,
-		Exe: toolbox.InBoxExe(m), Env: env,
+		Exe: exe, Env: env,
 		Args: nonNil(m.Launch.Args), Resume: nonNil(m.Launch.Resume),
 		Auth:  boxside.LaunchAuth{Method: rh.AuthMethod},
 		Home:  boxside.LaunchHome{Dir: home, Strategy: m.Home.Strategy, Shared: nonNil(m.Home.Shared), PerBox: nonNil(m.Home.PerBox)},
@@ -85,14 +90,17 @@ func nonNil(s []string) []string {
 }
 
 // BaselineDir is the in-box directory a harness's baseline is mounted at,
-// or "" when the manifest has no baseline. Validation guarantees that the
-// settings and instructions paths share it.
+// or "" when the manifest has no baseline. Validation guarantees that all
+// baseline paths share it.
 func BaselineDir(m *config.Harness) string {
 	if s := m.Baseline.Settings; s != nil {
 		return path.Dir(s.Path)
 	}
 	if in := m.Baseline.Instructions; in != nil {
 		return path.Dir(in.Path)
+	}
+	if len(m.Baseline.Files) > 0 {
+		return path.Dir(m.Baseline.Files[0].Path)
 	}
 	return ""
 }
@@ -106,6 +114,11 @@ type BoxHooks struct {
 	Toolbox *toolbox.Toolbox
 	Secrets secrets.Store
 	Out     io.Writer
+	// AllowPersistentSecrets permits delivering secrets to a runtime
+	// directory that is not memory-backed (DEVC_ALLOW_PERSISTENT_SECRETS=1).
+	AllowPersistentSecrets bool
+	// LockTimeout bounds the wait for a box lock in RefreshLaunches.
+	LockTimeout time.Duration
 }
 
 var (
@@ -143,6 +156,15 @@ func (h *BoxHooks) Contribute(in *box.Inputs, s *box.Spec) error {
 	ms, err := h.manifests(r)
 	if err != nil {
 		return err
+	}
+	// The homes of two harnesses must not nest: one harness's writable
+	// state mount would hold the other's mount points.
+	for j, m := range ms {
+		for _, o := range ms[:j] {
+			if m.Home.Dir == o.Home.Dir || paths.Within(o.Home.Dir, m.Home.Dir) || paths.Within(m.Home.Dir, o.Home.Dir) {
+				return fmt.Errorf("the harnesses %s and %s use overlapping home directories (%s and %s); a project cannot list both", o.ID, m.ID, o.Home.Dir, m.Home.Dir)
+			}
+		}
 	}
 	for _, m := range ms {
 		if dir := BaselineDir(m); dir != "" {
@@ -211,7 +233,7 @@ func (h *BoxHooks) Prepare(ctx context.Context, in *box.Inputs, s *box.Spec) err
 		if err := h.renderBaseline(p, ref, r, m); err != nil {
 			return fmt.Errorf("rendering the baseline of %s: %w", m.ID, err)
 		}
-		ok, err := h.Toolbox.IsInstalled(m)
+		exe, ok, err := h.Toolbox.CurrentExe(m)
 		if err != nil {
 			return err
 		}
@@ -227,7 +249,7 @@ func (h *BoxHooks) Prepare(ctx context.Context, in *box.Inputs, s *box.Spec) err
 		if err := h.Toolbox.EnsureShim(m.Bin); err != nil {
 			return err
 		}
-		if err := h.writeLaunch(p, etc, r, m, byID[m.ID]); err != nil {
+		if err := h.writeLaunch(etc, r, m, byID[m.ID], exe); err != nil {
 			return fmt.Errorf("writing the launch description of %s: %w", m.ID, err)
 		}
 		keep[m.ID+".json"], keep[m.ID] = true, len(m.Home.Seed) > 0
@@ -280,21 +302,6 @@ func prune(dir string, keep map[string]bool) error {
 	return nil
 }
 
-// replaceDir moves the freshly written src over dst.
-func replaceDir(src, dst string) error {
-	old := dst + ".old"
-	if err := os.RemoveAll(old); err != nil {
-		return err
-	}
-	if err := os.Rename(dst, old); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := os.Rename(src, dst); err != nil {
-		return err
-	}
-	return os.RemoveAll(old)
-}
-
 // cleanBaselines removes rendered baselines of harnesses the project no
 // longer lists.
 func cleanBaselines(p *paths.Paths, ref names.ProjectRef, ms []*config.Harness) error {
@@ -329,6 +336,11 @@ func (h *BoxHooks) renderBaseline(p *paths.Paths, ref names.ProjectRef, r *confi
 		return err
 	}
 	keep := map[string]bool{}
+	write := func(inBox string, b []byte) error {
+		name := path.Base(inBox)
+		keep[name] = true
+		return writeFile(filepath.Join(dir, name), b, 0o644)
+	}
 	instr, err := Instructions(h.Config, r, m)
 	if err != nil {
 		return err
@@ -338,30 +350,40 @@ func (h *BoxHooks) renderBaseline(p *paths.Paths, ref names.ProjectRef, r *confi
 		if err != nil {
 			return err
 		}
-		if err := writeFile(filepath.Join(dir, path.Base(s.Path)), b, 0o644); err != nil {
-			return err
+		for _, target := range append([]string{s.Path}, s.Also...) {
+			if err := write(target, b); err != nil {
+				return err
+			}
 		}
-		keep[path.Base(s.Path)] = true
 	}
 	if in := m.Baseline.Instructions; in != nil {
-		if err := writeFile(filepath.Join(dir, path.Base(in.Path)), []byte(instr), 0o644); err != nil {
+		if err := write(in.Path, []byte(instr)); err != nil {
 			return err
 		}
-		keep[path.Base(in.Path)] = true
+	}
+	for _, f := range m.Baseline.Files {
+		b, err := RenderBaselineFile(h.Config, r, m, f, instr)
+		if err != nil {
+			return err
+		}
+		if err := write(f.Path, b); err != nil {
+			return err
+		}
 	}
 	return prune(dir, keep)
 }
 
-func (h *BoxHooks) writeLaunch(p *paths.Paths, etc string, r *config.Resolved, m *config.Harness, rh config.ResolvedHarness) error {
-	l := Describe(r, m, rh)
+func (h *BoxHooks) writeLaunch(etc string, r *config.Resolved, m *config.Harness, rh config.ResolvedHarness, exe string) error {
+	l := Describe(r, m, rh, exe)
 	if err := l.Validate(); err != nil {
 		return err
 	}
 	if len(m.Home.Seed) > 0 {
-		stage := filepath.Join(etc, "."+m.ID+".new")
-		if err := os.RemoveAll(stage); err != nil {
+		stage, err := os.MkdirTemp(etc, "."+m.ID+"-new-")
+		if err != nil {
 			return err
 		}
+		defer os.RemoveAll(stage)
 		seedDir := filepath.Join(stage, "seed")
 		for _, sd := range m.Home.Seed {
 			b, err := RenderSeed(h.Config, r, m, sd)
@@ -379,15 +401,124 @@ func (h *BoxHooks) writeLaunch(p *paths.Paths, etc string, r *config.Resolved, m
 		if err := chmodTree(stage); err != nil {
 			return err
 		}
-		if err := replaceDir(stage, filepath.Join(etc, m.ID)); err != nil {
+		if err := box.ReplaceDir(stage, filepath.Join(etc, m.ID)); err != nil {
 			return err
 		}
 	}
+	return writeDescription(etc, l)
+}
+
+func writeDescription(etc string, l *boxside.Launch) error {
 	b, err := marshalIndent(l)
 	if err != nil {
 		return err
 	}
-	return writeFile(filepath.Join(etc, m.ID+".json"), b, 0o644)
+	return writeFile(filepath.Join(etc, l.ID+".json"), b, 0o644)
+}
+
+// RefreshLaunches rewrites the launch description of harness m in every
+// box that already has one, under the box's lock, so that the next launch
+// in a running box uses the current installation (finding E1). Projects
+// with configuration problems are skipped with a warning; their boxes keep
+// the version they name, which harness gc keeps.
+func (h *BoxHooks) RefreshLaunches(ctx context.Context, m *config.Harness) error {
+	exe, ok, err := h.Toolbox.CurrentExe(m)
+	if err != nil || !ok {
+		return err
+	}
+	p := h.Config.Paths
+	var errs []error
+	for _, pr := range h.Config.Projects("") {
+		ref := pr.Ref()
+		if !slices.Contains(pr.Harnesses, m.ID) {
+			continue
+		}
+		etc := filepath.Join(p.BoxEtcDir(ref), "harness")
+		if _, err := os.Lstat(filepath.Join(etc, m.ID+".json")); err != nil {
+			continue
+		}
+		if probs := h.Config.ProblemsFor(ref); len(probs) > 0 {
+			h.warnf("%s has configuration problems; its boxes keep the previous %s until the next 'devc up'", ref, m.ID)
+			continue
+		}
+		if err := h.refreshOne(ctx, ref, m, etc, exe); err != nil {
+			errs = append(errs, fmt.Errorf("updating the launch description of %s in %s: %w", m.ID, ref, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (h *BoxHooks) refreshOne(ctx context.Context, ref names.ProjectRef, m *config.Harness, etc, exe string) error {
+	timeout := h.LockTimeout
+	if timeout <= 0 {
+		timeout = box.DefaultLockTimeout
+	}
+	unlock, err := box.LockBox(ctx, h.Config.Paths, ref, timeout, h.Out)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	r, err := h.Config.Resolved(ref)
+	if err != nil {
+		return err
+	}
+	var rh config.ResolvedHarness
+	for _, x := range r.Harnesses {
+		if x.ID == m.ID {
+			rh = x
+		}
+	}
+	l := Describe(r, m, rh, exe)
+	if err := l.Validate(); err != nil {
+		return err
+	}
+	return writeDescription(etc, l)
+}
+
+// NamedVersions returns the version stamps of harness id that the launch
+// descriptions of all boxes name. The descriptions are devc's own files
+// (mounted read-only into boxes); they are still parsed defensively.
+func NamedVersions(p *paths.Paths, id string) (map[string]bool, error) {
+	out := map[string]bool{}
+	root := filepath.Join(p.LocalDir(), "boxes")
+	realms, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, rd := range realms {
+		if !rd.IsDir() || !names.ValidRealm(rd.Name()) {
+			continue
+		}
+		projects, err := os.ReadDir(filepath.Join(root, rd.Name()))
+		if err != nil {
+			return nil, err
+		}
+		for _, pd := range projects {
+			if !pd.IsDir() || !names.Valid(pd.Name()) {
+				continue
+			}
+			ref := names.ProjectRef{Realm: rd.Name(), Project: pd.Name()}
+			file := filepath.Join(p.BoxEtcDir(ref), "harness", id+".json")
+			b, err := readConfigFile(file)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			var l boxside.Launch
+			if err := json.Unmarshal(b, &l); err != nil {
+				return nil, fmt.Errorf("%s: %w", file, err)
+			}
+			if s := toolbox.StampOfExe(id, l.Exe); s != "" {
+				out[s] = true
+			}
+		}
+	}
+	return out, nil
 }
 
 // deliverSecrets writes the credentials of installed token harnesses and
@@ -424,7 +555,7 @@ func (h *BoxHooks) deliverSecrets(p *paths.Paths, r *config.Resolved, installed 
 			return fmt.Errorf("reading the secret %s: %w", name, err)
 		}
 	}
-	return secrets.Deliver(p, dir, values)
+	return secrets.Deliver(p, dir, values, h.AllowPersistentSecrets)
 }
 
 // warnTmux says once (per state directory) that tmux is missing.

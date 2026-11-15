@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 
+	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/harness"
@@ -53,7 +54,7 @@ func (a *app) toolEnv() (*toolEnv, error) {
 	if _, err := tb.Sync(exe, version.Version); err != nil {
 		return nil, fmt.Errorf("syncing the toolbox: %w", err)
 	}
-	return &toolEnv{cfg: c, eng: engine.NewPodman(c.Global.Engine, a.runner), tb: tb}, nil
+	return &toolEnv{cfg: c, eng: a.engine(c), tb: tb}, nil
 }
 
 // auxSecurityOpts follows the boxes' SELinux mode.
@@ -73,29 +74,70 @@ func (a *app) installer(e *toolEnv) *toolbox.Installer {
 	}
 }
 
-// manifestFor returns a harness manifest and refuses one with problems.
-func (a *app) manifestFor(c *config.Config, probs []config.Problem, id string) (*config.Harness, error) {
+// manifestFor returns a harness manifest and refuses one with problems,
+// including a user manifest of that id that failed to load (which never
+// falls back to the built-in one).
+func (a *app) manifestFor(c *config.Config, id string) (*config.Harness, error) {
 	if err := names.Check(names.KindHarness, id); err != nil {
 		return nil, &usageError{msg: err.Error()}
 	}
-	m, ok := c.Harness(id)
-	if !ok {
-		return nil, fmt.Errorf("no harness %q: run 'devc harness ls' to list harnesses", id)
-	}
-	var mine []config.Problem
-	for _, p := range probs {
-		if p.File == m.File {
-			mine = append(mine, p)
-		}
-	}
-	if len(mine) > 0 {
+	if mine := c.HarnessProblems(id); len(mine) > 0 {
 		for _, p := range mine {
 			p.File = display(c, p.File)
 			fmt.Fprintf(a.stderr, "devc: %s\n", p)
 		}
 		return nil, fmt.Errorf("the %s manifest has problems; fix them first", id)
 	}
+	m, ok := c.Harness(id)
+	if !ok {
+		return nil, fmt.Errorf("no harness %q: run 'devc harness ls' to list harnesses", id)
+	}
 	return m, nil
+}
+
+// refreshLaunches points the existing boxes' launch descriptions of m at
+// its current installation, so running boxes start the new version at the
+// next launch.
+func (a *app) refreshLaunches(ctx context.Context, e *toolEnv, m *config.Harness) {
+	hooks := &harness.BoxHooks{Config: e.cfg, Toolbox: e.tb, Out: a.stderr}
+	if err := hooks.RefreshLaunches(ctx, m); err != nil {
+		fmt.Fprintf(a.stderr, "devc: warning: %v\n", err)
+	}
+}
+
+// gcKeep collects what harness gc must keep for harness id: the versions
+// named by launch descriptions, and when the oldest running box started.
+func gcKeep(ctx context.Context, c *config.Config, eng engine.Engine, id string) (toolbox.GCKeep, error) {
+	named, err := harness.NamedVersions(c.Paths, id)
+	if err != nil {
+		return toolbox.GCKeep{}, fmt.Errorf("reading launch descriptions: %w", err)
+	}
+	keep := toolbox.GCKeep{Named: named}
+	boxes, err := eng.Ps(ctx, engine.PsOptions{Labels: map[string]string{box.LabelRole: box.RoleBox}})
+	if err != nil {
+		return keep, fmt.Errorf("listing running boxes: %w", err)
+	}
+	for _, b := range boxes {
+		ci, err := eng.Inspect(ctx, b.Name())
+		if errors.Is(err, engine.ErrNoSuchContainer) {
+			continue
+		}
+		if err != nil {
+			return keep, err
+		}
+		if !ci.State.Running {
+			continue
+		}
+		started := ci.State.Started
+		if started.IsZero() {
+			// Unknown start: assume the box predates every version.
+			started = time.Unix(0, 0)
+		}
+		if keep.Since.IsZero() || started.Before(keep.Since) {
+			keep.Since = started
+		}
+	}
+	return keep, nil
 }
 
 type harnessRow struct {
@@ -190,7 +232,7 @@ func newHarnessCmds(a *app) []*cobra.Command {
 			if err != nil {
 				return err
 			}
-			m, err := a.manifestFor(e.cfg, e.cfg.Problems, args[0])
+			m, err := a.manifestFor(e.cfg, args[0])
 			if err != nil {
 				return err
 			}
@@ -202,6 +244,7 @@ func newHarnessCmds(a *app) []*cobra.Command {
 			}
 			if in != nil {
 				fmt.Fprintf(a.stdout, "installed %s: %s (%s)\n", m.ID, in.Version, in.Stamp)
+				a.refreshLaunches(ctx, e, m)
 			}
 			return nil
 		},
@@ -210,8 +253,10 @@ func newHarnessCmds(a *app) []*cobra.Command {
 
 	gc := &cobra.Command{
 		Use:   "gc",
-		Short: "Remove harness versions other than current and the two newest",
-		Args:  noArgs,
+		Short: "Remove harness versions no box can be using",
+		Long: "Remove harness versions other than current, the two newest, every version a box's launch description " +
+			"names, and every version that was current at any time since the oldest running box started.",
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, probs, err := a.load()
 			if err != nil {
@@ -223,8 +268,15 @@ func newHarnessCmds(a *app) []*cobra.Command {
 			if err != nil {
 				return err
 			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
+			defer cancel()
+			eng := a.engine(c)
 			for _, id := range ids {
-				removed, err := tb.GC(id)
+				keep, err := gcKeep(ctx, c, eng, id)
+				if err != nil {
+					return fmt.Errorf("harness gc removes nothing while it cannot tell which versions are in use: %w", err)
+				}
+				removed, err := tb.GC(id, keep)
 				for _, v := range removed {
 					fmt.Fprintf(a.stdout, "removed %s %s\n", id, v)
 				}
@@ -264,11 +316,12 @@ func newHarnessCmds(a *app) []*cobra.Command {
 			defer cancel()
 			var failed []string
 			for _, id := range ids {
-				m, err := a.manifestFor(e.cfg, e.cfg.Problems, id)
+				m, err := a.manifestFor(e.cfg, id)
 				if err == nil {
 					var in *toolbox.Installed
 					if in, err = a.installer(e).Install(ctx, m, ""); err == nil && in != nil {
 						fmt.Fprintf(a.stdout, "installed %s: %s (%s)\n", m.ID, in.Version, in.Stamp)
+						a.refreshLaunches(ctx, e, m)
 					}
 				}
 				if err != nil {
@@ -504,7 +557,7 @@ func newLoginCmd(a *app) *cobra.Command {
 			if err := a.realmArg(e.cfg, args[0]); err != nil {
 				return err
 			}
-			m, err := a.manifestFor(e.cfg, e.cfg.Problems, args[1])
+			m, err := a.manifestFor(e.cfg, args[1])
 			if err != nil {
 				return err
 			}
@@ -579,7 +632,7 @@ func newLoginCmd(a *app) *cobra.Command {
 			}
 			var ms []*config.Harness
 			if len(args) == 2 {
-				m, err := a.manifestFor(c, probs, args[1])
+				m, err := a.manifestFor(c, args[1])
 				if err != nil {
 					return err
 				}

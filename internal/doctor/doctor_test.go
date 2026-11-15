@@ -116,6 +116,14 @@ func TestAllOK(t *testing.T) {
 	if Failed(cs) {
 		t.Error("Failed = true")
 	}
+	if len(f.run.Calls()) == 0 {
+		t.Error("no host command ran")
+	}
+	for _, c := range f.run.Calls() {
+		if c.Dir != "/" {
+			t.Errorf("%s ran in %q, want /", c.String(), c.Dir)
+		}
+	}
 }
 
 func TestEngine(t *testing.T) {

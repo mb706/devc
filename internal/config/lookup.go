@@ -176,8 +176,8 @@ func (c *Config) ProblemsFor(ref names.ProjectRef) []Problem {
 			dirs = append(dirs, e.Dir)
 		}
 		for _, h := range p.Harnesses {
-			if m, ok := c.harnesses[h]; ok {
-				files[m.File] = true
+			for _, f := range c.harnessFiles(h) {
+				files[f] = true
 			}
 		}
 	}
@@ -188,6 +188,39 @@ func (c *Config) ProblemsFor(ref names.ProjectRef) []Problem {
 			hit = hit || paths.Within(d, pr.File)
 		}
 		if hit {
+			out = append(out, pr)
+		}
+	}
+	return out
+}
+
+// harnessFiles lists the files whose problems concern harness id: its
+// manifest, a user manifest of that id that failed to load, and the user
+// manifest directory when it could not be listed.
+func (c *Config) harnessFiles(id string) []string {
+	var out []string
+	if m, ok := c.harnesses[id]; ok {
+		out = append(out, m.File)
+	}
+	if f, ok := c.overrides[id]; ok {
+		out = append(out, f)
+	}
+	if c.harnessDirFailed {
+		out = append(out, c.Paths.UserHarnessDir())
+	}
+	return out
+}
+
+// HarnessProblems returns the problems that make harness id unusable (see
+// harnessFiles). Commands that act on one harness refuse while any exist.
+func (c *Config) HarnessProblems(id string) []Problem {
+	files := map[string]bool{}
+	for _, f := range c.harnessFiles(id) {
+		files[f] = true
+	}
+	var out []Problem
+	for _, pr := range c.Problems {
+		if files[pr.File] {
 			out = append(out, pr)
 		}
 	}
@@ -313,7 +346,7 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 	if r.Env == "" && r.Image == "" {
 		r.Env = g.DefaultEnv
 	}
-	if p.Box.Pids > 0 {
+	if p.Box.Pids > 0 || p.Box.Pids == NoPidsLimit {
 		r.Box.Pids = p.Box.Pids
 	}
 	if r.Mounts == nil {

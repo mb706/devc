@@ -183,15 +183,55 @@ func TrimValue(b []byte) []byte {
 	return []byte(s)
 }
 
+// EnvAllowPersistent is the environment variable that permits delivering
+// secrets to a directory that is not memory-backed.
+const EnvAllowPersistent = "DEVC_ALLOW_PERSISTENT_SECRETS"
+
+// Filesystem magic numbers of statfs(2) for memory-backed filesystems.
+const (
+	tmpfsMagic = 0x01021994
+	ramfsMagic = 0x858458f6
+)
+
+// fsType reports the statfs type of dir; tests replace it.
+var fsType = func(dir string) (int64, error) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(dir, &st); err != nil {
+		return 0, err
+	}
+	return int64(st.Type), nil
+}
+
+// CheckMemoryFS fails unless dir is on tmpfs or ramfs, so delivered
+// secrets never reach persistent storage (finding A9).
+func CheckMemoryFS(dir string) error {
+	t, err := fsType(dir)
+	if err != nil {
+		return fmt.Errorf("checking the filesystem of %s: %w", dir, err)
+	}
+	if t == tmpfsMagic || t == ramfsMagic {
+		return nil
+	}
+	return fmt.Errorf("the secrets directory %s is not on tmpfs or ramfs (filesystem type %#x), so delivered secrets would be written to persistent storage: "+
+		"point XDG_RUNTIME_DIR or DEVC_RUNTIME_DIR at a tmpfs, or set %s=1 to accept persistent copies", dir, t, EnvAllowPersistent)
+}
+
 // Deliver makes dir hold exactly the given secrets as 0400 files (dir 0700),
 // replacing each file by rename so that a running box, which mounts the
 // directory itself, sees the new values. Anything else in dir is removed.
-func Deliver(p *paths.Paths, dir string, values map[string][]byte) error {
+// Unless allowPersistent is set, it refuses to write any secret when dir is
+// not memory-backed.
+func Deliver(p *paths.Paths, dir string, values map[string][]byte, allowPersistent bool) error {
 	if err := p.Ensure(dir); err != nil {
 		return err
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
+	}
+	if len(values) > 0 && !allowPersistent {
+		if err := CheckMemoryFS(dir); err != nil {
+			return err
+		}
 	}
 	for _, name := range sortedKeys(values) {
 		if !names.ValidSecret(name) {

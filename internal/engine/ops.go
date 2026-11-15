@@ -149,7 +149,8 @@ func (o BuildOptions) Args() ([]string, error) {
 	if err := checkImageRef(o.Tag); err != nil {
 		return nil, err
 	}
-	args := []string{"build", "--file", o.File, "--tag", o.Tag}
+	// Build containers get no host proxy variables either (see RunOptions).
+	args := []string{"build", "--http-proxy=false", "--file", o.File, "--tag", o.Tag}
 	for _, k := range sortedMapKeys(o.Labels) {
 		if !labelKeyRE.MatchString(k) || strings.ContainsAny(o.Labels[k], "\x00\n") {
 			return nil, fmt.Errorf("invalid label %q", k)
@@ -201,6 +202,7 @@ func (p *Podman) stream(ctx context.Context, timeout time.Duration, out io.Write
 
 // Build implements Engine.
 func (p *Podman) Build(ctx context.Context, o BuildOptions, out io.Writer) error {
+	o.Labels = mergeLabels(o.Labels, p.ExtraLabels)
 	args, err := o.Args()
 	if err != nil {
 		return err
@@ -222,7 +224,14 @@ func (p *Podman) runLong(ctx context.Context, args ...string) (execx.Result, err
 
 // Create implements Engine.
 func (p *Podman) Create(ctx context.Context, args []string) (string, error) {
-	res, err := p.runLong(ctx, append([]string{"create"}, args...)...)
+	full := []string{"create"}
+	for _, k := range sortedMapKeys(p.ExtraLabels) {
+		if !labelKeyRE.MatchString(k) || strings.ContainsAny(p.ExtraLabels[k], "\x00\n") {
+			return "", fmt.Errorf("invalid label %q", k)
+		}
+		full = append(full, "--label", k+"="+p.ExtraLabels[k])
+	}
+	res, err := p.runLong(ctx, append(full, args...)...)
 	if err != nil {
 		return "", err
 	}

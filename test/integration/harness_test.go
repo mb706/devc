@@ -71,6 +71,14 @@ func TestTmux(t *testing.T) {
 		t.Errorf("toolbox ls:\n%s", res.Stdout)
 	}
 	e.MustRun("up", hello)
+	if got := runOK(t, e, hello, "sh", "-c", "echo $TERMINFO_DIRS"); got != "/opt/devc/terminfo:" {
+		t.Errorf("TERMINFO_DIRS = %q", got)
+	}
+	// The image's own database stays in use: Debian's linux entry lives
+	// only in /lib/terminfo.
+	if got := runOK(t, e, hello, "tput", "-T", "linux", "colors"); got != "8" {
+		t.Errorf("tput -T linux colors = %q", got)
+	}
 	if got := runOK(t, e, hello, "tmux", "-V"); !strings.HasPrefix(got, "tmux 3.") {
 		t.Errorf("tmux -V = %q", got)
 	}
@@ -83,12 +91,14 @@ func TestTmux(t *testing.T) {
 	}
 	// script(1) gives the client a terminal; the client attaches, then
 	// detaches at once. foot and xterm-kitty are not in Debian's base
-	// terminfo, so they show that the toolbox's database is used.
+	// terminfo, so they show that the toolbox's database is used. The box
+	// environment itself carries TERMINFO_DIRS (finding B4); nothing is
+	// injected here.
 	if runCode(e, hello, "test", "-e", "/usr/share/terminfo/f/foot") == 0 {
 		t.Log("the image has its own foot entry; the foot case proves less")
 	}
 	for _, term := range []string{"xterm-256color", "foot", "xterm-kitty"} {
-		res := e.Run("run", hello, "--", "env", "TERM="+term, "TERMINFO_DIRS=/opt/devc/terminfo:",
+		res := e.Run("run", hello, "--", "env", "TERM="+term,
 			"script", "-qec", "tmux -L it attach-session -t t \\; detach-client", "/dev/null")
 		if res.ExitCode != 0 || strings.Contains(res.Stdout+res.Stderr, "terminal") {
 			t.Errorf("attach with TERM=%s: exit %d\n%s\n%s", term, res.ExitCode, res.Stdout, res.Stderr)
@@ -187,17 +197,39 @@ func TestHarnessInstall(t *testing.T) {
 		t.Error("installing a harness made the box drift")
 	}
 
-	// gc keeps current and the two newest; current is the newest here.
+	// The installation rewrote the box's launch description, which names
+	// the concrete version (finding E1).
+	if got := runOK(t, e, hello, "cat", "/etc/devc/harness/fake.json"); !strings.Contains(got, `"/opt/devc/harness/fake/v/`+s2+`/bin/fakeagent"`) {
+		t.Errorf("launch description:\n%s", got)
+	}
+
+	// gc keeps current, the two newest, what descriptions name and what was
+	// current since the oldest running box started: with hello running
+	// since before s1 was replaced, nothing goes.
 	s3 := install(t, e, "fake")
 	res := e.MustRun("harness", "gc")
-	if strings.TrimSpace(res.Stdout) != "removed fake "+s1 {
-		t.Errorf("gc: %q", res.Stdout)
+	if strings.TrimSpace(res.Stdout) != "" {
+		t.Errorf("gc with a running box: %q", res.Stdout)
 	}
-	if r := harnessLs(t, e)["fake"]; !slices.Equal(r.Versions, []string{s2, s3}) || r.Stamp != s3 {
+	if r := harnessLs(t, e)["fake"]; !slices.Equal(r.Versions, []string{s1, s2, s3}) || r.Stamp != s3 {
 		t.Errorf("after gc: %+v", r)
 	}
 	if got := runOK(t, e, hello, "fake", "--version"); got != "fakeagent 1.0.0" {
 		t.Errorf("after gc: %q", got)
+	}
+	// Once no box runs, s1 is unused (the stopped box's description names
+	// s3). Running boxes outside this test would keep it.
+	e.MustRun("down", hello)
+	if others := strings.TrimSpace(itest.Podman(t, "ps", "--filter", "label=devc.role=box", "--format", "{{.Names}}")); others != "" {
+		t.Logf("other running boxes on this host (%s); not checking the removal of %s", others, s1)
+		return
+	}
+	res = e.MustRun("harness", "gc")
+	if strings.TrimSpace(res.Stdout) != "removed fake "+s1 {
+		t.Errorf("gc without running boxes: %q", res.Stdout)
+	}
+	if r := harnessLs(t, e)["fake"]; !slices.Equal(r.Versions, []string{s2, s3}) {
+		t.Errorf("after the second gc: %+v", r)
 	}
 }
 

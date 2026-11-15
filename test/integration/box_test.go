@@ -23,7 +23,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-const (
+var (
 	hello    = itest.RealmA + "/hello"
 	analysis = itest.RealmA + "/analysis"
 	tools    = itest.RealmB + "/tools"
@@ -83,7 +83,7 @@ func TestBoxLifecycle(t *testing.T) {
 
 	// 1. up creates a running box; ls shows it; a second up is a no-op.
 	res := e.MustRun("up", hello)
-	if !strings.Contains(res.Stderr, "is ready") || !strings.Contains(res.Stderr, "not enforced yet") {
+	if !strings.Contains(res.Stderr, "is ready") || strings.Contains(res.Stderr, "network") || strings.Contains(res.Stderr, "cgroup") {
 		t.Errorf("up output:\n%s", res.Stderr)
 	}
 	rows := ls(t, e)
@@ -143,8 +143,15 @@ func TestBoxLifecycle(t *testing.T) {
 	if len(seen) != len(wantMounts)+1 || !seen["/run/devc"] {
 		t.Errorf("mounts seen: %v", seen)
 	}
-	if ci.Labels["devc.realm"] != itest.RealmA || ci.Labels["devc.project"] != "hello" || ci.Labels["devc.role"] != "box" || len(ci.Labels["devc.confighash"]) != 64 {
+	if ci.Labels["devc.realm"] != itest.RealmA || ci.Labels["devc.project"] != "hello" || ci.Labels["devc.role"] != "box" || len(ci.Labels["devc.confighash"]) != 64 ||
+		ci.Labels["devc.test"] != "1" || ci.Labels[itest.LabelRun] != itest.Nonce {
 		t.Errorf("labels: %v", ci.Labels)
+	}
+	// The host's proxy variables never reach a box.
+	for _, kv := range ci.Env {
+		if strings.HasPrefix(strings.ToLower(kv), "http_proxy=") || strings.HasPrefix(strings.ToLower(kv), "https_proxy=") {
+			t.Errorf("proxy variable in the box: %s", kv)
+		}
 	}
 
 	// 3. Identity inside the box, and file ownership on the host.
@@ -226,6 +233,22 @@ func TestBoxLifecycle(t *testing.T) {
 	if got := out(t, e, "root", hello, "--", "sh", "-c", "grep CapEff /proc/self/status"); strings.HasSuffix(got, "0000000000000000") {
 		t.Errorf("root has no capabilities: %s", got)
 	}
+	// A program planted in the box-writable ~/.local/bin is never run
+	// by devc root (finding A1): root has the image's PATH, HOME=/root
+	// and / as its working directory.
+	e.MustRun("run", hello, "--", "sh", "-c", "mkdir -p ~/.local/bin && printf '#!/bin/sh\\ntouch /home/dev/planted-ran\\n' > ~/.local/bin/id && chmod +x ~/.local/bin/id")
+	if got := out(t, e, "run", hello, "--", "sh", "-c", "command -v id"); got != "/home/dev/.local/bin/id" {
+		t.Errorf("the planted id is not first in dev's PATH: %q", got)
+	}
+	if got := out(t, e, "root", hello, "--", "id", "-u"); got != "0" {
+		t.Errorf("root id -u = %q", got)
+	}
+	if runCode(e, hello, "test", "-e", "/home/dev/planted-ran") == 0 {
+		t.Error("devc root ran the planted program")
+	}
+	if got := out(t, e, "root", hello, "--", "sh", "-c", "pwd; echo $HOME; echo $PATH"); got != "/\n/root\n/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" {
+		t.Errorf("root environment:\n%s", got)
+	}
 	// Exit codes propagate.
 	if res := e.Run("run", hello, "--", "sh", "-c", "exit 7"); res.ExitCode != 7 {
 		t.Errorf("run exit code %d, want 7", res.ExitCode)
@@ -233,6 +256,13 @@ func TestBoxLifecycle(t *testing.T) {
 
 	// 6. The home survives down/up and rm/up; rm --home deletes it.
 	e.MustRun("run", hello, "--", "sh", "-c", "echo kept > ~/keep")
+	// Files of in-box root (a subordinate UID on the host) in a closed
+	// directory, and a symlink out of the home: rm --home deletes them in
+	// the helper container and leaves the link's target alone (finding A8).
+	e.MustRun("root", hello, "--", "sh", "-c", "mkdir /home/dev/rootdir && touch /home/dev/rootdir/f && chmod 700 /home/dev/rootdir")
+	// The link names the project's host path, which a host tool walking
+	// the home would reach.
+	e.MustRun("run", hello, "--", "ln", "-s", filepath.Join(e.ProjectsRoot, itest.RealmA, "hello"), "/home/dev/to-project")
 	e.MustRun("down", hello)
 	if rows := ls(t, e); rows[hello].State != "stopped" {
 		t.Errorf("after down: %+v", rows[hello])
@@ -252,6 +282,9 @@ func TestBoxLifecycle(t *testing.T) {
 	e.MustRun("rm", "--home", hello)
 	if _, err := os.Stat(filepath.Join(box, "home")); !os.IsNotExist(err) {
 		t.Errorf("home still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(e.ProjectsRoot, itest.RealmA, "hello", "owned-by-me")); err != nil {
+		t.Errorf("rm --home followed the symlink into the project: %v", err)
 	}
 	e.MustRun("up", hello)
 	if res := e.Run("run", hello, "--", "test", "-e", "/home/dev/keep"); res.ExitCode == 0 {
@@ -312,14 +345,20 @@ func TestIdentityAndNetwork(t *testing.T) {
 		t.Errorf("interfaces with network none: %q", ifaces)
 	}
 
-	e.WriteConfig("envs/ituid/Containerfile", "FROM docker.io/library/debian:bookworm-slim\n"+
-		"RUN useradd --uid 1000 --create-home --home-dir /home/other --shell /bin/sh other && groupadd --gid 2000 svc\n")
-	e.WriteConfig("realms/"+itest.RealmA+"/projects/uidtest/project.toml", "env = \"ituid\"\n")
+	e.WriteConfig("envs/"+itest.EnvUID+"/Containerfile", "FROM docker.io/library/debian:bookworm-slim\n"+
+		"RUN useradd --uid 1000 --create-home --home-dir /home/other --shell /bin/sh other && groupadd --gid 2000 svc\n"+
+		// An application entrypoint that would swallow devc's init
+		// (finding B6): devc sets its own.
+		"ENTRYPOINT [\"/bin/sh\", \"-c\", \"echo not devc; exit 3\"]\n")
+	e.WriteConfig("realms/"+itest.RealmA+"/projects/uidtest/project.toml", "env = \""+itest.EnvUID+"\"\n")
 	uid := itest.RealmA + "/uidtest"
 	old := e.Timeout
 	e.Timeout = 10 * time.Minute
 	e.MustRun("up", uid)
 	e.Timeout = old
+	if got := out(t, e, "run", uid, "--", "cat", "/proc/1/cmdline"); !strings.Contains(got, "devc") {
+		t.Errorf("PID 1 is not devc's init: %q", got)
+	}
 	if got := out(t, e, "run", uid, "--", "id"); got != "uid=1000(dev) gid=1000(dev) groups=1000(dev)" {
 		t.Errorf("id with a renamed user: %q", got)
 	}
@@ -360,6 +399,15 @@ func TestMountsAndRealms(t *testing.T) {
 		return m.Destination == "/w/"+hello && !m.RW
 	}) {
 		t.Errorf("mounts: %+v", ci.Mounts)
+	}
+
+	// Network levels that are not enforced yet fail closed (finding A5).
+	e.WriteConfig("realms/"+itest.RealmA+"/projects/hello/project.toml", "[network]\nlevel = \"internet\"\n")
+	if res := e.Run("up", hello); res.ExitCode != 1 || !strings.Contains(res.Stderr, "not implemented yet") {
+		t.Errorf("up with network internet: %d\n%s", res.ExitCode, res.Stderr)
+	}
+	if ls(t, e)[hello].State != "absent" {
+		t.Error("a box was created with network internet")
 	}
 
 	// A mount naming another realm stays rejected, and up fails closed.

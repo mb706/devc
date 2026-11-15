@@ -121,7 +121,9 @@ func (h *Host) run(ctx context.Context, name string, args ...string) (execx.Resu
 	if t == 0 {
 		t = 15 * time.Second
 	}
-	return h.Runner.Run(ctx, execx.Cmd{Name: name, Args: args, Timeout: t})
+	// Host tools run from "/", never from the current directory, which may
+	// be a box-writable project (README rule 2).
+	return h.Runner.Run(ctx, execx.Cmd{Name: name, Args: args, Dir: "/", Timeout: t})
 }
 
 // readSmall reads a small host file below Root.

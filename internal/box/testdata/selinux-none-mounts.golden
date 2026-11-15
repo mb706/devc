@@ -24,6 +24,8 @@ label=level:s0:c100,c200
 16g
 --network
 none
+--entrypoint
+/opt/devc/bin/devc
 --workdir
 /w/demo/hello
 --env
@@ -40,6 +42,8 @@ DEVC_REALM=demo
 DEVC_PROJECT=hello
 --env
 PATH=/opt/devc/shims:/opt/devc/bin:/home/dev/.local/bin:/usr/local/bin:/usr/bin:/bin
+--env
+TERMINFO_DIRS=/opt/devc/terminfo:
 --mount
 type=bind,source=/home/u/devc/demo/hello,destination=/w/demo/hello
 --mount
@@ -67,8 +71,7 @@ devc.project=hello
 --label
 devc.role=box
 --label
-devc.confighash=cc6e3272c502cab18385f3639eb93eeddc9ec26f544f9d474130b39a4d65d4ca
+devc.confighash=1f54d7b7b9705f5bd4d30654f17fc6924bedf52614101b3d2bb18604126a98d8
 localhost/devc-env/base:latest
-/opt/devc/bin/devc
 box
 init

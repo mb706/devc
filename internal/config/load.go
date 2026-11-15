@@ -66,6 +66,14 @@ type Config struct {
 	projects  map[names.ProjectRef]*Project
 	envs      map[string]*Env
 	harnesses map[string]*Harness
+	// overrides maps a harness id to the file in <config>/harness that
+	// defines it, also when that file failed to load: an existing user
+	// manifest is authoritative, and a broken one never falls back to the
+	// built-in manifest of the same id.
+	overrides map[string]string
+	// harnessDirFailed is set when <config>/harness exists but cannot be
+	// listed, so no harness can be trusted to be the intended one.
+	harnessDirFailed bool
 }
 
 // maxConfigFile bounds every configuration file; anything larger is a mistake.
@@ -84,6 +92,7 @@ func Load(p *paths.Paths) (*Config, []Problem) {
 		projects:  map[names.ProjectRef]*Project{},
 		envs:      map[string]*Env{},
 		harnesses: map[string]*Harness{},
+		overrides: map[string]string{},
 	}
 
 	c.Global = defaultGlobal()
@@ -259,9 +268,10 @@ func (c *Config) loadHarnesses(ps *problems) {
 	des, err := os.ReadDir(dir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		ps.add(dir, "", "cannot list: %v", err)
+		c.harnessDirFailed = true
 	}
 	for _, de := range des {
-		if de.IsDir() || !strings.HasSuffix(de.Name(), ".toml") || strings.HasPrefix(de.Name(), ".") {
+		if !strings.HasSuffix(de.Name(), ".toml") || strings.HasPrefix(de.Name(), ".") {
 			continue
 		}
 		file := filepath.Join(dir, de.Name())
@@ -270,8 +280,19 @@ func (c *Config) loadHarnesses(ps *problems) {
 			ps.add(file, "", "file name: %v", err)
 			continue
 		}
+		// From here on the file is the manifest of id, whether or not it
+		// loads: the built-in one is gone either way.
+		c.overrides[id] = file
+		delete(c.harnesses, id)
+		if de.IsDir() {
+			ps.add(file, "", "not a regular file")
+			continue
+		}
 		data, ok := readOptional(file, ps)
 		if !ok {
+			if _, err := os.Stat(file); errors.Is(err, fs.ErrNotExist) {
+				ps.add(file, "", "cannot read: the file vanished or is a dangling symlink")
+			}
 			continue
 		}
 		h := defaultHarness()

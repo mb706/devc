@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/mb706/devc/internal/paths"
@@ -84,10 +85,13 @@ func TestDeliver(t *testing.T) {
 	p := testPaths(t)
 	rt, _ := p.RuntimeDir()
 	dir := filepath.Join(rt, "abc-secrets")
-	if err := Deliver(p, dir, map[string][]byte{"a": []byte("1"), "B_C": []byte("2")}); err != nil {
+	orig := fsType
+	defer func() { fsType = orig }()
+	fsType = func(string) (int64, error) { return tmpfsMagic, nil }
+	if err := Deliver(p, dir, map[string][]byte{"a": []byte("1"), "B_C": []byte("2")}, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := Deliver(p, dir, map[string][]byte{"a": []byte("one")}); err != nil {
+	if err := Deliver(p, dir, map[string][]byte{"a": []byte("one")}, false); err != nil {
 		t.Fatal(err)
 	}
 	des, _ := os.ReadDir(dir)
@@ -99,8 +103,27 @@ func TestDeliver(t *testing.T) {
 	if fi.Mode().Perm() != 0o400 || string(b) != "one" {
 		t.Errorf("a: %v %q", fi.Mode(), b)
 	}
-	if err := Deliver(p, filepath.Join(t.TempDir(), "elsewhere"), nil); err == nil {
+	if err := Deliver(p, filepath.Join(t.TempDir(), "elsewhere"), nil, false); err == nil {
 		t.Error("Deliver wrote outside the devc directories")
+	}
+	// A persistent filesystem is refused unless explicitly allowed; with
+	// nothing to deliver there is nothing to refuse (finding A9).
+	fsType = func(string) (int64, error) { return 0xef53, nil } // ext4
+	if err := Deliver(p, dir, map[string][]byte{"a": []byte("two")}, false); err == nil || !strings.Contains(err.Error(), EnvAllowPersistent) {
+		t.Errorf("persistent filesystem: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "a")); string(b) != "one" {
+		t.Errorf("a refused delivery changed the file: %q", b)
+	}
+	if err := Deliver(p, dir, map[string][]byte{"a": []byte("two")}, true); err != nil {
+		t.Errorf("explicitly allowed: %v", err)
+	}
+	if err := Deliver(p, dir, nil, false); err != nil {
+		t.Errorf("empty delivery: %v", err)
+	}
+	fsType = orig
+	if err := CheckMemoryFS("/proc"); err == nil {
+		t.Error("procfs accepted as memory-backed")
 	}
 	if err := Remove(dir); err != nil {
 		t.Fatal(err)

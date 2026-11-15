@@ -13,7 +13,6 @@ import (
 
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
-	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/harness"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/secrets"
@@ -41,9 +40,9 @@ func (a *app) boxEnv() (*boxEnv, error) {
 	if err != nil {
 		return nil, fmt.Errorf("locating the devc executable: %w", err)
 	}
-	eng := engine.NewPodman(c.Global.Engine, a.runner)
-	m := box.NewManager(c, eng, a.runner, exe, version.Version, a.stderr)
-	hooks := &harness.BoxHooks{Config: c, Toolbox: m.Toolbox, Secrets: secrets.NewFileStore(c.Paths), Out: a.stderr}
+	m := box.NewManager(c, a.engine(c), a.runner, exe, version.Version, a.stderr)
+	hooks := &harness.BoxHooks{Config: c, Toolbox: m.Toolbox, Secrets: secrets.NewFileStore(c.Paths), Out: a.stderr,
+		AllowPersistentSecrets: a.getenv(secrets.EnvAllowPersistent) == "1"}
 	m.Contributors = append(m.Contributors, hooks)
 	m.Preparers = append(m.Preparers, hooks)
 	m.Cleaners = append(m.Cleaners, hooks)

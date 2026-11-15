@@ -78,6 +78,9 @@ func (r *Response) matches(c Cmd) bool {
 }
 
 func (f *Fake) answer(c Cmd) (*Response, error) {
+	// Recorded calls carry the directory the real runner would use, so
+	// tests can assert that nothing runs in the caller's directory.
+	c.Dir = c.WorkDir()
 	var stdin string
 	if c.Stdin != nil {
 		// Drain stdin so tests can assert on what was sent.

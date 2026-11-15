@@ -9,10 +9,14 @@
 // argument list is built as a vector, never a shell string (rule 3); every
 // container found by name is checked for devc's labels before it is used
 // (C02 amendment); commands that create or start a box refuse while the
-// project's configuration has problems (rule 6); and host code never runs
-// anything in the project directory (rule 2): the only host operations on
-// it are mkdir, lstat checks on mount points, and restorecon on SELinux
-// hosts.
+// project's configuration has problems, and protections that cannot be
+// applied (resource limits, network levels) fail the box (rule 6); host
+// code never runs anything in box-writable directories (rule 2): mount
+// sources and mount points are created without following symlinks
+// (safefs), a box home is deleted from the helper container, restorecon on
+// SELinux hosts is the one host tool that walks a project; root execs use
+// a fixed system PATH, HOME=/root and "/" as working directory; and every
+// lifecycle operation holds the box's lock.
 package box
 
 import (
@@ -41,6 +45,7 @@ const (
 	LabelRole       = "devc.role"
 	LabelConfigHash = "devc.confighash"
 	RoleBox         = "box"
+	RoleHelper      = "helper"
 )
 
 // Mount is one bind mount of the box.
@@ -102,14 +107,22 @@ type Spec struct {
 	Image    string
 	ImageID  string
 	Workdir  string
-	Command  []string
+	// Entrypoint replaces the image's ENTRYPOINT, so devc's init is the
+	// process started whatever the image declares; Command are its
+	// arguments.
+	Entrypoint string
+	Command    []string
 
 	SecurityOpts []string
 	Limits       []string
 	Network      []string
-	Env          []EnvVar
-	Mounts       []Mount
-	Labels       []EnvVar // without the hash label
+	// Devices are passed with --device (GPU, KVM); GroupAdd with
+	// --group-add.
+	Devices  []string
+	GroupAdd []string
+	Env      []EnvVar
+	Mounts   []Mount
+	Labels   []EnvVar // without the hash label
 	// Warnings are printed by devc up.
 	Warnings []string
 
@@ -168,7 +181,8 @@ func BuildSpec(in Inputs, contribs ...Contributor) (*Spec, error) {
 		Image:         in.ImageRef,
 		ImageID:       in.Image.ID,
 		Workdir:       paths.InBoxProjectDir(ref),
-		Command:       []string{paths.InBoxHelper, "box", "init"},
+		Entrypoint:    paths.InBoxHelper,
+		Command:       []string{"box", "init"},
 		seccompDigest: hex.EncodeToString(sum[:]),
 	}
 
@@ -187,6 +201,8 @@ func BuildSpec(in Inputs, contribs ...Contributor) (*Spec, error) {
 		}
 	}
 
+	// A configured limit that cannot be applied fails the box (README rule
+	// 6); "none" and -1 switch a limit off explicitly.
 	var missing []string
 	if r.Box.Pids > 0 {
 		if slices.Contains(in.Host.Controllers, "pids") {
@@ -195,7 +211,7 @@ func BuildSpec(in Inputs, contribs ...Contributor) (*Spec, error) {
 			missing = append(missing, "pids")
 		}
 	}
-	if r.Box.Memory != "" {
+	if r.Box.Memory != "" && r.Box.Memory != config.NoLimit {
 		if slices.Contains(in.Host.Controllers, "memory") {
 			s.Limits = append(s.Limits, "--memory", r.Box.Memory)
 		} else {
@@ -203,8 +219,9 @@ func BuildSpec(in Inputs, contribs ...Contributor) (*Spec, error) {
 		}
 	}
 	if len(missing) > 0 {
-		s.Warnings = append(s.Warnings, fmt.Sprintf("the cgroup controller(s) %s are not delegated to this user: the box runs without that limit (see 'devc doctor')",
-			strings.Join(missing, " and ")))
+		return nil, fmt.Errorf("the cgroup controller(s) %s are not delegated to this user, so the configured limits cannot be applied: "+
+			"enable delegation (see 'devc doctor'), or switch the limits off explicitly with memory = \"none\" and pids = -1 under [box] in config.toml or project.toml",
+			strings.Join(missing, " and "))
 	}
 
 	net, err := netpolicy.BoxArgs(r.Network)
@@ -212,8 +229,19 @@ func BuildSpec(in Inputs, contribs ...Contributor) (*Spec, error) {
 		return nil, err
 	}
 	s.Network = net.Args
-	if net.Warning != "" {
-		s.Warnings = append(s.Warnings, net.Warning)
+
+	if r.Capabilities.Nested {
+		return nil, fmt.Errorf("capabilities.nested = true is not implemented yet: boxes cannot create user namespaces; remove the setting")
+	}
+	if r.Capabilities.GPU {
+		// CDI name of all NVIDIA GPUs (nvidia-ctk cdi generate).
+		s.Devices = append(s.Devices, "nvidia.com/gpu=all")
+	}
+	if r.Capabilities.KVM {
+		// /dev/kvm is usually group kvm; keep-groups carries the user's
+		// supplementary groups into the box so the device is usable.
+		s.Devices = append(s.Devices, "/dev/kvm")
+		s.GroupAdd = append(s.GroupAdd, "keep-groups")
 	}
 
 	imagePATH, _ := in.Image.EnvValue("PATH")
@@ -225,6 +253,9 @@ func BuildSpec(in Inputs, contribs ...Contributor) (*Spec, error) {
 		{"DEVC_REALM", r.Realm},
 		{"DEVC_PROJECT", r.Project},
 		{"PATH", BoxPATH(imagePATH)},
+		// The toolbox's terminfo first; the empty entry keeps the image's
+		// own database in use.
+		{"TERMINFO_DIRS", paths.InBoxTerminfo + ":"},
 	} {
 		if err := s.AddEnv(e.Name, e.Value); err != nil {
 			return nil, err
@@ -369,6 +400,13 @@ func (s *Spec) argsWithoutHash() []string {
 	}
 	a = append(a, s.Limits...)
 	a = append(a, s.Network...)
+	for _, d := range s.Devices {
+		a = append(a, "--device", d)
+	}
+	for _, g := range s.GroupAdd {
+		a = append(a, "--group-add", g)
+	}
+	a = append(a, "--entrypoint", s.Entrypoint)
 	a = append(a, "--workdir", s.Workdir)
 	for _, e := range s.Env {
 		a = append(a, "--env", e.Name+"="+e.Value)

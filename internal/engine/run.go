@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,15 +21,26 @@ type RunMount struct {
 }
 
 // RunOptions describe a throwaway container (`podman run --rm`): the
-// installer, the tmux build, logins. Environment values appear in the
-// engine's argument list and in `podman inspect`; never put a secret in Env.
+// installer, the tmux build, logins, helper workers. Environment values
+// appear in the engine's argument list and in `podman inspect`; never put a
+// secret in Env. The host's proxy variables are never passed in
+// (--http-proxy=false): they are host environment and may carry
+// credentials.
 type RunOptions struct {
-	Image  string
+	Image string
+	// Rootfs, set instead of Image, is a host directory used as the root
+	// filesystem behind a throwaway overlay (--rootfs <dir>:O), so the
+	// container cannot change it: the helper container of plan 3.3.
+	Rootfs string
 	Labels map[string]string
 	// Network is "" for the engine default or "none".
 	Network      string
 	SecurityOpts []string
-	Mounts       []RunMount
+	// CapDropAll drops every capability; CapAdd then adds the named ones
+	// (without the CAP_ prefix).
+	CapDropAll bool
+	CapAdd     []string
+	Mounts     []RunMount
 	// Tmpfs lists empty tmpfs mounts (absolute paths).
 	Tmpfs   []string
 	Env     []string // "KEY=value"
@@ -48,13 +60,26 @@ type RunOptions struct {
 
 // Args returns the arguments of `podman run` for o.
 func (o RunOptions) Args() ([]string, error) {
-	if err := checkImageRef(o.Image); err != nil {
-		return nil, err
+	switch {
+	case (o.Image == "") == (o.Rootfs == ""):
+		return nil, errors.New("run: set exactly one of an image and a root filesystem")
+	case o.Image != "":
+		if err := checkImageRef(o.Image); err != nil {
+			return nil, err
+		}
+	default:
+		if !filepath.IsAbs(o.Rootfs) || filepath.Clean(o.Rootfs) != o.Rootfs || strings.ContainsAny(o.Rootfs, ":,\"\n\r\x00") {
+			return nil, fmt.Errorf("root filesystem %q must be a clean absolute path without colons, commas, quotes or control characters", o.Rootfs)
+		}
 	}
 	if len(o.Cmd) == 0 {
 		return nil, errors.New("run: no command")
 	}
-	args := []string{"run", "--rm", "--pull=missing"}
+	args := []string{"run", "--rm"}
+	if o.Image != "" {
+		args = append(args, "--pull=missing")
+	}
+	args = append(args, "--http-proxy=false")
 	for _, k := range sortedMapKeys(o.Labels) {
 		if !labelKeyRE.MatchString(k) || strings.ContainsAny(o.Labels[k], "\x00\n") {
 			return nil, fmt.Errorf("invalid label %q", k)
@@ -73,6 +98,15 @@ func (o RunOptions) Args() ([]string, error) {
 			return nil, fmt.Errorf("invalid security option %q", s)
 		}
 		args = append(args, "--security-opt", s)
+	}
+	if o.CapDropAll {
+		args = append(args, "--cap-drop=ALL")
+	}
+	for _, c := range o.CapAdd {
+		if !capRE.MatchString(c) {
+			return nil, fmt.Errorf("invalid capability %q", c)
+		}
+		args = append(args, "--cap-add="+c)
 	}
 	for _, m := range o.Mounts {
 		for _, p := range []string{m.Source, m.Target} {
@@ -120,9 +154,15 @@ func (o RunOptions) Args() ([]string, error) {
 	if o.Interactive || o.TTY {
 		args = append(args, "--detach-keys=")
 	}
-	args = append(args, o.Image)
+	if o.Rootfs != "" {
+		args = append(args, "--rootfs", o.Rootfs+":O")
+	} else {
+		args = append(args, o.Image)
+	}
 	return append(args, o.Cmd...), nil
 }
+
+var capRE = regexp.MustCompile(`^[A-Z][A-Z_]{1,30}$`)
 
 func (o RunOptions) stdin() io.Reader {
 	if o.Stdin != nil {
@@ -136,7 +176,7 @@ func (o RunOptions) stdin() io.Reader {
 
 // Run implements Engine: the container's output is captured.
 func (p *Podman) Run(ctx context.Context, o RunOptions) (execx.Result, error) {
-	args, err := o.Args()
+	args, err := p.withLabels(o).Args()
 	if err != nil {
 		return execx.Result{}, err
 	}
@@ -150,10 +190,31 @@ func (p *Podman) Run(ctx context.Context, o RunOptions) (execx.Result, error) {
 // RunStream implements Engine: the container's output goes to o.Stdout and
 // o.Stderr (or the terminal) and its exit code is returned.
 func (p *Podman) RunStream(ctx context.Context, o RunOptions) (int, error) {
-	args, err := o.Args()
+	args, err := p.withLabels(o).Args()
 	if err != nil {
 		return -1, err
 	}
 	return p.Runner.Interactive(ctx, execx.Cmd{Name: p.Bin, Args: args, Dir: "/", Stdin: o.stdin(),
 		Stdout: o.Stdout, Stderr: o.Stderr, Timeout: o.Timeout})
+}
+
+// withLabels adds the engine's extra labels to a throwaway container.
+func (p *Podman) withLabels(o RunOptions) RunOptions {
+	o.Labels = mergeLabels(o.Labels, p.ExtraLabels)
+	return o
+}
+
+// mergeLabels returns base with extra added; base wins on a clash.
+func mergeLabels(base, extra map[string]string) map[string]string {
+	if len(extra) == 0 {
+		return base
+	}
+	out := make(map[string]string, len(base)+len(extra))
+	for k, v := range extra {
+		out[k] = v
+	}
+	for k, v := range base {
+		out[k] = v
+	}
+	return out
 }

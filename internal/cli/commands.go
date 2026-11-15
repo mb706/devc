@@ -16,7 +16,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mb706/devc/internal/doctor"
-	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/version"
 )
@@ -47,7 +46,7 @@ func newDoctorCmd(a *app) *cobra.Command {
 			}
 			a.warnProblems(probs)
 			name, uid := currentUser(a.getenv)
-			eng := engine.NewPodman(c.Global.Engine, a.runner)
+			eng := a.engine(c)
 			h := doctor.NewHost(a.runner, eng, name, uid, c.Paths.ProjectsRoot(), c.Paths.StateDir())
 			h.Getenv = a.getenv
 			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Minute)

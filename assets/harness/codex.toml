@@ -12,7 +12,9 @@ method = "script"
 # its in-box path.
 url = "https://chatgpt.com/codex/install.sh"
 args = []
-env = { CODEX_HOME = "{dir}/home/.codex" }
+# CODEX_RELEASE pins the version (install.sh [--release VERSION]); devc
+# leaves it out when no version is requested.
+env = { CODEX_HOME = "{dir}/home/.codex", CODEX_RELEASE = "{version}" }
 exe = "home/.local/bin/codex"
 needs = []
 version_cmd = ["--version"]
@@ -31,12 +33,23 @@ status = ["codex", "login", "status"]
 env = ""
 secret = ""
 
+# Codex's home is realm-shared and box-writable, and its config.toml there
+# outranks the system layer /etc/codex/config.toml. What Codex lets an
+# administrator enforce goes into /etc/codex/requirements.toml (allowed
+# approval policies and sandbox modes, managed hooks); the remaining
+# settings are also written as managed defaults (/etc/codex/
+# managed_config.toml), which Codex applies over the user's configuration
+# at every start. See docs/dev/LEFTOVER.md for what stays unenforced.
 [baseline.settings]
-# The system configuration layer: below the user's $CODEX_HOME/config.toml
-# in precedence; its hooks count as managed and need no trust review.
 path = "/etc/codex/config.toml"
 format = "toml"
 template = "codex-config.toml.tmpl"
+also = ["/etc/codex/managed_config.toml"]
+
+[[baseline.files]]
+path = "/etc/codex/requirements.toml"
+format = "toml"
+template = "codex-requirements.toml.tmpl"
 
 [env]
 

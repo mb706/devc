@@ -68,15 +68,15 @@ func TestSmoke(t *testing.T) {
 
 func TestConfigCheckRejectsBrokenConfig(t *testing.T) {
 	e := itest.New(t)
-	e.WriteConfig("realms/itdemo/projects/hello/project.toml", "harnesses = [\"claude\"]\n[[mounts]]\nproject = \"itother/tools\"\n")
-	e.WriteConfig("realms/itother/realm.toml", "[network]\ndefault = \"lan\"\n")
+	e.WriteConfig("realms/"+itest.RealmA+"/projects/hello/project.toml", "harnesses = [\"claude\"]\n[[mounts]]\nproject = \""+itest.RealmB+"/tools\"\n")
+	e.WriteConfig("realms/"+itest.RealmB+"/realm.toml", "[network]\ndefault = \"lan\"\n")
 	res := e.Run("config", "check")
 	if res.ExitCode != 1 {
 		t.Fatalf("exit %d, want 1\n%s", res.ExitCode, res.Stdout)
 	}
 	for _, want := range []string{
-		"realms/itdemo/projects/hello/project.toml: mounts[0].project:",
-		"realms/itother/realm.toml: network.default: \"lan\" is not one of",
+		"realms/" + itest.RealmA + "/projects/hello/project.toml: mounts[0].project:",
+		"realms/" + itest.RealmB + "/realm.toml: network.default: \"lan\" is not one of",
 	} {
 		if !strings.Contains(res.Stdout, want) {
 			t.Errorf("missing %q in:\n%s", want, res.Stdout)

@@ -210,6 +210,45 @@ func TestEnsure(t *testing.T) {
 	if err := p.Ensure(p.StateDir() + "-sibling"); err == nil {
 		t.Error("Ensure of a sibling with a common prefix succeeded")
 	}
+
+	// A symlink below the root (as a box could plant in harness state) is
+	// refused and nothing is created where it points.
+	outside := filepath.Join(tmp, "outside")
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := p.HarnessStateDir("work", "codex")
+	if err := p.Ensure(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(state, "home")); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Ensure(filepath.Join(state, "home", "sub")); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("Ensure through a symlink: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "sub")); !os.IsNotExist(err) {
+		t.Errorf("a directory was created through the symlink: %v", err)
+	}
+
+	// The root itself may be a symlink chosen by the user.
+	real := filepath.Join(tmp, "real-state")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(tmp, "linked-state")); err != nil {
+		t.Fatal(err)
+	}
+	q, err := Resolve(Options{Home: tmp, Getenv: env(map[string]string{EnvStateDir: filepath.Join(tmp, "linked-state")})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Ensure(q.BoxHomeDir(r)); err != nil {
+		t.Errorf("Ensure below a symlinked root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(real, "local", "boxes", "work", "foo", "home")); err != nil {
+		t.Errorf("home below the real state directory: %v", err)
+	}
 }
 
 func TestExpandHome(t *testing.T) {
