@@ -4,10 +4,17 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestFakeAgent(t *testing.T) {
@@ -108,5 +115,200 @@ func TestFakeAgentHooks(t *testing.T) {
 	}
 	if got := types(); strings.Join(got, " ") != "harness state:idle prompt state:working message state:done session.end" {
 		t.Errorf("-p hooks %q", got)
+	}
+}
+
+// openPTY opens a pseudo-terminal pair for the terminal tests.
+func openPTY(t *testing.T) (*os.File, *os.File) {
+	t.Helper()
+	m, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Skip(err)
+	}
+	if err := unix.IoctlSetPointerInt(int(m.Fd()), unix.TIOCSPTLCK, 0); err != nil {
+		t.Skip(err)
+	}
+	n, err := unix.IoctlGetUint32(int(m.Fd()), unix.TIOCGPTN)
+	if err != nil {
+		t.Skip(err)
+	}
+	s, err := os.OpenFile("/dev/pts/"+strconv.Itoa(int(n)), os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Skip(err)
+	}
+	t.Cleanup(func() { m.Close(); s.Close() })
+	return m, s
+}
+
+type termAgent struct {
+	t    *testing.T
+	m    *os.File
+	mu   sync.Mutex
+	out  bytes.Buffer
+	done chan int
+	log  string
+}
+
+func startTermAgent(t *testing.T, args ...string) *termAgent {
+	t.Helper()
+	dir := t.TempDir()
+	log := filepath.Join(dir, "hooks.log")
+	hook := filepath.Join(dir, "hook")
+	os.WriteFile(hook, []byte("#!/bin/sh\nprintf '%s ' \"$4\" >> "+log+"\ncat >> "+log+"\necho >> "+log+"\n"), 0o755)
+	t.Setenv("FAKEAGENT_HOOK", hook)
+	m, s := openPTY(t)
+	a := &termAgent{t: t, m: m, done: make(chan int, 1), log: log}
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := m.Read(buf)
+			a.mu.Lock()
+			a.out.Write(buf[:n])
+			a.mu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go func() { a.done <- run(args, s, s, io.Discard) }()
+	return a
+}
+
+func (a *termAgent) wait(what string, cond func(out, hooks string) bool) {
+	a.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		a.mu.Lock()
+		out := a.out.String()
+		a.mu.Unlock()
+		hooks, _ := os.ReadFile(a.log)
+		if cond(out, string(hooks)) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	hooks, _ := os.ReadFile(a.log)
+	a.t.Fatalf("no %s; output %q\nhooks %s", what, a.out.String(), hooks)
+}
+
+func (a *termAgent) write(s string) { a.m.Write([]byte(s)) }
+
+func hashOf(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func TestTerminalMode(t *testing.T) {
+	a := startTermAgent(t)
+	a.wait("query", func(out, _ string) bool { return strings.Contains(out, "\x1b[?2004h\x1b]7501;?\a\x1b[c") })
+	// The status wrapper's answer comes before the device attributes.
+	a.write("\x1b]7501;?:states=idle,working,done\a\x1b[?1;2c")
+	a.wait("idle report", func(out, _ string) bool { return strings.Contains(out, "\x1b]7501;state=idle:app=fakeagent\a") })
+	// A bracketed paste and the submit key: one prompt, with its hash.
+	text := "say first line\nsecond line"
+	a.write("\x1b[200~" + text + "\x1b[201~")
+	time.Sleep(100 * time.Millisecond)
+	a.write("\r")
+	a.wait("prompt", func(_, hooks string) bool { return strings.Contains(hooks, hashOf(text)) })
+	a.wait("done report", func(out, _ string) bool { return strings.Contains(out, "\x1b]7501;state=done:app=fakeagent:msg=") })
+	// Escape ends a long turn as idle.
+	a.write("sleep 30\r")
+	a.wait("working", func(_, hooks string) bool { return strings.Count(hooks, `"state":"working"`) >= 2 })
+	a.write("\x1b")
+	a.wait("interrupted", func(out, hooks string) bool {
+		return strings.Contains(out, "interrupted") && strings.HasSuffix(strings.TrimSpace(hooks), `{"data":{"state":"idle"},"type":"state"}`)
+	})
+	a.write("exit\r")
+	select {
+	case code := <-a.done:
+		if code != 0 {
+			t.Errorf("exit code %d", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the agent did not exit")
+	}
+}
+
+func TestTerminalSubmitModes(t *testing.T) {
+	a := startTermAgent(t, "--ignore-first-submit")
+	a.wait("query", func(out, _ string) bool { return strings.Contains(out, "\x1b[c") })
+	a.write("\x1b[?1;2c") // a terminal without the status protocol
+	a.wait("prompt", func(out, _ string) bool { return strings.Contains(out, "fake> ") })
+	a.write("\x1b[200~say once\x1b[201~\r")
+	time.Sleep(500 * time.Millisecond)
+	if hooks, _ := os.ReadFile(a.log); strings.Contains(string(hooks), "prompt") {
+		t.Errorf("the first submit key submitted: %s", hooks)
+	}
+	a.write("\r")
+	a.wait("prompt after the second key", func(_, hooks string) bool { return strings.Contains(hooks, hashOf("say once")) })
+	a.mu.Lock()
+	if strings.Contains(a.out.String(), "\x1b]7501;state") {
+		t.Error("status reports without the protocol")
+	}
+	a.mu.Unlock()
+	a.write("exit\r")
+	<-a.done
+
+	b := startTermAgent(t, "--never-submit")
+	b.wait("query", func(out, _ string) bool { return strings.Contains(out, "\x1b[c") })
+	b.write("\x1b[?1;2c")
+	b.write("\x1b[200~say never\x1b[201~\r\r\r")
+	time.Sleep(500 * time.Millisecond)
+	if hooks, _ := os.ReadFile(b.log); strings.Contains(string(hooks), "prompt") {
+		t.Errorf("--never-submit submitted: %s", hooks)
+	}
+	b.write("\x04") // C-d on a non-empty line does nothing
+}
+
+func TestCatMode(t *testing.T) {
+	m, s := openPTY(t)
+	var mu sync.Mutex
+	var out bytes.Buffer
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := m.Read(buf)
+			mu.Lock()
+			out.Write(buf[:n])
+			mu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}()
+	done := make(chan int, 1)
+	go func() { done <- run([]string{"--cat"}, s, s, io.Discard) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		ready := strings.Contains(out.String(), "<cat ready>")
+		mu.Unlock()
+		if ready || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	data := make([]byte, 2000)
+	for i := range data {
+		data[i] = byte(i*31 + 7)
+	}
+	m.Write(data)
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := out.Len()
+		mu.Unlock()
+		if n >= len("<cat ready>")+len(data) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	got := strings.TrimPrefix(out.String(), "<cat ready>")
+	mu.Unlock()
+	if got != string(data) {
+		t.Errorf("cat returned %d bytes, want the %d sent unchanged", len(got), len(data))
 	}
 }

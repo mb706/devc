@@ -652,14 +652,16 @@ func scanFlag(args []string, name string) string {
 }
 
 func (a *app) newHarnessRunCmd(id, bin, display string) *cobra.Command {
-	var worktree string
+	var worktree, prompt string
 	var detach bool
+	var f commandFlags
 	cmd := &cobra.Command{
 		Use:   bin + " [<realm>/<project>] [-w <worktree>] [--detach] [-- args...]",
 		Short: "Start a " + display + " session in a project's box",
 		Long: "Start " + display + " in a new session in the project's box (started if needed) and attach to it. " +
 			"Arguments after -- go to " + display + ". With --detach the session keeps running in the background; " +
-			"attach later with 'devc attach'.",
+			"attach later with 'devc attach'. --prompt (with --detach, through the daemon) types a first prompt once " +
+			"the session is idle and prints the receipt.",
 		Args: func(cmd *cobra.Command, args []string) error {
 			at := cmd.ArgsLenAtDash()
 			if (at < 0 && len(args) > 1) || at > 1 {
@@ -672,12 +674,75 @@ func (a *app) newHarnessRunCmd(id, bin, display string) *cobra.Command {
 			if at := cmd.ArgsLenAtDash(); at >= 0 {
 				refArgs, harnessArgs = args[:at], args[at:]
 			}
+			if prompt != "" || cmd.Flags().Changed("prompt") {
+				if !detach {
+					return usageErrorf("--prompt needs --detach")
+				}
+				return a.startWithPrompt(cmd, &f, id, refArgs, harnessArgs, worktree, prompt)
+			}
+			if f.id != "" || f.wait || f.json {
+				return usageErrorf("--id, --wait and --json apply only with --prompt")
+			}
 			return a.startSession(cmd, id, refArgs, harnessArgs, worktree, detach)
 		},
 	}
 	cmd.Flags().StringVarP(&worktree, "worktree", "w", "main", "worktree the session works in")
 	cmd.Flags().BoolVar(&detach, "detach", false, "start the session without attaching")
+	cmd.Flags().StringVar(&prompt, "prompt", "", "first prompt, typed once the session is idle (needs --detach and the daemon)")
+	f.add(cmd)
 	return cmd
+}
+
+// startWithPrompt starts a detached session through the daemon
+// (session.start) with a first prompt, after preparing the box as
+// startSession does.
+func (a *app) startWithPrompt(cmd *cobra.Command, f *commandFlags, id string, refArgs, harnessArgs []string, worktree, prompt string) error {
+	cid, err := f.commandID()
+	if err != nil {
+		return err
+	}
+	if err := names.Check(names.KindWorktree, worktree); err != nil {
+		return &usageError{msg: err.Error()}
+	}
+	e, err := a.boxEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), lifecycleTimeout)
+	defer cancel()
+	cl, err := a.daemonClient(ctx, e.cfg, nil)
+	if err != nil {
+		return errNeedsDaemon
+	}
+	defer cl.Close()
+	ref, err := a.resolveRef(e.cfg, refArgs)
+	if err != nil {
+		return err
+	}
+	if _, err := a.prepareSession(ctx, e, ref, id, worktree); err != nil {
+		return err
+	}
+	params := proto.StartParams{ID: cid, Ref: ref.String(), Harness: id, Worktree: worktree, Prompt: prompt, Args: harnessArgs}
+	if f.wait {
+		return a.callCommand(ctx, cl, f, proto.MethodSessionStart, params)
+	}
+	// Without --wait: until the session exists, so its ID can be printed.
+	var r proto.Receipt
+	if err := cl.Call(ctx, proto.MethodSessionStart, params, &r); err != nil {
+		return fmt.Errorf("the daemon: %w", err)
+	}
+	for !r.Final && r.Session == "" && ctx.Err() == nil {
+		if err := cl.Call(ctx, proto.MethodCommandGet, proto.CommandGetParams{ID: r.Command, Wait: 2}, &r); err != nil {
+			return fmt.Errorf("waiting for the session: %w", err)
+		}
+	}
+	if err := a.printReceipt(r, f.json); err != nil {
+		return err
+	}
+	if r.Outcome == proto.OutcomeRefused || r.Outcome == proto.OutcomeUnknown {
+		return exitCode(1)
+	}
+	return nil
 }
 
 func (a *app) startSession(cmd *cobra.Command, id string, refArgs, harnessArgs []string, worktree string, detach bool) error {
@@ -692,52 +757,11 @@ func (a *app) startSession(cmd *cobra.Command, id string, refArgs, harnessArgs [
 	if err != nil {
 		return err
 	}
-	r, err := e.cfg.Resolved(ref)
-	if err != nil {
-		return err
-	}
-	listed := false
-	for _, h := range r.Harnesses {
-		listed = listed || h.ID == id
-	}
-	if !listed {
-		return fmt.Errorf("%s does not list the harness %s: add it to harnesses in its project.toml", ref, id)
-	}
-	m, err := a.manifestFor(e.cfg, id)
-	if err != nil {
-		return err
-	}
-	if _, ok, err := e.mgr.Toolbox.CurrentExe(m); err != nil {
-		return err
-	} else if !ok {
-		return fmt.Errorf("the harness %s is not installed: run 'devc harness install %s'", id, id)
-	}
-	if e.mgr.Toolbox.InstalledTmux() == "" {
-		return errors.New("the toolbox has no tmux, which sessions need: run 'devc toolbox build tmux'")
-	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), lifecycleTimeout)
 	defer cancel()
-	if err := a.saveBeforeSession(ctx, e, r); err != nil {
-		return err
-	}
-	name, err := e.mgr.EnsureRunning(ctx, ref)
+	name, err := a.prepareSession(ctx, e, ref, id, worktree)
 	if err != nil {
-		return a.boxError(e.cfg, err)
-	}
-	if _, err := os.Stat(filepath.Join(e.cfg.Paths.BoxEtcDir(ref), "harness", id+".json")); err != nil {
-		return fmt.Errorf("%s was started before %s was installed: restart it with 'devc down %s', then try again", name, id, ref)
-	}
-	// A task worktree is created first when it does not exist (C05). A
-	// project without a relay has no repository to make one from; its
-	// sessions start in the project directory as before.
-	if worktree != paths.MainWorktree && (&gitx.Relay{Dir: e.cfg.Paths.RelayRepo(ref)}).Exists() {
-		dir, created, err := a.worktreeNew(ctx, e, ref, worktree, "")
-		if err != nil {
-			return fmt.Errorf("creating the worktree %s: %w", worktree, err)
-		}
-		if created {
-			fmt.Fprintf(a.stderr, "devc: created the worktree %s\n", dir)
-		}
+		return err
 	}
 	sid := names.NewSessionID()
 	boxArgs := []string{paths.InBoxHelper, "box", "session", "start", "--id", sid, "--harness", id, "--worktree", worktree}
@@ -765,6 +789,58 @@ func (a *app) startSession(cmd *cobra.Command, id string, refArgs, harnessArgs [
 		return exitCode(code)
 	}
 	return nil
+}
+
+// prepareSession checks that the project lists and has installed the
+// harness, takes a savepoint when asked, starts the box when needed and
+// creates the worktree; it returns the box's name.
+func (a *app) prepareSession(ctx context.Context, e *boxEnv, ref names.ProjectRef, id, worktree string) (string, error) {
+	r, err := e.cfg.Resolved(ref)
+	if err != nil {
+		return "", err
+	}
+	listed := false
+	for _, h := range r.Harnesses {
+		listed = listed || h.ID == id
+	}
+	if !listed {
+		return "", fmt.Errorf("%s does not list the harness %s: add it to harnesses in its project.toml", ref, id)
+	}
+	m, err := a.manifestFor(e.cfg, id)
+	if err != nil {
+		return "", err
+	}
+	if _, ok, err := e.mgr.Toolbox.CurrentExe(m); err != nil {
+		return "", err
+	} else if !ok {
+		return "", fmt.Errorf("the harness %s is not installed: run 'devc harness install %s'", id, id)
+	}
+	if e.mgr.Toolbox.InstalledTmux() == "" {
+		return "", errors.New("the toolbox has no tmux, which sessions need: run 'devc toolbox build tmux'")
+	}
+	if err := a.saveBeforeSession(ctx, e, r); err != nil {
+		return "", err
+	}
+	name, err := e.mgr.EnsureRunning(ctx, ref)
+	if err != nil {
+		return "", a.boxError(e.cfg, err)
+	}
+	if _, err := os.Stat(filepath.Join(e.cfg.Paths.BoxEtcDir(ref), "harness", id+".json")); err != nil {
+		return "", fmt.Errorf("%s was started before %s was installed: restart it with 'devc down %s', then try again", name, id, ref)
+	}
+	// A task worktree is created first when it does not exist (C05). A
+	// project without a relay has no repository to make one from; its
+	// sessions start in the project directory as before.
+	if worktree != paths.MainWorktree && (&gitx.Relay{Dir: e.cfg.Paths.RelayRepo(ref)}).Exists() {
+		dir, created, err := a.worktreeNew(ctx, e, ref, worktree, "")
+		if err != nil {
+			return "", fmt.Errorf("creating the worktree %s: %w", worktree, err)
+		}
+		if created {
+			fmt.Fprintf(a.stderr, "devc: created the worktree %s\n", dir)
+		}
+	}
+	return name, nil
 }
 
 // saveBeforeSession takes a savepoint before a session when the project

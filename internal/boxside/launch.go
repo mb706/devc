@@ -17,6 +17,7 @@ import (
 
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/proto"
+	"github.com/mb706/devc/internal/tmux"
 )
 
 // Paths of the harness descriptions and delivered secrets in a box.
@@ -95,6 +96,9 @@ type LaunchStatus struct {
 type LaunchInput struct {
 	Adapter   string `json:"adapter"`
 	SubmitKey string `json:"submit_key"`
+	// QuestionWait is how long (seconds) a question hook waits for an
+	// answer through the box channel; 0: it never waits.
+	QuestionWait int `json:"question_wait,omitempty"`
 }
 
 var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -242,6 +246,11 @@ type LaunchEnv struct {
 	Getwd func() (string, error)
 	Pid   int
 	Now   func() time.Time
+	// IsTerminal reports whether the launcher's standard input and output
+	// are terminals (nil: they are not); Helper is the devc binary that
+	// runs the status wrapper (default /opt/devc/bin/devc).
+	IsTerminal func() bool
+	Helper     string
 }
 
 // Prepared is the result of PrepareLaunch: what exec receives.
@@ -309,6 +318,18 @@ func PrepareLaunch(l *Launch, userArgs []string, e LaunchEnv) (*Prepared, error)
 
 	argv := append([]string{l.Bin}, l.Args...)
 	argv = append(argv, userArgs...)
+	// A harness that reports its status through OSC 7501 runs under the
+	// status wrapper (work order C09), but only on a terminal: without one
+	// it would get a pseudo-terminal it did not ask for (and its output
+	// carriage returns).
+	if l.Status.OSC7501 && env.get(NoPTYEnv) != "1" && e.IsTerminal != nil && e.IsTerminal() {
+		helper := e.Helper
+		if helper == "" {
+			helper = tmux.Helper
+		}
+		wrapped := append([]string{"devc", "box", "pty", "--argv0", l.Bin, "--", l.Exe}, argv[1:]...)
+		return &Prepared{Exe: helper, Argv: wrapped, Env: env.list(), Session: session}, nil
+	}
 	return &Prepared{Exe: l.Exe, Argv: argv, Env: env.list(), Session: session}, nil
 }
 

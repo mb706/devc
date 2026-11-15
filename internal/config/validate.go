@@ -24,6 +24,8 @@ var (
 	authMethods      = []string{"env-token", "shared-home", "api-key", "none"}
 	baselineFormats  = []string{"json", "toml"}
 	inputAdapters    = []string{"paste", "mod", "app-server", "extension"}
+	// tmuxKeyRE is a tmux key name devc may pass to send-keys.
+	tmuxKeyRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,31}$`)
 )
 
 var (
@@ -385,8 +387,29 @@ func validateHarness(h *Harness, ps *problems) {
 		k.name("hooks.kind", "hook kind", h.Hooks.Kind)
 	}
 	k.enum("input.adapter", h.Input.Adapter, inputAdapters)
-	if h.Input.SubmitKey == "" {
-		k.bad("input.submit_key", "must not be empty")
+	if !tmuxKeyRE.MatchString(h.Input.SubmitKey) {
+		k.bad("input.submit_key", "must be a tmux key name such as Enter, Tab or M-Enter")
+	}
+	for i, key := range h.Input.InterruptKeys {
+		if !tmuxKeyRE.MatchString(key) {
+			k.bad(idx("input.interrupt_keys", i), "%q is not a tmux key name", key)
+		}
+	}
+	hasN := false
+	for i, key := range h.Input.AnswerKeys {
+		hasN = hasN || key == "{n}"
+		if key != "{n}" && !tmuxKeyRE.MatchString(key) {
+			k.bad(idx("input.answer_keys", i), "%q is neither {n} nor a tmux key name", key)
+		}
+	}
+	if len(h.Input.AnswerKeys) > 0 && !hasN {
+		k.bad("input.answer_keys", "must contain {n}, the number of the chosen option")
+	}
+	if len(h.Input.InterruptKeys) > 8 || len(h.Input.AnswerKeys) > 8 {
+		k.bad("input", "at most 8 interrupt or answer keys")
+	}
+	if w := h.Input.QuestionWait; w != nil && (*w < 0 || *w > 1800) {
+		k.bad("input.question_wait", "must be between 0 and 1800 seconds")
 	}
 	if h.Memory.Kind != "" {
 		k.name("memory.kind", "memory kind", h.Memory.Kind)

@@ -65,11 +65,26 @@ type hub struct {
 	// heartbeat is the interval of heartbeat notifications.
 	heartbeat time.Duration
 	instance  string
+	// changedCh is closed (and replaced) whenever a session's view changed.
+	changedCh chan struct{}
 }
 
 func newHub(log *slog.Logger, instance string) *hub {
 	return &hub{dirs: map[names.ProjectRef]*dirState{}, sessions: map[string]*sessionEntry{}, subs: map[*subscriber]struct{}{},
-		window: DefaultWindow, now: time.Now, log: log, heartbeat: 15 * time.Second, instance: instance}
+		window: DefaultWindow, now: time.Now, log: log, heartbeat: 15 * time.Second, instance: instance, changedCh: make(chan struct{})}
+}
+
+// changed returns a channel that is closed at the next change of any
+// session's view. Take it before looking at a view, then wait on it.
+func (h *hub) changed() <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.changedCh
+}
+
+func (h *hub) signalLocked() {
+	close(h.changedCh)
+	h.changedCh = make(chan struct{})
 }
 
 // setProjects makes refs the followed projects (after a configuration
@@ -172,6 +187,9 @@ func (h *hub) tailLocked(e *sessionEntry, publish bool) {
 		}
 		prev := e.offset
 		e.offset = off
+		if len(fresh) > 0 {
+			h.signalLocked()
+		}
 		if publish && len(fresh) > 0 {
 			h.enqueueLocked(e.ref, e.view.Session, fresh, false)
 		}

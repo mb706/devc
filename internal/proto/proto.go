@@ -51,6 +51,22 @@ const (
 	// TypeHarness carries the harness's own session identity (its session
 	// ID and transcript), reported by its session-start hook.
 	TypeHarness = "harness"
+	// TypeSeen records that a user looked at a session up to a turn; TypeAnswer
+	// records an answer devc delivered to a question. Both are written only
+	// by the host (work order C09): a box cannot claim either.
+	TypeSeen   = "seen"
+	TypeAnswer = "answer"
+)
+
+// HostOnly reports whether events of type t may only be written by the host
+// (a spool line of such a type is refused).
+func HostOnly(t string) bool { return t == TypeSeen || t == TypeAnswer }
+
+// Sources of state events: the harness's hooks, or its own OSC 7501 status
+// reports answered by the status wrapper (work order C09).
+const (
+	SourceHook = "hook"
+	SourceOSC  = "osc"
 )
 
 // States of a session as reported by state events.
@@ -66,6 +82,7 @@ const (
 const (
 	KindPermission = "permission"
 	KindQuestion   = "question"
+	KindAuth       = "auth"
 )
 
 // Reasons for session.end written by devc itself (harnesses add their own).
@@ -147,10 +164,29 @@ type SessionEnd struct {
 	Signal *int   `json:"signal,omitempty"`
 }
 
-// State is the session's state; Kind says why it is blocked.
+// State is the session's state; Kind says why it is blocked. Source says
+// where the report came from (SourceHook, SourceOSC; empty in events
+// written before C09) and Message carries the text of an OSC report.
 type State struct {
-	State string `json:"state"`
-	Kind  string `json:"kind,omitempty"`
+	State   string `json:"state"`
+	Kind    string `json:"kind,omitempty"`
+	Source  string `json:"source,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// Seen records that a user has looked at a session up to Turn.
+type Seen struct {
+	Turn int64 `json:"turn"`
+}
+
+// Answer records an answer delivered to a question: the option number
+// (from 1) or free text, and how it reached the harness (Via: "hook" when a
+// waiting hook returned it, "screen" when keys were typed into the dialog).
+type Answer struct {
+	Question string `json:"question,omitempty"`
+	Choice   int    `json:"choice,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Via      string `json:"via"`
 }
 
 // Prompt records a submitted prompt: the SHA-256 and length (characters) of
@@ -195,7 +231,8 @@ type Harness struct {
 // Known reports whether t is an event type.
 func Known(t string) bool {
 	switch t {
-	case TypeSessionStart, TypeSessionEnd, TypeState, TypePrompt, TypeQuestion, TypeMessage, TypeTool, TypeNote, TypeHarness:
+	case TypeSessionStart, TypeSessionEnd, TypeState, TypePrompt, TypeQuestion, TypeMessage, TypeTool, TypeNote, TypeHarness,
+		TypeSeen, TypeAnswer:
 		return true
 	}
 	return false
@@ -254,6 +291,8 @@ func ParseSpoolLine(line []byte, session string) (Event, error) {
 		return Event{}, fmt.Errorf("event names session %q in the spool file of %s", Printable(Truncate(*se.Session, 40)), session)
 	case !Known(*se.Type):
 		return Event{}, fmt.Errorf("unknown type %q", Printable(Truncate(*se.Type, 40)))
+	case HostOnly(*se.Type):
+		return Event{}, fmt.Errorf("events of type %s are written only by the host", *se.Type)
 	}
 	if len(*se.TS) > 64 {
 		return Event{}, errors.New("timestamp too long")
@@ -310,6 +349,10 @@ func ValidateData(typ string, raw json.RawMessage) (json.RawMessage, error) {
 		v = &Note{}
 	case TypeHarness:
 		v = &Harness{}
+	case TypeSeen:
+		v = &Seen{}
+	case TypeAnswer:
+		v = &Answer{}
 	default:
 		return nil, fmt.Errorf("unknown type %q", typ)
 	}
@@ -379,6 +422,33 @@ func (d *State) validate() error {
 	if len(d.Kind) > MaxKind || !kindRE.MatchString(d.Kind) {
 		return errors.New("invalid kind")
 	}
+	switch {
+	case d.Source != "" && d.Source != SourceHook && d.Source != SourceOSC:
+		return errors.New("invalid source")
+	case !textOK(d.Message, MaxMessageText) || !noNUL(d.Message):
+		return errors.New("message too long")
+	}
+	return nil
+}
+
+func (d *Seen) validate() error {
+	if d.Turn < 1 || d.Turn > 1<<40 {
+		return errors.New("invalid turn")
+	}
+	return nil
+}
+
+func (d *Answer) validate() error {
+	switch {
+	case utf8.RuneCountInString(d.Question) > MaxID || !noNUL(d.Question):
+		return errors.New("invalid question")
+	case d.Choice < 0 || d.Choice > MaxOptions:
+		return errors.New("invalid choice")
+	case !textOK(d.Text, MaxPromptText) || !noNUL(d.Text):
+		return errors.New("text too long")
+	case d.Via != "hook" && d.Via != "screen":
+		return errors.New("invalid via")
+	}
 	return nil
 }
 
@@ -443,6 +513,39 @@ func (d *Harness) validate() error {
 		return errors.New("invalid path")
 	case utf8.RuneCountInString(d.Source) > MaxKind || !noNUL(d.Source):
 		return errors.New("invalid source")
+	}
+	return nil
+}
+
+// MaxInputText bounds the text of one input command (bytes).
+const MaxInputText = 256 << 10
+
+// NormalizeInputText turns CR LF and lone CR into LF, so text typed on any
+// system reaches a session with plain newlines.
+func NormalizeInputText(s string) string {
+	if !strings.Contains(s, "\r") {
+		return s
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
+}
+
+// CheckInputText refuses text that must not be typed into a session: empty
+// or oversized text, invalid UTF-8, and control characters other than
+// newline and tab. An escape character could end a bracketed paste early
+// and turn the rest of the text into keystrokes.
+func CheckInputText(s string) error {
+	switch {
+	case s == "":
+		return errors.New("the text is empty")
+	case len(s) > MaxInputText:
+		return fmt.Errorf("the text is longer than %d bytes", MaxInputText)
+	case !utf8.ValidString(s):
+		return errors.New("the text is not valid UTF-8")
+	}
+	for _, r := range s {
+		if r != '\n' && r != '\t' && unicode.IsControl(r) {
+			return fmt.Errorf("the text contains the control character U+%04X", r)
+		}
 	}
 	return nil
 }

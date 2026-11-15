@@ -59,6 +59,10 @@ type Data struct {
 	Data *DataFacts
 	// Instructions is the assembled instruction text (settings templates).
 	Instructions string
+	// QuestionHookTimeout is the timeout (seconds) of a hook that waits for
+	// an answer to a question: input.question_wait plus a minute, so the
+	// harness never kills the hook while it waits.
+	QuestionHookTimeout int
 }
 
 // DataFacts describes the project's data for the sandbox description.
@@ -87,6 +91,7 @@ func NewData(r *config.Resolved, m *config.Harness) Data {
 		Home: paths.InBoxHome, HarnessHome: path.Join(paths.InBoxHome, m.Home.Dir),
 		Helper: paths.InBoxHelper, Notes: paths.InBoxNotes, Memory: paths.InBoxMemory,
 		Network: r.Network, NetworkSentence: networkSentences[r.Network],
+		QuestionHookTimeout: m.Input.Wait() + 60,
 	}
 	// The description must match the level in force: a level devc cannot
 	// enforce yet never gets a box, and is never described as restricted.

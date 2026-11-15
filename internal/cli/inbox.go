@@ -66,9 +66,11 @@ func newBoxCmd(a *app) *cobra.Command {
 				log := boxside.OpenAgentLog(boxside.RunDir)
 				env := a.sessionEnv()
 				env.Stdout = io.Discard
-				boxside.RunAgent(ctx, boxside.DefaultAgentOptions(log, boxside.AgentHello, func() ([]boxside.Live, error) {
+				ao := boxside.DefaultAgentOptions(log, boxside.AgentHello, func() ([]boxside.Live, error) {
 					return boxside.LiveSessions(env)
-				}))
+				})
+				ao.Input = &boxside.Input{Tmux: env.Tmux, TmuxStdin: boxside.ExecTmuxStdin(os.Environ())}
+				boxside.RunAgent(ctx, ao)
 			}
 			return boxside.Init(ctx, o)
 		},
@@ -216,10 +218,44 @@ func newBoxCmd(a *app) *cobra.Command {
 				_, _ = io.Copy(io.Discard, io.LimitReader(cmd.InOrStdin(), boxside.MaxHookInput))
 				return nil
 			}
-			boxside.RunHook(args[0], args[1], boxside.HookEnv{Getenv: a.getenv, Stdin: cmd.InOrStdin(), SpoolDir: boxside.SpoolDir})
+			boxside.RunHook(args[0], args[1], boxside.HookEnv{Getenv: a.getenv, Stdin: cmd.InOrStdin(), SpoolDir: boxside.SpoolDir,
+				StatusDir: boxside.StatusDir, Stdout: a.stdout, Tmux: boxside.ExecTmux(os.Environ()), Agent: boxside.AgentCall,
+				Launch: func(id string) (*boxside.Launch, error) { return boxside.ReadLaunch("/", id) }})
 			return nil
 		},
 	}
+
+	// pty is the status wrapper (work order C09): the launcher runs a
+	// harness whose manifest sets status.osc7501 through it.
+	var argv0 string
+	pty := &cobra.Command{
+		Use:    "pty [--argv0 name] -- <executable> [args...]",
+		Short:  "Run a harness on a pseudo-terminal and answer its status protocol (OSC 7501)",
+		Hidden: true,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if cmd.ArgsLenAtDash() != 0 || boxside.CheckPTYArgs(args) != nil {
+				return usageErrorf("usage: devc box pty [--argv0 name] -- <absolute executable> [args...]")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := requireBox(a.getenv); err != nil {
+				return err
+			}
+			argv := append([]string{argv0}, args[1:]...)
+			if argv0 == "" {
+				argv[0] = filepath.Base(args[0])
+			}
+			res, err := boxside.RunPTY(boxside.PTYOptions{Exe: args[0], Argv: argv, Environ: os.Environ(), Stdin: os.Stdin, Stdout: os.Stdout,
+				Log: a.stderr, SpoolDir: boxside.SpoolDir, StatusDir: boxside.StatusDir})
+			if err != nil {
+				return err
+			}
+			boxside.ExitWith(res)
+			return nil
+		},
+	}
+	pty.Flags().StringVar(&argv0, "argv0", "", "name the harness sees as its argv[0]")
 
 	// rm-worker runs in the helper container (plan 3.3), not in a box: it
 	// empties the one tree mounted at /target, so the host never walks a
@@ -286,7 +322,7 @@ func newBoxCmd(a *app) *cobra.Command {
 		},
 	}
 
-	subs := []*cobra.Command{initCmd, fixIdentity, shell, selftest, probe, launch, hook, agentStatus,
+	subs := []*cobra.Command{initCmd, fixIdentity, shell, selftest, probe, launch, hook, pty, agentStatus,
 		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker, dataWorker, newBoxDialCmd(a), newBoxCanaryCmd(a), newStatxWorkerCmd(a)}
 	return group("box", "Commands that run inside a box (internal)", true, append(subs, newBoxGitCmds(a)...)...)
 }
@@ -464,7 +500,7 @@ func (a *app) launchEnv() boxside.LaunchEnv {
 	if r, err := filepath.EvalSymlinks(self); err == nil {
 		self = r
 	}
-	return boxside.LaunchEnv{Root: "/", Environ: os.Environ(), Self: self, Stderr: a.stderr, NewSession: names.NewSessionID}
+	return boxside.LaunchEnv{Root: "/", Environ: os.Environ(), Self: self, Stderr: a.stderr, NewSession: names.NewSessionID, IsTerminal: boxside.StdioIsTerminal}
 }
 
 // newBoxDialCmd is `devc box dial <addr>`, run by the host's forwarder

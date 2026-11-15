@@ -285,6 +285,9 @@ func (p *Paths) SecretsDir(realm string) string {
 }
 func (p *Paths) NodeDir() string  { return filepath.Join(p.DurableDir(), "node") }
 func (p *Paths) LocalDir() string { return filepath.Join(p.stateDir, "local") }
+
+// ReceiptsDir holds the daemon's command receipts (work order C09).
+func (p *Paths) ReceiptsDir() string { return filepath.Join(p.LocalDir(), "receipts") }
 func (p *Paths) BoxLocalDir(r names.ProjectRef) string {
 	return filepath.Join(p.LocalDir(), "boxes", must(names.KindRealm, r.Realm), must(names.KindProject, r.Project))
 }

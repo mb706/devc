@@ -131,6 +131,7 @@ type Daemon struct {
 	warnings map[names.ProjectRef]*pendingWarn
 
 	hub *hub
+	cmd *commander
 	wg  sync.WaitGroup
 }
 
@@ -258,6 +259,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		ln.Close()
 		return err
 	}
+	d.cmd = newCommander(d, d.current().cfg.Paths)
+	d.cmd.resume()
 	d.log.Info("daemon started", "version", d.version, "instance", d.instance, "socket", sock)
 	d.goSafe("api", func() { d.serveAPI(ln) })
 	d.goSafe("watch", d.watchLoop)
@@ -550,6 +553,41 @@ func (d *Daemon) ingest(ctx context.Context, e *env, ref names.ProjectRef) (sess
 	return rep, err
 }
 
+// recordHost appends an event the host writes itself (seen, answer) to a
+// session's journal: under the ingestion lock, after ingesting what the box
+// spooled, so it follows what the box reported before it.
+func (d *Daemon) recordHost(ctx context.Context, ref names.ProjectRef, sid, typ string, data any) error {
+	e := d.current()
+	unlock, err := e.store.Lock(ctx, ref)
+	if err != nil {
+		return err
+	}
+	rep, ierr := e.store.Ingest(ref)
+	d.noteInvalid(ref, rep.Invalid, "")
+	err = e.store.AppendHostEvent(ref, sid, typ, data)
+	unlock()
+	d.hub.poll(&ref)
+	if err != nil {
+		return err
+	}
+	if ierr != nil {
+		d.log.Debug("ingesting before a host event", "ref", ref.String(), "err", ierr)
+	}
+	return nil
+}
+
+// wakeBox asks a box's ingester for a run now.
+func (d *Daemon) wakeBox(ref names.ProjectRef) {
+	if w := d.worker(ref); w != nil {
+		w.wake()
+	}
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 func (d *Daemon) noteInvalid(ref names.ProjectRef, invalid int, text string) {
 	if invalid == 0 && text == "" {
 		return
@@ -666,6 +704,9 @@ func (d *Daemon) housekeepingLoop() {
 }
 
 func (d *Daemon) housekeep(ctx context.Context) {
+	if d.cmd != nil {
+		d.cmd.prune()
+	}
 	for _, args := range d.o.Housekeeping {
 		if ctx.Err() != nil {
 			return

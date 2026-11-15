@@ -86,7 +86,7 @@ func (s shim) launch(name string, args []string) int {
 	if r, err := filepath.EvalSymlinks(self); err == nil {
 		self = r
 	}
-	err = boxside.RunLaunch(l, args, boxside.LaunchEnv{Root: s.root, Environ: os.Environ(), Self: self, Stderr: s.stderr, NewSession: names.NewSessionID})
+	err = boxside.RunLaunch(l, args, boxside.LaunchEnv{Root: s.root, Environ: os.Environ(), Self: self, Stderr: s.stderr, NewSession: names.NewSessionID, IsTerminal: boxside.StdioIsTerminal})
 	fmt.Fprintf(s.stderr, "devc: %v\n", err)
 	return 126
 }

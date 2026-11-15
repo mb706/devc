@@ -56,6 +56,8 @@ type AgentOptions struct {
 	// sessions for box.sessions.
 	Hello    func() (proto.HelloReply, error)
 	Sessions func() ([]Live, error)
+	// Input carries out the daemon's input to session panes (nil: refused).
+	Input *Input
 	// AcceptHost decides whether a connection on Socket is the host's
 	// (default: its peer is outside the box's PID namespace).
 	AcceptHost func(*unix.Ucred) error
@@ -270,6 +272,9 @@ func (a *Agent) serveHost(ctx context.Context, s *yamux.Session) {
 	handlers := map[string]proto.Handler{
 		proto.MethodBoxHello:    a.handleHello,
 		proto.MethodBoxSessions: a.handleSessions,
+		proto.MethodBoxClients:  a.inputHandler(proto.MethodBoxClients),
+		proto.MethodBoxPaste:    a.inputHandler(proto.MethodBoxPaste),
+		proto.MethodBoxKeys:     a.inputHandler(proto.MethodBoxKeys),
 	}
 	for {
 		st, err := s.AcceptStreamWithContext(ctx)
@@ -321,6 +326,38 @@ func (a *Agent) handleSessions(context.Context, *proto.Conn, json.RawMessage) (a
 		return nil, err
 	}
 	return proto.LiveReply{Sessions: b}, nil
+}
+
+// inputHandler serves one of the input methods (work order C09).
+func (a *Agent) inputHandler(method string) proto.Handler {
+	return func(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
+		var p proto.BoxInputParams
+		if err := proto.DecodeParams(params, &p); err != nil {
+			return nil, err
+		}
+		in := a.o.Input
+		if in == nil {
+			return nil, proto.Errorf(proto.CodeRefused, "input is not available in this box")
+		}
+		var res any = struct{}{}
+		var err error
+		switch method {
+		case proto.MethodBoxClients:
+			res, err = in.Clients(p.Session)
+		case proto.MethodBoxPaste:
+			err = in.Paste(p.Session, p.Text, p.Submit)
+		case proto.MethodBoxKeys:
+			err = in.Keys(p.Session, p.Keys)
+		}
+		switch {
+		case errors.Is(err, ErrNoPane):
+			return nil, proto.Errorf(proto.CodeNotFound, "%s", ErrNoPane.Error())
+		case err != nil:
+			a.logf("%s: %v", method, err)
+			return nil, proto.Errorf(proto.CodeInternal, "%s", proto.Printable(proto.Truncate(err.Error(), 300)))
+		}
+		return res, nil
+	}
 }
 
 // localLoop listens for in-box clients.

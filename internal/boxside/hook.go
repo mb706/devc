@@ -1,6 +1,7 @@
 package boxside
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,13 +23,33 @@ type HookEnv struct {
 	Stdin    io.Reader
 	SpoolDir string
 	Now      func() time.Time
+	// StatusDir holds the status wrapper's markers (StatusDir in a box).
+	StatusDir string
+	// The question path (work order C09 section 5): Stdout carries an
+	// answer back to the harness, Tmux finds the session's clients, Agent
+	// asks the host through the box agent, Launch reads the harness's
+	// description (for input.question_wait). Without them no question
+	// waits.
+	Stdout io.Writer
+	Tmux   TmuxRunner
+	Agent  func(ctx context.Context, method string, params, result any) error
+	Launch func(id string) (*Launch, error)
+}
+
+func (e HookEnv) now() time.Time {
+	if e.Now != nil {
+		return e.Now()
+	}
+	return time.Now()
 }
 
 // RunHook is `devc box hook <kind> <event>`: it maps the harness's hook
 // input to events and appends them to the session's spool file. It never
-// fails and never prints: some harnesses add hook output to the model's
+// fails, and it prints only an answer to a question that a harness takes
+// from the hook's output: some harnesses add hook output to the model's
 // context, and a failing hook must never disturb a session. Without a valid
-// DEVC_SESSION it does nothing.
+// DEVC_SESSION it does nothing. While the status wrapper reports the
+// session's state (OSCActive), state events from hooks are dropped.
 func RunHook(kind, event string, e HookEnv) {
 	defer func() { _ = recover() }()
 	session := e.Getenv("DEVC_SESSION")
@@ -44,14 +65,22 @@ func RunHook(kind, event string, e HookEnv) {
 		ps = noteF(kind, event, "reading the hook input failed")
 	case len(in) > MaxHookInput:
 		ps = noteF(kind, event, "hook input larger than 1 MiB ignored")
+	case kind == "claude" && event == "PreToolUse", kind == "fake" && event == "ask":
+		runQuestionHook(kind, session, in, e)
+		return
 	default:
 		ps = MapHook(kind, event, in)
 	}
-	now := time.Now
-	if e.Now != nil {
-		now = e.Now
+	if OSCActive(e.Getenv, e.StatusDir, session) {
+		kept := ps[:0]
+		for _, p := range ps {
+			if p.Type != proto.TypeState {
+				kept = append(kept, p)
+			}
+		}
+		ps = kept
 	}
-	_ = AppendEvents(e.SpoolDir, session, now(), ps)
+	_ = AppendEvents(e.SpoolDir, session, e.now(), ps)
 }
 
 func noteF(kind, event, msg string) []Payload {
@@ -127,7 +156,7 @@ func harnessPayloads(m map[string]json.RawMessage) []Payload {
 			Cwd:        absPath(str(m, "cwd")),
 			Source:     short(str(m, "source"), proto.MaxKind),
 		}},
-		{proto.TypeState, proto.State{State: proto.StateIdle}},
+		{proto.TypeState, proto.State{State: proto.StateIdle, Source: proto.SourceHook}},
 	}
 }
 
@@ -141,7 +170,7 @@ func PromptData(text string) proto.Prompt {
 func promptPayloads(m map[string]json.RawMessage) []Payload {
 	return []Payload{
 		{proto.TypePrompt, PromptData(str(m, "prompt"))},
-		{proto.TypeState, proto.State{State: proto.StateWorking}},
+		{proto.TypeState, proto.State{State: proto.StateWorking, Source: proto.SourceHook}},
 	}
 }
 
@@ -150,7 +179,7 @@ func stopPayloads(m map[string]json.RawMessage) []Payload {
 	if msg := str(m, "last_assistant_message"); msg != "" {
 		ps = append(ps, Payload{proto.TypeMessage, proto.Message{Text: proto.Truncate(msg, proto.MaxMessageText)}})
 	}
-	return append(ps, Payload{proto.TypeState, proto.State{State: proto.StateDone}})
+	return append(ps, Payload{proto.TypeState, proto.State{State: proto.StateDone, Source: proto.SourceHook}})
 }
 
 func endPayloads(m map[string]json.RawMessage) []Payload {
@@ -172,7 +201,7 @@ func questionID() string {
 func blocked(kind, text string) []Payload {
 	return []Payload{
 		{proto.TypeQuestion, proto.Question{ID: questionID(), Text: proto.Truncate(text, proto.MaxQuestionText)}},
-		{proto.TypeState, proto.State{State: proto.StateBlocked, Kind: kind}},
+		{proto.TypeState, proto.State{State: proto.StateBlocked, Kind: kind, Source: proto.SourceHook}},
 	}
 }
 
@@ -195,7 +224,7 @@ func mapClaude(event string, m map[string]json.RawMessage) []Payload {
 		case "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input":
 			return blocked(proto.KindQuestion, msg)
 		case "idle_prompt":
-			return []Payload{{proto.TypeState, proto.State{State: proto.StateDone}}}
+			return []Payload{{proto.TypeState, proto.State{State: proto.StateDone, Source: proto.SourceHook}}}
 		default:
 			text := msg
 			if t != "" {
@@ -208,6 +237,9 @@ func mapClaude(event string, m map[string]json.RawMessage) []Payload {
 		}
 	case "SessionEnd":
 		return endPayloads(m)
+	case "PreToolUse":
+		// Only AskUserQuestion is hooked; it takes the question path.
+		return nil
 	}
 	return noteF("claude", safeLabel(event), "unhandled event")
 }
@@ -250,8 +282,15 @@ func mapFake(event string, in []byte) []Payload {
 		return noteF("fake", safeLabel(event), "invalid input")
 	}
 	data, err := proto.ValidateData(f.Type, f.Data)
-	if err != nil {
+	if err != nil || proto.HostOnly(f.Type) {
 		return noteF("fake", safeLabel(event), "invalid "+f.Type+" data")
+	}
+	if f.Type == proto.TypeState {
+		var st proto.State
+		if json.Unmarshal(data, &st) == nil && st.Source == "" {
+			st.Source = proto.SourceHook
+			return []Payload{{f.Type, st}}
+		}
 	}
 	return []Payload{{f.Type, data}}
 }

@@ -185,6 +185,45 @@ started before the daemon existed has no agent; restart it with `devc down` and
 (mode 0600); only your own user can talk to it. Setting `DEVC_NO_DAEMON=1`
 makes a command ignore a running daemon.
 
+### Talking to a running session
+
+With the daemon running, you can type into a session without attaching:
+
+```sh
+devc send <session> "fix the failing test"   # waits until the session is idle or done
+devc send <session> --steer "stop, use the other API"   # delivers now
+git diff | devc send <session> -              # the text from stdin
+devc answer <session> 2                       # choose option 2 of the pending question
+devc answer <session> "use Postgres"          # or answer with text
+devc interrupt <session>                      # stop the current turn (Escape)
+devc keys <session> Down Enter                # named keys: Enter Escape Tab arrows C-c 0-9 y n
+devc seen <session>                           # mark the session's turns as seen (on every device)
+devc claude demo/hello --detach --prompt "review the open TODOs"   # start with a first prompt
+```
+
+A session's argument may be a unique prefix of its ID. Each command prints a
+receipt: its ID and an outcome (`accepted`, then `delivered`,
+`typed-not-submitted`, `unknown` or `refused`); `--wait` waits for the final
+outcome, `--json` prints the receipt as JSON. A command carries an ID (`--id`
+to choose it): sending the same ID again returns the stored receipt and never
+types the text a second time. Receipts are kept for seven days, and queued
+commands survive a restart of the daemon.
+
+Text is pasted into the session's terminal as one block, then the harness's
+submit key is pressed, and devc waits for the harness to report the prompt.
+Nothing is typed while someone is typing in that terminal: devc waits until
+the attached terminal has been quiet for three seconds (at most a minute).
+When a harness asks a question through Claude Code's question tool and nobody
+has used its terminal in the last minute, the question waits (up to
+`input.question_wait`, ten minutes) for `devc answer`; otherwise the harness
+shows its own dialog and `devc answer` types the choice into it.
+
+Harnesses that support the Program Status Protocol (Claude Code, Codex) run
+under a small terminal wrapper (`devc box pty`) that answers the protocol's
+query and turns the harness's own status reports into the session's state;
+it passes every other byte unchanged. `DEVC_NO_PTY=1` in the box starts a
+harness without it.
+
 Harness installs: `devc harness install claude` (or `codex`) installs the
 vendor's release into the toolbox in a throwaway container; `devc update`
 installs newer versions; `devc harness ls` shows what is installed; `devc

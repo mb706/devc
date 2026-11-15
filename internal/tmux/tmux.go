@@ -260,6 +260,80 @@ func ParsePanes(out string) []Pane {
 	return ps
 }
 
+// clientsFormat lists one client per line: its last activity (Unix
+// seconds) and the window its session shows.
+const clientsFormat = "#{client_activity} #{window_id}"
+
+// ListClients lists the clients attached to the server.
+func ListClients() []string {
+	return append(base(), "list-clients", "-F", clientsFormat)
+}
+
+// Client is one line of ListClients.
+type Client struct {
+	Activity int64
+	Window   string
+}
+
+// ParseClients parses the output of ListClients; malformed lines are
+// skipped.
+func ParseClients(out string) []Client {
+	var cs []Client
+	for _, l := range strings.Split(out, "\n") {
+		f := strings.Fields(l)
+		if len(f) != 2 || !ValidWindowID(f[1]) {
+			continue
+		}
+		a, err := strconv.ParseInt(f[0], 10, 64)
+		if err != nil || a < 0 {
+			continue
+		}
+		cs = append(cs, Client{Activity: a, Window: f[1]})
+	}
+	return cs
+}
+
+var bufferRE = regexp.MustCompile(`^devc-in-[0-9a-f]{8,32}$`)
+
+// LoadBuffer loads standard input into the paste buffer name (a name
+// devc generated).
+func LoadBuffer(name string) []string {
+	return append(base(), "load-buffer", "-b", name, "-")
+}
+
+// PasteBuffer pastes buffer name into pane as a bracketed paste (when the
+// program asked for bracketed paste mode), keeping newlines as they are
+// (-r) and deleting the buffer afterwards.
+func PasteBuffer(name, pane string) ([]string, error) {
+	if !bufferRE.MatchString(name) || !ValidPaneID(pane) {
+		return nil, fmt.Errorf("invalid buffer %q or pane %q", name, pane)
+	}
+	return append(base(), "paste-buffer", "-p", "-r", "-d", "-b", name, "-t", pane), nil
+}
+
+// DeleteBuffer removes buffer name (after a failed paste).
+func DeleteBuffer(name string) []string {
+	return append(base(), "delete-buffer", "-b", name)
+}
+
+var keyRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,31}$`)
+
+// SendKeys sends named keys to pane. Key names are letters, digits and
+// dashes, so none can be read as an option or a command separator.
+func SendKeys(pane string, keys []string) ([]string, error) {
+	if !ValidPaneID(pane) || len(keys) == 0 {
+		return nil, fmt.Errorf("invalid pane %q or no keys", pane)
+	}
+	a := append(base(), "send-keys", "-t", pane)
+	for _, k := range keys {
+		if !keyRE.MatchString(k) {
+			return nil, fmt.Errorf("invalid key %q", k)
+		}
+		a = append(a, k)
+	}
+	return a, nil
+}
+
 // NoServer reports whether tmux's error output says that the server or the
 // session "devc" does not exist.
 func NoServer(stderr string) bool {
@@ -282,7 +356,7 @@ func DuplicateSession(stderr string) bool {
 // that starts the server would otherwise put them into the global
 // environment of every window.
 var sessionVars = map[string]bool{
-	"DEVC_SESSION": true, "DEVC_HARNESS": true, "DEVC_LAUNCH_DEPTH": true, "DEVC_WORKTREE": true,
+	"DEVC_SESSION": true, "DEVC_HARNESS": true, "DEVC_LAUNCH_DEPTH": true, "DEVC_WORKTREE": true, "DEVC_STATUS": true,
 	"TMUX": true, "TMUX_PANE": true,
 }
 

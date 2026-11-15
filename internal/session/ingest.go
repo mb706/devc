@@ -405,3 +405,18 @@ type hostEvent struct {
 	typ  string
 	data any
 }
+
+// AppendHostEvent appends one event the host writes itself (seen, answer)
+// to a session's journal. The caller holds the lock and has ingested the
+// box's spool first, so the event follows what the box reported before it.
+func (s *Store) AppendHostEvent(ref names.ProjectRef, sid, typ string, data any) error {
+	if _, err := proto.ValidateData(typ, mustJSON(data)); err != nil {
+		return err
+	}
+	return s.AppendHost(ref, sid, hostEvent{typ, data})
+}
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}

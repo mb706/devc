@@ -173,3 +173,25 @@ func TestEventLine(t *testing.T) {
 		t.Errorf("%q", line)
 	}
 }
+
+func TestInputCommandUsage(t *testing.T) {
+	for _, args := range [][]string{
+		{"send"},
+		{"send", "s0000000001aaaaaaaaaa", "a", "b"},
+		{"send", "s0000000001aaaaaaaaaa", "x", "--id", "../bad"},
+		{"answer", "s0000000001aaaaaaaaaa"},
+		{"interrupt"},
+		{"keys", "s0000000001aaaaaaaaaa"},
+		{"keys", "s0000000001aaaaaaaaaa", "C-d"},
+		{"seen", "s0000000001aaaaaaaaaa", "--turn", "-1"},
+	} {
+		if code, _, errb := run(t, map[string]string{"DEVC_RUNTIME_DIR": t.TempDir(), "DEVC_STATE_DIR": t.TempDir()}, args...); code != 2 {
+			t.Errorf("%v: exit %d, want 2 (%s)", args, code, errb)
+		}
+	}
+	// Without a daemon: a clear message, exit 1.
+	code, _, errb := run(t, map[string]string{"DEVC_RUNTIME_DIR": t.TempDir(), "DEVC_STATE_DIR": t.TempDir()}, "send", "s0000000001aaaaaaaaaa", "hello")
+	if code != 1 || !strings.Contains(errb, "needs the devc daemon") {
+		t.Errorf("send without a daemon: %d %q", code, errb)
+	}
+}

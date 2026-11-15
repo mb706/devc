@@ -1,0 +1,31 @@
+# Test manifest (work order C09): the fake agent run under the status
+# wrapper, which answers its OSC 7501 query, with the input settings the
+# command tests use. Tests replace @FAKEAGENT@ with the path of
+# bin/fakeagent.
+id = "fakeosc"
+display = "Fake agent (status protocol)"
+bin = "fakeosc"
+
+[install]
+method = "local"
+path = "@FAKEAGENT@"
+exe = "bin/fakeagent"
+version_cmd = ["--version"]
+
+[home]
+strategy = "private"
+dir = ".fakeosc"
+env = { FAKEAGENT_DIR = "/home/dev/.fakeosc" }
+
+[status]
+osc7501 = true
+
+[hooks]
+kind = "fake"
+
+[input]
+adapter = "paste"
+submit_key = "Enter"
+interrupt_keys = ["Escape"]
+answer_keys = ["{n}", "Enter"]
+question_wait = 8

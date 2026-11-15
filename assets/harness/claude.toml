@@ -55,8 +55,11 @@ osc7501 = true
 kind = "claude"
 
 [input]
-adapter = "paste"              # paste | mod | app-server | extension
-submit_key = "Enter"
+adapter = "paste"              # paste | mod | app-server | extension (only paste is available yet)
+submit_key = "Enter"           # tmux key sent after a pasted prompt
+interrupt_keys = ["Escape"]    # stop the current turn
+answer_keys = ["{n}", "Enter"] # choose option {n} of a dialog on screen
+question_wait = 600            # seconds an AskUserQuestion hook waits for an answer from elsewhere
 
 [memory]
 kind = "claude-auto-memory"    # empty when the harness has no memory directory setting

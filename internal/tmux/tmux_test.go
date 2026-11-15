@@ -167,3 +167,30 @@ func TestEnvAndConfig(t *testing.T) {
 		t.Error("the hook contains a single quote, which breaks its quoting in the configuration")
 	}
 }
+
+func TestInputCommands(t *testing.T) {
+	if got := ListClients(); strings.Join(got[4:], " ") != "list-clients -F #{client_activity} #{window_id}" {
+		t.Errorf("list-clients: %q", got)
+	}
+	cs := ParseClients("1700000000 @3\nbad line\n-1 @4\n1700000001 @x\n1700000002 @5\n")
+	if len(cs) != 2 || cs[0] != (Client{1700000000, "@3"}) || cs[1].Window != "@5" {
+		t.Errorf("clients: %+v", cs)
+	}
+	if got := LoadBuffer("devc-in-0011223344556677"); strings.Join(got[4:], " ") != "load-buffer -b devc-in-0011223344556677 -" {
+		t.Errorf("load-buffer: %q", got)
+	}
+	if got, err := PasteBuffer("devc-in-0011223344556677", "%3"); err != nil || strings.Join(got[4:], " ") != "paste-buffer -p -r -d -b devc-in-0011223344556677 -t %3" {
+		t.Errorf("paste-buffer: %q %v", got, err)
+	}
+	if _, err := PasteBuffer("other", "%3"); err == nil {
+		t.Error("a foreign buffer name was accepted")
+	}
+	if got, err := SendKeys("%3", []string{"Escape", "1", "Enter"}); err != nil || strings.Join(got[4:], " ") != "send-keys -t %3 Escape 1 Enter" {
+		t.Errorf("send-keys: %q %v", got, err)
+	}
+	for _, bad := range []string{"-X", "a;", "", "Enter kill-server", strings.Repeat("a", 40)} {
+		if _, err := SendKeys("%3", []string{bad}); err == nil {
+			t.Errorf("key %q accepted", bad)
+		}
+	}
+}

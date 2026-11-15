@@ -44,7 +44,7 @@ func Describe(r *config.Resolved, m *config.Harness, rh config.ResolvedHarness, 
 		Seeds: []boxside.LaunchSeed{}, Secrets: []boxside.LaunchSecret{},
 		Hooks:  m.Hooks.Kind,
 		Status: boxside.LaunchStatus{OSC7501: m.Status.OSC7501},
-		Input:  boxside.LaunchInput{Adapter: m.Input.Adapter, SubmitKey: m.Input.SubmitKey},
+		Input:  boxside.LaunchInput{Adapter: m.Input.Adapter, SubmitKey: m.Input.SubmitKey, QuestionWait: m.Input.Wait()},
 		Memory: m.Memory.Kind, Transcripts: nonNil(m.Transcripts.Globs),
 	}
 	if rh.AuthMethod == "env-token" || rh.AuthMethod == "api-key" {

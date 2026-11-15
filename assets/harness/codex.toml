@@ -65,7 +65,9 @@ kind = "codex"
 
 [input]
 adapter = "paste"
-submit_key = "Tab"
+submit_key = "Tab"             # Enter would steer a running turn
+interrupt_keys = ["Escape"]
+answer_keys = ["{n}", "Enter"]
 
 [memory]
 kind = ""

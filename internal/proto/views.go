@@ -22,9 +22,24 @@ const (
 	// Host to box, on streams the host opens.
 	MethodBoxHello    = "box.hello"
 	MethodBoxSessions = "box.sessions"
+	// Input to a session's pane (work order C09).
+	MethodBoxClients = "box.input.clients"
+	MethodBoxPaste   = "box.input.paste"
+	MethodBoxKeys    = "box.input.keys"
 	// Box to host, on streams the box agent opens for in-box clients.
-	MethodHostHint = "host.hint" // notification
-	MethodHostPing = "host.ping"
+	MethodHostHint     = "host.hint" // notification
+	MethodHostPing     = "host.ping"
+	MethodHostQuestion = "host.question"
+
+	// Commands (work order C09).
+	MethodSessionSend      = "session.send"
+	MethodSessionAnswer    = "session.answer"
+	MethodSessionInterrupt = "session.interrupt"
+	MethodSessionKeys      = "session.keys"
+	MethodSessionStart     = "session.start"
+	MethodSessionStop      = "session.stop"
+	MethodSessionSeen      = "session.seen"
+	MethodCommandGet       = "command.get"
 
 	// The daemon's local API.
 	MethodDaemonInfo      = "daemon.info"
@@ -113,6 +128,15 @@ type SessionView struct {
 	Transcript     string `json:"transcript,omitempty"`
 	Events         int    `json:"events"`
 	LastSeq        int64  `json:"last_seq"`
+	// Turn counts the prompt events, DoneTurn is the last turn that reached
+	// done and SeenTurn the last turn a user marked seen (session.seen).
+	Turn     int64 `json:"turn"`
+	DoneTurn int64 `json:"done_turn"`
+	SeenTurn int64 `json:"seen_turn"`
+	// PromptSeq and StateSeq are the seqs of the last prompt and state
+	// events: a state reported after the last prompt has seen that prompt.
+	PromptSeq int64 `json:"prompt_seq,omitempty"`
+	StateSeq  int64 `json:"state_seq,omitempty"`
 	// Window is the session's tmux window when the box reported it.
 	Window string `json:"window,omitempty"`
 	// Machine is the host name of the machine that runs the session and
@@ -127,14 +151,15 @@ func NewSessionView(realm, project, session string) SessionView {
 	return SessionView{Session: session, Ref: realm + "/" + project, Realm: realm, Project: project, State: "unknown", Live: true}
 }
 
-// NeedsYou reports whether a live session waits for the user.
+// NeedsYou reports whether a live session waits for the user: it is
+// blocked, or done with a turn nobody has marked seen.
 func (s *SessionView) NeedsYou() bool {
-	return s.Live && (s.State == StateBlocked || s.State == StateDone)
+	return s.Live && (s.State == StateBlocked || (s.State == StateDone && (s.DoneTurn == 0 || s.SeenTurn < s.DoneTurn)))
 }
 
 // Apply folds one journal event into the view. Times are the host's
 // ingestion times (at), which a box cannot choose. Nothing after the end
-// changes the session.
+// changes the session, except what a user has seen.
 func (s *SessionView) Apply(e *Event) {
 	at := e.AtTime()
 	if s.Events == 0 {
@@ -144,6 +169,13 @@ func (s *SessionView) Apply(e *Event) {
 	s.LastEvent = at
 	if e.Seq > s.LastSeq {
 		s.LastSeq = e.Seq
+	}
+	if e.Type == TypeSeen {
+		var d Seen
+		if json.Unmarshal(e.Data, &d) == nil && d.Turn > s.SeenTurn {
+			s.SeenTurn = d.Turn
+		}
+		return
 	}
 	if !s.Live {
 		return
@@ -164,9 +196,12 @@ func (s *SessionView) Apply(e *Event) {
 	case TypeState:
 		var d State
 		if json.Unmarshal(e.Data, &d) == nil {
-			s.State, s.Kind = d.State, d.Kind
+			s.State, s.Kind, s.StateSeq = d.State, d.Kind, e.Seq
 			if d.State != StateBlocked {
 				s.Question = nil
+			}
+			if d.State == StateDone {
+				s.DoneTurn = s.Turn
 			}
 		}
 	case TypeQuestion:
@@ -174,8 +209,12 @@ func (s *SessionView) Apply(e *Event) {
 		if json.Unmarshal(e.Data, &d) == nil {
 			s.Question = &d
 		}
+	case TypeAnswer:
+		s.Question = nil
 	case TypePrompt:
 		s.Question = nil
+		s.Turn++
+		s.PromptSeq = e.Seq
 	case TypeMessage:
 		var d Message
 		if json.Unmarshal(e.Data, &d) == nil {
@@ -238,7 +277,7 @@ func (c Cursor) Validate() error {
 // MaxCursor bounds the sessions of one cursor.
 const MaxCursor = 100000
 
-// Command kinds (spec 12.4); used from C09.
+// Command kinds (spec 12.4).
 const (
 	CommandSend      = "send"
 	CommandAnswer    = "answer"
@@ -250,66 +289,189 @@ const (
 	CommandAttach    = "attach"
 )
 
-// Receipt outcomes (spec 12.4).
+// Modes of send.
 const (
+	ModeQueue = "queue" // deliver when the session is at rest
+	ModeSteer = "steer" // deliver now
+)
+
+// Receipt outcomes (spec 12.4). Accepted and Delivering are not final:
+// accepted means stored and waiting its turn, delivering that input to the
+// session has begun (a command found in that state after a restart is
+// never retried; it ends as unknown).
+const (
+	OutcomeAccepted          = "accepted"
+	OutcomeDelivering        = "delivering"
 	OutcomeDelivered         = "delivered"
 	OutcomeTypedNotSubmitted = "typed-not-submitted"
 	OutcomeUnknown           = "unknown"
 	OutcomeRefused           = "refused"
 )
 
-// Command is something a client asks to be done to a session. ID is chosen
-// by the client; the daemon stores a receipt per ID before acting and
-// returns the stored receipt when the ID comes again (plan 3.11).
+// FinalOutcome reports whether o ends a command.
+func FinalOutcome(o string) bool {
+	switch o {
+	case OutcomeDelivered, OutcomeTypedNotSubmitted, OutcomeUnknown, OutcomeRefused:
+		return true
+	}
+	return false
+}
+
+// Command is something a client asks to be done to a session, as the
+// daemon stores it with its receipt. ID is chosen by the client; the
+// daemon stores a receipt per ID before acting and returns the stored
+// receipt when the ID comes again (plan 3.11).
 type Command struct {
 	ID      string `json:"id"`
 	Kind    string `json:"kind"`
 	Session string `json:"session,omitempty"`
-	// Text is the message of send or the answer of answer; Mode is queue
-	// or steer for send.
-	Text       string   `json:"text,omitempty"`
-	Mode       string   `json:"mode,omitempty"`
-	QuestionID string   `json:"question_id,omitempty"`
-	Keys       []string `json:"keys,omitempty"`
-	// Start: the project, harness and worktree of a new session.
-	Ref      string `json:"ref,omitempty"`
-	Harness  string `json:"harness,omitempty"`
-	Worktree string `json:"worktree,omitempty"`
+	// Text is the message of send or the free-text answer of answer (or the
+	// initial prompt of start); Mode is queue or steer for send.
+	Text     string   `json:"text,omitempty"`
+	Mode     string   `json:"mode,omitempty"`
+	Question string   `json:"question,omitempty"`
+	Choice   int      `json:"choice,omitempty"`
+	Keys     []string `json:"keys,omitempty"`
+	Turn     int64    `json:"turn,omitempty"`
+	// Start: the project, harness, worktree and harness arguments of a new
+	// session.
+	Ref      string   `json:"ref,omitempty"`
+	Harness  string   `json:"harness,omitempty"`
+	Worktree string   `json:"worktree,omitempty"`
+	Args     []string `json:"args,omitempty"`
 }
 
-var commandIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-// ValidCommandID reports whether id may name a command.
-func ValidCommandID(id string) bool { return commandIDRE.MatchString(id) }
-
-// Validate checks the fields every command must have.
-func (c *Command) Validate() error {
-	if !ValidCommandID(c.ID) {
-		return errors.New("invalid command id")
-	}
-	switch c.Kind {
-	case CommandSend, CommandAnswer, CommandInterrupt, CommandKeys, CommandStop, CommandSeen, CommandAttach:
-		if !names.ValidSessionID(c.Session) {
-			return errors.New("invalid session")
-		}
-	case CommandStart:
-		if _, err := names.Parse(c.Ref); err != nil || !names.Valid(c.Harness) {
-			return errors.New("invalid project or harness")
-		}
-	default:
-		return errors.New("unknown command kind")
-	}
-	return nil
-}
+// ValidCommandID reports whether id may name a command: it has the form of
+// a session ID or of a UUID (work order C09 section 3).
+func ValidCommandID(id string) bool { return names.ValidSessionID(id) || uuidRE.MatchString(id) }
 
 // Receipt records what became of a command.
 type Receipt struct {
-	Command string    `json:"command"`
-	Outcome string    `json:"outcome"`
-	Detail  string    `json:"detail,omitempty"`
-	At      time.Time `json:"at"`
-	// Session is the session a start command created.
+	Command string `json:"command"`
+	Kind    string `json:"kind"`
+	// Session is the session the command addresses, or the one a start
+	// command created.
 	Session string `json:"session,omitempty"`
+	Outcome string `json:"outcome"`
+	Detail  string `json:"detail,omitempty"`
+	// Adapter is the input adapter that delivered (paste, …).
+	Adapter  string    `json:"adapter,omitempty"`
+	Accepted time.Time `json:"accepted"`
+	At       time.Time `json:"at"`
+	Final    bool      `json:"final"`
+}
+
+// SendParams are the parameters of session.send.
+type SendParams struct {
+	ID      string `json:"id"`
+	Session string `json:"session"`
+	Text    string `json:"text"`
+	Mode    string `json:"mode,omitempty"`
+}
+
+// AnswerParams are the parameters of session.answer: an option number
+// (from 1) or free text for the pending question (Question, when given,
+// must name it).
+type AnswerParams struct {
+	ID       string `json:"id"`
+	Session  string `json:"session"`
+	Question string `json:"question,omitempty"`
+	Choice   int    `json:"choice,omitempty"`
+	Text     string `json:"text,omitempty"`
+}
+
+// SessionCommandParams are the parameters of session.interrupt and
+// session.stop.
+type SessionCommandParams struct {
+	ID      string `json:"id"`
+	Session string `json:"session"`
+}
+
+// KeysParams are the parameters of session.keys.
+type KeysParams struct {
+	ID      string   `json:"id"`
+	Session string   `json:"session"`
+	Keys    []string `json:"keys"`
+}
+
+// StartParams are the parameters of session.start: a detached session of
+// harness in project ref (worktree default main), with Prompt queued as
+// its first input.
+type StartParams struct {
+	ID       string   `json:"id"`
+	Ref      string   `json:"ref"`
+	Harness  string   `json:"harness"`
+	Worktree string   `json:"worktree,omitempty"`
+	Prompt   string   `json:"prompt,omitempty"`
+	Args     []string `json:"args,omitempty"`
+}
+
+// SeenParams are the parameters of session.seen; Turn defaults to the
+// session's current turn, ID is optional.
+type SeenParams struct {
+	ID      string `json:"id,omitempty"`
+	Session string `json:"session"`
+	Turn    int64  `json:"turn,omitempty"`
+}
+
+// CommandGetParams ask for a stored receipt; with Wait (seconds, at most
+// 600) the daemon answers once the receipt is final or the time is up.
+type CommandGetParams struct {
+	ID   string `json:"id"`
+	Wait int    `json:"wait,omitempty"`
+}
+
+// Keys a client may send with session.keys (work order C09 section 3).
+var NamedKeys = []string{"Enter", "Escape", "Tab", "Up", "Down", "Left", "Right", "C-c",
+	"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "y", "n"}
+
+// ValidNamedKey reports whether k is one of NamedKeys.
+func ValidNamedKey(k string) bool {
+	for _, n := range NamedKeys {
+		if n == k {
+			return true
+		}
+	}
+	return false
+}
+
+// Box channel: input operations the daemon asks the box agent for, and the
+// question wait the box's hook asks the daemon for.
+
+// BoxInputParams address a session's pane in a box: its clients, a
+// bracketed paste of Text followed after a pause by Submit (a tmux key
+// name; empty: no submit key), or Keys.
+type BoxInputParams struct {
+	Session string   `json:"session"`
+	Text    string   `json:"text,omitempty"`
+	Submit  string   `json:"submit,omitempty"`
+	Keys    []string `json:"keys,omitempty"`
+}
+
+// BoxClients is the answer of box.input.clients: the session's window and
+// the latest activity (Unix seconds, box clock Now) of the tmux clients
+// that show it.
+type BoxClients struct {
+	Window       string `json:"window"`
+	Clients      int    `json:"clients"`
+	LastActivity int64  `json:"last_activity"`
+	Now          int64  `json:"now"`
+}
+
+// QuestionParams are what a hook sends with host.question: it waits up to
+// Timeout seconds for an answer to the question.
+type QuestionParams struct {
+	Session  string `json:"session"`
+	Question string `json:"question"`
+	Timeout  int    `json:"timeout"`
+}
+
+// QuestionReply is the answer the daemon returns to a waiting hook.
+type QuestionReply struct {
+	Choice int    `json:"choice,omitempty"`
+	Text   string `json:"text,omitempty"`
 }
 
 // DaemonInfo is the result of daemon.info.

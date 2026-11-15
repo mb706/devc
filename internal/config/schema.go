@@ -313,9 +313,46 @@ type HarnessHooks struct {
 	Kind string `toml:"kind" json:"kind"`
 }
 
+// HarnessInput says how devc delivers input to a live session (work order
+// C09): the adapter, the tmux key that submits a pasted prompt, the keys
+// that interrupt a turn, the keys that choose an option of a dialog on
+// screen ("{n}" is the option's number), and how long a question hook
+// waits for an answer from elsewhere (seconds; 0: never).
 type HarnessInput struct {
-	Adapter   string `toml:"adapter" json:"adapter"`
-	SubmitKey string `toml:"submit_key" json:"submit_key"`
+	Adapter       string   `toml:"adapter" json:"adapter"`
+	SubmitKey     string   `toml:"submit_key" json:"submit_key"`
+	InterruptKeys []string `toml:"interrupt_keys" json:"interrupt_keys"`
+	AnswerKeys    []string `toml:"answer_keys" json:"answer_keys"`
+	QuestionWait  *int     `toml:"question_wait" json:"question_wait"`
+}
+
+// DefaultQuestionWait is input.question_wait when a manifest does not set
+// it (10 minutes, below the default timeout of Claude Code's hooks only
+// because devc's baseline raises that timeout).
+const DefaultQuestionWait = 600
+
+// Wait returns input.question_wait with its default applied.
+func (i HarnessInput) Wait() int {
+	if i.QuestionWait == nil {
+		return DefaultQuestionWait
+	}
+	return *i.QuestionWait
+}
+
+// Interrupt returns input.interrupt_keys with its default applied.
+func (i HarnessInput) Interrupt() []string {
+	if len(i.InterruptKeys) == 0 {
+		return []string{"Escape"}
+	}
+	return i.InterruptKeys
+}
+
+// Answer returns input.answer_keys with its default applied.
+func (i HarnessInput) Answer() []string {
+	if len(i.AnswerKeys) == 0 {
+		return []string{"{n}", "Enter"}
+	}
+	return i.AnswerKeys
 }
 
 type HarnessMemory struct {

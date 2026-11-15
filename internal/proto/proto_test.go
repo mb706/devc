@@ -112,3 +112,117 @@ func TestPrintable(t *testing.T) {
 		t.Errorf("PrintableText: %q", got)
 	}
 }
+
+func TestC09Events(t *testing.T) {
+	sid := "s0000000000aaaaaaaaaa"
+	line := func(typ string, data any) []byte {
+		ev, _ := New(sid, typ, data, time.Now())
+		b, _ := json.Marshal(ev)
+		return b
+	}
+	// A box cannot write seen or answer events.
+	for _, typ := range []string{TypeSeen, TypeAnswer} {
+		var data any = Seen{Turn: 1}
+		if typ == TypeAnswer {
+			data = Answer{Choice: 1, Via: "hook"}
+		}
+		if _, err := ParseSpoolLine(line(typ, data), sid); err == nil || !strings.Contains(err.Error(), "host") {
+			t.Errorf("%s from a spool: %v", typ, err)
+		}
+		if _, err := ValidateData(typ, mustJSON(data)); err != nil {
+			t.Errorf("%s: %v", typ, err)
+		}
+	}
+	if _, err := ParseSpoolLine(line(TypeState, State{State: StateWorking, Source: SourceOSC, Message: "hi"}), sid); err != nil {
+		t.Errorf("osc state: %v", err)
+	}
+	for _, bad := range []any{State{State: StateIdle, Source: "screen"}, State{State: StateIdle, Message: strings.Repeat("x", MaxMessageText+100)}} {
+		if _, err := ValidateData(TypeState, mustJSON(bad)); err == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
+	for _, bad := range []any{Seen{}, Answer{Via: "magic"}, Answer{Choice: 99, Via: "hook"}} {
+		typ := TypeSeen
+		if _, ok := bad.(Answer); ok {
+			typ = TypeAnswer
+		}
+		if _, err := ValidateData(typ, mustJSON(bad)); err == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
+}
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+func TestTurnsAndSeen(t *testing.T) {
+	v := NewSessionView("r", "p", "s0000000000aaaaaaaaaa")
+	seq := int64(0)
+	apply := func(typ string, data any) {
+		seq++
+		ev, _ := New(v.Session, typ, data, time.Now())
+		ev.Seq = seq
+		v.Apply(&ev)
+	}
+	apply(TypeSessionStart, SessionStart{Harness: "fake"})
+	apply(TypeState, State{State: StateIdle})
+	apply(TypePrompt, Prompt{SHA256: strings.Repeat("a", 64)})
+	apply(TypeState, State{State: StateDone})
+	if v.Turn != 1 || v.DoneTurn != 1 || !v.NeedsYou() || v.PromptSeq != 3 || v.StateSeq != 4 {
+		t.Errorf("after one turn: %+v", v)
+	}
+	apply(TypeSeen, Seen{Turn: 1})
+	if v.SeenTurn != 1 || v.NeedsYou() {
+		t.Errorf("after seen: %+v", v)
+	}
+	apply(TypePrompt, Prompt{SHA256: strings.Repeat("a", 64)})
+	apply(TypeQuestion, Question{ID: "q", Text: "?"})
+	apply(TypeState, State{State: StateBlocked})
+	if !v.NeedsYou() || v.Question == nil {
+		t.Errorf("blocked: %+v", v)
+	}
+	apply(TypeAnswer, Answer{Question: "q", Choice: 1, Via: "hook"})
+	if v.Question != nil {
+		t.Errorf("answered: %+v", v)
+	}
+	apply(TypeState, State{State: StateDone})
+	if v.DoneTurn != 2 || !v.NeedsYou() {
+		t.Errorf("second turn done: %+v", v)
+	}
+	apply(TypeSessionEnd, SessionEnd{Reason: "exit"})
+	apply(TypeSeen, Seen{Turn: 2})
+	if v.SeenTurn != 2 || v.Live {
+		t.Errorf("seen after the end: %+v", v)
+	}
+}
+
+func TestInputTextAndIDs(t *testing.T) {
+	if got := NormalizeInputText("a\r\nb\rc"); got != "a\nb\nc" {
+		t.Errorf("normalize: %q", got)
+	}
+	for _, ok := range []string{"hello", "two\nlines\twith tab", "ünïcödé ✓"} {
+		if err := CheckInputText(ok); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "esc\x1b[201~", "nul\x00", "del\x7f", "c1\u0085", "\xff", strings.Repeat("x", MaxInputText+1)} {
+		if err := CheckInputText(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	for _, ok := range []string{"s0000000000aaaaaaaaaa", "123e4567-e89b-12d3-a456-426614174000"} {
+		if !ValidCommandID(ok) {
+			t.Errorf("%q refused", ok)
+		}
+	}
+	for _, bad := range []string{"", "x", "../etc", "s0000000000aaaaaaaaaa.json", "123e4567-e89b-12d3-a456-42661417400"} {
+		if ValidCommandID(bad) {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if !ValidNamedKey("C-c") || ValidNamedKey("C-d") || ValidNamedKey("Enter;") {
+		t.Error("named keys")
+	}
+}

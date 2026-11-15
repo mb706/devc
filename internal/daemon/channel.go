@@ -23,8 +23,8 @@ const (
 	// host at once; more are closed at once.
 	maxBoxStreams = 32
 	// boxStreamIdle closes a box stream on which nothing arrived for that
-	// long.
-	boxStreamIdle = 10 * time.Minute
+	// long; longer than the longest question wait (30 minutes).
+	boxStreamIdle = 31 * time.Minute
 	// helloTimeout bounds the box's answer to box.hello.
 	helloTimeout = 10 * time.Second
 	// maxBackoff is the longest pause between connection attempts;
@@ -247,6 +247,18 @@ func (w *boxWorker) acceptStreams(ctx context.Context, sess *yamux.Session) {
 		proto.MethodHostPing: func(context.Context, *proto.Conn, json.RawMessage) (any, error) {
 			return proto.PingReply{Version: w.d.version, Instance: w.d.instance}, nil
 		},
+		// A question hook waits for an answer (work order C09 section 5);
+		// the session must belong to this box.
+		proto.MethodHostQuestion: func(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
+			var p proto.QuestionParams
+			if err := proto.DecodeParams(params, &p); err != nil {
+				return nil, err
+			}
+			if w.d.cmd == nil {
+				return nil, proto.Errorf(proto.CodeRefused, "commands are not available")
+			}
+			return w.d.cmd.questionWait(ctx, w.ref, p)
+		},
 	}
 	notify := map[string]proto.NotifyHandler{
 		proto.MethodHostHint: func(_ context.Context, _ *proto.Conn, params json.RawMessage) {
@@ -273,6 +285,55 @@ func (w *boxWorker) acceptStreams(ctx context.Context, sess *yamux.Session) {
 			<-w.streams
 		}()
 	}
+}
+
+// errNotConnected: the box channel is not connected.
+var errNotConnected = errors.New("the box channel is not connected")
+
+// call makes one request to the box agent on a stream of its own, so a slow
+// operation never holds up the control stream. The result is decoded
+// strictly (into result unless nil).
+func (w *boxWorker) call(ctx context.Context, method string, params, result any) error {
+	w.mu.Lock()
+	sess := w.sess
+	w.mu.Unlock()
+	if sess == nil {
+		return errNotConnected
+	}
+	st, err := sess.OpenStream()
+	if err != nil {
+		return fmt.Errorf("%w: %v", errNotConnected, err)
+	}
+	conn := proto.NewConn(st, proto.Options{Context: ctx, Log: w.d.log, CallTimeout: time.Minute})
+	defer conn.Close()
+	var raw json.RawMessage
+	if err := conn.Call(ctx, method, params, &raw); err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+	if err := proto.DecodeResult(raw, result); err != nil {
+		return fmt.Errorf("invalid answer from %s to %s: %v", names.BoxName(w.ref), method, err)
+	}
+	if v, ok := result.(*proto.BoxClients); ok {
+		if v.Clients < 0 || v.Clients > 100000 || v.LastActivity < 0 || (v.Window != "" && !validWindow(v.Window)) {
+			return fmt.Errorf("invalid client report from %s", names.BoxName(w.ref))
+		}
+	}
+	return nil
+}
+
+func validWindow(s string) bool {
+	if len(s) < 2 || len(s) > 10 || s[0] != '@' {
+		return false
+	}
+	for _, c := range s[1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // live asks the box for its live sessions over the channel; the answer is
