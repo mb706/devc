@@ -223,6 +223,57 @@ func (r *Root) ReadFrom(rel string, offset, max int64) ([]byte, int64, error) {
 	return buf[:got], offset + int64(got), nil
 }
 
+// Size returns the size of the regular file rel.
+func (r *Root) Size(rel string) (int64, error) {
+	f, err := r.Open(rel)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
+}
+
+// RemoveFile removes the regular file rel. Its directory is resolved
+// beneath the root with the resolve flags of this package, and the entry is
+// checked and unlinked relative to that directory's descriptor without
+// following a symlink. Anything but a regular file is refused. (A box may
+// swap the file for something else between the check and the unlink;
+// unlinkat then removes that entry itself, never what it points to.)
+func (r *Root) RemoveFile(rel string) error {
+	if err := checkRel(rel); err != nil {
+		return &fs.PathError{Op: "safefs: remove", Path: r.join(rel), Err: err}
+	}
+	dir, base := path.Split(rel)
+	dir = strings.TrimSuffix(dir, "/")
+	if base == "" || base == "." {
+		return &fs.PathError{Op: "safefs: remove", Path: r.join(rel), Err: errors.New("not a file name")}
+	}
+	dfd := r.fd
+	if dir != "" && dir != "." {
+		fd, err := r.openat2(dir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(fd)
+		dfd = fd
+	}
+	var st unix.Stat_t
+	if err := unix.Fstatat(dfd, base, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return &fs.PathError{Op: "safefs: remove", Path: r.join(rel), Err: err}
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return &fs.PathError{Op: "safefs: remove", Path: r.join(rel), Err: fmt.Errorf("not a regular file (%s)", typeName(st.Mode))}
+	}
+	if err := unix.Unlinkat(dfd, base, 0); err != nil {
+		return &fs.PathError{Op: "safefs: remove", Path: r.join(rel), Err: err}
+	}
+	return nil
+}
+
 // MkdirAll creates rel and every missing parent beneath the root with mode
 // (minus the umask). Each component is resolved on its own, relative to the
 // descriptor of its parent, with the resolve flags of this package, and

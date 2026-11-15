@@ -49,3 +49,64 @@ func TestFakeAgent(t *testing.T) {
 		t.Errorf("touch-state escape: %d", code)
 	}
 }
+
+func TestFakeAgentHooks(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "hooks.log")
+	hook := filepath.Join(dir, "hook")
+	// The receiver records its arguments and input, one call per line.
+	os.WriteFile(hook, []byte("#!/bin/sh\nprintf '%s %s %s %s ' \"$1\" \"$2\" \"$3\" \"$4\" >> "+log+"\ncat >> "+log+"\necho >> "+log+"\n"), 0o755)
+	t.Setenv("FAKEAGENT_HOOK", hook)
+	types := func() []string {
+		b, _ := os.ReadFile(log)
+		os.Remove(log)
+		var out []string
+		for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			f := strings.Fields(l)
+			if len(f) < 5 || f[0] != "box" || f[1] != "hook" || f[2] != "fake" {
+				t.Errorf("hook call %q", l)
+				continue
+			}
+			typ := f[3]
+			if strings.Contains(l, `"state":"`) {
+				i := strings.Index(l, `"state":"`) + len(`"state":"`)
+				typ += ":" + l[i:i+strings.IndexByte(l[i:], '"')]
+			}
+			out = append(out, typ)
+		}
+		return out
+	}
+	var out, errb bytes.Buffer
+	in := strings.NewReader("say hi\nask which one?\nthe second\nexit\n")
+	if code := run(nil, in, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	want := []string{"harness", "state:idle", "prompt", "state:working", "message", "state:done",
+		"prompt", "state:working", "question", "state:blocked", "state:working", "message", "state:done", "session.end"}
+	if got := types(); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("interactive hooks:\n got %q\nwant %q", got, want)
+	}
+	if !strings.Contains(out.String(), "question: which one?") || !strings.Contains(out.String(), "answer: the second") {
+		t.Errorf("output %q", out.String())
+	}
+	// --no-end and die: no end event.
+	if code := run([]string{"--no-end"}, strings.NewReader("exit\n"), &out, &errb); code != 0 {
+		t.Errorf("--no-end exit %d", code)
+	}
+	if got := types(); strings.Join(got, " ") != "harness state:idle" {
+		t.Errorf("--no-end hooks %q", got)
+	}
+	if code := run(nil, strings.NewReader("die 7\nsay never\n"), &out, &errb); code != 7 {
+		t.Errorf("die exit %d", code)
+	}
+	if got := types(); strings.Join(got, " ") != "harness state:idle" {
+		t.Errorf("die hooks %q", got)
+	}
+	// -p: one turn and the end.
+	if code := run([]string{"-p", "say once"}, nil, &out, &errb); code != 0 {
+		t.Errorf("-p exit %d", code)
+	}
+	if got := types(); strings.Join(got, " ") != "harness state:idle prompt state:working message state:done session.end" {
+		t.Errorf("-p hooks %q", got)
+	}
+}

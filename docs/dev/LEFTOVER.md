@@ -71,7 +71,7 @@ Vendor formats that could not be confirmed without an account or a live session 
 |---|---|
 | Claude `.claude.json` seed keys `hasCompletedOnboarding`, `bypassPermissionsModeAccepted`, `projects.<path>.hasTrustDialogAccepted`, `hasCompletedProjectOnboarding`: not documented, taken from observation of earlier versions; only the location (`$CLAUDE_CONFIG_DIR/.claude.json`) is documented | a Claude session in a box: no onboarding, trust or bypass prompt on first start |
 | Claude managed settings: `permissions.defaultMode = "bypassPermissions"` and `skipDangerousModePermissionPrompt` from `/etc/claude-code/managed-settings.json` (documented scopes allow managed); whether bypass mode works for UID 1000 without further confirmation | a Claude session in a box |
-| Claude command hooks for `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`, `SessionEnd` from managed settings (documented format); they call the C03 placeholder `devc box hook`, which ignores them | C04, then a Claude session |
+| Claude command hooks for `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`, `SessionEnd` from managed settings (documented format); they call `devc box hook claude <event>` (the real receiver since C04) | a Claude session |
 | Claude runtime with the native binary under `/opt/devc/harness/claude/v/<stamp>/home/.local/share/claude/versions/…` while `HOME=/home/dev`: whether it warns about its install location or tries to self-manage (`DISABLE_UPDATES=1` is set, which also blocks `claude install`) | a Claude session in a box |
 | Codex `/etc/codex/config.toml` is the documented system layer, the lowest-precedence file layer: the box can override `approval_policy` and the rest from `$CODEX_HOME/config.toml` in the realm-shared, box-writable home. Admin-enforced `/etc/codex/requirements.toml` would bind; its keys were not verified | requirements and managed defaults added in C03r (see there); still unverified |
 | Codex hooks: inline `[[hooks.<Event>]]` tables in the system layer, events `SessionStart`, `UserPromptSubmit`, `Stop`, `PermissionRequest` (used as the counterpart of Claude's `Notification`) and `SessionEnd`; the documentation says system-layer hooks count as managed and need no trust review | a Codex session in a box |
@@ -110,3 +110,27 @@ Other checks and deferred work:
 | The helper container (`--rootfs <toolbox>/helper-rootfs:O`) for `rm --home` works on this host (fuse-overlayfs, runc); untested on SELinux hosts (it mounts a box home without relabelling) and with crun | a Fedora machine, enforcing |
 | `devc up` on a running box no longer re-delivers secrets, baselines or launch descriptions (A3); `devc update`/`harness install` still refresh launch descriptions of running boxes. A command to refresh secrets of a running box does not exist | a decision (C08 delivers secrets on demand anyway) |
 | `harness gc` treats every running devc box on the host (any state directory) as a possible user of a version; boxes started before the history file existed fall back to the stamp times | nothing |
+
+### From C04
+
+Hook field names that could not be confirmed against a live harness (taken from the vendors' hook references as of 2026-11):
+
+| Item | Needs |
+|---|---|
+| Claude Code hook inputs: `session_id`, `transcript_path`, `cwd`, `source` (SessionStart), `prompt` (UserPromptSubmit), `last_assistant_message` (Stop), `message`, `title`, `notification_type` (Notification), `reason` (SessionEnd). Mapped notification types: `permission_prompt` → blocked/permission, `elicitation_dialog`, `elicitation_url_dialog`, `agent_needs_input` → blocked/question (the last two from the matcher table only), `idle_prompt` → done, everything else → note | a Claude session in a box (one permission prompt, one question, one idle notification, `/exit`) |
+| Claude: an empty stdout and exit 0 from every hook is harmless (SessionStart and UserPromptSubmit stdout becomes model context); the SessionEnd hook finishes within Claude's 1.5 s budget | a Claude session in a box |
+| Codex hook inputs: `session_id`, `transcript_path`, `cwd`, `source`, `prompt`, `turn_id`, `last_assistant_message`, `tool_name`, `tool_input.description` (may be null; `tool_input.command` is used as a fallback), `reason` (documented as always `other`); whether `PermissionRequest` fires at all under `approval_policy = "never"` | a Codex session in a box |
+| Claude Code and Codex TUIs inside devc's tmux (passthrough, extended keys, focus events, mouse) and inside a grouped client session | real sessions in a box |
+
+Other checks and deferred work:
+
+| Item | Needs |
+|---|---|
+| `ssh <machine> -t devc attach <ref>`: tested only under a local pseudo-terminal (creack/pty), not over SSH | a second machine (or sshd on localhost) |
+| The numbered session chooser of `devc attach` on a real terminal (unit-tested with scripted input) | a manual run |
+| A harness that exits within milliseconds of its window's creation (before the window is tagged) gets no `session.end` from tmux and is reconciled as `lost`; a launcher error in an attached window disappears with the pane, because the hook removes dead panes at once (`box session start` checks the description and the executable first, which catches the usual causes) | a decision (keep failed panes for a few seconds?) |
+| Periodic context commits (spec 8.3): C04 commits at `down`/`rm` and on demand only | C05's banking timer |
+| `box session ps` counts every process whose initial environment names a session, including background processes an agent left behind; they keep a session started from a shell "live" after its harness died | a decision (count only processes with `DEVC_HARNESS`?) |
+| Journals are never rotated or pruned; diff snapshots leave unreachable objects in the context repository (`gc.auto = 0`, no `git gc`) | a retention design (with C17 state sync) |
+| The context container on SELinux hosts mounts the context directory and the toolbox without relabelling, like the other auxiliary containers | a Fedora machine, enforcing |
+| Text fields in `devc ps --json` and the journal are box-written; devc escapes control characters for terminals, but other consumers must treat them as untrusted | document for users (C07) |

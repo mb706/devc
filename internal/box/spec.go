@@ -148,6 +148,16 @@ type Cleaner interface {
 	Cleanup(ctx context.Context, ref names.ProjectRef) error
 }
 
+// StopHook runs around stopping a box in down and rm, with the box lock
+// held: BeforeStop while the box still runs (container is its name),
+// AfterStop once it no longer does; stopped says whether this command
+// stopped it (false for a box that was not running). Their errors are
+// reported as warnings; they never prevent the stop.
+type StopHook interface {
+	BeforeStop(ctx context.Context, ref names.ProjectRef, container string) error
+	AfterStop(ctx context.Context, ref names.ProjectRef, stopped bool) error
+}
+
 // ContributorFunc adapts a function to Contributor.
 type ContributorFunc func(in *Inputs, s *Spec) error
 

@@ -2,12 +2,22 @@
 // into the toolbox through a manifest with install.method = "local" and
 // started through its shim like a real harness.
 //
-//	fakeagent --version          print a version
-//	fakeagent -p '<command>'     run one command and exit
-//	fakeagent                    print a prompt, read commands until "exit"
+//	fakeagent --version              print a version
+//	fakeagent [--no-end] -p '<command>'  run one command and exit
+//	fakeagent [--no-end]             print a prompt, read commands until "exit"
 //
 // Commands: env [NAME…], say <text>, write <path> <text>, sh <command>,
-// sleep <seconds>, touch-state <relative path>, exit.
+// sleep <seconds>, touch-state <relative path>, ask <question> (waits for
+// the next line as the answer), die [code] (exits at once, without an end
+// event), exit.
+//
+// Like a real harness it reports what it does through devc's hook
+// receiver (`devc box hook fake <event>`, JSON {"type", "data"} on stdin):
+// a harness and an idle state event at start; for each input line a prompt
+// and "working", then a message and "done"; for ask a question and
+// "blocked"; session.end at exit, unless --no-end is given. The receiver
+// is FAKEAGENT_HOOK, by default /opt/devc/bin/devc; hook failures are
+// ignored.
 //
 // The agent's own "config directory" comes from FAKEAGENT_DIR, which its
 // manifest sets through home.env, so tests can tell the home strategies
@@ -17,8 +27,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -27,6 +39,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const version = "fakeagent 1.0.0"
@@ -35,44 +48,137 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
+// noEnd suppresses the session.end event (--no-end).
+var noEnd bool
+
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	noEnd = false
+	if len(args) > 0 && args[0] == "--no-end" {
+		noEnd, args = true, args[1:]
+	}
 	switch {
 	case len(args) == 1 && args[0] == "--version":
 		fmt.Fprintln(stdout, version)
 		return 0
 	case len(args) == 2 && args[0] == "-p":
-		// C04: call the hook receiver with a start event here.
-		code, _ := command(args[1], stdout, stderr)
-		// C04: report the end of the session here.
+		started()
+		code, done := turn(args[1], nil, stdout, stderr)
+		if !done {
+			end("exit")
+		}
 		return code
 	case len(args) == 0:
 		return interactive(stdin, stdout, stderr)
 	}
-	fmt.Fprintf(stderr, "usage: fakeagent [--version | -p <command>]\n")
+	fmt.Fprintf(stderr, "usage: fakeagent [--no-end] [--version | -p <command>]\n")
 	return 2
 }
 
+// hook reports one event through devc's hook receiver.
+func hook(typ string, data any) {
+	exe := os.Getenv("FAKEAGENT_HOOK")
+	if exe == "" {
+		exe = "/opt/devc/bin/devc"
+	}
+	if fi, err := os.Stat(exe); err != nil || fi.Mode().Perm()&0o111 == 0 {
+		return
+	}
+	in, _ := json.Marshal(map[string]any{"type": typ, "data": data})
+	cmd := exec.Command(exe, "box", "hook", "fake", typ)
+	cmd.Stdin = bytes.NewReader(in)
+	_ = cmd.Run()
+}
+
+func started() {
+	cwd, _ := os.Getwd()
+	hook("harness", map[string]any{"id": fmt.Sprintf("fake-%d", os.Getpid()), "cwd": cwd, "source": "startup"})
+	hook("state", map[string]any{"state": "idle"})
+}
+
+func end(reason string) {
+	if !noEnd {
+		hook("session.end", map[string]any{"reason": reason})
+	}
+}
+
+func firstRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n])
+}
+
+// turn handles one input line as a harness turn: prompt and "working",
+// the command, then the message and "done". ask also reports a question,
+// "blocked", and takes the next line from next as the answer.
+func turn(line string, next func() (string, bool), stdout, stderr io.Writer) (int, bool) {
+	verb, rest, _ := strings.Cut(line, " ")
+	switch verb {
+	case "exit":
+		end("exit")
+		return 0, true
+	case "die":
+		code, _ := strconv.Atoi(strings.TrimSpace(rest))
+		return code, true
+	}
+	sum := sha256.Sum256([]byte(line))
+	hook("prompt", map[string]any{"sha256": hex.EncodeToString(sum[:]), "length": utf8.RuneCountInString(line), "text": firstRunes(line, 2000)})
+	hook("state", map[string]any{"state": "working"})
+	var buf bytes.Buffer
+	out, errw := io.MultiWriter(stdout, &buf), io.MultiWriter(stderr, &buf)
+	code := 0
+	if verb == "ask" {
+		question := strings.TrimSpace(rest)
+		fmt.Fprintf(stdout, "question: %s\n", question)
+		hook("question", map[string]any{"id": fmt.Sprintf("q%d", time.Now().UnixNano()), "text": firstRunes(question, 4000)})
+		hook("state", map[string]any{"state": "blocked", "kind": "question"})
+		answer, ok := "", false
+		if next != nil {
+			fmt.Fprint(stdout, "answer> ")
+			answer, ok = next()
+		}
+		if !ok {
+			return 0, false
+		}
+		hook("state", map[string]any{"state": "working"})
+		fmt.Fprintf(out, "answer: %s\n", answer)
+	} else {
+		code, _ = command(line, out, errw)
+	}
+	msg := strings.TrimSpace(buf.String())
+	if msg == "" {
+		msg = "ok: " + verb
+	}
+	hook("message", map[string]any{"text": firstRunes(msg, 4000)})
+	hook("state", map[string]any{"state": "done"})
+	return code, false
+}
+
 func interactive(stdin io.Reader, stdout, stderr io.Writer) int {
-	// C04: call the hook receiver with a start event and report "idle" here.
+	started()
 	sc := bufio.NewScanner(stdin)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	next := func() (string, bool) {
+		if !sc.Scan() {
+			return "", false
+		}
+		return strings.TrimSpace(sc.Text()), true
+	}
 	code := 0
 	for {
 		fmt.Fprint(stdout, "fake> ")
-		if !sc.Scan() {
+		line, ok := next()
+		if !ok {
 			fmt.Fprintln(stdout)
+			end("eof")
 			return code
 		}
-		line := strings.TrimSpace(sc.Text())
 		if line == "" {
 			continue
 		}
-		// C04: report the prompt and "working" here, and the message and
-		// "done" after the command; "ask <text>" will report a question.
 		var done bool
-		code, done = command(line, stdout, stderr)
+		code, done = turn(line, next, stdout, stderr)
 		if done {
-			// C04: write session.end here.
 			return code
 		}
 	}

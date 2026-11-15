@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -718,5 +719,64 @@ func TestPreparersAndCleaners(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(r.m.Config.Paths.BoxEtcDir(hello), "box.json"))
 	if err != nil || !strings.Contains(string(b), `"home_mounts": [`) || !strings.Contains(string(b), `".tool"`) {
 		t.Errorf("box.json: %v %s", err, b)
+	}
+}
+
+type stopRecorder struct {
+	calls []string
+	eng   *engine.Fake
+}
+
+func (h *stopRecorder) BeforeStop(ctx context.Context, ref names.ProjectRef, container string) error {
+	ci, _ := h.eng.Inspect(ctx, container)
+	h.calls = append(h.calls, fmt.Sprintf("before %s running=%v", ref.Project, ci.State.Running))
+	return errors.New("before failed")
+}
+
+func (h *stopRecorder) AfterStop(ctx context.Context, ref names.ProjectRef, stopped bool) error {
+	ci, _ := h.eng.Inspect(ctx, names.BoxName(ref))
+	h.calls = append(h.calls, fmt.Sprintf("after %s stopped=%v running=%v", ref.Project, stopped, ci.State.Running))
+	return nil
+}
+
+func TestStopHooks(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	h := &stopRecorder{eng: r.eng}
+	r.m.StopHooks = append(r.m.StopHooks, h)
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Fatalf("up: %v\n%s", err, r.out)
+	}
+	// A failing hook is a warning; the box stops anyway.
+	if err := r.m.Down(ctx, hello); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.out.String(), "warning: before failed") {
+		t.Errorf("output:\n%s", r.out)
+	}
+	if err := r.m.Down(ctx, hello); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.m.Remove(ctx, hello, false); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"before hello running=true", "after hello stopped=true running=false",
+		"after hello stopped=false running=false",
+		"before hello running=true", "after hello stopped=true running=false",
+	}
+	if !slices.Equal(h.calls, want) {
+		t.Errorf("calls:\n got %q\nwant %q", h.calls, want)
+	}
+	if _, running, ready, err := r.m.State(ctx, hello); err != nil || running || ready {
+		t.Errorf("State after rm: %v %v %v", running, ready, err)
+	}
+	// The box's tmux configuration is rendered into /etc/devc.
+	b, err := os.ReadFile(filepath.Join(r.m.Config.Paths.BoxEtcDir(hello), "tmux.conf"))
+	if err != nil || !strings.Contains(string(b), "source-file -q ~/.tmux.conf") {
+		t.Errorf("tmux.conf: %v %s", err, b)
 	}
 }

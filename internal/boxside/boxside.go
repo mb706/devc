@@ -2,12 +2,23 @@
 // through the hidden `devc box …` commands (plan 3.3) and the harness shims:
 // the container's main process (init, which also applies harness seeds),
 // the identity fix run by `devc up`, the login shell used by `devc sh`, the
-// harness launcher, and a self-test of the hardening.
+// harness launcher (which registers each session), the hook receiver that
+// turns harness hooks into spool events, the session commands that create,
+// list and stop tmux windows, and a self-test of the hardening. Two workers
+// run outside boxes: rm-worker in the helper container and the context
+// worker in the context container (internal/ctxrepo).
 //
 // Security rules: code here runs in the box and trusts nothing the box can
 // write. It reads its own description only from /etc/devc, which the host
 // renders and mounts read-only, and it never talks to the host except
-// through files in /run/devc that the host reads with internal/safefs.
+// through files in /run/devc that the host reads with internal/safefs and
+// through the output of commands the host runs, which the host validates.
+// Events are validated here as the host would validate them, so a mapping
+// bug shows up as a note rather than a refused line. The hook receiver
+// never prints and never fails. tmux runs with argument vectors and an
+// environment without per-session variables (internal/tmux). The context
+// worker walks a box-written tree through safefs and never lets git look
+// at it.
 package boxside
 
 import (

@@ -46,7 +46,19 @@ func (a *app) boxEnv() (*boxEnv, error) {
 	m.Contributors = append(m.Contributors, hooks)
 	m.Preparers = append(m.Preparers, hooks)
 	m.Cleaners = append(m.Cleaners, hooks)
-	return &boxEnv{cfg: c, mgr: m}, nil
+	e := &boxEnv{cfg: c, mgr: m}
+	repo, err := a.ctxRepo(c, m.Engine)
+	if err != nil {
+		return nil, err
+	}
+	m.StopHooks = append(m.StopHooks, &sessionHooks{a: a, e: e, repo: repo})
+	return e, nil
+}
+
+// lsRow is one line of `devc ls`: the box and its sessions.
+type lsRow struct {
+	box.Row
+	Sessions sessionCount `json:"sessions"`
 }
 
 // resolveRef turns the optional ref argument into a project reference,
@@ -153,11 +165,21 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 			if err != nil {
 				return err
 			}
-			if lsJSON {
-				return writeJSON(a.stdout, rows)
-			}
-			tw := table(a.stdout, "PROJECT", "STATE", "IMAGE", "DRIFT", "STARTED")
+			// Sessions of every project (work order C04 section 5); the
+			// spools are ingested and the journals reconciled first.
+			out := make([]lsRow, 0, len(rows))
 			for _, r := range rows {
+				lr := lsRow{Row: r}
+				if ref, err := names.Parse(r.Ref); err == nil && r.State != "conflict" {
+					lr.Sessions = a.countSessions(ctx, e, ref)
+				}
+				out = append(out, lr)
+			}
+			if lsJSON {
+				return writeJSON(a.stdout, out)
+			}
+			tw := table(a.stdout, "PROJECT", "STATE", "IMAGE", "DRIFT", "STARTED", "SESSIONS")
+			for _, r := range out {
 				drift, started := "-", "-"
 				if r.State == "running" || r.State == "stopped" {
 					drift = "no"
@@ -168,7 +190,7 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 				if r.StartedAt != nil {
 					started = r.StartedAt.Local().Format("2006-01-02 15:04")
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.Ref, r.State, r.Image, drift, started)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Ref, r.State, r.Image, drift, started, r.Sessions)
 			}
 			if err := tw.Flush(); err != nil {
 				return err

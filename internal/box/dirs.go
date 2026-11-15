@@ -17,6 +17,7 @@ import (
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/safefs"
+	"github.com/mb706/devc/internal/tmux"
 )
 
 // DetectHost reads the host facts that change box arguments. root prefixes
@@ -162,6 +163,10 @@ func writeEtc(p *paths.Paths, r *config.Resolved, version string, homeMounts []s
 		return err
 	}
 	if err := WriteFileAtomic(filepath.Join(dir, "box.json"), append(b, '\n'), 0o644); err != nil {
+		return err
+	}
+	// The configuration of the box's tmux server (sessions, plan 3.5).
+	if err := WriteFileAtomic(filepath.Join(dir, "tmux.conf"), []byte(tmux.Config()), 0o644); err != nil {
 		return err
 	}
 

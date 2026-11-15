@@ -19,6 +19,7 @@ import (
 	"github.com/mb706/devc/internal/flock"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
+	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/toolbox"
 )
 
@@ -63,6 +64,8 @@ type Manager struct {
 	// per-box state after down and rm.
 	Preparers []Preparer
 	Cleaners  []Cleaner
+	// StopHooks run around stopping a box (sessions, context commit).
+	StopHooks []StopHook
 	// Now is the clock for the root log.
 	Now func() time.Time
 
@@ -473,16 +476,48 @@ func (m *Manager) Down(ctx context.Context, ref names.ProjectRef) error {
 	switch {
 	case ci == nil:
 		m.printf("devc: %s does not exist\n", name)
+		m.afterStop(ctx, ref, false)
 		return m.cleanup(ctx, ref)
 	case !ci.State.Running:
 		m.printf("devc: %s is not running\n", name)
+		m.afterStop(ctx, ref, false)
 		return m.cleanup(ctx, ref)
 	}
+	m.beforeStop(ctx, ref, name)
 	m.printf("devc: stopping %s\n", name)
 	if err := m.Engine.Stop(ctx, name, 10*time.Second); err != nil {
 		return err
 	}
+	m.afterStop(ctx, ref, true)
 	return m.cleanup(ctx, ref)
+}
+
+// beforeStop and afterStop run the stop hooks; failures are warnings.
+func (m *Manager) beforeStop(ctx context.Context, ref names.ProjectRef, name string) {
+	for _, h := range m.StopHooks {
+		if err := h.BeforeStop(ctx, ref, name); err != nil {
+			m.printf("devc: warning: %s\n", proto.PrintableText(err.Error()))
+		}
+	}
+}
+
+func (m *Manager) afterStop(ctx context.Context, ref names.ProjectRef, stopped bool) {
+	for _, h := range m.StopHooks {
+		if err := h.AfterStop(ctx, ref, stopped); err != nil {
+			m.printf("devc: warning: %s\n", proto.PrintableText(err.Error()))
+		}
+	}
+}
+
+// State reports whether a project's box runs and whether box init has
+// reported ready since its last start through devc. ci is nil when the box
+// does not exist.
+func (m *Manager) State(ctx context.Context, ref names.ProjectRef) (ci *engine.ContainerInfo, running, ready bool, err error) {
+	ci, err = m.Find(ctx, ref)
+	if err != nil || ci == nil {
+		return ci, false, false, err
+	}
+	return ci, ci.State.Running, ci.State.Running && m.isReady(ref), nil
 }
 
 // cleanup runs the cleaners; all run even when one fails.
@@ -512,10 +547,14 @@ func (m *Manager) Remove(ctx context.Context, ref names.ProjectRef, home bool) e
 	if ci == nil {
 		m.printf("devc: %s does not exist\n", name)
 	} else {
+		if ci.State.Running {
+			m.beforeStop(ctx, ref, name)
+		}
 		m.printf("devc: removing %s\n", name)
 		if err := m.Engine.Remove(ctx, name); err != nil {
 			return err
 		}
+		m.afterStop(ctx, ref, ci.State.Running)
 	}
 	if err := m.cleanup(ctx, ref); err != nil {
 		return err

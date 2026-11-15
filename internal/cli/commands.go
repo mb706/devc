@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
@@ -270,8 +272,28 @@ func table(w io.Writer, headers ...string) *tabwriter.Writer {
 	return tw
 }
 
+// writeJSON prints v as indented JSON. encoding/json leaves DEL and the C1
+// control characters unescaped; they are escaped here, so text a box wrote
+// cannot drive a terminal the output is shown on.
 func writeJSON(w io.Writer, v any) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(escapeControls(b), '\n'))
+	return err
+}
+
+func escapeControls(b []byte) []byte {
+	var out bytes.Buffer
+	for len(b) > 0 {
+		r, n := utf8.DecodeRune(b)
+		if r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			fmt.Fprintf(&out, "\\u%04x", r)
+		} else {
+			out.Write(b[:n])
+		}
+		b = b[n:]
+	}
+	return out.Bytes()
 }

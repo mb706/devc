@@ -21,6 +21,7 @@ import (
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/paths"
+	"github.com/mb706/devc/internal/proto"
 )
 
 // usageError marks errors that exit with status 2.
@@ -45,11 +46,16 @@ type app struct {
 	verbose   int
 
 	stdout, stderr io.Writer
-	getenv         func(string) string
-	runner         execx.Runner
-	executable     func() (string, error)
-	getwd          func() (string, error)
-	isTerminal     func() bool
+	// stdin answers interactive questions (attach's session choice).
+	stdin      io.Reader
+	getenv     func(string) string
+	runner     execx.Runner
+	executable func() (string, error)
+	getwd      func() (string, error)
+	isTerminal func() bool
+	// args are the raw command-line arguments; harness commands are
+	// registered before cobra parses them.
+	args []string
 }
 
 func (a *app) paths() (*paths.Paths, error) {
@@ -102,7 +108,7 @@ func display(c *config.Config, file string) string {
 
 // Main runs the CLI and returns the process exit status.
 func Main(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
-	a := &app{stdout: stdout, stderr: stderr, getenv: getenv, runner: execx.Real{},
+	a := &app{stdout: stdout, stderr: stderr, stdin: os.Stdin, getenv: getenv, runner: execx.Real{},
 		executable: os.Executable, getwd: os.Getwd, isTerminal: stdinIsTerminal}
 	return a.main(args)
 }
@@ -111,6 +117,7 @@ func Main(args []string, stdout, stderr io.Writer, getenv func(string) string) i
 // fakes.
 func (a *app) main(args []string) int {
 	stdout, stderr := a.stdout, a.stderr
+	a.args = args
 	root := newRoot(a)
 	root.SetArgs(args)
 	root.SetOut(stdout)
@@ -125,11 +132,17 @@ func (a *app) main(args []string) int {
 	}
 	var ue *usageError
 	if errors.As(err, &ue) {
-		fmt.Fprintf(stderr, "devc: %v\nRun '%s --help' for usage.\n", err, cmd.CommandPath())
+		fmt.Fprintf(stderr, "devc: %s\nRun '%s --help' for usage.\n", errText(err), cmd.CommandPath())
 		return 2
 	}
-	fmt.Fprintf(stderr, "devc: %v\n", err)
+	fmt.Fprintf(stderr, "devc: %s\n", errText(err))
 	return 1
+}
+
+// errText is an error message made safe for a terminal: errors can carry
+// output of commands that ran in a box (README rule 2).
+func errText(err error) string {
+	return proto.PrintableText(err.Error())
 }
 
 // Run is the entry point used by cmd/devc.
@@ -180,6 +193,15 @@ func newRoot(a *app) *cobra.Command {
 	)
 	root.AddCommand(newLifecycleCmds(a)...)
 	root.AddCommand(newHarnessCmds(a)...)
+	root.AddCommand(newSessionCmds(a)...)
+	existing := map[string]bool{"help": true}
+	for _, c := range root.Commands() {
+		existing[c.Name()] = true
+		for _, al := range c.Aliases {
+			existing[al] = true
+		}
+	}
+	root.AddCommand(a.harnessRunCmds(existing)...)
 	return root
 }
 

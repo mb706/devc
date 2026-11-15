@@ -264,3 +264,32 @@ func TestMkdirAll(t *testing.T) {
 		t.Error("RequireDirs accepted a symlink")
 	}
 }
+
+func TestRemoveFile(t *testing.T) {
+	r, base := fixture(t)
+	root := filepath.Join(base, "root")
+	if n, err := r.Size("big"); err != nil || n != 2000 {
+		t.Errorf("Size: %d %v", n, err)
+	}
+	if err := r.RemoveFile("sub/inner.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "sub", "inner.txt")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("inner.txt still there: %v", err)
+	}
+	// Symlinks, FIFOs, directories, escapes and symlinked parents are refused;
+	// nothing outside is touched.
+	for _, rel := range []string{"link-out", "link-in", "fifo", "sub", "../outside/secret", "dirlink/inner.txt", "/etc/passwd", ""} {
+		if err := r.RemoveFile(rel); err == nil {
+			t.Errorf("RemoveFile(%q) succeeded", rel)
+		}
+	}
+	for _, p := range []string{filepath.Join(base, "outside", "secret"), filepath.Join(root, "link-out"), filepath.Join(root, "fifo")} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+	if err := r.RemoveFile("ok.txt"); err != nil {
+		t.Errorf("top-level file: %v", err)
+	}
+}

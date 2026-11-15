@@ -13,8 +13,10 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/proto"
 )
 
 // Paths of the harness descriptions and delivered secrets in a box.
@@ -235,6 +237,11 @@ type LaunchEnv struct {
 	Stderr io.Writer
 	// NewSession generates a session ID.
 	NewSession func() string
+	// Getwd, Pid and Now describe the process for session.start; nil and
+	// zero mean the running process and the clock.
+	Getwd func() (string, error)
+	Pid   int
+	Now   func() time.Time
 }
 
 // Prepared is the result of PrepareLaunch: what exec receives.
@@ -305,9 +312,48 @@ func PrepareLaunch(l *Launch, userArgs []string, e LaunchEnv) (*Prepared, error)
 	return &Prepared{Exe: l.Exe, Argv: argv, Env: env.list(), Session: session}, nil
 }
 
-// registerSession records the start of a session. C04 fills it in (it
-// writes session.start to the spool); until then it does nothing.
-func registerSession(l *Launch, p *Prepared) {}
+// registerSession records the start of a session: session.start with the
+// harness, the worktree, the working directory and the PID (which the
+// harness keeps, because the launcher execs it). It is best effort: a
+// harness must start even when the spool cannot be written.
+func registerSession(l *Launch, p *Prepared, e LaunchEnv) error {
+	getwd, now, pid := e.Getwd, e.Now, e.Pid
+	if getwd == nil {
+		getwd = os.Getwd
+	}
+	if now == nil {
+		now = time.Now
+	}
+	if pid == 0 {
+		pid = os.Getpid()
+	}
+	cwd, _ := getwd()
+	if !path.IsAbs(cwd) || len(cwd) > 4096 {
+		cwd = ""
+	}
+	env := newEnvList(p.Env)
+	start := proto.SessionStart{Harness: l.ID, Worktree: worktreeOf(env.get("DEVC_WORKTREE"), cwd, l), Cwd: cwd, PID: pid}
+	return AppendEvents(filepath.Join(e.Root, SpoolDir), p.Session, now(), []Payload{{proto.TypeSessionStart, start}})
+}
+
+// worktreeOf is the session's worktree: DEVC_WORKTREE when it is a valid
+// name (set in windows that devc creates), else the first directory below
+// the project directory that the working directory lies in, else "".
+func worktreeOf(env, cwd string, l *Launch) string {
+	if names.ValidKind(names.KindWorktree, env) {
+		return env
+	}
+	proj := path.Join("/w", l.Realm, l.Project)
+	rest, ok := strings.CutPrefix(cwd, proj+"/")
+	if !ok {
+		return ""
+	}
+	first, _, _ := strings.Cut(rest, "/")
+	if !names.ValidKind(names.KindWorktree, first) || first == ".repo" || first == ".devc" {
+		return ""
+	}
+	return first
+}
 
 // RunLaunch prepares and execs the harness; it returns only on failure.
 func RunLaunch(l *Launch, userArgs []string, e LaunchEnv) error {
@@ -315,7 +361,7 @@ func RunLaunch(l *Launch, userArgs []string, e LaunchEnv) error {
 	if err != nil {
 		return err
 	}
-	registerSession(l, p)
+	_ = registerSession(l, p, e)
 	err = syscall.Exec(p.Exe, p.Argv, p.Env)
 	return fmt.Errorf("starting %s (%s): %w", l.Display, p.Exe, err)
 }

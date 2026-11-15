@@ -356,6 +356,10 @@ func (e *Env) WriteConfig(rel, content string) {
 	}
 }
 
+// Environ is the environment devc runs with: the parent environment
+// without DEVC_* variables, plus this environment's directories.
+func (e *Env) Environ() []string { return e.environ() }
+
 // environ is the parent environment without DEVC_* variables, plus this
 // environment's directories.
 func (e *Env) environ() []string {
