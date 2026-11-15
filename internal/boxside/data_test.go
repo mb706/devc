@@ -508,6 +508,65 @@ func TestDataSavepointRestore(t *testing.T) {
 	}
 }
 
+// TestDataReflinkModes: a reflink savepoint's copy is read-only, but a
+// restore gives every entry the mode it had when saved, from the
+// savepoint's mode record (finding B9).
+func TestDataReflinkModes(t *testing.T) {
+	tw := newTestWorker(t)
+	tw.must(DataRequest{Op: OpSetup})
+	modes := map[string]os.FileMode{
+		"scratch/private":         0o700, // directories
+		"scratch/private/sub":     0o750,
+		"scratch/shared":          0o775,
+		"scratch/private/key":     0o600, // files
+		"scratch/shared/group-rw": 0o664,
+		"scratch/shared/ro":       0o444,
+		"scratch/shared/run.sh":   0o755,
+		"scratch/shared/plain":    0o644,
+	}
+	for _, rel := range []string{"scratch/private/key", "scratch/private/sub/f", "scratch/shared/group-rw", "scratch/shared/ro", "scratch/shared/run.sh", "scratch/shared/plain"} {
+		tw.write("data/"+rel, rel, 0o644)
+	}
+	for _, rel := range []string{"scratch/private/sub", "scratch/private", "scratch/shared"} {
+		os.Lchown(tw.p("data/"+rel), 1000, 1000)
+	}
+	for rel, m := range modes {
+		if err := os.Chmod(tw.p("data/"+rel), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const id = "20261115T040600Z-modes"
+	tw.must(DataRequest{Op: OpReflinkSave, Savepoint: id})
+	sp := tw.p(".devc/savepoints/" + id)
+	// The copy is protected; the record is the vault's and read-only.
+	checkOwner(t, sp+"/scratch/private", 2000, 2000, 0o555)
+	checkOwner(t, sp+"/scratch/shared/group-rw", 2000, 2000, 0o444)
+	checkOwner(t, tw.p(".devc/savepoints/.modes/"+id), 2000, 2000, 0o444)
+	checkOwner(t, tw.p(".devc/savepoints/.modes"), 2000, 2000, 0o700)
+
+	res := tw.must(DataRequest{Op: OpRestore, Source: SourceSavepoint, Savepoint: id})
+	for rel, m := range modes {
+		checkOwner(t, tw.p("data/"+res.Dest+"/"+rel), 1000, 1000, m)
+	}
+	// In place: a file whose mode changed is put back with its saved mode;
+	// a read-only file that is unchanged stays where it is.
+	os.Chmod(tw.p("data/scratch/shared/group-rw"), 0o644)
+	os.RemoveAll(tw.p("data/scratch/private"))
+	os.RemoveAll(tw.p("data/" + res.Dest))
+	res = tw.must(DataRequest{Op: OpRestore, Source: SourceSavepoint, Savepoint: id, InPlace: true})
+	if !slices.Equal(res.Displaced, []string{"scratch/shared/group-rw"}) {
+		t.Errorf("displaced %v", res.Displaced)
+	}
+	for rel, m := range modes {
+		checkOwner(t, tw.p("data/"+rel), 1000, 1000, m)
+	}
+	// Dropping removes the record with the copy.
+	tw.must(DataRequest{Op: OpSavepointDrop, IDs: []string{id}})
+	if _, err := os.Lstat(tw.p(".devc/savepoints/.modes/" + id)); err == nil {
+		t.Error("the mode record is still there")
+	}
+}
+
 func TestDataReflinkUnsupported(t *testing.T) {
 	tw := newTestWorker(t)
 	tw.Clone = func(dst, src *os.File) error { return unix.EOPNOTSUPP }

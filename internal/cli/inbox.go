@@ -15,6 +15,7 @@ import (
 
 	"github.com/mb706/devc/internal/boxside"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/tmux"
 )
 
@@ -57,7 +58,7 @@ func newBoxCmd(a *app) *cobra.Command {
 				info = nil
 			}
 			o := boxside.DefaultInitOptions(a.stderr, mounts)
-			o.CheckNetwork = boxside.NetworkCheck(info, nil)
+			o.CheckNetwork = boxside.NetworkCheck(info, nil, boxside.BindingFile, netpolicy.ProcFS{})
 			return boxside.Init(ctx, o)
 		},
 	}

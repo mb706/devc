@@ -1090,15 +1090,17 @@ func (w *DataWorker) probeClone(d *safefs.Dir) (bool, error) {
 	return true, nil
 }
 
-// copier copies trees descriptor by descriptor.
+// copier copies trees descriptor by descriptor. fileMode and dirMode give
+// the mode of the copy of the entry rel (relative to the data root) whose
+// source has mode m.
 type copier struct {
 	w        *DataWorker
 	uid, gid int
 	// clone tries FICLONE; required makes a failure to clone fatal
 	// (errUnsupported) instead of falling back to copying.
 	clone, required bool
-	fileMode        func(uint32) uint32
-	dirMode         func(uint32) uint32
+	fileMode        func(rel string, m uint32) uint32
+	dirMode         func(rel string, m uint32) uint32
 	exclude         map[string]bool
 	stats           treeStats
 }
@@ -1141,7 +1143,7 @@ func (c *copier) copyEntry(src *safefs.Dir, name string, dst *safefs.Dir, dstNam
 		if err := dd.Chown(c.uid, c.gid); err != nil {
 			return err
 		}
-		if err := dd.Chmod(c.dirMode(st.Mode)); err != nil {
+		if err := dd.Chmod(c.dirMode(rel, st.Mode)); err != nil {
 			return err
 		}
 		return dst.SetTimes(dstName, st.Atim, st.Mtim)
@@ -1219,7 +1221,7 @@ func (c *copier) copyFile(src *safefs.Dir, name string, dst *safefs.Dir, dstName
 	if err := df.Chown(c.uid, c.gid); err != nil {
 		return err
 	}
-	if err := unix.Fchmod(int(df.Fd()), c.fileMode(st.Mode)); err != nil {
+	if err := unix.Fchmod(int(df.Fd()), c.fileMode(rel, st.Mode)); err != nil {
 		return err
 	}
 	if err := futimens(int(df.Fd()), st.Atim, st.Mtim); err != nil {
@@ -1273,9 +1275,12 @@ func (w *DataWorker) reflinkSave(req DataRequest, res *DataResult) error {
 	if err != nil {
 		return err
 	}
+	// The copy is protected (read-only, vault-owned); the modes it stands
+	// for go into the savepoint's mode record (finding B9).
+	modes := &SavedModes{V: SavedModesVersion, Files: map[string]uint32{}, Dirs: map[string]uint32{}}
 	c := &copier{w: w, uid: w.VaultUID, gid: w.VaultGID, clone: true, required: true,
-		fileMode: func(m uint32) uint32 { return m & 0o555 },
-		dirMode:  func(uint32) uint32 { return modeSealDir },
+		fileMode: func(rel string, m uint32) uint32 { modes.note(rel, false, m); return m & 0o555 },
+		dirMode:  func(rel string, m uint32) uint32 { modes.note(rel, true, m); return modeSealDir },
 		exclude:  map[string]bool{}}
 	for _, x := range exclude {
 		c.exclude[x] = true
@@ -1294,7 +1299,12 @@ func (w *DataWorker) reflinkSave(req DataRequest, res *DataResult) error {
 	if err := pd.Chmod(modeSealDir); err != nil {
 		return err
 	}
+	if err := w.writeModes(sp, req.Savepoint, modes); err != nil {
+		_ = sp.RemoveAll(partial)
+		return fmt.Errorf("recording the modes of the savepoint: %w", err)
+	}
 	if err := sp.Rename(partial, sp, req.Savepoint); err != nil {
+		_ = w.dropModes(sp, req.Savepoint)
 		return err
 	}
 	res.Files, res.Size, res.Skipped, res.Exclude = c.stats.files, c.stats.size, c.stats.skipped, exclude
@@ -1329,15 +1339,173 @@ func (w *DataWorker) savepointDrop(req DataRequest, res *DataResult) error {
 		if err := sp.RemoveAll(id + ".partial"); err != nil {
 			return err
 		}
+		if err := w.dropModes(sp, id); err != nil {
+			return err
+		}
 		res.Removed = append(res.Removed, id)
 	}
 	return nil
 }
 
+// SavedModes is the mode record of a reflink savepoint (finding B9): the
+// copy itself is read-only and vault-owned, so the modes of the saved
+// entries are kept here, in .devc/savepoints/.modes/<id> (vault-owned,
+// unreachable for the box). Only modes that differ from the default are
+// recorded: a file whose owner may write it and others may not (the
+// copy's mode plus owner write), a directory 0755.
+type SavedModes struct {
+	V     int               `json:"v"`
+	Files map[string]uint32 `json:"files"`
+	Dirs  map[string]uint32 `json:"dirs"`
+}
+
+// SavedModesVersion is the format of the record.
+const SavedModesVersion = 1
+
+// modesDir holds the mode records; its name cannot be a savepoint ID.
+const modesDir = ".modes"
+
+// maxModesSize caps a mode record.
+const maxModesSize = 256 << 20
+
+func defaultFileMode(saved uint32) uint32 { return saved&0o555 | 0o200 }
+
+const defaultDirMode = 0o755
+
+// note records the original mode m of rel when it is not the default.
+func (s *SavedModes) note(rel string, dir bool, m uint32) {
+	m &= 0o777
+	switch {
+	case dir && m != defaultDirMode:
+		s.Dirs[rel] = m
+	case !dir && m != defaultFileMode(m):
+		s.Files[rel] = m
+	}
+}
+
+// file and dir return the mode to restore for rel, whose copy in the
+// savepoint has mode saved. A savepoint without a record (made before
+// records existed) restores the defaults.
+func (s *SavedModes) file(rel string, saved uint32) uint32 {
+	if m, ok := s.Files[rel]; ok {
+		return m & 0o777
+	}
+	return defaultFileMode(saved)
+}
+
+func (s *SavedModes) dir(rel string, _ uint32) uint32 {
+	if m, ok := s.Dirs[rel]; ok {
+		return m & 0o777
+	}
+	return defaultDirMode
+}
+
+// writeModes stores the mode record of savepoint id (vault-owned, 0444).
+func (w *DataWorker) writeModes(sp *safefs.Dir, id string, modes *SavedModes) error {
+	if err := sp.Mkdir(modesDir, modeDevc); err != nil && !errors.Is(err, unix.EEXIST) {
+		return err
+	}
+	md, err := sp.Sub(modesDir)
+	if err != nil {
+		return err
+	}
+	defer md.Close()
+	if err := md.Chown(w.VaultUID, w.VaultGID); err != nil {
+		return err
+	}
+	if err := md.Chmod(modeDevc); err != nil {
+		return err
+	}
+	b, err := json.Marshal(modes)
+	if err != nil {
+		return err
+	}
+	tmp := id + ".partial"
+	_ = md.Remove(tmp)
+	f, err := md.OpenFile(tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(append(b, '\n'))
+	if werr == nil {
+		werr = f.Chown(w.VaultUID, w.VaultGID)
+	}
+	if werr == nil {
+		werr = unix.Fchmod(int(f.Fd()), 0o444)
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = md.Remove(tmp)
+		return werr
+	}
+	return md.Rename(tmp, md, id)
+}
+
+// readModes reads the mode record of savepoint id; a savepoint without one
+// gets an empty record (the defaults).
+func (w *DataWorker) readModes(sp *safefs.Dir, id string) (*SavedModes, error) {
+	modes := &SavedModes{V: SavedModesVersion, Files: map[string]uint32{}, Dirs: map[string]uint32{}}
+	md, err := sp.Sub(modesDir)
+	if errors.Is(err, unix.ENOENT) {
+		return modes, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer md.Close()
+	f, err := md.OpenFile(id, unix.O_RDONLY, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return modes, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxModesSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxModesSize {
+		return nil, errors.New("the mode record of the savepoint is too large")
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(modes); err != nil || modes.V != SavedModesVersion {
+		return nil, fmt.Errorf("the mode record of the savepoint is unusable: %v", err)
+	}
+	if modes.Files == nil {
+		modes.Files = map[string]uint32{}
+	}
+	if modes.Dirs == nil {
+		modes.Dirs = map[string]uint32{}
+	}
+	return modes, nil
+}
+
+// dropModes removes the mode record of savepoint id.
+func (w *DataWorker) dropModes(sp *safefs.Dir, id string) error {
+	md, err := sp.Sub(modesDir)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer md.Close()
+	if err := md.RemoveAll(id); err != nil {
+		return err
+	}
+	return md.RemoveAll(id + ".partial")
+}
+
 // --- restore ---
 
-func restoredFileMode(m uint32) uint32 { return m&0o777 | 0o200 }
-func restoredDirMode(m uint32) uint32  { return m&0o777 | 0o700 }
+// Restored copies get the modes the saved entries had: from the mode
+// record for a reflink savepoint, as restic restored them for staging.
+func stagedFileMode(_ string, m uint32) uint32 { return m & 0o777 }
+func stagedDirMode(_ string, m uint32) uint32  { return m & 0o777 }
 
 func (w *DataWorker) restore(req DataRequest, res *DataResult) error {
 	if !ValidSavepointID(req.Savepoint) {
@@ -1359,12 +1527,19 @@ func (w *DataWorker) restore(req DataRequest, res *DataResult) error {
 	defer root.Close()
 	defer devc.Close()
 	var src *safefs.Dir
+	fileMode, dirMode := stagedFileMode, stagedDirMode
 	switch req.Source {
 	case SourceSavepoint:
 		sp, err := devc.Sub("savepoints")
 		if err != nil {
 			return err
 		}
+		modes, err := w.readModes(sp, req.Savepoint)
+		if err != nil {
+			sp.Close()
+			return err
+		}
+		fileMode, dirMode = modes.file, modes.dir
 		src, err = sp.Sub(req.Savepoint)
 		sp.Close()
 		if errors.Is(err, unix.ENOENT) {
@@ -1404,7 +1579,7 @@ func (w *DataWorker) restore(req DataRequest, res *DataResult) error {
 		}
 	}
 	if req.InPlace {
-		return w.restoreInPlace(req, root, devc, src, res)
+		return w.restoreInPlace(req, root, devc, src, fileMode, dirMode, res)
 	}
 	zone := req.Layout.FirstWork()
 	if zone == "" {
@@ -1432,7 +1607,7 @@ func (w *DataWorker) restore(req DataRequest, res *DataResult) error {
 		return err
 	}
 	defer dd.Close()
-	c := &copier{w: w, uid: w.BoxUID, gid: w.BoxGID, clone: true, fileMode: restoredFileMode, dirMode: restoredDirMode}
+	c := &copier{w: w, uid: w.BoxUID, gid: w.BoxGID, clone: true, fileMode: fileMode, dirMode: dirMode}
 	if len(req.Paths) == 0 {
 		err = c.copyChildren(src, dd, "", 1)
 	} else {
@@ -1486,8 +1661,8 @@ type inPlace struct {
 	moved   []string
 }
 
-func (w *DataWorker) restoreInPlace(req DataRequest, root, devc, src *safefs.Dir, res *DataResult) error {
-	c := &copier{w: w, uid: w.BoxUID, gid: w.BoxGID, clone: true, fileMode: restoredFileMode, dirMode: restoredDirMode}
+func (w *DataWorker) restoreInPlace(req DataRequest, root, devc, src *safefs.Dir, fileMode, dirMode func(string, uint32) uint32, res *DataResult) error {
+	c := &copier{w: w, uid: w.BoxUID, gid: w.BoxGID, clone: true, fileMode: fileMode, dirMode: dirMode}
 	ip := &inPlace{w: w, req: req, devc: devc, copier: c}
 	defer func() {
 		if ip.entry != nil {
@@ -1626,7 +1801,7 @@ func (ip *inPlace) entryAt(src, dst *safefs.Dir, name, rel string, depth int) er
 		return nil
 	}
 	if exists {
-		if ip.w.unchanged(src, dst, name, sst, dst0) {
+		if ip.w.unchanged(src, dst, name, sst, dst0, ip.copier.fileMode(rel, sst.Mode)) {
 			return nil
 		}
 		if err := ip.displace(dst, name, rel); err != nil {
@@ -1638,16 +1813,16 @@ func (ip *inPlace) entryAt(src, dst *safefs.Dir, name, rel string, depth int) er
 
 // unchanged reports whether dst/name already is what restoring src/name
 // would make it: a symlink with the same target, or a regular file of the
-// box user with the restored mode and the same bytes. Contents are compared,
-// not times: the box can set times to anything.
-func (w *DataWorker) unchanged(src, dst *safefs.Dir, name string, sst, dstat unix.Stat_t) bool {
+// box user with the restored mode (mode) and the same bytes. Contents are
+// compared, not times: the box can set times to anything.
+func (w *DataWorker) unchanged(src, dst *safefs.Dir, name string, sst, dstat unix.Stat_t, mode uint32) bool {
 	switch {
 	case isType(sst, unix.S_IFLNK) && isType(dstat, unix.S_IFLNK):
 		a, err1 := src.Readlink(name)
 		b, err2 := dst.Readlink(name)
 		return err1 == nil && err2 == nil && a == b
 	case isType(sst, unix.S_IFREG) && isType(dstat, unix.S_IFREG):
-		if sst.Size != dstat.Size || dstat.Mode&0o7777 != restoredFileMode(sst.Mode) || int(dstat.Uid) != w.BoxUID || int(dstat.Gid) != w.BoxGID {
+		if sst.Size != dstat.Size || dstat.Mode&0o7777 != mode || int(dstat.Uid) != w.BoxUID || int(dstat.Gid) != w.BoxGID {
 			return false
 		}
 		a, err := src.OpenFile(name, unix.O_RDONLY, 0)

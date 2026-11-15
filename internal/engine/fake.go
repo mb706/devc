@@ -61,6 +61,9 @@ type Fake struct {
 	// OnStart, when set, adjusts a container's state after Start (for
 	// example to make it exit at once).
 	OnStart func(ci *ContainerInfo)
+	// DefaultNetwork is the network mode Create records when no --network
+	// is given (the engine's default, "slirp4netns" or "pasta" rootless).
+	DefaultNetwork string
 
 	seq int
 }
@@ -240,6 +243,9 @@ func (f *Fake) Create(_ context.Context, args []string) (string, error) {
 			positional = append(positional, a)
 		}
 	}
+	if ci.HostConfig.NetworkMode == "" {
+		ci.HostConfig.NetworkMode = f.DefaultNetwork
+	}
 	f.Log = append(f.Log, "create "+ci.Name)
 	if err := f.Errors["create"]; err != nil {
 		return "", err
@@ -305,8 +311,9 @@ func (f *Fake) transition(verb, name string, fn func(*ContainerInfo)) error {
 func (f *Fake) Init(_ context.Context, name string) error {
 	var werr error
 	err := f.transition("init", name, func(ci *ContainerInfo) {
-		ci.State.Status = "initialized"
 		f.seq++
+		// Like the OCI runtime's create, init makes the main process.
+		ci.State.Status, ci.State.Pid = "initialized", 1000+f.seq
 		ci.NetworkSettings.SandboxKey = fmt.Sprintf("/run/user/1000/netns/netns-fake-%d", f.seq)
 		if f.UserData == "" {
 			return
@@ -330,7 +337,11 @@ func (f *Fake) Init(_ context.Context, name string) error {
 func (f *Fake) Start(_ context.Context, name string) error {
 	return f.transition("start", name, func(ci *ContainerInfo) {
 		f.seq++
-		ci.State = ContainerState{Status: "running", Running: true, Pid: 1000 + f.seq, Started: time.Now().UTC()}
+		pid := 1000 + f.seq
+		if ci.State.Status == "initialized" && ci.State.Pid > 0 {
+			pid = ci.State.Pid // the process init made
+		}
+		ci.State = ContainerState{Status: "running", Running: true, Pid: pid, Started: time.Now().UTC()}
 		if f.OnStart != nil {
 			f.OnStart(ci)
 		}

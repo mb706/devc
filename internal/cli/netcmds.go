@@ -119,6 +119,7 @@ func (a *app) forward(cmd *cobra.Command, refArgs []string, port, hostPort int, 
 		ln.Close()
 		return err
 	}
+	defer fwd.Box.Close()
 	if detach {
 		return a.detachForward(e, ref, name, ln.(*net.TCPListener), port, bind, addr.Port)
 	}
@@ -150,8 +151,14 @@ func (a *app) forwarder(ctx context.Context, e *boxEnv, ref names.ProjectRef, po
 	if ci == nil || !ci.State.Running || ci.State.Pid <= 0 {
 		return nil, fmt.Errorf("%s is not running: start it with 'devc up %s'", names.BoxName(ref), ref)
 	}
+	// The box's namespaces are pinned now and used for every connection
+	// (finding B5).
+	box, err := netpolicy.Pin(ctx, e.mgr.Engine, names.BoxName(ref), netpolicy.ProcFS{})
+	if err != nil {
+		return nil, err
+	}
 	return &netpolicy.Forwarder{Runner: a.runner, Engine: e.mgr.Engine, Nsenter: nsenter, Exe: exe,
-		Container: names.BoxName(ref), PID: ci.State.Pid, Port: port, Log: log}, nil
+		Container: names.BoxName(ref), Box: box, Port: port, Log: log}, nil
 }
 
 // detachForward hands the listener to a background devc process (`devc
@@ -249,6 +256,7 @@ func newForwardServeCmd(a *app) *cobra.Command {
 				ln.Close()
 				return err
 			}
+			defer fwd.Box.Close()
 			sctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			signal.Ignore(syscall.SIGHUP)

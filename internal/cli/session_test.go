@@ -207,6 +207,33 @@ func TestWriteJSONEscapesControls(t *testing.T) {
 	}
 }
 
+// TestShortIDs: displayed session prefixes include random characters and
+// grow until they are unique among the listed sessions (finding B12).
+func TestShortIDs(t *testing.T) {
+	// Two sessions of one process in the same millisecond differ only in
+	// the last random character.
+	a, b, c := "s0ka3b7c9d1a4b5c6d7e8", "s0ka3b7c9d1a4b5c6d7e9", "s0ka3b7c9e00000000aa0"
+	got := shortIDs([]string{a, b, c, a})
+	if got[a] != a[1:] || got[b] != b[1:] || got[c] != "0ka3b7c9e000" {
+		t.Errorf("shortIDs = %q", got)
+	}
+	// Created within the same second: the old eight-character display was
+	// equal, the new one is not.
+	d, e := "s0ka3b7c9d1abcdefghij", "s0ka3b7c9d2klmnopqrst"
+	got = shortIDs([]string{d, e})
+	if got[d] == got[e] || len(got[d]) != 12 || !strings.HasPrefix(d[1:], got[d]) {
+		t.Errorf("shortIDs = %q", got)
+	}
+	if got := shortIDs([]string{d}); got[d] != "0ka3b7c9d1ab" {
+		t.Errorf("single: %q", got)
+	}
+	for id, p := range shortIDs([]string{a, b, c, d, e}) {
+		if !matchSession(id, p) {
+			t.Errorf("%s does not match its prefix %s", id, p)
+		}
+	}
+}
+
 func TestChooseSession(t *testing.T) {
 	wins := []session.Live{
 		{Session: "s0000000aaaaaaaaaaaaa", Source: "tmux", Window: "@1"},
@@ -224,7 +251,7 @@ func TestChooseSession(t *testing.T) {
 		if (err != nil) != (want == "") || got.Window != want {
 			t.Errorf("answer %q: %+v %v", answer, got, err)
 		}
-		if !strings.Contains(errb.String(), "  2  0000000b  -/-  unknown  -") {
+		if !strings.Contains(errb.String(), "  2  0000000bbbbb  -/-  unknown  -") {
 			t.Errorf("list:\n%s", errb.String())
 		}
 	}

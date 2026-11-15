@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -36,20 +37,49 @@ func TestInitNetworkCheck(t *testing.T) {
 }
 
 func TestNetworkCheckSelection(t *testing.T) {
-	if NetworkCheck(&Info{Network: "none"}, nil) != nil || NetworkCheck(&Info{Network: "open"}, nil) != nil {
+	proc := netpolicy.ProcFS{Root: t.TempDir()}
+	if NetworkCheck(&Info{Network: "none"}, nil, "", proc) != nil || NetworkCheck(&Info{Network: "open"}, nil, "", proc) != nil {
 		t.Error("check for a level without rules")
 	}
-	// Level internet, and an unknown level (no box.json), check the
-	// sentinel.
+	// A /proc of this box and the binding record the host wrote for it.
+	_ = os.MkdirAll(filepath.Join(proc.Root, "1"), 0o755)
+	_ = os.WriteFile(filepath.Join(proc.Root, "1", "stat"), []byte("1 (catatonit) S 0 1 1 0 -1 4194560 75 0 0 0 0 0 0 0 20 0 1 0 4242 2420736"), 0o444)
+	_ = os.MkdirAll(filepath.Join(proc.Root, "self", "ns"), 0o755)
+	_ = os.WriteFile(filepath.Join(proc.Root, "self", "ns", "net"), nil, 0o444)
+	_ = os.MkdirAll(filepath.Join(proc.Root, "sys", "kernel", "random"), 0o755)
+	boot := "2ca2e1dd-4048-4a52-9349-e4d44c4025dd"
+	_ = os.WriteFile(filepath.Join(proc.Root, "sys", "kernel", "random", "boot_id"), []byte(boot+"\n"), 0o444)
+	ino, _ := netpolicy.Inode(filepath.Join(proc.Root, "self", "ns", "net"))
+	rec := filepath.Join(t.TempDir(), netpolicy.BindingFile)
+	refusing := func(context.Context, string) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+	}
 	failing := func(context.Context, string) (net.Conn, error) {
 		return nil, &net.OpError{Op: "dial", Err: os.NewSyscallError("connect", errors.New("x"))}
 	}
+	// Level internet, and an unknown level (no box.json), check the binding
+	// first (a plain podman start has none that matches), then the
+	// sentinel.
 	for _, info := range []*Info{{Network: "internet"}, nil} {
-		fn := NetworkCheck(info, failing)
+		_ = os.Remove(rec)
+		fn := NetworkCheck(info, refusing, rec, proc)
 		if fn == nil {
 			t.Fatalf("no check for %+v", info)
 		}
-		if err := fn(context.Background()); err == nil || !strings.Contains(err.Error(), "not in place") {
+		if err := fn(context.Background()); err == nil || !strings.Contains(err.Error(), "plain 'podman start'") {
+			t.Errorf("check without a binding: %v", err)
+		}
+		if err := netpolicy.WriteBinding(rec, netpolicy.Binding{V: 1, NetNS: ino, PID1Start: 4243, BootID: boot}); err != nil {
+			t.Fatal(err)
+		}
+		if err := fn(context.Background()); err == nil || !strings.Contains(err.Error(), "not the one devc installed") {
+			t.Errorf("check with another start's binding: %v", err)
+		}
+		_ = netpolicy.WriteBinding(rec, netpolicy.Binding{V: 1, NetNS: ino, PID1Start: 4242, BootID: boot})
+		if err := fn(context.Background()); err != nil {
+			t.Errorf("check with the binding and the sentinel: %v", err)
+		}
+		if err := NetworkCheck(info, failing, rec, proc)(context.Background()); err == nil || !strings.Contains(err.Error(), "not in place") {
 			t.Errorf("check with a non-refusing network: %v", err)
 		}
 	}

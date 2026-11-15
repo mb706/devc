@@ -148,26 +148,38 @@ type RefreshResult struct {
 	Warning string
 }
 
+// Observe reports a box's state. Refresh calls it with the ingestion lock
+// held, after ingesting, so that a stale observation can never end a
+// session that a box started meanwhile (finding B7).
+type Observe func(context.Context) (BoxState, error)
+
 // Refresh ingests the spool and reconciles the journals of one box: in a
 // ready box, sessions that the journal shows open but the box no longer
 // runs end with reason "lost"; when the box does not run at all, every
-// open session ends so. To avoid a race with sessions that start meanwhile,
-// only sessions already open before the box was asked are reconciled, and
-// the spool is ingested again after asking, so an end the box wrote in
-// between wins over "lost". Refresh takes the ingestion lock.
-func (s *Store) Refresh(ctx context.Context, ref names.ProjectRef, st BoxState, eng engine.Engine) (RefreshResult, error) {
-	return s.refresh(ctx, ref, st, eng, proto.ReasonLost)
+// open session ends so. The box's state is observed under the ingestion
+// lock and after the spool was read: a session whose start is in the
+// journal by then was started before the observation, so if the box was
+// not running at that moment, the session cannot be alive; a session
+// started later has its start still in the spool and is not touched. In a
+// running box only sessions already open before the box was asked are
+// reconciled, and the spool is ingested again after asking, so an end the
+// box wrote in between wins over "lost". Refresh takes the ingestion lock.
+func (s *Store) Refresh(ctx context.Context, ref names.ProjectRef, observe Observe, eng engine.Engine) (RefreshResult, error) {
+	return s.refresh(ctx, ref, observe, eng, proto.ReasonLost)
 }
 
 // RefreshStopped ingests and ends every open session with reason, for a box
-// that has just been stopped.
+// that the caller has just stopped (or found stopped) with the box lock
+// held, so no start can come in between.
 func (s *Store) RefreshStopped(ctx context.Context, ref names.ProjectRef, reason string) (RefreshResult, error) {
-	return s.refresh(ctx, ref, BoxState{}, nil, reason)
+	stopped := func(context.Context) (BoxState, error) { return BoxState{}, nil }
+	return s.refresh(ctx, ref, stopped, nil, reason)
 }
 
-func (s *Store) refresh(ctx context.Context, ref names.ProjectRef, st BoxState, eng engine.Engine, reason string) (RefreshResult, error) {
+func (s *Store) refresh(ctx context.Context, ref names.ProjectRef, observe Observe, eng engine.Engine, reason string) (RefreshResult, error) {
 	var res RefreshResult
-	if !st.Running && !s.hasState(ref) {
+	// A box devc started always has its runtime directory.
+	if !s.hasState(ref) {
 		return res, nil // never had a box or a session: nothing to do
 	}
 	unlock, err := s.Lock(ctx, ref)
@@ -177,6 +189,10 @@ func (s *Store) refresh(ctx context.Context, ref names.ProjectRef, st BoxState, 
 	defer unlock()
 	rep, err := s.Ingest(ref)
 	res.Report = rep
+	if err != nil {
+		return res, err
+	}
+	st, err := observe(ctx)
 	if err != nil {
 		return res, err
 	}

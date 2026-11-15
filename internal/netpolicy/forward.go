@@ -7,10 +7,14 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
@@ -22,24 +26,26 @@ var ErrBoxGone = errors.New("the box is no longer running")
 // Forwarder relays connections accepted on a host listener to a TCP port
 // on the box's loopback interface. For each connection it runs
 //
-//	nsenter -t <box PID> -U -n --preserve-credentials <devc> box dial 127.0.0.1:<port>
+//	nsenter --user=/proc/self/fd/3 --net=/proc/self/fd/4 --preserve-credentials <devc> box dial 127.0.0.1:<port>
 //
-// with the connection as standard input and output. The dial process is
-// the host's devc binary, running in the box's user and network
-// namespaces but in the host's mount namespace, so it needs nothing in
-// the image, reaches services bound to the box's loopback, and works at
-// every network level. It has the box user's identity and no
-// capabilities.
+// with the connection as standard input and output and the box's pinned
+// user and network namespaces (Pin) as descriptors 3 and 4. The dial
+// process is the host's devc binary, running in the box's user and network
+// namespaces but in the host's mount namespace, so it needs nothing in the
+// image, reaches services bound to the box's loopback, and works at every
+// network level. It has the box user's identity and no capabilities.
+// Because the namespaces are held open from the start, a connection can
+// only ever reach this box's namespaces, never those of a process that
+// later reuses its PID (finding B5).
 type Forwarder struct {
 	Runner execx.Runner
 	Engine engine.Engine
 	// Nsenter and Exe are absolute paths of nsenter and the devc binary.
 	Nsenter string
 	Exe     string
-	// Container is the box's name, PID its main process on the host when
-	// the forward started.
+	// Container is the box's name; Box its pinned main process.
 	Container string
-	PID       int
+	Box       *Pinned
 	// Port is the port inside the box.
 	Port int
 	// Log receives one line per failed connection (nil discards).
@@ -48,9 +54,15 @@ type Forwarder struct {
 	Poll time.Duration
 }
 
+// Descriptors of the pinned namespaces in each dial process.
+const (
+	dialUserFD = 3
+	dialNetFD  = 4
+)
+
 // DialArgs are nsenter's arguments for one connection.
 func (f *Forwarder) DialArgs() []string {
-	return []string{"-t", strconv.Itoa(f.PID), "-U", "-n", "--preserve-credentials",
+	return []string{"--user=/proc/self/fd/" + strconv.Itoa(dialUserFD), "--net=/proc/self/fd/" + strconv.Itoa(dialNetFD), "--preserve-credentials",
 		f.Exe, "box", "dial", netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(f.Port)).String()}
 }
 
@@ -60,10 +72,11 @@ func (f *Forwarder) logf(format string, args ...any) {
 	}
 }
 
-// Serve accepts connections until ctx ends or the box goes away; it
-// returns ErrBoxGone in the latter case. It closes ln.
+// Serve accepts connections until ctx ends or the box's generation ends
+// (it stops, is removed or restarts); it returns ErrBoxGone in the latter
+// case. It closes ln.
 func (f *Forwarder) Serve(ctx context.Context, ln net.Listener) error {
-	if f.PID <= 0 || f.Port <= 0 || f.Port > 65535 || f.Nsenter == "" || f.Exe == "" {
+	if f.Box == nil || f.Box.PID <= 0 || f.Box.UserNS == nil || f.Box.NetNS == nil || f.Port <= 0 || f.Port > 65535 || f.Nsenter == "" || f.Exe == "" {
 		ln.Close()
 		return errors.New("forward: incomplete settings")
 	}
@@ -85,6 +98,11 @@ func (f *Forwarder) Serve(ctx context.Context, ln net.Listener) error {
 		if err != nil {
 			break
 		}
+		// A connection accepted as the box's generation ends is dropped.
+		if ctx.Err() != nil {
+			conn.Close()
+			break
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -102,7 +120,7 @@ func (f *Forwarder) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 // watch returns ErrBoxGone when the box is no longer the running container
-// the forward started with.
+// generation the forward started with.
 func (f *Forwarder) watch(ctx context.Context) error {
 	poll := f.Poll
 	if poll <= 0 {
@@ -129,10 +147,81 @@ func (f *Forwarder) watch(ctx context.Context) error {
 			continue
 		}
 		failures = 0
-		if !ci.State.Running || ci.State.Pid != f.PID {
+		if !f.Box.Same(&ci) {
 			return ErrBoxGone
 		}
 	}
+}
+
+// Pinned is a running box's main process with its user and network
+// namespaces held open.
+type Pinned struct {
+	PID     int
+	Started time.Time
+	UserNS  *os.File
+	NetNS   *os.File
+}
+
+// Same reports whether ci is still the generation that was pinned.
+func (p *Pinned) Same(ci *engine.ContainerInfo) bool {
+	return ci.State.Running && ci.State.Pid == p.PID && ci.State.Started.Equal(p.Started)
+}
+
+// Close releases the namespaces.
+func (p *Pinned) Close() {
+	if p.UserNS != nil {
+		p.UserNS.Close()
+	}
+	if p.NetNS != nil {
+		p.NetNS.Close()
+	}
+}
+
+// Pin opens the user and network namespaces of a running box's main process
+// and proves that they are the box's: the engine reports the same main
+// process and start time before and after, and the process with that PID
+// has the same start time (fs: the host's /proc) before and after the
+// namespaces were opened, so the PID was not reused in between.
+func Pin(ctx context.Context, eng engine.Engine, container string, fs ProcFS) (*Pinned, error) {
+	gone := fmt.Errorf("%s is not running", container)
+	ci, err := eng.Inspect(ctx, container)
+	if err != nil {
+		return nil, err
+	}
+	if !ci.State.Running || ci.State.Pid <= 0 {
+		return nil, gone
+	}
+	p := &Pinned{PID: ci.State.Pid, Started: ci.State.Started}
+	pid := strconv.Itoa(p.PID)
+	before, err := fs.StartTime(pid)
+	if err != nil {
+		return nil, fmt.Errorf("reading the box's main process (pid %d): %w", p.PID, err)
+	}
+	open := func(ns string) (*os.File, error) {
+		f, err := os.OpenFile(filepath.Join(fs.root(), pid, "ns", ns), os.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, fmt.Errorf("opening the %s namespace of the box's main process (pid %d): %w", ns, p.PID, err)
+		}
+		return f, nil
+	}
+	if p.UserNS, err = open("user"); err != nil {
+		return nil, err
+	}
+	if p.NetNS, err = open("net"); err != nil {
+		p.Close()
+		return nil, err
+	}
+	after, err := fs.StartTime(pid)
+	if err != nil || after != before {
+		p.Close()
+		return nil, fmt.Errorf("%s stopped or restarted while the forward was set up: try again", container)
+	}
+	ci2, err := eng.Inspect(ctx, container)
+	if err != nil || !p.Same(&ci2) {
+		p.Close()
+		return nil, fmt.Errorf("%s stopped or restarted while the forward was set up: try again", container)
+	}
+	return p, nil
 }
 
 // relay hands one connection to a dial process in the box. The socket
@@ -162,6 +251,8 @@ func (f *Forwarder) relay(ctx context.Context, conn net.Conn) {
 		// configuration; it reads nothing from the box either.
 		Env:   []string{"DEVC_BOX=1"},
 		Stdin: file, Stdout: file, Stderr: stderr,
+		// Descriptors 3 and 4 (dialUserFD, dialNetFD).
+		ExtraFiles: []*os.File{f.Box.UserNS, f.Box.NetNS},
 	})
 	switch {
 	case err != nil && ctx.Err() == nil:

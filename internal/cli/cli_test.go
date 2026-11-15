@@ -124,6 +124,33 @@ func TestLifecycleRefusesBrokenConfig(t *testing.T) {
 	}
 }
 
+// TestGitRefusesBrokenConfig: bank, pull, push and worktree changes refuse
+// while the project's configuration has problems, such as a protection
+// pattern that does not compile; nothing runs (finding B2).
+func TestGitRefusesBrokenConfig(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "realms", "r", "projects", "p"), 0o755)
+	os.WriteFile(filepath.Join(dir, "realms", "r", "realm.toml"), []byte(""), 0o644)
+	os.WriteFile(filepath.Join(dir, "realms", "r", "projects", "p", "project.toml"), []byte("image = \"debian\"\n[git]\nprotected = [\"[\"]\n"), 0o644)
+	for _, args := range [][]string{{"bank", "r/p"}, {"pull", "r/p"}, {"push", "r/p", "main"}, {"wt", "new", "t1", "r/p"}, {"wt", "rm", "t1", "r/p"}} {
+		a := &app{getenv: func(k string) string {
+			return map[string]string{"HOME": t.TempDir(), "DEVC_CONFIG_DIR": dir, "XDG_RUNTIME_DIR": t.TempDir()}[k]
+		}}
+		var out, errb bytes.Buffer
+		a.stdout, a.stderr, a.runner = &out, &errb, execx.NewFake()
+		a.executable = func() (string, error) { return "/nonexistent/devc", nil }
+		a.getwd = func() (string, error) { return "/", nil }
+		a.isTerminal = func() bool { return false }
+		code := a.main(args)
+		if code != 1 || !strings.Contains(errb.String(), "git.protected") || !strings.Contains(errb.String(), "fix them first") {
+			t.Errorf("%v: exit %d\n%s", args, code, errb.String())
+		}
+		for _, c := range a.runner.(*execx.Fake).Calls() {
+			t.Errorf("%v ran %s despite configuration problems", args, c)
+		}
+	}
+}
+
 func TestConfigCheck(t *testing.T) {
 	code, out, _ := run(t, nil, "config", "check")
 	if code != 0 || !strings.Contains(out, "configuration OK: 2 realm(s), 3 project(s)") {

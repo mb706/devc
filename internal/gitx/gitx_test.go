@@ -185,6 +185,45 @@ func TestCheckNameAndMatches(t *testing.T) {
 	if !Matches([]string{"fwd/*"}, "fwd/a") || Matches([]string{"fwd/*"}, "fwd/a/b") || Matches(nil, "x") || !Matches([]string{"x", "rel?"}, "rel1") {
 		t.Error("Matches")
 	}
+	// A malformed pattern forwards nothing but protects everything (B2).
+	if Matches([]string{"["}, "main") || !Protected([]string{"["}, "main") || !Protected([]string{"x", "ma*"}, "main") || Protected(nil, "main") {
+		t.Error("Protected")
+	}
+}
+
+// TestPlanBankBoxTips: a branch whose box tip has not moved since the last
+// bank keeps the relay's head, which a pull may have advanced; a moved one
+// follows the box; equal tips are recorded as observed (finding B8).
+func TestPlanBankBoxTips(t *testing.T) {
+	const a, b, c = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccccccccccccccccc"
+	in := BankInput{
+		Branches:  map[string]string{"main": a, "dev": c, "seen": b, "fresh": b, "prot": a},
+		Heads:     map[string]string{"main": b, "dev": b, "seen": b, "prot": b},
+		BoxTips:   map[string]string{"main": a, "dev": a},
+		Protected: []string{"prot"},
+		Now:       10,
+	}
+	p := PlanBank(in)
+	got := map[string]string{}
+	for _, ch := range p.Branches {
+		got[ch.Branch] = ch.New
+	}
+	if _, ok := got["main"]; ok || got["dev"] != c || got["fresh"] != b || len(got) != 2 {
+		t.Errorf("branches %v", got)
+	}
+	if !slices.Equal(p.Observed, []Ref{{Name: "seen", OID: b}}) {
+		t.Errorf("observed %v", p.Observed)
+	}
+	// Without box tips (adopting a clone) every difference is applied.
+	in.BoxTips = nil
+	if p := PlanBank(in); len(p.Branches) != 3 || len(p.Observed) != 0 {
+		t.Errorf("untracked: %+v", p)
+	}
+	// A malformed protection pattern protects every branch.
+	in.Protected = []string{"["}
+	if p := PlanBank(in); len(p.Branches) != 0 {
+		t.Errorf("malformed pattern: %+v", p.Branches)
+	}
 }
 
 func TestSortRefs(t *testing.T) {
@@ -258,6 +297,9 @@ type world struct {
 	svc   *Service
 	p     *Project
 	hooks string
+	// snapErr makes box snapshot fail; snapHook changes its report.
+	snapErr  error
+	snapHook func(*boxside.SnapshotReport)
 }
 
 func gitEnv() []string {
@@ -307,7 +349,15 @@ func (w *world) exec(o engine.ExecOptions) (execx.Result, error) {
 		var v any
 		switch cmd[2] {
 		case "snapshot":
-			v = brepo.Snapshot("", w.dir)
+			if w.snapErr != nil {
+				res = execx.Result{ExitCode: 1, Stderr: []byte(w.snapErr.Error())}
+				return res, &execx.ExitError{Cmd: "devc box snapshot", Result: res}
+			}
+			rep := brepo.Snapshot("", w.dir)
+			if w.snapHook != nil {
+				w.snapHook(&rep)
+			}
+			v = rep
 		case "repo-state":
 			st := brepo.State()
 			v = st
@@ -529,7 +579,89 @@ func TestEndToEnd(t *testing.T) {
 	if d, err := w.svc.Diff(ctx, w.p, []string{"--stat", upMain, c1c}, false); err != nil || !strings.Contains(d, "f") {
 		t.Errorf("diff: %q %v", d, err)
 	}
+
+	// The next bank keeps the pull's fast-forward: the box has not moved
+	// main since the last bank (finding B8).
+	u2 := w.git(w.up, "rev-parse", "main")
+	if res, err := w.svc.Bank(ctx, w.p); err != nil || len(res.Branches) != 0 {
+		t.Errorf("bank after pull: %+v %v", res, err)
+	}
+	set, _ = w.p.Relay.RefSet(ctx)
+	if set.Heads["main"] != u2 || w.git(main, "rev-parse", "origin/main") != u2 || set.BoxTips["main"] != c1c {
+		t.Errorf("after pull and bank: relay main %s, box origin/main %s, box tip %s (want %s)", set.Heads["main"], w.git(main, "rev-parse", "origin/main"), set.BoxTips["main"], u2)
+	}
+	// The box merges: nothing to change in the relay, the tip is observed;
+	// then a new commit moves the relay's head.
+	w.git(main, "merge", "-q", "--ff-only", "origin/main")
+	if res, err := w.svc.Bank(ctx, w.p); err != nil || len(res.Branches) != 0 {
+		t.Errorf("bank after merge: %+v %v", res, err)
+	}
+	if set, _ = w.p.Relay.RefSet(ctx); set.BoxTips["main"] != u2 {
+		t.Errorf("box tip after merge: %s", set.BoxTips["main"])
+	}
+	w.git(main, "commit", "-q", "--allow-empty", "-m", "c3")
+	if res, err := w.svc.Bank(ctx, w.p); err != nil || len(res.Branches) != 1 || res.Branches[0].Old != u2 {
+		t.Errorf("bank after a new commit: %+v %v", res, err)
+	}
 	w.checkCalls()
+}
+
+// TestBankNotPreserved: a snapshot that cannot be made is a preservation
+// failure, distinct from policy refusals; Preserved tells which worktrees
+// are affected (finding B4).
+func TestBankNotPreserved(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	def, err := w.svc.InitRelay(ctx, w.p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.svc.InitBox(ctx, w.p, def); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(w.box, "main")
+	os.WriteFile(filepath.Join(main, "f"), []byte("dirty\n"), 0o644)
+	// A protected branch alone is a policy refusal, not a failure.
+	w.git(main, "branch", "prot")
+	w.git(main, "commit", "-qam", "x")
+	w.git(main, "checkout", "-q", "-b", "other")
+	w.git(main, "branch", "-f", "prot", "HEAD")
+	res, err := w.svc.Bank(ctx, w.p)
+	if err != nil || len(res.Skipped) == 0 {
+		t.Fatalf("policy refusal: %+v %v", res, err)
+	}
+	os.WriteFile(filepath.Join(main, "f"), []byte("dirty again\n"), 0o644)
+	// The snapshot command fails (the box's /tmp is full, say).
+	w.snapErr = errors.New("mktemp: No space left on device")
+	res, err = w.svc.Bank(ctx, w.p)
+	var np *NotPreservedError
+	if !errors.As(err, &np) || !np.All || Preserved(err, "main") || !strings.Contains(err.Error(), "No space left") {
+		t.Errorf("snapshot failure: %v", err)
+	}
+	if !strings.Contains(FormatBank(res, true), "snapshot") {
+		t.Errorf("summary:\n%s", FormatBank(res, true))
+	}
+	// One worktree's snapshot fails: the others are preserved.
+	w.snapErr = nil
+	w.snapHook = func(rep *boxside.SnapshotReport) {
+		rep.Worktrees = append(rep.Worktrees, boxside.SnapshotWorktree{Name: "t1", Error: "index.lock exists"})
+	}
+	_, err = w.svc.Bank(ctx, w.p)
+	if !errors.As(err, &np) || np.All || Preserved(err, "t1") || !Preserved(err, "main") {
+		t.Errorf("one worktree: %v", err)
+	}
+	// A snapshot the box reports but the relay never receives.
+	w.snapHook = func(rep *boxside.SnapshotReport) {
+		for i := range rep.Worktrees {
+			rep.Worktrees[i].Commit = strings.Repeat("e", 40)
+		}
+	}
+	if _, err = w.svc.Bank(ctx, w.p); Preserved(err, "main") {
+		t.Errorf("missing snapshot commit: %v", err)
+	}
+	if Preserved(errors.New("box gone"), "main") || !Preserved(nil, "main") {
+		t.Error("Preserved")
+	}
 }
 
 func TestInitBoxRefusesForeignRepository(t *testing.T) {

@@ -32,6 +32,8 @@ type boxEnv struct {
 	mgr  *box.Manager
 	git  *gitx.Service
 	data *data.Service
+	// bank is the stop hook that banks before a box stops.
+	bank *bankHook
 }
 
 func (a *app) boxEnv() (*boxEnv, error) {
@@ -62,7 +64,8 @@ func (a *app) boxEnv() (*boxEnv, error) {
 		return nil, err
 	}
 	// down and rm bank before they stop a box (work order C05 section 4).
-	m.StopHooks = append(m.StopHooks, &sessionHooks{a: a, e: e, repo: repo}, &bankHook{a: a, e: e})
+	e.bank = &bankHook{a: a, e: e}
+	m.StopHooks = append(m.StopHooks, &sessionHooks{a: a, e: e, repo: repo}, e.bank)
 	return e, nil
 }
 
@@ -112,7 +115,7 @@ func stdoutIsTerminal() bool {
 }
 
 func newLifecycleCmds(a *app) []*cobra.Command {
-	var upRecreate, upBuild, upAll bool
+	var upRecreate, upBuild, upAll, upNoBank bool
 	up := &cobra.Command{
 		Use:   "up [<realm>/<project>] [--all]",
 		Short: "Create or start a project's box",
@@ -120,7 +123,8 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 			"The toolbox is synced and the image built or pulled when missing. If the box exists but was created " +
 			"from a different definition, up says so and exits 1 unless --recreate is given. Boxes of network level " +
 			"internet get their firewall rules before they start, and a check from outside afterwards. --all starts " +
-			"every box that exists (after a reboot, for example); it creates none.",
+			"every box that exists (after a reboot, for example); it creates none. --recreate banks a running box first and " +
+			"keeps it when that fails, unless --no-bank is given.",
 		Args: maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if upAll {
@@ -131,6 +135,7 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 					if err := a.requireRelay(e, ref); err != nil {
 						return err
 					}
+					e.bank.skip = upNoBank
 					return e.mgr.Up(ctx, ref, box.UpOptions{Recreate: upRecreate, Build: upBuild})
 				})
 			}
@@ -138,6 +143,7 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 				if err := a.requireRelay(e, ref); err != nil {
 					return err
 				}
+				e.bank.skip = upNoBank
 				return e.mgr.Up(ctx, ref, box.UpOptions{Recreate: upRecreate, Build: upBuild})
 			})
 		},
@@ -145,53 +151,65 @@ func newLifecycleCmds(a *app) []*cobra.Command {
 	up.Flags().BoolVar(&upRecreate, "recreate", false, "remove and recreate the box (home, project and state are kept)")
 	up.Flags().BoolVar(&upBuild, "build", false, "rebuild the env image first")
 	up.Flags().BoolVar(&upAll, "all", false, "start every existing box of the configuration")
+	up.Flags().BoolVar(&upNoBank, "no-bank", false, "with --recreate: do not bank a running box first")
 
-	var downAll bool
+	var downAll, downNoBank bool
 	down := &cobra.Command{
-		Use:   "down [<realm>/<project>] [--all]",
+		Use:   "down [<realm>/<project>] [--all] [--no-bank]",
 		Short: "Stop a project's box",
-		Long:  "Stop a project's box; --all stops every running box of the configuration.",
-		Args:  maxArgs(1),
+		Long: "Bank a project's box and stop it; --all stops every running box of the configuration. A box whose work " +
+			"cannot be banked keeps running unless --no-bank is given.",
+		Args: maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if downAll {
 				if len(args) > 0 {
 					return usageErrorf("--all takes no project")
 				}
 				return a.forAllBoxes(cmd, true, func(ctx context.Context, e *boxEnv, ref names.ProjectRef) error {
+					e.bank.skip = downNoBank
 					return e.mgr.Down(ctx, ref)
 				})
 			}
 			return a.withBox(cmd, args, func(ctx context.Context, e *boxEnv, ref names.ProjectRef) error {
+				e.bank.skip = downNoBank
 				return e.mgr.Down(ctx, ref)
 			})
 		},
 	}
 	down.Flags().BoolVar(&downAll, "all", false, "stop every running box of the configuration")
+	down.Flags().BoolVar(&downNoBank, "no-bank", false, "stop without banking")
 
-	var rmHome bool
+	var rmHome, rmNoBank bool
 	rm := &cobra.Command{
-		Use:   "rm [<realm>/<project>]",
+		Use:   "rm [<realm>/<project>] [--home] [--no-bank]",
 		Short: "Stop and remove a project's box",
-		Long:  "Stop and remove the box container. Its home, the project directory and all state are kept unless --home is given, which also deletes the box home.",
-		Args:  maxArgs(1),
+		Long: "Bank the box, then stop and remove the container. Its home, the project directory and all state are kept unless " +
+			"--home is given, which also deletes the box home. A box whose work cannot be banked is kept unless --no-bank is given.",
+		Args: maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.withBox(cmd, args, func(ctx context.Context, e *boxEnv, ref names.ProjectRef) error {
+				e.bank.skip = rmNoBank
 				return e.mgr.Remove(ctx, ref, rmHome)
 			})
 		},
 	}
 	rm.Flags().BoolVar(&rmHome, "home", false, "also delete the box home directory")
+	rm.Flags().BoolVar(&rmNoBank, "no-bank", false, "remove without banking")
 
+	var rebuildNoBank bool
 	rebuild := &cobra.Command{
-		Use:   "rebuild [<realm>/<project>]",
+		Use:   "rebuild [<realm>/<project>] [--no-bank]",
 		Short: "Rebuild a project's image and recreate its box",
+		Long:  "Build the env image again and recreate the box; a running box is banked first and kept when that fails, unless --no-bank is given.",
 		Args:  maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.withBox(cmd, args, func(ctx context.Context, e *boxEnv, ref names.ProjectRef) error {
+				e.bank.skip = rebuildNoBank
 				return e.mgr.Rebuild(ctx, ref)
 			})
 		},
 	}
+	rebuild.Flags().BoolVar(&rebuildNoBank, "no-bank", false, "recreate without banking")
 
 	var lsJSON bool
 	ls := &cobra.Command{

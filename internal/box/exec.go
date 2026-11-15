@@ -9,6 +9,7 @@ import (
 
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/paths"
 )
 
@@ -37,12 +38,26 @@ func (m *Manager) EnsureRunning(ctx context.Context, ref names.ProjectRef) (stri
 	if err != nil {
 		return "", err
 	}
-	if ci == nil || !ci.State.Running || !m.isReady(ref) {
+	// For level internet the readiness marker is not enough: the host checks
+	// the binding and the rules (finding B1) and up restarts a box that
+	// fails.
+	if ci == nil || !ci.State.Running || !m.isReady(ref) || (m.needsRules(ref) && m.verifyRunning(ctx, ref, ci) != nil) {
 		if err := m.up(ctx, ref, UpOptions{}); err != nil {
 			return "", err
 		}
 	}
 	return names.BoxName(ref), nil
+}
+
+// needsRules reports whether the project's box gets the rules of level
+// internet.
+func (m *Manager) needsRules(ref names.ProjectRef) bool {
+	r, err := m.Config.Resolved(ref)
+	if err != nil {
+		return true
+	}
+	d, err := netpolicy.BoxArgs(r.Network)
+	return err != nil || d.Rules
 }
 
 // RootPATH is the PATH of every command devc runs as root in a box: the

@@ -30,6 +30,11 @@ import (
 // changed and --recreate was not given; the message has been printed.
 var ErrDrift = errors.New("the box definition changed")
 
+// ErrKeepRunning, wrapped in the error of a stop hook's BeforeStop, keeps
+// down, rm and a recreation from stopping the box: work the hook had to
+// preserve first (banking, finding B4) could not be preserved.
+var ErrKeepRunning = errors.New("the box was left running")
+
 // ProblemsError is returned when a project's configuration has problems
 // and the command would create, start or change its box.
 type ProblemsError struct {
@@ -261,13 +266,29 @@ func (m *Manager) up(ctx context.Context, ref names.ProjectRef, o UpOptions) err
 		return err
 	}
 	name := pl.spec.Name
+	// The readiness marker is box-writable and proves nothing; for level
+	// internet what counts is checked from the host (finding B1).
+	var netErr error
+	if ci != nil && ci.State.Running && !o.Recreate && pl.spec.NetRules && ci.Labels[LabelConfigHash] == pl.spec.Hash() {
+		netErr = m.verifyRunning(ctx, ref, ci)
+	}
 	switch {
 	case ci == nil:
 		return m.createAndStart(ctx, pl)
 	case o.Recreate:
+		// A running box is banked and its sessions ended first, as by rm
+		// (finding B4): a refusal leaves it running.
+		if ci.State.Running {
+			if err := m.beforeStop(ctx, ref, name); err != nil {
+				return err
+			}
+		}
 		m.printf("devc: recreating %s\n", name)
 		if err := m.Engine.Remove(ctx, name); err != nil {
 			return err
+		}
+		if ci.State.Running {
+			m.afterStop(ctx, ref, true)
 		}
 		if err := m.cleanup(ctx, ref); err != nil {
 			return err
@@ -277,21 +298,21 @@ func (m *Manager) up(ctx context.Context, ref names.ProjectRef, o UpOptions) err
 		m.printf("devc: %s was created from a different definition (configuration, image or devc's hardening changed).\n"+
 			"Run 'devc up --recreate %s' to recreate it; the home directory, the project files and all state are kept.\n", name, ref)
 		return ErrDrift
+	case ci.State.Running && netErr != nil:
+		// Not the start devc bound its rules to, or its namespace lacks
+		// them: stop it and start it properly.
+		m.printf("devc: %s is running without devc's network rules in force (%v); stopping it\n", name, netErr)
+		if err := m.Engine.Stop(ctx, name, 10*time.Second); err != nil {
+			return fmt.Errorf("stopping %s: %w", name, err)
+		}
+		return m.startStopped(ctx, pl)
 	case ci.State.Running && m.isReady(ref):
 		m.printf("devc: %s is already running\n", name)
 		return nil
 	case ci.State.Running:
-		// Started outside this invocation but never reported ready. A box
-		// of level internet without devc's rules is stopped (it would stop
-		// itself at the sentinel check) and started properly.
+		// Started outside this invocation but never reported ready; for
+		// level internet its rules and binding were verified above.
 		if pl.spec.NetRules {
-			if err := m.installer().Verify(ctx, ci.NetworkSettings.SandboxKey); err != nil {
-				m.printf("devc: %s is running without devc's network rules (%v); stopping it\n", name, err)
-				if err := m.Engine.Stop(ctx, name, 10*time.Second); err != nil {
-					return fmt.Errorf("stopping %s: %w", name, err)
-				}
-				return m.startStopped(ctx, pl)
-			}
 			// The rules are there. Its hosts file is box-writable by now,
 			// so the canary tries the host's own addresses only.
 			pl.net = &netpolicy.Facts{Namespace: ci.NetworkSettings.SandboxKey}
@@ -330,6 +351,32 @@ func (m *Manager) installer() *netpolicy.Installer {
 	return &netpolicy.Installer{Engine: m.Engine, HostAddrs: m.HostAddrs}
 }
 
+// bindingPath is the host path of a box's network binding record (in its
+// generated /etc/devc, which the box sees read-only).
+func (m *Manager) bindingPath(ref names.ProjectRef) string {
+	return filepath.Join(m.Config.Paths.BoxEtcDir(ref), netpolicy.BindingFile)
+}
+
+// verifyRunning checks from the host that a running box of level internet
+// is the start whose namespace devc filtered (its binding record matches
+// the engine's namespace and main process) and that devc's table is in
+// that namespace (finding B1).
+func (m *Manager) verifyRunning(ctx context.Context, ref names.ProjectRef, ci *engine.ContainerInfo) error {
+	in := m.installer()
+	want, err := netpolicy.ReadBinding(m.bindingPath(ref))
+	if err != nil {
+		return fmt.Errorf("its network rules are not bound to this start: %w", err)
+	}
+	got, err := in.Bind(ctx, ci.NetworkSettings.SandboxKey, ci.State.Pid)
+	if err != nil {
+		return err
+	}
+	if !got.Equal(want) {
+		return errors.New("it is not the start devc installed the network rules for")
+	}
+	return in.Verify(ctx, ci.NetworkSettings.SandboxKey)
+}
+
 // startBox starts a created or stopped container. For level internet it
 // is the sequence of spec section 11: `init` (which creates a fresh network
 // namespace, also for a container that ran before), read the namespace
@@ -353,12 +400,31 @@ func (m *Manager) startBox(ctx context.Context, pl *plan) error {
 				return err
 			}
 		}
-		facts, err := netpolicy.Gather(&ci)
+		// Resolver exceptions only for addresses the host vouches for
+		// (finding B13).
+		facts, err := netpolicy.Gather(&ci, netpolicy.TrustedResolvers(m.HostRoot, &ci))
 		if err != nil {
 			return err
 		}
-		if err := m.installer().Install(ctx, facts); err != nil {
+		if len(facts.Untrusted) > 0 {
+			m.printf("devc: warning: %s: nameserver(s) %s in the box's resolver configuration are not among the host's resolvers; they get no DNS exception\n",
+				name, addrList(facts.Untrusted))
+		}
+		if len(facts.Resolvers) == 0 {
+			m.printf("devc: warning: %s: no trusted resolver: DNS will not work in the box\n", name)
+		}
+		in := m.installer()
+		if err := in.Install(ctx, facts); err != nil {
 			return err
+		}
+		// Bind readiness to this namespace and this main process: box init
+		// compares the record with its own (finding B1).
+		b, err := in.Bind(ctx, facts.Namespace, ci.State.Pid)
+		if err != nil {
+			return err
+		}
+		if err := netpolicy.WriteBinding(m.bindingPath(pl.spec.Ref), b); err != nil {
+			return fmt.Errorf("writing the network binding: %w", err)
 		}
 		pl.net = &facts
 	}
@@ -429,7 +495,19 @@ func (m *Manager) publish(ctx context.Context, pl *plan) error {
 	if err := prepareMountPoints(pl.spec); err != nil {
 		return err
 	}
+	// A binding from an earlier start must never meet this one.
+	if err := netpolicy.RemoveBinding(m.bindingPath(pl.spec.Ref)); err != nil {
+		return err
+	}
 	return m.clearReady(pl.runtime)
+}
+
+func addrList(as []netip.Addr) string {
+	s := make([]string, len(as))
+	for i, a := range as {
+		s[i] = a.String()
+	}
+	return strings.Join(s, ", ")
 }
 
 func (m *Manager) createAndStart(ctx context.Context, pl *plan) error {
@@ -611,7 +689,9 @@ func (m *Manager) Down(ctx context.Context, ref names.ProjectRef) error {
 		m.afterStop(ctx, ref, false)
 		return m.cleanup(ctx, ref)
 	}
-	m.beforeStop(ctx, ref, name)
+	if err := m.beforeStop(ctx, ref, name); err != nil {
+		return err
+	}
 	m.printf("devc: stopping %s\n", name)
 	if err := m.Engine.Stop(ctx, name, 10*time.Second); err != nil {
 		return err
@@ -620,13 +700,19 @@ func (m *Manager) Down(ctx context.Context, ref names.ProjectRef) error {
 	return m.cleanup(ctx, ref)
 }
 
-// beforeStop and afterStop run the stop hooks; failures are warnings.
-func (m *Manager) beforeStop(ctx context.Context, ref names.ProjectRef, name string) {
+// beforeStop and afterStop run the stop hooks; failures are warnings,
+// except that a BeforeStop error wrapping ErrKeepRunning stops beforeStop
+// and is returned: the box must not be stopped.
+func (m *Manager) beforeStop(ctx context.Context, ref names.ProjectRef, name string) error {
 	for _, h := range m.StopHooks {
 		if err := h.BeforeStop(ctx, ref, name); err != nil {
+			if errors.Is(err, ErrKeepRunning) {
+				return err
+			}
 			m.printf("devc: warning: %s\n", proto.PrintableText(err.Error()))
 		}
 	}
+	return nil
 }
 
 func (m *Manager) afterStop(ctx context.Context, ref names.ProjectRef, stopped bool) {
@@ -676,7 +762,9 @@ func (m *Manager) Remove(ctx context.Context, ref names.ProjectRef, home bool) e
 		m.printf("devc: %s does not exist\n", name)
 	} else {
 		if ci.State.Running {
-			m.beforeStop(ctx, ref, name)
+			if err := m.beforeStop(ctx, ref, name); err != nil {
+				return err
+			}
 		}
 		m.printf("devc: removing %s\n", name)
 		if err := m.Engine.Remove(ctx, name); err != nil {

@@ -105,6 +105,12 @@ type Event struct {
 	Session string          `json:"session"`
 	Type    string          `json:"type"`
 	Data    json.RawMessage `json:"data"`
+	// Spool is set by the host on journal events taken from a spool file:
+	// the offset in that file just after the event's line (for a note about
+	// a truncated file, the offset ingestion continues at). It lets a
+	// later run resume exactly where the journal ends (finding B6). Spool
+	// lines cannot carry it.
+	Spool *int64 `json:"spool,omitempty"`
 }
 
 // Time parses TS; the zero time when it does not parse.

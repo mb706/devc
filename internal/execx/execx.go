@@ -59,6 +59,8 @@ type Cmd struct {
 	MaxOutput int
 	// Redact lists secret values to hide in errors and logs.
 	Redact []string
+	// ExtraFiles are passed to the command as descriptors 3, 4, ….
+	ExtraFiles []*os.File
 }
 
 // String renders the command for messages, with redaction applied.
@@ -201,6 +203,7 @@ func (c Cmd) WorkDir() string {
 func (Real) command(ctx context.Context, c Cmd) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.Dir = c.WorkDir()
+	cmd.ExtraFiles = c.ExtraFiles
 	if len(c.Env) > 0 || len(c.Unset) > 0 {
 		cmd.Env = append(c.Environ(os.Environ()), c.Env...)
 	}

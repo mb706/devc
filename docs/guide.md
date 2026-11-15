@@ -85,7 +85,7 @@ devc ls                       # all boxes: state, image, drift, sessions
 devc sh demo/hello            # a login shell as dev in the box
 devc run demo/hello -- make   # run one command as dev
 devc root demo/hello -- apt-get install -y ripgrep   # as root, with all capabilities
-devc down demo/hello          # stop the box (banks its commits first)
+devc down demo/hello          # stop the box (banks its work first; --no-bank skips that)
 devc rm demo/hello            # remove the container; home, project and state are kept
 devc rm --home demo/hello     # ... and delete the box home too
 devc rebuild demo/hello       # rebuild the env image and recreate the box
@@ -172,6 +172,7 @@ devc pull demo/app      # fetch the upstream into the relay and hand it to the b
 devc push demo/app      # push the branch checked out in main, after showing what it sends
 devc wt new fix-login demo/app      # a task worktree with branch <prefix>fix-login
 devc wt ls demo/app / devc wt rm fix-login demo/app
+devc ingest --all       # copy session events into the durable journal (the timer does this)
 ```
 
 **Banking** is how commits leave a box. `devc bank` takes a snapshot of
@@ -181,9 +182,24 @@ every new tip under `refs/devc/bank/<branch>/<time>`. The box can add commits
 and even rewrite its branches, but a tip that was banked once stays in the
 relay. Branches listed in `git.protected` are never updated from the box; a
 branch deleted in the box stays in the relay. Branches matching `git.forward`
-are pushed to the upstream by each bank. Banking happens on `devc bank`,
-before `devc down` and `devc rm`, and every five minutes once you run `devc
-service install` (a systemd user timer).
+are pushed to the upstream by each bank. A pull that fast-forwards a relay
+branch is not taken back by the next bank: the relay remembers the box's tip
+of every branch (`refs/devc/boxtip/<branch>`) and follows the box only when
+the box moves the branch. Banking happens on `devc bank`, before `devc down`,
+`devc rm`, `devc rebuild` and `devc up --recreate`, and every five minutes
+once you run `devc service install` (a systemd user timer, which also copies
+session events into the durable journal with `devc ingest --all`).
+
+Banking is refused while the project's configuration has problems (see `devc
+config check`); so are `pull`, `push` and the worktree commands. `down` and
+`rm` then stop the box anyway and say that nothing was banked. When work
+cannot be banked (a snapshot fails, the box cannot be fetched, a ref cannot be
+recorded), `down`, `rm`, `rebuild` and `up --recreate` leave the box running
+and say why; `--no-bank` stops it without banking (its files stay in the
+project directory). `devc wt rm` removes a worktree only after its
+uncommitted work is banked, also with `--force` (which allows a dirty worktree
+or live sessions); `--discard` removes it without banking, and its uncommitted
+work is lost.
 
 **In the box**, `git fetch origin` and `git pull` work after `devc pull` has
 handed new upstream commits to the box; `git push origin` changes nothing and
@@ -271,10 +287,17 @@ box. The rules reject every private destination with an error, so attempts
 fail at once. No process in the box has the capability to list or change
 them. Two checks guard the rules:
 
-- when the box starts, devc's init connects to a sentinel address that only
-  the rules answer; if the answer is not the expected refusal, the box stops
-  before it reports ready. A box started behind devc's back with `podman
-  start` therefore stops again instead of running unfiltered;
+- between installing the rules and starting the box, devc writes a record
+  into the box's read-only `/etc/devc` that names the filtered network
+  namespace, the box's main process and the boot. devc's init in the box
+  compares it with its own and stops the box before it reports ready when
+  they differ, so a box started behind devc's back with `podman start` stops
+  again instead of running unfiltered. Then init connects to a sentinel
+  address that only the rules answer and expects a refusal;
+- `devc up`, `sh`, `run`, a session or a forward on a running box checks from
+  the host that the record matches the running box and that the rules are in
+  its namespace; a box that fails is stopped and started properly. The box's
+  own readiness marker is not trusted;
 - after the start, the host listens on all its addresses for a moment while
   the box tries to reach them and the engine's host alias; if anything gets
   through, the box is stopped and `devc up` fails.
@@ -282,6 +305,13 @@ them. Two checks guard the rules:
 The rules live in the box's network namespace and disappear when the box
 stops; every start through devc (`up`, `sh`, `run`, a session) installs them
 again.
+
+DNS exceptions go only to resolvers devc computes on the host: the host's own
+nameservers (systemd-resolved's upstream servers when `/etc/resolv.conf` names
+its local stub) and the network backend's built-in resolver (slirp4netns,
+pasta, or a named network's gateway). A nameserver in the box's
+`/etc/resolv.conf` that is not among them gets no exception, and `devc up`
+warns about it.
 
 **Limits of `internet`.** Anything the box can read, it can send to the
 internet: code, notes, and the harness credential. DNS queries to the resolver

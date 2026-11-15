@@ -19,6 +19,9 @@ const (
 	SnapPrefix     = "refs/devc/snap/"
 	DevcTagsPrefix = "refs/devc/tags/"
 	IncomingPrefix = "refs/devc/incoming/"
+	// BoxTipPrefix records, per branch, the box's tip as the last bank saw
+	// it (finding B8).
+	BoxTipPrefix = "refs/devc/boxtip/"
 
 	incomingHeads = IncomingPrefix + "heads/"
 	incomingWIP   = IncomingPrefix + "wip/"
@@ -38,10 +41,23 @@ const (
 func CheckName(n string) error { return names.CheckRef(n) }
 
 // Matches reports whether a branch matches one of the glob patterns of
-// git.forward or git.protected (path.Match: "*" does not cross "/").
+// git.forward (path.Match: "*" does not cross "/"). A malformed pattern
+// matches nothing; configuration loading reports it as a problem, and
+// devc refuses git mutations while there are problems (finding B2).
 func Matches(patterns []string, branch string) bool {
 	for _, p := range patterns {
 		if ok, err := path.Match(p, branch); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Protected reports whether a branch is protected by git.protected. It
+// fails closed: a malformed pattern protects every branch.
+func Protected(patterns []string, branch string) bool {
+	for _, p := range patterns {
+		if ok, err := path.Match(p, branch); err != nil || ok {
 			return true
 		}
 	}
@@ -109,6 +125,11 @@ type BankInput struct {
 	DevcTags     map[string]map[string]bool
 	UpstreamTags map[string]string
 	Protected    []string
+	// BoxTips are the box's tips as the previous bank saw them
+	// (refs/devc/boxtip/*); nil when the incoming branches are not a box's
+	// (adopting a clone). A branch whose box tip has not moved since keeps
+	// the relay's head, which a pull may have advanced (finding B8).
+	BoxTips map[string]string
 	// Now is the host's clock in Unix seconds.
 	Now int64
 	// SameSnapshot reports whether two snapshot commits have the same tree
@@ -130,6 +151,9 @@ type BankPlan struct {
 	Snapshots []Recorded
 	Tags      []Recorded
 	Skipped   []Skip
+	// Observed are box tips to record that change no relay head (the
+	// relay already has them); with BoxTips set only.
+	Observed []Ref
 }
 
 // stamp returns a timestamp for a new ref of a name: now, or one second
@@ -151,6 +175,9 @@ func sortedKeys(m map[string]string) []string {
 }
 
 // PlanBank applies the policy of work order section 5.3:
+//   - a branch whose box tip equals the one the last bank saw is left
+//     alone: the box has not moved it, and the relay's head may be ahead
+//     through a pull (finding B8);
 //   - a branch whose name fails the checks is skipped and reported;
 //   - a protected branch is not updated, and reported when it differs;
 //   - every other branch is set to the box's tip, fast-forward or not, and a
@@ -170,10 +197,17 @@ func PlanBank(in BankInput) BankPlan {
 		limit = DefaultMaxChanges
 	}
 	deferred := 0
+	tracked := in.BoxTips != nil
 	for _, b := range sortedKeys(in.Branches) {
 		oid := in.Branches[b]
 		old := in.Heads[b]
+		if tracked && in.BoxTips[b] == oid {
+			continue
+		}
 		if old == oid {
+			if tracked && CheckName(b) == nil && !Protected(in.Protected, b) {
+				p.Observed = append(p.Observed, Ref{Name: b, OID: oid})
+			}
 			continue
 		}
 		if len(p.Branches) >= limit {
@@ -184,7 +218,7 @@ func PlanBank(in BankInput) BankPlan {
 			p.Skipped = append(p.Skipped, Skip{Kind: "branch", Name: b, Reason: "invalid name: " + err.Error()})
 			continue
 		}
-		if Matches(in.Protected, b) {
+		if Protected(in.Protected, b) {
 			p.Skipped = append(p.Skipped, Skip{Kind: "branch", Name: b, Reason: "protected (git.protected): the relay keeps its own tip"})
 			continue
 		}
@@ -245,10 +279,12 @@ type RefSet struct {
 	DevcTags     map[string]map[string]bool
 	// DevcTagNewest is the newest recorded object per tag.
 	DevcTagNewest map[string]Stamped
-	InBranches    map[string]string
-	InWIP         map[string]string
-	InTags        map[string]string
-	Incoming      []string
+	// BoxTips are the box tips the last bank saw, per branch.
+	BoxTips    map[string]string
+	InBranches map[string]string
+	InWIP      map[string]string
+	InTags     map[string]string
+	Incoming   []string
 }
 
 // splitStamped splits "<name>/<unix-time>".
@@ -269,7 +305,7 @@ func SortRefs(refs []Ref) RefSet {
 	s := RefSet{
 		Heads: map[string]string{}, Github: map[string]string{}, UpstreamTags: map[string]string{},
 		LastBank: map[string]Stamped{}, LastSnap: map[string]Stamped{}, NewestTag: map[string]int64{},
-		DevcTags: map[string]map[string]bool{}, DevcTagNewest: map[string]Stamped{},
+		DevcTags: map[string]map[string]bool{}, DevcTagNewest: map[string]Stamped{}, BoxTips: map[string]string{},
 		InBranches: map[string]string{}, InWIP: map[string]string{}, InTags: map[string]string{},
 	}
 	newer := func(m map[string]Stamped, name string, st Stamped) {
@@ -307,6 +343,8 @@ func SortRefs(refs []Ref) RefSet {
 				}
 				newer(s.DevcTagNewest, tag, Stamped{r.OID, t})
 			}
+		case strings.HasPrefix(n, BoxTipPrefix):
+			s.BoxTips[n[len(BoxTipPrefix):]] = r.OID
 		case strings.HasPrefix(n, IncomingPrefix):
 			s.Incoming = append(s.Incoming, n)
 			switch {

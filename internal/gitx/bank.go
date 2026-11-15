@@ -2,7 +2,9 @@ package gitx
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -59,6 +61,62 @@ func (r *BankResult) HasProblems() bool {
 	return false
 }
 
+// NotPreservedError is returned by Bank when work could not be preserved
+// in the relay (finding B4): a snapshot could not be made, the box could
+// not be fetched, or a snapshot, branch or bank ref could not be recorded.
+// Policy refusals (protected branches, invalid names) and failed forwards
+// are not preservation failures. The bank's result lists the details.
+type NotPreservedError struct {
+	Ref string
+	// All is set when nothing could be relied on (the snapshot command or
+	// the fetch failed); Cause is then that failure.
+	All   bool
+	Cause error
+	// Worktrees are the worktrees whose uncommitted work was not banked,
+	// with the reason.
+	Worktrees map[string]string
+	// Branches are the branches whose new tip was not recorded.
+	Branches map[string]string
+}
+
+func (e *NotPreservedError) Error() string {
+	var parts []string
+	if e.All {
+		parts = append(parts, "nothing could be banked")
+		if e.Cause != nil {
+			parts[0] += ": " + e.Cause.Error()
+		}
+	}
+	for _, w := range sortedKeys(e.Worktrees) {
+		parts = append(parts, fmt.Sprintf("worktree %s: %s", w, e.Worktrees[w]))
+	}
+	for _, b := range sortedKeys(e.Branches) {
+		parts = append(parts, fmt.Sprintf("branch %s: %s", b, e.Branches[b]))
+	}
+	return fmt.Sprintf("%s: work was not preserved in the relay (%s)", e.Ref, strings.Join(parts, "; "))
+}
+
+func (e *NotPreservedError) Unwrap() error { return e.Cause }
+
+func (e *NotPreservedError) empty() bool {
+	return !e.All && len(e.Worktrees) == 0 && len(e.Branches) == 0
+}
+
+// Preserved reports, from Bank's error, whether the uncommitted work of a
+// worktree is preserved in the relay. Any error other than a
+// NotPreservedError that spares the worktree means it is not.
+func Preserved(err error, worktree string) bool {
+	if err == nil {
+		return true
+	}
+	var np *NotPreservedError
+	if !errors.As(err, &np) || np.All {
+		return false
+	}
+	_, failed := np.Worktrees[worktree]
+	return !failed
+}
+
 // bankRefspecs fetch the box's branches, snapshot refs and tags into the
 // relay's scratch namespace.
 var bankRefspecs = []string{
@@ -81,22 +139,30 @@ func (s *Service) Bank(ctx context.Context, p *Project) (*BankResult, error) {
 		return res, fmt.Errorf("%s: %w", p.Container, ErrNotRunning)
 	}
 
+	np := &NotPreservedError{Ref: p.Ref.String(), Worktrees: map[string]string{}, Branches: map[string]string{}}
+	fail := func(cause error) (*BankResult, error) {
+		np.All, np.Cause = true, cause
+		return res, np
+	}
+
 	// 1. Snapshot commits of uncommitted work, made in the box.
 	skippedFiles := map[string]SnapResult{}
 	rep, err := s.snapshot(ctx, p)
 	if err != nil {
 		res.Problems = append(res.Problems, "snapshot: "+err.Error())
+		np.All, np.Cause = true, fmt.Errorf("snapshot: %w", err)
 	}
 	for _, w := range rep.Worktrees {
 		if w.Error != "" {
 			res.Problems = append(res.Problems, fmt.Sprintf("snapshot of %s: %s", w.Name, w.Error))
+			np.Worktrees[w.Name] = "the snapshot failed: " + w.Error
 		}
 		skippedFiles[w.Name] = SnapResult{Skipped: w.Skipped, SkippedMore: w.SkippedMore}
 	}
 
 	// 2. Fetch into the scratch namespace, emptied before and after.
 	if err := p.Relay.ClearIncoming(ctx); err != nil {
-		return res, err
+		return fail(err)
 	}
 	defer func() {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
@@ -106,18 +172,26 @@ func (s *Service) Bank(ctx context.Context, p *Project) (*BankResult, error) {
 		}
 	}()
 	if err := s.fetchFromBox(ctx, p, bankRefspecs...); err != nil {
-		return res, err
+		return fail(err)
 	}
 
 	// 3. Apply the policy.
 	set, err := p.Relay.RefSet(ctx)
 	if err != nil {
-		return res, err
+		return fail(err)
+	}
+	// A snapshot the box made must have arrived.
+	for _, w := range rep.Worktrees {
+		if w.Commit != "" && w.Error == "" && set.InWIP[w.Name] != w.Commit {
+			np.Worktrees[w.Name] = "its snapshot commit did not arrive in the relay"
+			res.Problems = append(res.Problems, fmt.Sprintf("snapshot of %s: the commit did not arrive in the relay", w.Name))
+		}
 	}
 	plan := PlanBank(BankInput{
 		Branches: set.InBranches, WIP: set.InWIP, Tags: set.InTags,
 		Heads: set.Heads, LastBank: set.LastBank, LastSnap: set.LastSnap, NewestTag: set.NewestTag,
 		DevcTags: set.DevcTags, UpstreamTags: set.UpstreamTags, Protected: p.Resolved.Git.Protected,
+		BoxTips:      set.BoxTips,
 		Now:          s.now().Unix(),
 		SameSnapshot: s.sameSnapshot(ctx, p, set),
 		CheckBranch:  func(b string) error { return p.Relay.CheckRefFormat(ctx, b) },
@@ -146,18 +220,26 @@ func (s *Service) Bank(ctx context.Context, p *Project) (*BankResult, error) {
 		if ch.BankRef != "" {
 			ups = append(ups, RefUpdate{Ref: ch.BankRef, New: ch.New, Old: Zero(ch.New)})
 		}
+		// The box tip is recorded with the head, so it is only ever "seen"
+		// once the relay has it.
+		ups = append(ups, boxTipUpdate(set.BoxTips, ch.Branch, ch.New))
 		if err := p.Relay.Update(ctx, ups); err != nil {
 			ch.Error = printable(err.Error())
+			np.Branches[ch.Branch] = "the new tip could not be recorded"
 		} else {
 			heads[ch.Branch] = ch.New
 		}
 		res.Branches = append(res.Branches, ch)
+	}
+	if err := s.recordObserved(ctx, p, set.BoxTips, plan.Observed); err != nil {
+		res.Problems = append(res.Problems, err.Error())
 	}
 	for _, sn := range plan.Snapshots {
 		r := skippedFiles[sn.Name]
 		r.Worktree, r.Commit, r.Ref = sn.Name, sn.OID, sn.Ref
 		if err := p.Relay.Update(ctx, []RefUpdate{{Ref: sn.Ref, New: sn.OID, Old: Zero(sn.OID)}}); err != nil {
 			res.Problems = append(res.Problems, fmt.Sprintf("recording the snapshot of %s: %s", sn.Name, printable(err.Error())))
+			np.Worktrees[sn.Name] = "its snapshot could not be recorded"
 			continue
 		}
 		res.Snapshots = append(res.Snapshots, r)
@@ -180,7 +262,46 @@ func (s *Service) Bank(ctx context.Context, p *Project) (*BankResult, error) {
 	if p.Resolved.Upstream != "" && len(p.Resolved.Git.Forward) > 0 {
 		res.Forwards = s.forward(ctx, p, heads, set.Github)
 	}
+	if !np.empty() {
+		return res, np
+	}
 	return res, nil
+}
+
+// boxTipUpdate records b's box tip as oid, checked against the old record.
+func boxTipUpdate(tips map[string]string, b, oid string) RefUpdate {
+	old := tips[b]
+	if old == "" {
+		old = Zero(oid)
+	}
+	return RefUpdate{Ref: BoxTipPrefix + b, New: oid, Old: old}
+}
+
+// recordObserved records box tips that changed no relay head: one
+// transaction, or one per ref when that fails (a conflict between two
+// names must not hold back the others).
+func (s *Service) recordObserved(ctx context.Context, p *Project, tips map[string]string, obs []Ref) error {
+	if len(obs) == 0 {
+		return nil
+	}
+	sort.Slice(obs, func(i, j int) bool { return obs[i].Name < obs[j].Name })
+	ups := make([]RefUpdate, len(obs))
+	for i, o := range obs {
+		ups[i] = boxTipUpdate(tips, o.Name, o.OID)
+	}
+	if err := p.Relay.Update(ctx, ups); err == nil {
+		return nil
+	}
+	var failed []string
+	for _, u := range ups {
+		if err := p.Relay.Update(ctx, []RefUpdate{u}); err != nil {
+			failed = append(failed, strings.TrimPrefix(u.Ref, BoxTipPrefix))
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("recording the box's tips of %s: %d failed", strings.Join(failed, ", "), len(failed))
+	}
+	return nil
 }
 
 // sameSnapshot returns a comparison of snapshot commits by tree and

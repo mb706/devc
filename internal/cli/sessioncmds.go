@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,12 +39,12 @@ const psWindow = 24 * time.Hour
 // refresh ingests a box's spool and reconciles its journals (work order
 // C04 section 4), printing a warning when the box could not be asked.
 func (a *app) refresh(ctx context.Context, e *boxEnv, ref names.ProjectRef) (session.RefreshResult, error) {
-	_, running, ready, err := e.mgr.State(ctx, ref)
-	if err != nil {
-		return session.RefreshResult{}, err
+	// The box's state is read by Refresh under the ingestion lock (B7).
+	observe := func(ctx context.Context) (session.BoxState, error) {
+		_, running, ready, err := e.mgr.State(ctx, ref)
+		return session.BoxState{Running: running, Ready: ready, Container: names.BoxName(ref)}, err
 	}
-	st := session.BoxState{Running: running, Ready: ready, Container: names.BoxName(ref)}
-	res, err := session.NewStore(e.cfg.Paths).Refresh(ctx, ref, st, e.mgr.Engine)
+	res, err := session.NewStore(e.cfg.Paths).Refresh(ctx, ref, observe, e.mgr.Engine)
 	if res.Warning != "" {
 		fmt.Fprintf(a.stderr, "devc: warning: %s: %s\n", ref, proto.PrintableText(res.Warning))
 	}
@@ -51,6 +52,67 @@ func (a *app) refresh(ctx context.Context, e *boxEnv, ref names.ProjectRef) (ses
 		fmt.Fprintf(a.stderr, "devc: warning: %s: %d invalid spool line(s) ignored\n", ref, res.Report.Invalid)
 	}
 	return res, err
+}
+
+// ingest brings a box's session events into the durable journal (and
+// reconciles), as the banking timer and devc bank do with or without a
+// relay (finding B3). Problems are printed, never fatal to the caller.
+func (a *app) ingest(ctx context.Context, e *boxEnv, ref names.ProjectRef) (session.RefreshResult, error) {
+	res, err := a.refresh(ctx, e, ref)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "devc: warning: %s: ingesting session events: %s\n", ref, errText(err))
+	}
+	return res, err
+}
+
+// newIngestCmd is `devc ingest`.
+func newIngestCmd(a *app) *cobra.Command {
+	var all, quiet bool
+	cmd := &cobra.Command{
+		Use:   "ingest [<realm>/<project>] [--all] [--quiet]",
+		Short: "Copy session events from boxes into the durable journal",
+		Long: "Append the session events a box has spooled (in the runtime directory, which a reboot clears) to the " +
+			"journals in the state directory, and mark sessions their box no longer runs as ended (lost). --all covers " +
+			"every project; the banking timer runs it. --quiet prints only problems.",
+		Args: maxArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if all && len(args) > 0 {
+				return usageErrorf("give a project or --all, not both")
+			}
+			e, err := a.boxEnv()
+			if err != nil {
+				return err
+			}
+			refs := allRefs(e.cfg)
+			if !all {
+				ref, err := a.resolveRef(e.cfg, args)
+				if err != nil {
+					return err
+				}
+				refs = []names.ProjectRef{ref}
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Minute)
+			defer cancel()
+			failed := false
+			for _, ref := range refs {
+				res, err := a.ingest(ctx, e, ref)
+				if err != nil {
+					failed = true
+					continue
+				}
+				if !quiet && (res.Report.Events > 0 || res.Ended > 0 || !all) {
+					fmt.Fprintf(a.stdout, "%s: %d event(s) ingested, %d session(s) ended\n", ref, res.Report.Events, res.Ended)
+				}
+			}
+			if failed {
+				return exitCode(1)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&all, "all", false, "every project")
+	cmd.Flags().BoolVar(&quiet, "quiet", false, "print only problems")
+	return cmd
 }
 
 // liveWindows maps session IDs to tmux windows from a box's report.
@@ -72,8 +134,50 @@ func matchSession(id, prefix string) bool {
 	return strings.HasPrefix(id, prefix) || strings.HasPrefix(id[1:], prefix)
 }
 
-// shortID is what `devc ps` shows: the first 8 characters after the "s".
-func shortID(id string) string { return id[1:9] }
+// Session IDs are "s", ten characters of time and ten random ones; a
+// displayed prefix always includes random characters (finding B12).
+const minShownID = 12
+
+// shortIDs returns, for each of the listed sessions, the prefix (without
+// the "s") that devc shows: at least minShownID characters, and as many
+// more as needed to tell it from every other listed session.
+func shortIDs(ids []string) map[string]string {
+	sorted := slices.Clone(ids)
+	sort.Strings(sorted)
+	sorted = slices.Compact(sorted)
+	out := map[string]string{}
+	for i, id := range sorted {
+		n := minShownID
+		for _, j := range []int{i - 1, i + 1} {
+			if j < 0 || j >= len(sorted) {
+				continue
+			}
+			// Sorted order: only the neighbours share the longest prefix.
+			if c := commonPrefix(id[1:], sorted[j][1:]) + 1; c > n {
+				n = c
+			}
+		}
+		out[id] = id[1 : min(n, len(id)-1)+1]
+	}
+	return out
+}
+
+func commonPrefix(a, b string) int {
+	n := 0
+	for n < len(a) && n < len(b) && a[n] == b[n] {
+		n++
+	}
+	return n
+}
+
+// shownIDs is shortIDs of summaries.
+func shownIDs(sums []session.Summary) map[string]string {
+	ids := make([]string, len(sums))
+	for i := range sums {
+		ids[i] = sums[i].Session
+	}
+	return shortIDs(ids)
+}
 
 // collect gathers session summaries of refs after refreshing each box.
 func (a *app) collect(ctx context.Context, e *boxEnv, refs []names.ProjectRef, since time.Time) ([]session.Summary, error) {
@@ -158,13 +262,14 @@ func dash(s string) string {
 
 func printSessions(w io.Writer, sums []session.Summary, now time.Time) error {
 	tw := table(w, "SESSION", "PROJECT", "WORKTREE", "HARNESS", "STATE", "AGE", "MESSAGE")
+	shown := shownIDs(sums)
 	for i := range sums {
 		s := &sums[i]
 		msg := s.Message
 		if s.Question != nil && s.State == proto.StateBlocked {
 			msg = "? " + s.Question.Text
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", shortID(s.Session), s.Ref, dash(s.Worktree), dash(s.Harness),
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", shown[s.Session], s.Ref, dash(s.Worktree), dash(s.Harness),
 			stateText(s), sinceStart(s, now), oneLine(msg, 60))
 	}
 	return tw.Flush()
@@ -338,7 +443,7 @@ func newSessionCmds(a *app) []*cobra.Command {
 			return nil
 		},
 	}
-	return []*cobra.Command{ps, attach, stop, newContextCmd(a)}
+	return []*cobra.Command{ps, attach, stop, newIngestCmd(a), newContextCmd(a)}
 }
 
 func printableTail(b []byte) string {
@@ -442,13 +547,18 @@ func (a *app) attach(cmd *cobra.Command, args []string) error {
 func (a *app) chooseSession(e *boxEnv, ref names.ProjectRef, wins []session.Live) (session.Live, error) {
 	fmt.Fprintf(a.stderr, "Sessions in %s:\n", names.BoxName(ref))
 	now := a.now()
+	ids := make([]string, len(wins))
+	for i, w := range wins {
+		ids[i] = w.Session
+	}
+	shown := shortIDs(ids)
 	for i, w := range wins {
 		s, _ := session.ReadSummary(e.cfg.Paths, ref, w.Session)
 		msg := s.Message
 		if s.Question != nil && s.State == proto.StateBlocked {
 			msg = "? " + s.Question.Text
 		}
-		fmt.Fprintf(a.stderr, "  %d  %s  %s/%s  %s  %s  %s\n", i+1, shortID(w.Session), dash(s.Worktree), dash(s.Harness),
+		fmt.Fprintf(a.stderr, "  %d  %s  %s/%s  %s  %s  %s\n", i+1, shown[w.Session], dash(s.Worktree), dash(s.Harness),
 			stateText(&s), sinceStart(&s, now), oneLine(msg, 50))
 	}
 	fmt.Fprintf(a.stderr, "Attach to [1-%d, default %d]: ", len(wins), len(wins))
@@ -610,7 +720,7 @@ func (a *app) startSession(cmd *cobra.Command, id string, refArgs, harnessArgs [
 	boxArgs := []string{paths.InBoxHelper, "box", "session", "start", "--id", sid, "--harness", id, "--worktree", worktree}
 	if detach || !a.isTerminal() {
 		if !detach {
-			fmt.Fprintf(a.stderr, "devc: stdin is not a terminal: the session runs detached; attach with 'devc attach %s %s'\n", ref, shortID(sid))
+			fmt.Fprintf(a.stderr, "devc: stdin is not a terminal: the session runs detached; attach with 'devc attach %s %s'\n", ref, sid)
 		}
 		res, err := e.mgr.Engine.Exec(ctx, engine.ExecOptions{Container: name, Workdir: "/", Timeout: time.Minute,
 			Cmd: append(append(boxArgs, "--detach", "--"), harnessArgs...)})

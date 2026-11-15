@@ -1,7 +1,8 @@
-// Package service installs the systemd user timer that banks every running
-// box and commits the realms' context repositories every five minutes
-// (work order C05 section 4): devc-bank.service runs `devc bank --all
-// --quiet` and `devc context commit --all`, devc-bank.timer starts it.
+// Package service installs the systemd user timer that ingests session
+// events, banks every running box and commits the realms' context
+// repositories every five minutes (work order C05 section 4, finding B3):
+// devc-bank.service runs `devc ingest --all --quiet`, `devc bank --all
+// --quiet` and `devc context commit --all`; devc-bank.timer starts it.
 //
 // Security rules: unit files are written only below the user's systemd
 // directory, by rename; every value placed in a unit is checked for
@@ -62,7 +63,7 @@ func ServiceText(exe string, env []string) (string, error) {
 	}
 	var b strings.Builder
 	b.WriteString("# Written by 'devc service install'; remove it with 'devc service uninstall'.\n")
-	b.WriteString("[Unit]\nDescription=devc: bank every running box and commit the context repositories\n\n")
+	b.WriteString("[Unit]\nDescription=devc: ingest session events, bank every running box and commit the context repositories\n\n")
 	b.WriteString("[Service]\nType=oneshot\n")
 	for _, kv := range env {
 		k, _, ok := strings.Cut(kv, "=")
@@ -75,7 +76,10 @@ func ServiceText(exe string, env []string) (string, error) {
 		}
 		fmt.Fprintf(&b, "Environment=%s\n", q)
 	}
-	// "-": a failed bank must not keep the context commit from running.
+	// "-": a failure must not keep the next steps from running. Session
+	// events are ingested on their own first, so a bank that fails or
+	// waits does not hold them back (finding B3).
+	fmt.Fprintf(&b, "ExecStart=-%s ingest --all --quiet\n", qexe)
 	fmt.Fprintf(&b, "ExecStart=-%s bank --all --quiet\n", qexe)
 	fmt.Fprintf(&b, "ExecStart=%s context commit --all\n", qexe)
 	return b.String(), nil

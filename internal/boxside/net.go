@@ -106,15 +106,24 @@ func NetCanary(ctx context.Context, addrs []string, port int, timeout time.Durat
 	return false, nil
 }
 
-// NetworkCheck returns the check box init runs before it reports ready:
-// for level internet (or when box.json cannot be read, so the level is
-// unknown) the sentinel must answer "connection refused", which only
-// devc's rules do. Other levels need no check.
-func NetworkCheck(info *Info, dial netpolicy.Dialer) func(context.Context) error {
+// BindingFile is where box init finds the host's network binding record.
+const BindingFile = "/etc/devc/" + netpolicy.BindingFile
+
+// NetworkCheck returns the check box init runs before it reports ready, for
+// level internet (or when box.json cannot be read, so the level is
+// unknown): the binding record the host wrote into the read-only
+// /etc/devc must name this box's network namespace, PID 1 and boot, which
+// only a start through devc gives (finding B1); then the sentinel must
+// answer "connection refused", which devc's rules do. Other levels need no
+// check. binding is the record's path and proc the box's /proc.
+func NetworkCheck(info *Info, dial netpolicy.Dialer, binding string, proc netpolicy.ProcFS) func(context.Context) error {
 	if info != nil && info.Network != netpolicy.Internet {
 		return nil
 	}
 	return func(ctx context.Context) error {
+		if err := netpolicy.CheckBinding(binding, proc); err != nil {
+			return err
+		}
 		return netpolicy.CheckSentinel(ctx, dial, 5*time.Second)
 	}
 }

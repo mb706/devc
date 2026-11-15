@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -34,16 +35,23 @@ func connect(e *itest.Env, ref, addr string, timeout int) (bool, string) {
 // host, the way devc installs it.
 func rulesInPlace(t *testing.T, ref string) bool {
 	t.Helper()
+	out, err := nftInBox(t, ref, "list", "table", "inet", "devc")
+	return err == nil && strings.Contains(out, "set allow4") && strings.Contains(out, "192.0.2.1")
+}
+
+// nftInBox runs nft in the box's network namespace from the host.
+func nftInBox(t *testing.T, ref string, args ...string) (string, error) {
+	t.Helper()
 	ns := inspect(t, ref).NetworkSettings.SandboxKey
 	if ns == "" {
-		return false
+		return "", os.ErrNotExist
 	}
 	nft, err := exec.LookPath("nft")
 	if err != nil {
 		nft = "/usr/sbin/nft"
 	}
-	out, err := exec.Command(itest.Engine(), "unshare", "--", "nsenter", "--net="+ns, nft, "list", "table", "inet", "devc").CombinedOutput()
-	return err == nil && strings.Contains(string(out), "set allow4") && strings.Contains(string(out), "192.0.2.1")
+	out, err := exec.Command(itest.Engine(), append([]string{"unshare", "--", "nsenter", "--net=" + ns, nft}, args...)...).CombinedOutput()
+	return string(out), err
 }
 
 // hostAddrs are the host's IPv4 addresses other than loopback.
@@ -194,13 +202,80 @@ func TestNetworkPlainStart(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(e.RuntimeDir, boxID(hello), "ready")); err == nil {
 		t.Error("the box reported ready without rules")
 	}
+	// The binding to the filtered namespace is checked before the sentinel
+	// (finding B1): this start is not the one devc installed rules for.
 	logs, _ := exec.Command(itest.Engine(), "logs", name).CombinedOutput()
-	if !strings.Contains(string(logs), "network rules of level internet are not in place") {
+	if !strings.Contains(string(logs), "not the one devc installed the network rules for") {
 		t.Errorf("box log:\n%s", logs)
 	}
 	e.MustRun("up", hello)
 	if !rulesInPlace(t, hello) {
 		t.Error("rules missing after devc up")
+	}
+
+	// A running box whose namespace lost the table: the readiness marker
+	// proves nothing, devc up checks from the host and restarts it; so does
+	// a command that execs in the box.
+	for _, args := range [][]string{{"up", hello}, {"run", hello, "--", "true"}} {
+		if out, err := nftInBox(t, hello, "delete", "table", "inet", "devc"); err != nil {
+			t.Fatalf("flushing the rules: %v %s", err, out)
+		}
+		if _, err := os.Stat(filepath.Join(e.RuntimeDir, boxID(hello), "ready")); err != nil {
+			t.Fatalf("no readiness marker: %v", err)
+		}
+		res := e.MustRun(args...)
+		if !strings.Contains(res.Stderr, "without devc's network rules in force") || !rulesInPlace(t, hello) {
+			t.Errorf("%v on a box without its rules:\n%s", args, res.Stderr)
+		}
+	}
+	if res := e.MustRun("up", hello); !strings.Contains(res.Stderr, "already running") {
+		t.Errorf("up on a filtered box:\n%s", res.Stderr)
+	}
+}
+
+// TestNetworkResolvers (finding B13): the box user cannot change the box's
+// resolver file; a change made as root in the box does not survive a
+// restart on this host (the engine writes the file again at init); and
+// either way, port-53 exceptions go only to resolvers the host vouches for.
+func TestNetworkResolvers(t *testing.T) {
+	e := itest.New(t)
+	itest.EnsureBaseImage(t, e)
+	e.MustRun("up", hello)
+	const planted = "10.99.0.7"
+	if res := e.Run("run", hello, "--", "sh", "-c", "echo nameserver "+planted+" >> /etc/resolv.conf"); res.ExitCode == 0 {
+		t.Error("the box user changed /etc/resolv.conf")
+	}
+	e.MustRun("root", hello, "--", "sh", "-c", "echo nameserver "+planted+" >> /etc/resolv.conf")
+	if got := runOK(t, e, hello, "cat", "/etc/resolv.conf"); !strings.Contains(got, planted) {
+		t.Fatalf("the resolver file was not changed: %q", got)
+	}
+	e.MustRun("down", hello)
+	e.MustRun("up", hello)
+	rc := runOK(t, e, hello, "cat", "/etc/resolv.conf")
+	t.Logf("resolver file after down and up (the planted line survived: %v):\n%s", strings.Contains(rc, planted), rc)
+	rules, err := nftInBox(t, hello, "list", "table", "inet", "devc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(rules, planted) {
+		t.Errorf("the planted resolver has an exception:\n%s", rules)
+	}
+	ci := inspect(t, hello)
+	trusted := netpolicy.TrustedResolvers("/", &ci)
+	for _, line := range strings.Split(rules, "\n") {
+		if !strings.Contains(line, "dport 53") {
+			continue
+		}
+		for _, f := range strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == '{' || r == '}' || r == ',' }) {
+			if a, err := netip.ParseAddr(f); err == nil && !slices.Contains(trusted, a) {
+				t.Errorf("resolver %s has an exception but is not trusted (%v)", a, trusted)
+			}
+		}
+	}
+	if hostOnline() {
+		if res := e.Run("run", hello, "--", "getent", "hosts", "debian.org"); res.ExitCode != 0 {
+			t.Errorf("DNS: exit %d %s", res.ExitCode, res.Stderr)
+		}
 	}
 }
 

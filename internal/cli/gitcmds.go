@@ -71,6 +71,16 @@ func (a *app) requireRelay(e *boxEnv, ref names.ProjectRef) error {
 	return nil
 }
 
+// refuseProblems implements fail-closed for git mutations (finding B2): bank,
+// pull, push and worktree changes refuse while the project's configuration
+// has problems; the problems are printed.
+func (a *app) refuseProblems(e *boxEnv, ref names.ProjectRef) error {
+	if probs := e.cfg.ProblemsFor(ref); len(probs) > 0 {
+		return a.boxError(e.cfg, &box.ProblemsError{Ref: ref, Problems: probs})
+	}
+	return nil
+}
+
 // gitProject returns the project with its box state.
 func (a *app) gitProject(ctx context.Context, e *boxEnv, ref names.ProjectRef) (*gitx.Project, error) {
 	r, err := e.cfg.Resolved(ref)
@@ -92,11 +102,15 @@ func (a *app) lockBox(ctx context.Context, e *boxEnv, ref names.ProjectRef, time
 	return box.LockBox(ctx, e.cfg.Paths, ref, timeout, a.stderr)
 }
 
-// bankHook banks a box before down and rm stop it (box.StopHook; the box
-// lock is held by the caller).
+// bankHook banks a box before down, rm and a recreation stop it
+// (box.StopHook; the box lock is held by the caller). Work that cannot be
+// preserved keeps the box running (finding B4) unless skip is set
+// (--no-bank); a configuration with problems banks nothing but does not
+// keep the box from stopping (finding B2).
 type bankHook struct {
-	a *app
-	e *boxEnv
+	a    *app
+	e    *boxEnv
+	skip bool
 }
 
 var _ box.StopHook = (*bankHook)(nil)
@@ -110,10 +124,19 @@ func (h *bankHook) BeforeStop(ctx context.Context, ref names.ProjectRef, _ strin
 	if !p.Relay.Exists() {
 		return nil
 	}
+	if h.skip {
+		fmt.Fprintf(h.a.stderr, "devc: %s: not banked (--no-bank)\n", ref)
+		return nil
+	}
+	if probs := h.e.cfg.ProblemsFor(ref); len(probs) > 0 {
+		fmt.Fprintf(h.a.stderr, "devc: %s: nothing was banked: its configuration has %d problem(s) (see 'devc config check'); stopping it anyway\n", ref, len(probs))
+		return nil
+	}
 	res, err := h.e.git.Bank(ctx, p)
 	fmt.Fprint(h.a.stderr, gitx.FormatBank(res, false))
 	if err != nil {
-		return fmt.Errorf("banking %s: %w", ref, err)
+		return fmt.Errorf("%w: banking %s failed (%v): fix the problem and try again, or pass --no-bank to stop it without banking (its files stay in the project directory)",
+			box.ErrKeepRunning, ref, err)
 	}
 	return nil
 }
@@ -500,7 +523,7 @@ func newGitCmds(a *app) []*cobra.Command {
 			"reported) and update the box's origin/*, github/* and tags. Branches and worktrees in the box are not touched.",
 		Args: maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.withGit(cmd, args, func(ctx context.Context, e *boxEnv, p *gitx.Project) error {
+			return a.withGit(cmd, args, false, func(ctx context.Context, e *boxEnv, p *gitx.Project) error {
 				res, err := e.git.Pull(ctx, p)
 				fmt.Fprint(a.stdout, gitx.FormatPull(p.Ref.String(), res))
 				return err
@@ -552,8 +575,11 @@ func newGitCmds(a *app) []*cobra.Command {
 	return []*cobra.Command{bank, pull, push, logCmd, diffCmd, newWorktreeCmd(a), newServiceCmd(a)}
 }
 
-// withGit runs fn on a project with the box lock held.
-func (a *app) withGit(cmd *cobra.Command, args []string, fn func(context.Context, *boxEnv, *gitx.Project) error) error {
+// withGit runs a git mutation on a project with the box lock held. It
+// refuses while the project's configuration has problems (finding B2);
+// with ingest it first brings the box's session events into the journal
+// (finding B3), which needs no valid configuration.
+func (a *app) withGit(cmd *cobra.Command, args []string, ingest bool, fn func(context.Context, *boxEnv, *gitx.Project) error) error {
 	e, err := a.boxEnv()
 	if err != nil {
 		return err
@@ -564,6 +590,12 @@ func (a *app) withGit(cmd *cobra.Command, args []string, fn func(context.Context
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), gitTimeout)
 	defer cancel()
+	if ingest {
+		a.ingest(ctx, e, ref)
+	}
+	if err := a.refuseProblems(e, ref); err != nil {
+		return err
+	}
 	unlock, err := a.lockBox(ctx, e, ref, 0)
 	if err != nil {
 		return err
@@ -578,7 +610,9 @@ func (a *app) withGit(cmd *cobra.Command, args []string, fn func(context.Context
 
 func (a *app) bank(cmd *cobra.Command, args []string, all, quiet, asJSON bool) error {
 	if !all {
-		return a.withGit(cmd, args, func(ctx context.Context, e *boxEnv, p *gitx.Project) error {
+		// Session events reach the durable journal with every bank, relay
+		// or not (finding B3).
+		return a.withGit(cmd, args, true, func(ctx context.Context, e *boxEnv, p *gitx.Project) error {
 			if !p.Running && p.Relay.Exists() {
 				// A stopped box is skipped with a note (work order section 5).
 				fmt.Fprintf(a.stderr, "devc: %s: skipped: the box is not running\n", p.Ref)
@@ -600,8 +634,17 @@ func (a *app) bank(cmd *cobra.Command, args []string, all, quiet, asJSON bool) e
 	defer cancel()
 	failed := 0
 	results := []*gitx.BankResult{}
+	// Every box's session events first, with or without a relay (B3).
+	for _, ref := range allRefs(e.cfg) {
+		a.ingest(ctx, e, ref)
+	}
 	for _, ref := range allRefs(e.cfg) {
 		if !(&gitx.Relay{Dir: e.cfg.Paths.RelayRepo(ref)}).Exists() {
+			continue
+		}
+		if probs := e.cfg.ProblemsFor(ref); len(probs) > 0 {
+			fmt.Fprintf(a.stderr, "devc: %s: not banked: its configuration has %d problem(s) (see 'devc config check')\n", ref, len(probs))
+			failed++
 			continue
 		}
 		_, running, _, err := e.mgr.State(ctx, ref)
@@ -674,6 +717,9 @@ func (a *app) push(cmd *cobra.Command, args []string, o gitx.PushOptions) error 
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), gitTimeout)
 	defer cancel()
+	if err := a.refuseProblems(e, ref); err != nil {
+		return err
+	}
 	unlock, err := a.lockBox(ctx, e, ref, 0)
 	if err != nil {
 		return err
@@ -826,6 +872,9 @@ func newWorktreeCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := a.refuseProblems(e, ref); err != nil {
+				return err
+			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), lifecycleTimeout)
 			defer cancel()
 			if _, err := e.mgr.EnsureRunning(ctx, ref); err != nil {
@@ -856,19 +905,21 @@ func newWorktreeCmd(a *app) *cobra.Command {
 	}
 	ls.Flags().BoolVar(&lsJSON, "json", false, "print JSON")
 
-	var rmForce bool
+	var rmForce, rmDiscard bool
 	rm := &cobra.Command{
-		Use:   "rm <name> [<realm>/<project>] [--force]",
+		Use:   "rm <name> [<realm>/<project>] [--force] [--discard]",
 		Short: "Bank, then remove a task worktree (its branch stays)",
-		Long:  "Bank the box, then remove the worktree. A worktree with uncommitted changes or live sessions is refused without --force.",
-		Args:  rangeArgs(1, 2, "devc wt rm <name> [<realm>/<project>]"),
+		Long: "Bank the box, then remove the worktree; nothing is removed unless the worktree's uncommitted work was banked. " +
+			"A worktree with uncommitted changes or live sessions is refused without --force (which still banks first). " +
+			"--discard removes it without banking: its uncommitted work is lost.",
+		Args: rangeArgs(1, 2, "devc wt rm <name> [<realm>/<project>]"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			if err := names.Check(names.KindWorktree, name); err != nil {
 				return &usageError{msg: err.Error()}
 			}
-			return a.withGit(cmd, args[1:], func(ctx context.Context, e *boxEnv, p *gitx.Project) error {
-				if !rmForce {
+			return a.withGit(cmd, args[1:], false, func(ctx context.Context, e *boxEnv, p *gitx.Project) error {
+				if !rmForce && !rmDiscard {
 					sums, err := session.Sessions(e.cfg.Paths, p.Ref, a.now().Add(-psWindow))
 					if err != nil {
 						return err
@@ -879,14 +930,19 @@ func newWorktreeCmd(a *app) *cobra.Command {
 						}
 					}
 				}
-				if p.Relay.Exists() {
+				switch {
+				case rmDiscard:
+					fmt.Fprintf(a.stderr, "devc: %s: removing %s without banking it (--discard); its uncommitted work is lost\n", p.Ref, name)
+				case p.Relay.Exists():
+					// The worktree's uncommitted work must be in the relay
+					// before it goes (finding B4); --force does not change that.
 					res, err := e.git.Bank(ctx, p)
 					fmt.Fprint(a.stderr, gitx.FormatBank(res, true))
-					if err != nil {
-						return fmt.Errorf("banking before the removal: %w", err)
+					if !gitx.Preserved(err, name) {
+						return fmt.Errorf("the work in %s was not banked, so nothing was removed (%v): fix the problem and try again, or remove it with --discard", name, err)
 					}
 				}
-				if err := e.git.WorktreeRemove(ctx, p, name, rmForce); err != nil {
+				if err := e.git.WorktreeRemove(ctx, p, name, rmForce || rmDiscard); err != nil {
 					return err
 				}
 				fmt.Fprintf(a.stdout, "removed %s (the branch stays)\n", name)
@@ -894,7 +950,8 @@ func newWorktreeCmd(a *app) *cobra.Command {
 			})
 		},
 	}
-	rm.Flags().BoolVar(&rmForce, "force", false, "remove a worktree with changes or sessions")
+	rm.Flags().BoolVar(&rmForce, "force", false, "remove a worktree with changes or sessions (after banking it)")
+	rm.Flags().BoolVar(&rmDiscard, "discard", false, "remove the worktree without banking it; its uncommitted work is lost")
 	return group("wt", "Create, list and remove task worktrees", false, newCmd, ls, rm)
 }
 
@@ -983,6 +1040,11 @@ func (a *app) worktreeList(cmd *cobra.Command, args []string, asJSON bool) error
 		return fmt.Sprintf("+%d -%d", d.Ahead, d.Behind)
 	}
 	tw := table(a.stdout, "WORKTREE", "BRANCH", "VS ORIGIN", "VS UPSTREAM", "DIRTY", "SESSIONS")
+	var all []string
+	for _, r := range rows {
+		all = append(all, r.Sessions...)
+	}
+	shown := shortIDs(all)
 	for _, r := range rows {
 		dirty := "no"
 		if r.Dirty {
@@ -990,7 +1052,7 @@ func (a *app) worktreeList(cmd *cobra.Command, args []string, asJSON bool) error
 		}
 		ss := make([]string, len(r.Sessions))
 		for i, s := range r.Sessions {
-			ss[i] = shortID(s)
+			ss[i] = shown[s]
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Name, dash(r.Branch), div(r.Origin), div(r.Upstream), dirty, dash(strings.Join(ss, ",")))
 	}

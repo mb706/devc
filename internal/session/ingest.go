@@ -58,10 +58,14 @@ func (s *Store) offsetsFile(ref names.ProjectRef) string {
 }
 
 // spoolPos is how far ingestion got in one spool file. Discard is set while
-// the rest of an oversized line is being skipped.
+// the rest of an oversized line is being skipped. Seq is the journal's
+// last sequence number when the position was recorded: journal events
+// with a higher number and a spool offset were appended after it, and
+// their offset wins (finding B6).
 type spoolPos struct {
 	Offset  int64 `json:"offset"`
 	Discard bool  `json:"discard,omitempty"`
+	Seq     int64 `json:"seq,omitempty"`
 }
 
 func (s *Store) loadOffsets(ref names.ProjectRef) (map[string]spoolPos, error) {
@@ -74,7 +78,7 @@ func (s *Store) loadOffsets(ref names.ProjectRef) (map[string]spoolPos, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("%s is corrupt (%v): fix or remove it; removing it re-ingests the spool from the start", s.offsetsFile(ref), err)
+		return nil, fmt.Errorf("%s is corrupt (%v): fix or remove it; the journals record how far they got, so removing it re-reads only invalid lines", s.offsetsFile(ref), err)
 	}
 	return m, nil
 }
@@ -95,6 +99,10 @@ func (s *Store) saveOffsets(ref names.ProjectRef, m map[string]spoolPos) error {
 	tmp := f.Name()
 	defer os.Remove(tmp)
 	if _, err := f.Write(append(b, '\n')); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
 		f.Close()
 		return err
 	}
@@ -211,7 +219,12 @@ func (s *Store) Ingest(ref names.ProjectRef) (IngestReport, error) {
 }
 
 // ingestFile ingests one spool file from pos and reports the new position
-// and whether the file was removed.
+// and whether the file was removed. The position advances only past
+// events that are durably in the journal (finding B6): when the append
+// fails, the position from before this run is returned. When the journal
+// holds events appended after pos was recorded (the offsets were not saved,
+// or an append went through only in part), ingestion resumes after the
+// last of them, so nothing is read twice.
 func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid string, pos spoolPos) (spoolPos, IngestReport, bool, error) {
 	var rep IngestReport
 	rel := "spool/" + name
@@ -220,10 +233,15 @@ func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid st
 	if err != nil {
 		return pos, rep, false, err
 	}
+	// (Once a session has ended, everything else is dropped anyway.)
+	if !js.ended && js.markSeq > pos.Seq && js.mark >= 0 {
+		pos = spoolPos{Offset: js.mark, Seq: js.lastSeq}
+	}
+	start := pos
 	now := s.now()
-	stamp := func(e proto.Event) proto.Event {
+	stamp := func(e proto.Event, off int64) proto.Event {
 		js.lastSeq++
-		e.Seq, e.At = js.lastSeq, now.UTC().Format(time.RFC3339Nano)
+		e.Seq, e.At, e.Spool = js.lastSeq, now.UTC().Format(time.RFC3339Nano), &off
 		return e
 	}
 	var batch []proto.Event
@@ -238,7 +256,7 @@ func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid st
 		if !js.ended {
 			ev, _ := proto.New(sid, proto.TypeNote, proto.Note{Text: fmt.Sprintf(
 				"devc: the spool file of this session was truncated (it has %d bytes, %d had been ingested); continuing at its end", size, pos.Offset)}, now)
-			batch = append(batch, stamp(ev))
+			batch = append(batch, stamp(ev, size))
 			rep.Notes++
 		}
 		pos = spoolPos{Offset: size}
@@ -275,6 +293,7 @@ func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid st
 			}
 			line := rest[:nl]
 			consumed += nl + 1
+			end := pos.Offset + int64(consumed)
 			if pos.Discard {
 				pos.Discard = false
 				continue // the tail of an oversized line, already counted
@@ -289,7 +308,7 @@ func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid st
 				rep.Dropped++
 				continue
 			}
-			batch = append(batch, stamp(ev))
+			batch = append(batch, stamp(ev, end))
 			rep.Events++
 			if ev.Type == proto.TypeSessionEnd {
 				js.ended = true
@@ -302,8 +321,10 @@ func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid st
 		}
 	}
 	if err := appendJournal(s.Paths, ref, sid, batch); err != nil {
-		return pos, rep, false, err
+		rep.Events, rep.Notes = 0, 0
+		return start, rep, false, err
 	}
+	pos.Seq = js.lastSeq
 	// A file whose session has ended and that holds nothing more is done.
 	if js.ended && !pos.Discard {
 		if size, err := root.Size(rel); err == nil && size == pos.Offset {

@@ -274,6 +274,14 @@ type ContainerInfo struct {
 // NetworkSettings is the part of a container's network settings devc uses.
 type NetworkSettings struct {
 	SandboxKey string `json:"SandboxKey"`
+	// Networks are the container's named networks (bridge mode); their
+	// gateways run the engine's DNS server when DNS is enabled.
+	Networks map[string]EndpointSettings `json:"Networks"`
+}
+
+// EndpointSettings is the part of a named network's settings devc uses.
+type EndpointSettings struct {
+	Gateway string `json:"Gateway"`
 }
 
 // GraphDriver describes a container's root filesystem; Data holds

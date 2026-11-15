@@ -74,10 +74,18 @@ func newRig(t *testing.T) *rig {
 	// Level internet: Init writes the engine files, nft keeps what it was
 	// given, and the canary in the box reaches nothing.
 	r.eng.UserData = filepath.Join(base, "userdata")
-	r.eng.ResolvConf = "nameserver 10.0.2.3\n"
+	// The box's resolv.conf names the backend's resolver and an address no
+	// trusted input names (finding B13); the host uses systemd-resolved.
+	r.eng.DefaultNetwork = "slirp4netns"
+	r.eng.ResolvConf = "nameserver 10.0.2.3\nnameserver 10.66.0.9\n"
+	r.writeHost("etc/resolv.conf", "nameserver 127.0.0.53\noptions edns0\n")
+	r.writeHost("run/systemd/resolve/resolv.conf", "nameserver 192.168.122.1\n")
 	r.eng.Hosts = "192.168.1.5 host.containers.internal\n"
 	r.eng.UnshareFunc = func(args []string, stdin string) (execx.Result, error) {
-		if slices.Contains(args, "-f") {
+		switch {
+		case strings.HasSuffix(args[0], "/stat"):
+			return execx.Result{Stdout: []byte(fmt.Sprintf("%d\n", fakeNetNS(args[len(args)-1])))}, nil
+		case slices.Contains(args, "-f"):
 			r.rules = stdin
 			return execx.Result{}, nil
 		}
@@ -102,6 +110,31 @@ func newRig(t *testing.T) *rig {
 		return execx.Result{}, nil
 	}
 	return r
+}
+
+// fakeNetNS is the inode the fake stat reports for a fake namespace path
+// (netns-fake-<n>).
+func fakeNetNS(path string) uint64 {
+	var n uint64
+	_, _ = fmt.Sscanf(path[strings.LastIndexByte(path, '-')+1:], "%d", &n)
+	return 4026531000 + n
+}
+
+// rigProc is the host's /proc for the fake engine's processes: a start
+// time per PID, namespaces hidden.
+type rigProc struct{}
+
+func (rigProc) StartTime(pid int) (uint64, error) { return uint64(pid) * 100, nil }
+func (rigProc) NetNS(int) (uint64, error)         { return 0, fs.ErrPermission }
+func (rigProc) BootID() (string, error)           { return "2ca2e1dd-4048-4a52-9349-e4d44c4025dd", nil }
+
+func (r *rig) writeHost(rel, content string) {
+	r.t.Helper()
+	p := filepath.Join(r.base, "hostroot", rel)
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		r.t.Fatal(err)
+	}
 }
 
 func (r *rig) writeConfig(rel, content string) {
@@ -138,7 +171,7 @@ func (r *rig) load() {
 	m.ReadyTimeout = 2 * time.Second
 	m.Now = func() time.Time { return time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC) }
 	m.HostAddrs = func() ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr("192.168.1.5")}, nil }
-	m.Net = &netpolicy.Installer{Engine: r.eng, HostAddrs: m.HostAddrs,
+	m.Net = &netpolicy.Installer{Engine: r.eng, HostAddrs: m.HostAddrs, Proc: rigProc{},
 		LookPath: func(n string) (string, error) { return "/usr/sbin/" + n, nil }}
 	r.m = m
 }
@@ -388,9 +421,10 @@ func TestRemoveWithHome(t *testing.T) {
 	}
 	// The home is deleted from the helper container, never by a host tool
 	// walking it (finding A8).
-	// (The only unshares are the network rules of the earlier start.)
+	// (The only unshares are the network rules of the earlier start and
+	// the inode of its namespace.)
 	for _, u := range r.eng.Unshares {
-		if !slices.Contains(u, "/usr/sbin/nft") {
+		if !slices.Contains(u, "/usr/sbin/nft") && u[0] != "/usr/sbin/stat" {
 			t.Errorf("unshare %q", u)
 		}
 	}
@@ -764,6 +798,10 @@ func TestPreparersAndCleaners(t *testing.T) {
 	}
 }
 
+type mismatchProc struct{ rigProc }
+
+func (mismatchProc) NetNS(int) (uint64, error) { return 42, nil }
+
 type stopRecorder struct {
 	calls []string
 	eng   *engine.Fake
@@ -823,6 +861,49 @@ func TestStopHooks(t *testing.T) {
 	}
 }
 
+type refusingHook struct{ calls int }
+
+func (h *refusingHook) BeforeStop(context.Context, names.ProjectRef, string) error {
+	h.calls++
+	return fmt.Errorf("%w: nothing banked", ErrKeepRunning)
+}
+func (h *refusingHook) AfterStop(context.Context, names.ProjectRef, bool) error { return nil }
+
+// TestStopRefused: a stop hook that could not preserve the box's work keeps
+// down, rm and a recreation from stopping it (finding B4); a recreation of
+// a running box runs the stop hooks like rm.
+func TestStopRefused(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	h := &refusingHook{}
+	r.m.StopHooks = []StopHook{h}
+	for name, op := range map[string]func() error{
+		"down":     func() error { return r.m.Down(ctx, hello) },
+		"rm":       func() error { return r.m.Remove(ctx, hello, false) },
+		"recreate": func() error { return r.m.Up(ctx, hello, UpOptions{Recreate: true}) },
+	} {
+		r.eng.Log = nil
+		if err := op(); !errors.Is(err, ErrKeepRunning) || len(r.eng.Log) != 0 {
+			t.Errorf("%s: %v, engine calls %v", name, err, r.eng.Log)
+		}
+	}
+	if ci := r.eng.Containers["devc-demo-hello"]; !ci.State.Running || h.calls != 3 {
+		t.Errorf("running %v, hook calls %d", ci.State.Running, h.calls)
+	}
+	rec := &stopRecorder{eng: r.eng}
+	r.m.StopHooks = []StopHook{rec}
+	if err := r.m.Up(ctx, hello, UpOptions{Recreate: true}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"before hello running=true", "after hello stopped=true running=false"}
+	if !slices.Equal(rec.calls, want) {
+		t.Errorf("recreate hooks %q", rec.calls)
+	}
+}
+
 // TestInternetLevel: the start sequence of level internet (spec 11):
 // create, init, rules installed from the host into the namespace the
 // engine reports, verification, start; then the canary. Every failure
@@ -837,11 +918,24 @@ func TestInternetLevel(t *testing.T) {
 	if !slices.Contains(args, "net.ipv6.conf.all.disable_ipv6=1") || !slices.Contains(args, "net.ipv6.conf.default.disable_ipv6=1") || slices.Contains(args, "--network") {
 		t.Errorf("create arguments: %q", args)
 	}
-	if len(r.eng.Unshares) != 2 || !strings.HasPrefix(r.eng.Unshares[0][1], "--net=/run/user/1000/netns/netns-fake-") {
+	// Install, verify, then the namespace's inode for the binding.
+	if len(r.eng.Unshares) != 3 || !strings.HasPrefix(r.eng.Unshares[0][1], "--net=/run/user/1000/netns/netns-fake-") ||
+		!slices.Equal(r.eng.Unshares[2][:5], []string{"/usr/sbin/stat", "-L", "-c", "%i", "--"}) {
 		t.Fatalf("unshares: %q", r.eng.Unshares)
 	}
+	// Only the resolver the host vouches for gets a DNS exception (B13).
 	if want := netpolicy.Rules([]netip.Addr{netip.MustParseAddr("10.0.2.3")}, []netip.Addr{netip.MustParseAddr("192.168.1.5")}); r.eng.UnshareInputs[0] != want {
 		t.Errorf("rules:\n%s", r.eng.UnshareInputs[0])
+	}
+	if !strings.Contains(r.out.String(), "10.66.0.9 in the box's resolver configuration are not among the host's resolvers") {
+		t.Errorf("no warning about the untrusted resolver:\n%s", r.out)
+	}
+	// The binding names the namespace the rules went into and the main
+	// process init made, which start kept (B1).
+	ci := r.eng.Containers["devc-demo-hello"]
+	b, err := netpolicy.ReadBinding(filepath.Join(r.m.Config.Paths.BoxEtcDir(hello), netpolicy.BindingFile))
+	if err != nil || b.NetNS != fakeNetNS(ci.NetworkSettings.SandboxKey) || b.PID1Start != uint64(ci.State.Pid)*100 || b.BootID == "" {
+		t.Errorf("binding %+v (%v) for %+v", b, err, ci.State)
 	}
 	canary := r.eng.Execs[1]
 	if canary.User != "" || !slices.Equal(canary.Cmd[:4], []string{"/opt/devc/bin/devc", "box", "net-canary", "--port"}) || canary.Cmd[5] != "192.168.1.5" || len(canary.Cmd) != 6 {
@@ -906,6 +1000,64 @@ func TestInternetLevel(t *testing.T) {
 		}
 		if got := r.verbs(); !slices.Equal(got, []string{"stop", "init", "start"}) || !strings.Contains(r.out.String(), "without devc's network rules") {
 			t.Errorf("engine calls %v\n%s", r.eng.Log, r.out)
+		}
+	})
+	// A box that was stopped and started again with plain podman: the
+	// readiness marker from before is still there, the rules seem to be
+	// (the fake keeps no namespaces), but the main process is another one.
+	// up does not believe the marker (B1).
+	t.Run("plain restart", func(t *testing.T) {
+		r := newRig(t)
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		_ = r.eng.Stop(ctx, "devc-demo-hello", 0)
+		_ = r.eng.Start(ctx, "devc-demo-hello")
+		r.eng.Log = nil
+		r.out.Reset()
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatalf("up: %v\n%s", err, r.out)
+		}
+		if got := r.verbs(); !slices.Equal(got, []string{"stop", "init", "start"}) || !strings.Contains(r.out.String(), "not the start devc installed") {
+			t.Errorf("engine calls %v\n%s", r.eng.Log, r.out)
+		}
+		// So does every command that execs in the box.
+		_ = r.eng.Stop(ctx, "devc-demo-hello", 0)
+		_ = r.eng.Start(ctx, "devc-demo-hello")
+		r.eng.Log = nil
+		if _, err := r.m.Run(ctx, hello, []string{"true"}, ExecOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.verbs(); !slices.Equal(got, []string{"stop", "init", "start"}) {
+			t.Errorf("run on a plainly restarted box: %v", r.eng.Log)
+		}
+	})
+	// A running, ready box whose namespace lost devc's table is stopped
+	// and started properly; one that has it is left alone.
+	t.Run("ready but unfiltered", func(t *testing.T) {
+		r := newRig(t)
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		r.eng.Log = nil
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil || len(r.eng.Log) != 0 || !strings.Contains(r.out.String(), "already running") {
+			t.Fatalf("up on a filtered box: %v %v\n%s", err, r.eng.Log, r.out)
+		}
+		r.rules = ""
+		r.out.Reset()
+		if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatalf("up: %v\n%s", err, r.out)
+		}
+		if got := r.verbs(); !slices.Equal(got, []string{"stop", "init", "start"}) || !strings.Contains(r.out.String(), "without devc's network rules in force") {
+			t.Errorf("engine calls %v\n%s", r.eng.Log, r.out)
+		}
+	})
+	// The engine's namespace is not the main process's: refused.
+	t.Run("namespace mismatch", func(t *testing.T) {
+		r := newRig(t)
+		r.m.Net.Proc = mismatchProc{}
+		if err := r.m.Up(ctx, hello, UpOptions{}); err == nil || !strings.Contains(err.Error(), "not in the network namespace") || len(r.eng.Containers) != 0 {
+			t.Fatalf("up: %v, %v", err, r.eng.Containers)
 		}
 	})
 	// A container left initialised by an interrupted start is started

@@ -7,15 +7,19 @@
 // Security rules: enforcement sits outside the box (R6). The rules are
 // installed by the host into the box's network namespace between `podman
 // init` and `podman start`, before any box process runs, and a process in
-// the box has no capability to list or change them. A level that cannot be
-// enforced fails closed (README rule 6): `allowlist` is refused, and a box
-// of level internet whose rules cannot be installed or verified is not
-// started. Every command is an argument vector (rule 3); the rules reach
-// nft on stdin. Files the engine writes for the box (resolv.conf, hosts)
-// are read with a size cap, without following symlinks, before the box
-// starts, and parsed strictly (rule 2). The forwarder runs the host's own
-// devc binary inside the box's user and network namespaces only; it never
-// enters the box's mount namespace, so nothing from the box is executed.
+// the box has no capability to list or change them. Readiness is bound to
+// that namespace and that start (Binding), never to anything the box can
+// write. A level that cannot be enforced fails closed (README rule 6):
+// `allowlist` is refused, and a box of level internet whose rules cannot be
+// installed, bound or verified is not started. Every command is an argument
+// vector (rule 3); the rules reach nft on stdin. Files the engine writes for
+// the box (resolv.conf, hosts) are read with a size cap, without following
+// symlinks, before the box starts, and parsed strictly (rule 2); resolver
+// exceptions go only to addresses the host computes from trusted inputs
+// (TrustedResolvers). The forwarder runs the host's own devc binary inside
+// the box's user and network namespaces only, entered through descriptors
+// pinned when the forward starts; it never enters the box's mount
+// namespace, so nothing from the box is executed.
 package netpolicy
 
 import (

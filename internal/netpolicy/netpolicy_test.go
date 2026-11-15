@@ -3,6 +3,8 @@ package netpolicy
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net"
 	"net/netip"
 	"os"
@@ -216,16 +218,202 @@ func TestInstall(t *testing.T) {
 func TestGather(t *testing.T) {
 	dir := t.TempDir()
 	rc, hosts := filepath.Join(dir, "resolv.conf"), filepath.Join(dir, "hosts")
-	_ = os.WriteFile(rc, []byte("nameserver 169.254.1.1\n"), 0o644)
+	_ = os.WriteFile(rc, []byte("nameserver 169.254.1.1\nnameserver 192.168.50.1\n"), 0o644)
 	_ = os.WriteFile(hosts, []byte("169.254.1.2 host.containers.internal\n"), 0o644)
 	ci := &engine.ContainerInfo{NetworkSettings: engine.NetworkSettings{SandboxKey: "/run/netns/x"}, ResolvConfPath: rc, HostsPath: hosts}
-	f, err := Gather(ci)
-	if err != nil || f.Namespace != "/run/netns/x" || !slices.Equal(f.Resolvers, addrs("169.254.1.1")) || !slices.Equal(f.HostAlias, addrs("169.254.1.2")) {
+	// Only nameservers the host trusts are kept (finding B13).
+	f, err := Gather(ci, addrs("169.254.1.1", "8.8.8.8"))
+	if err != nil || f.Namespace != "/run/netns/x" || !slices.Equal(f.Resolvers, addrs("169.254.1.1")) || !slices.Equal(f.Untrusted, addrs("192.168.50.1")) ||
+		!slices.Equal(f.HostAlias, addrs("169.254.1.2")) {
 		t.Errorf("gather: %+v %v", f, err)
 	}
+	if f, err := Gather(ci, nil); err != nil || len(f.Resolvers) != 0 || len(f.Untrusted) != 2 {
+		t.Errorf("gather without trusted resolvers: %+v %v", f, err)
+	}
 	ci.NetworkSettings.SandboxKey = ""
-	if _, err := Gather(ci); err == nil {
+	if _, err := Gather(ci, nil); err == nil {
 		t.Error("missing namespace accepted")
+	}
+}
+
+// TestTrustedResolvers: the trusted set comes from the host's files and
+// the engine's description of the network backend, never from the box.
+func TestTrustedResolvers(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, content string) {
+		p := filepath.Join(root, rel)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// systemd-resolved: /etc/resolv.conf is a link to the stub file.
+	write("run/systemd/resolve/stub-resolv.conf", "nameserver 127.0.0.53\noptions edns0 trust-ad\n")
+	write("run/systemd/resolve/resolv.conf", "nameserver 192.168.122.1\nnameserver fd00::1\n")
+	_ = os.MkdirAll(filepath.Join(root, "etc"), 0o755)
+	if err := os.Symlink("../run/systemd/resolve/stub-resolv.conf", filepath.Join(root, "etc", "resolv.conf")); err != nil {
+		t.Fatal(err)
+	}
+	slirp := &engine.ContainerInfo{HostConfig: engine.HostConfig{NetworkMode: "slirp4netns"}}
+	if got := TrustedResolvers(root, slirp); !slices.Equal(got, addrs("192.168.122.1", "10.0.2.3")) {
+		t.Errorf("slirp4netns with systemd-resolved: %v", got)
+	}
+	custom := &engine.ContainerInfo{HostConfig: engine.HostConfig{NetworkMode: "slirp4netns:allow_host_loopback=false,cidr=10.5.0.0/16"}}
+	if got := TrustedResolvers(root, custom); !slices.Equal(got, addrs("192.168.122.1", "10.5.0.3")) {
+		t.Errorf("slirp4netns with a cidr: %v", got)
+	}
+	// A plain resolv.conf: the stub file is not consulted.
+	_ = os.Remove(filepath.Join(root, "etc", "resolv.conf"))
+	write("etc/resolv.conf", "nameserver 9.9.9.9\nnameserver 9.9.9.9\n")
+	pasta := &engine.ContainerInfo{HostConfig: engine.HostConfig{NetworkMode: "pasta"}}
+	if got := TrustedResolvers(root, pasta); !slices.Equal(got, addrs("9.9.9.9", "169.254.1.1")) {
+		t.Errorf("pasta: %v", got)
+	}
+	bridge := &engine.ContainerInfo{HostConfig: engine.HostConfig{NetworkMode: "bridge"},
+		NetworkSettings: engine.NetworkSettings{Networks: map[string]engine.EndpointSettings{"podman": {Gateway: "10.88.0.1"}}}}
+	if got := TrustedResolvers(root, bridge); !slices.Equal(got, addrs("9.9.9.9", "10.88.0.1")) {
+		t.Errorf("bridge: %v", got)
+	}
+	// Nothing readable: nothing trusted but the backend.
+	if got := TrustedResolvers(filepath.Join(root, "missing"), slirp); !slices.Equal(got, addrs("10.0.2.3")) {
+		t.Errorf("no host files: %v", got)
+	}
+}
+
+// fakeProc writes a /proc tree for the binding checks: stat files for the
+// given PIDs, a boot ID, and regular files standing in for namespaces.
+func fakeProc(t *testing.T, starts map[string]uint64, boot string) (ProcFS, map[string]uint64) {
+	t.Helper()
+	root := t.TempDir()
+	inodes := map[string]uint64{}
+	for pid, start := range starts {
+		_ = os.MkdirAll(filepath.Join(root, pid, "ns"), 0o755)
+		stat := fmt.Sprintf("%s (catatonit (x) y) S 0 1 1 0 -1 4194560 75 0 0 0 0 0 0 0 20 0 1 0 %d 2420736 1 18446744073709551615 0", pid, start)
+		_ = os.WriteFile(filepath.Join(root, pid, "stat"), []byte(stat), 0o444)
+		for _, ns := range []string{"net", "user"} {
+			p := filepath.Join(root, pid, "ns", ns)
+			_ = os.WriteFile(p, nil, 0o444)
+			ino, err := Inode(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inodes[pid+"/"+ns] = ino
+		}
+	}
+	_ = os.MkdirAll(filepath.Join(root, "sys", "kernel", "random"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "sys", "kernel", "random", "boot_id"), []byte(boot+"\n"), 0o444)
+	return ProcFS{Root: root}, inodes
+}
+
+const testBoot = "2ca2e1dd-4048-4a52-9349-e4d44c4025dd"
+
+// TestBinding: box init accepts only the record of its own namespace, PID
+// 1 and boot (finding B1).
+func TestBinding(t *testing.T) {
+	fs, inodes := fakeProc(t, map[string]uint64{"1": 81739521, "self": 81739600}, testBoot)
+	if st, err := ParseStartTime([]byte("1 (a) b) S 0 1 1 0 -1 4194560 75 0 0 0 0 0 0 0 20 0 1 0 77 0")); err != nil || st != 77 {
+		t.Errorf("start time with a parenthesis in the name: %d %v", st, err)
+	}
+	dir := t.TempDir()
+	rec := filepath.Join(dir, BindingFile)
+	good := Binding{V: BindingVersion, NetNS: inodes["self/net"], PID1Start: 81739521, BootID: testBoot}
+	if err := CheckBinding(rec, fs); err == nil || !strings.Contains(err.Error(), "no record") {
+		t.Errorf("no record: %v", err)
+	}
+	if err := WriteBinding(rec, good); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckBinding(rec, fs); err != nil {
+		t.Errorf("matching record: %v", err)
+	}
+	for name, b := range map[string]Binding{
+		"other namespace": {V: 1, NetNS: good.NetNS + 1, PID1Start: good.PID1Start, BootID: testBoot},
+		"other start":     {V: 1, NetNS: good.NetNS, PID1Start: good.PID1Start + 1, BootID: testBoot},
+		"other boot":      {V: 1, NetNS: good.NetNS, PID1Start: good.PID1Start, BootID: "00000000-4048-4a52-9349-e4d44c4025dd"},
+	} {
+		if err := WriteBinding(rec, b); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckBinding(rec, fs); err == nil || !strings.Contains(err.Error(), "plain 'podman start'") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for _, bad := range []string{`{"v":1,"netns":5,"pid1_start":7,"boot_id":"` + testBoot + `","x":1}`, `{"v":2,"netns":5,"pid1_start":7,"boot_id":"` + testBoot + `"}`,
+		`{"v":1,"netns":0,"pid1_start":7,"boot_id":"` + testBoot + `"}`, `{"v":1,"netns":5,"pid1_start":7,"boot_id":"x"}`, "{} {}"} {
+		if _, err := ParseBinding([]byte(bad)); err == nil {
+			t.Errorf("record %s accepted", bad)
+		}
+	}
+	// A symlinked record is refused.
+	_ = os.Remove(rec)
+	other := filepath.Join(dir, "other")
+	_ = WriteBinding(other, good)
+	_ = os.Symlink(other, rec)
+	if err := CheckBinding(rec, fs); err == nil {
+		t.Error("symlinked record accepted")
+	}
+}
+
+type procStub struct {
+	start uint64
+	netns uint64
+	err   error
+}
+
+func (p procStub) StartTime(int) (uint64, error) { return p.start, nil }
+func (p procStub) NetNS(int) (uint64, error)     { return p.netns, p.err }
+func (p procStub) BootID() (string, error)       { return testBoot, nil }
+
+func TestBind(t *testing.T) {
+	eng := engine.NewFake()
+	eng.UnshareFunc = func(args []string, _ string) (execx.Result, error) {
+		if !slices.Equal(args, []string{"/usr/bin/stat", "-L", "-c", "%i", "--", "/run/netns/x"}) {
+			return execx.Result{}, fmt.Errorf("unexpected %q", args)
+		}
+		return execx.Result{Stdout: []byte("4026532837\n")}, nil
+	}
+	in := &Installer{Engine: eng, LookPath: func(n string) (string, error) { return "/usr/bin/" + n, nil }, Proc: procStub{start: 99, netns: 4026532837}}
+	b, err := in.Bind(context.Background(), "/run/netns/x", 1234)
+	if err != nil || !b.Equal(Binding{V: 1, NetNS: 4026532837, PID1Start: 99, BootID: testBoot}) {
+		t.Errorf("bind: %+v %v", b, err)
+	}
+	in.Proc = procStub{start: 99, netns: 1}
+	if _, err := in.Bind(context.Background(), "/run/netns/x", 1234); err == nil || !strings.Contains(err.Error(), "not in the network namespace") {
+		t.Errorf("mismatch: %v", err)
+	}
+	// Hidden processes: the namespace path alone counts.
+	in.Proc = procStub{start: 99, err: fs.ErrPermission}
+	if _, err := in.Bind(context.Background(), "/run/netns/x", 1234); err != nil {
+		t.Errorf("hidden: %v", err)
+	}
+	if _, err := in.Bind(context.Background(), "/run/netns/x", 0); err == nil {
+		t.Error("no main process accepted")
+	}
+}
+
+// TestPin: the forwarder's namespaces are opened from the box's main
+// process only while the engine and the process's start time agree
+// (finding B5).
+func TestPin(t *testing.T) {
+	fs, _ := fakeProc(t, map[string]uint64{"777": 5000}, testBoot)
+	eng := engine.NewFake()
+	started := time.Now().UTC()
+	eng.Containers["devc-demo-hello"] = engine.ContainerInfo{Name: "devc-demo-hello", State: engine.ContainerState{Running: true, Pid: 777, Started: started}}
+	p, err := Pin(context.Background(), eng, "devc-demo-hello", fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.PID != 777 || p.UserNS == nil || p.NetNS == nil || !strings.HasSuffix(p.NetNS.Name(), "777/ns/net") {
+		t.Errorf("pinned %+v", p)
+	}
+	p.Close()
+	eng.Containers["devc-demo-hello"] = engine.ContainerInfo{Name: "devc-demo-hello", State: engine.ContainerState{Running: true, Pid: 778, Started: started}}
+	if _, err := Pin(context.Background(), eng, "devc-demo-hello", fs); err == nil {
+		t.Error("a PID without a process pinned")
+	}
+	eng.Containers["devc-demo-hello"] = engine.ContainerInfo{Name: "devc-demo-hello", State: engine.ContainerState{Status: "exited"}}
+	if _, err := Pin(context.Background(), eng, "devc-demo-hello", fs); err == nil {
+		t.Error("a stopped box pinned")
 	}
 }
 
@@ -445,7 +633,14 @@ func TestForwarder(t *testing.T) {
 		t.Skipf("cannot listen: %v", err)
 	}
 	eng := engine.NewFake()
-	eng.Containers["devc-demo-hello"] = engine.ContainerInfo{Name: "devc-demo-hello", State: engine.ContainerState{Running: true, Pid: 777}}
+	started := time.Now().UTC()
+	eng.Containers["devc-demo-hello"] = engine.ContainerInfo{Name: "devc-demo-hello", State: engine.ContainerState{Running: true, Pid: 777, Started: started}}
+	fs, _ := fakeProc(t, map[string]uint64{"777": 5000}, testBoot)
+	box, err := Pin(context.Background(), eng, "devc-demo-hello", fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
 	got := make(chan execx.Cmd, 1)
 	runner := socketRunner(func(c execx.Cmd) {
 		// Answer through the socket, as box dial relays the box's answer.
@@ -453,7 +648,7 @@ func TestForwarder(t *testing.T) {
 		_, _ = f.Write([]byte("hello from the box\n"))
 		got <- c
 	})
-	f := &Forwarder{Runner: runner, Engine: eng, Nsenter: "/usr/bin/nsenter", Exe: "/usr/local/bin/devc", Container: "devc-demo-hello", PID: 777, Port: 8888, Poll: 20 * time.Millisecond}
+	f := &Forwarder{Runner: runner, Engine: eng, Nsenter: "/usr/bin/nsenter", Exe: "/usr/local/bin/devc", Container: "devc-demo-hello", Box: box, Port: 8888, Poll: 20 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() { done <- f.Serve(context.Background(), ln) }()
 	conn, err := net.Dial("tcp4", ln.Addr().String())
@@ -468,12 +663,15 @@ func TestForwarder(t *testing.T) {
 		t.Errorf("relayed %q", buf[:n])
 	}
 	c := <-got
-	if !slices.Equal(c.Args, []string{"-t", "777", "-U", "-n", "--preserve-credentials", "/usr/local/bin/devc", "box", "dial", "127.0.0.1:8888"}) ||
-		c.Dir != "/" || !slices.Contains(c.Env, "DEVC_BOX=1") || c.Stdin.(*os.File) != c.Stdout.(*os.File) {
+	// The pinned namespaces, by descriptor; never a PID that could be reused.
+	if !slices.Equal(c.Args, []string{"--user=/proc/self/fd/3", "--net=/proc/self/fd/4", "--preserve-credentials", "/usr/local/bin/devc", "box", "dial", "127.0.0.1:8888"}) ||
+		c.Dir != "/" || !slices.Contains(c.Env, "DEVC_BOX=1") || c.Stdin.(*os.File) != c.Stdout.(*os.File) ||
+		len(c.ExtraFiles) != 2 || c.ExtraFiles[0] != box.UserNS || c.ExtraFiles[1] != box.NetNS {
 		t.Errorf("dial command: %+v", c)
 	}
-	// The box restarts (another PID): the forward ends.
-	eng.Containers["devc-demo-hello"] = engine.ContainerInfo{Name: "devc-demo-hello", State: engine.ContainerState{Running: true, Pid: 778}}
+	// The box restarts with the same PID but another start: the forward
+	// ends with that generation.
+	eng.Containers["devc-demo-hello"] = engine.ContainerInfo{Name: "devc-demo-hello", State: engine.ContainerState{Running: true, Pid: 777, Started: started.Add(time.Second)}}
 	select {
 	case err := <-done:
 		if !errors.Is(err, ErrBoxGone) {

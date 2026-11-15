@@ -20,7 +20,7 @@ func TestServiceText(t *testing.T) {
 		`Environment="PATH=/usr/bin:/home/u/bin"`,
 		`Environment="DEVC_CONFIG_DIR=/home/u/100%%/\"cfg\""`,
 		`Environment="DEVC_STATE_DIR=/s/$HOME"`, // no $ expansion in Environment=
-		`ExecStart=-"/opt/my tools/devc" bank --all --quiet`,
+		`ExecStart=-"/opt/my tools/devc" ingest --all --quiet` + "\n" + `ExecStart=-"/opt/my tools/devc" bank --all --quiet`,
 		`ExecStart="/opt/my tools/devc" context commit --all`,
 	} {
 		if !strings.Contains(s, want) {

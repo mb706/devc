@@ -378,7 +378,7 @@ func TestRefresh(t *testing.T) {
 		return execx.Result{Stdout: []byte(`[{"session":"` + sidA + `","source":"tmux","window":"@0","pane":"%0","pid":3}]`)}, nil
 	}
 	ctx := context.Background()
-	res, err := e.store.Refresh(ctx, ref, BoxState{Running: true, Ready: true, Container: "devc-r-p"}, eng)
+	res, err := e.store.Refresh(ctx, ref, state(BoxState{Running: true, Ready: true, Container: "devc-r-p"}), eng)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,10 +396,10 @@ func TestRefresh(t *testing.T) {
 	// A box that is not ready is not asked; garbage from the box changes
 	// nothing.
 	eng.ExecFunc = func(engine.ExecOptions) (execx.Result, error) { return execx.Result{Stdout: []byte("garbage")}, nil }
-	if res, err := e.store.Refresh(ctx, ref, BoxState{Running: true, Container: "devc-r-p"}, eng); err != nil || res.Live != nil || res.Ended != 0 {
+	if res, err := e.store.Refresh(ctx, ref, state(BoxState{Running: true, Container: "devc-r-p"}), eng); err != nil || res.Live != nil || res.Ended != 0 {
 		t.Errorf("not ready: %+v %v", res, err)
 	}
-	if res, err := e.store.Refresh(ctx, ref, BoxState{Running: true, Ready: true, Container: "devc-r-p"}, eng); err != nil || res.Warning == "" || res.Ended != 0 {
+	if res, err := e.store.Refresh(ctx, ref, state(BoxState{Running: true, Ready: true, Container: "devc-r-p"}), eng); err != nil || res.Warning == "" || res.Ended != 0 {
 		t.Errorf("garbage report: %+v %v", res, err)
 	}
 	// A stopped box: every open session ends.
@@ -421,10 +421,148 @@ func TestRefresh(t *testing.T) {
 	}
 	// A project without state is not touched.
 	other := names.ProjectRef{Realm: "r", Project: "never"}
-	if _, err := e.store.Refresh(ctx, other, BoxState{}, eng); err != nil {
+	if _, err := e.store.Refresh(ctx, other, state(BoxState{}), eng); err != nil {
 		t.Error(err)
 	}
 	if _, err := os.Stat(e.p.BoxLocalDir(other)); !os.IsNotExist(err) {
 		t.Errorf("refresh created state for a project without a box: %v", err)
+	}
+}
+
+func state(st BoxState) Observe {
+	return func(context.Context) (BoxState, error) { return st, nil }
+}
+
+// TestRefreshObservesUnderLock: the box's state is read with the ingestion
+// lock held and after the spool was read, so an observation made before a
+// box started cannot end a session it then runs (finding B7).
+func TestRefreshObservesUnderLock(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.write(sidA, event(sidA, proto.TypeSessionStart, start("fake")))
+	eng := engine.NewFake()
+	eng.ExecFunc = func(engine.ExecOptions) (execx.Result, error) {
+		return execx.Result{Stdout: []byte(`[{"session":"` + sidA + `","source":"tmux","window":"@0"}]`)}, nil
+	}
+	var order []string
+	observe := func(context.Context) (BoxState, error) {
+		// Another devc command must not be able to ingest meanwhile.
+		other := &Store{Paths: e.p, LockTimeout: 50 * time.Millisecond}
+		if unlock, err := other.Lock(ctx, ref); err == nil {
+			unlock()
+			order = append(order, "unlocked")
+		}
+		if got := e.journal(sidA); len(got) == 1 {
+			order = append(order, "after ingest")
+		}
+		// The box started (and runs session A) after an earlier, stale look.
+		return BoxState{Running: true, Ready: true, Container: "devc-r-p"}, nil
+	}
+	res, err := e.store.Refresh(ctx, ref, observe, eng)
+	if err != nil || res.Ended != 0 || !slices.Equal(order, []string{"after ingest"}) {
+		t.Errorf("refresh: %+v %v, order %q", res, err, order)
+	}
+	if s, _ := ReadSummary(e.p, ref, sidA); !s.Live {
+		t.Errorf("a live session was ended: %+v", s)
+	}
+	// An observation that fails changes nothing.
+	failing := func(context.Context) (BoxState, error) { return BoxState{}, fmt.Errorf("engine down") }
+	if _, err := e.store.Refresh(ctx, ref, failing, eng); err == nil {
+		t.Error("failed observation accepted")
+	}
+	if s, _ := ReadSummary(e.p, ref, sidA); !s.Live {
+		t.Errorf("a failed observation ended a session: %+v", s)
+	}
+}
+
+// failingJournal makes the next write go through only in part and the
+// cleanup fail, as a journal on a disk that fills up or goes read-only.
+type failingJournal struct {
+	*os.File
+	keep int
+}
+
+func (f *failingJournal) Write(b []byte) (int, error) {
+	n, _ := f.File.Write(b[:min(f.keep, len(b))])
+	return n, fmt.Errorf("write: no space left on device")
+}
+
+func (f *failingJournal) Truncate(int64) error { return fmt.Errorf("truncate: read-only file system") }
+
+// TestIngestAppendFailure: spool offsets advance only past events that
+// are durably in the journal; after a failed or partial append the next
+// run neither skips nor repeats an event (finding B6).
+func TestIngestAppendFailure(t *testing.T) {
+	e := newEnv(t)
+	orig := openJournal
+	t.Cleanup(func() { openJournal = orig })
+	e.write(sidA, event(sidA, proto.TypeSessionStart, start("fake")))
+	e.ingest()
+
+	// A write that fails without writing anything.
+	e.write(sidA, event(sidA, proto.TypeState, idle()), event(sidA, proto.TypeMessage, message("one")))
+	openJournal = func(file string) (journalFile, error) {
+		f, err := orig(file)
+		if err != nil {
+			return nil, err
+		}
+		return &failingJournal{File: f.(*os.File), keep: 0}, nil
+	}
+	if rep, err := e.store.Ingest(ref); err == nil || rep.Events != 0 {
+		t.Errorf("failed append: %+v %v", rep, err)
+	}
+	openJournal = orig
+	if rep := e.ingest(); rep.Events != 2 {
+		t.Errorf("retry after a failed append: %+v", rep)
+	}
+	if got := e.journal(sidA); !slices.Equal(got, []string{"1 session.start", "2 state", "3 message"}) {
+		t.Errorf("journal after retry %q", got)
+	}
+
+	// A write that stores one complete event and half of the next, and a
+	// truncation that fails: the torn line stays.
+	e.write(sidA, event(sidA, proto.TypeMessage, message("two")), event(sidA, proto.TypeMessage, message("three")), event(sidA, proto.TypeMessage, message("four")))
+	var firstLine int
+	openJournal = func(file string) (journalFile, error) {
+		f, err := orig(file)
+		if err != nil {
+			return nil, err
+		}
+		return &failingJournal{File: f.(*os.File), keep: firstLine}, nil
+	}
+	// The length of one journal line of this batch, plus half the next.
+	probe, _ := proto.New(sidA, proto.TypeMessage, message("two"), time.Date(2026, 11, 15, 11, 0, 0, 0, time.UTC))
+	probe.Seq, probe.At = 4, e.store.Now().UTC().Format(time.RFC3339Nano)
+	off := int64(0)
+	probe.Spool = &off
+	b, _ := json.Marshal(probe)
+	firstLine = len(b) + 1 + 40
+	if _, err := e.store.Ingest(ref); err == nil {
+		t.Error("partial append reported no error")
+	}
+	openJournal = orig
+	if rep := e.ingest(); rep.Events != 2 {
+		t.Errorf("retry after a partial append: %+v", rep)
+	}
+	var texts []string
+	_ = readJournal(e.p.JournalFile(ref, sidA), func(ev *proto.Event) {
+		if ev.Type == proto.TypeMessage {
+			var m proto.Message
+			_ = json.Unmarshal(ev.Data, &m)
+			texts = append(texts, fmt.Sprintf("%d %s", ev.Seq, m.Text))
+		}
+	})
+	if !slices.Equal(texts, []string{"3 one", "4 two", "5 three", "6 four"}) {
+		t.Errorf("messages after the partial append: %q", texts)
+	}
+
+	// The offsets file is lost (or was never saved after an append): the
+	// journal says where to resume.
+	if err := os.Remove(e.store.offsetsFile(ref)); err != nil {
+		t.Fatal(err)
+	}
+	e.write(sidA, event(sidA, proto.TypeMessage, message("five")))
+	if rep := e.ingest(); rep.Events != 1 {
+		t.Errorf("without the offsets file: %+v", rep)
 	}
 }

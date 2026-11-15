@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/mb706/devc/internal/engine"
@@ -16,8 +17,11 @@ import (
 type Facts struct {
 	// Namespace is the path of the box's network namespace.
 	Namespace string
-	// Resolvers are the IPv4 nameservers of the box's resolv.conf.
+	// Resolvers are the IPv4 nameservers of the box's resolv.conf that the
+	// host trusts (finding B13): only they get DNS exceptions.
 	Resolvers []netip.Addr
+	// Untrusted are the box's other nameservers; they get no exception.
+	Untrusted []netip.Addr
 	// HostAlias are the addresses the box's hosts file gives the engine's
 	// host alias.
 	HostAlias []netip.Addr
@@ -35,6 +39,9 @@ type Installer struct {
 	LookPath func(string) (string, error)
 	// HostAddrs lists the host's addresses (HostAddrs when nil).
 	HostAddrs func() ([]netip.Addr, error)
+	// Proc reads the box's main process from the host's /proc (nil: the
+	// real one).
+	Proc HostProc
 }
 
 func (in *Installer) tools() (nsenter, nft string, err error) {
@@ -53,8 +60,10 @@ func (in *Installer) tools() (nsenter, nft string, err error) {
 
 // Gather reads the namespace and the engine files of an initialised
 // container. Its resolv.conf and hosts file are read now, before any box
-// process can change them.
-func Gather(ci *engine.ContainerInfo) (Facts, error) {
+// process can change them. Of the box's nameservers only those in trusted
+// (TrustedResolvers: computed on the host from trusted inputs) are kept:
+// the file lives beside the container and is not proof of anything.
+func Gather(ci *engine.ContainerInfo, trusted []netip.Addr) (Facts, error) {
 	f := Facts{Namespace: ci.NetworkSettings.SandboxKey}
 	if err := checkNamespace(f.Namespace); err != nil {
 		return f, err
@@ -64,8 +73,16 @@ func Gather(ci *engine.ContainerInfo) (Facts, error) {
 		if err != nil {
 			return f, fmt.Errorf("reading the box's resolver configuration: %w", err)
 		}
-		if f.Resolvers, err = ParseResolvConf(b); err != nil {
+		all, err := ParseResolvConf(b)
+		if err != nil {
 			return f, err
+		}
+		for _, a := range all {
+			if slices.Contains(trusted, a) {
+				f.Resolvers = append(f.Resolvers, a)
+			} else {
+				f.Untrusted = append(f.Untrusted, a)
+			}
 		}
 	}
 	if ci.HostsPath != "" {

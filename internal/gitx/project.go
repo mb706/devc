@@ -154,6 +154,13 @@ func (s *Service) InitBox(ctx context.Context, p *Project, def string) error {
 		return fmt.Errorf("checking out %s in %s: %w", def, main, err)
 	}
 	s.printf("devc: %s has %s checked out, tracking origin/%s\n", main, def, def)
+	// The new box branch is the relay's head: record it as the box's tip,
+	// so that a pull before the first bank is not taken back (finding B8).
+	if set, err := p.Relay.RefSet(ctx); err == nil && set.Heads[def] != "" && set.BoxTips[def] == "" {
+		if err := p.Relay.Update(ctx, []RefUpdate{boxTipUpdate(set.BoxTips, def, set.Heads[def])}); err != nil {
+			s.printf("devc: %s: recording the box's tip of %s: %s\n", p.Ref, def, printable(err.Error()))
+		}
+	}
 	return nil
 }
 

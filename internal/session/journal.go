@@ -70,10 +70,14 @@ type journalState struct {
 	lastSeq int64
 	ended   bool
 	exists  bool
+	// markSeq and mark are the sequence number and spool offset of the
+	// last event that carries a spool offset (0 and -1 without one).
+	markSeq int64
+	mark    int64
 }
 
 func loadJournalState(file string) (journalState, error) {
-	var st journalState
+	st := journalState{mark: -1}
 	if _, err := os.Stat(file); err == nil {
 		st.exists = true
 	}
@@ -84,11 +88,18 @@ func loadJournalState(file string) (journalState, error) {
 		if e.Type == proto.TypeSessionEnd {
 			st.ended = true
 		}
+		if e.Spool != nil && *e.Spool >= 0 && e.Seq > st.markSeq {
+			st.markSeq, st.mark = e.Seq, *e.Spool
+		}
 	})
 	return st, err
 }
 
-// appendJournal appends events to a journal file (mode 0600) in one write.
+// appendJournal appends events to a journal file (mode 0600) in one write
+// and makes them durable (fsync) before it returns: callers record spool
+// offsets only afterwards (finding B6). A write that fails part-way is cut
+// off again; should that fail too, the torn line stays behind, and the
+// next append starts on a new line so readJournal skips just the torn one.
 func appendJournal(p *paths.Paths, ref names.ProjectRef, session string, evs []proto.Event) error {
 	if len(evs) == 0 {
 		return nil
@@ -106,15 +117,61 @@ func appendJournal(p *paths.Paths, ref names.ProjectRef, session string, evs []p
 		buf.Write(b)
 		buf.WriteByte('\n')
 	}
-	f, err := os.OpenFile(p.JournalFile(ref, session), os.O_WRONLY|os.O_APPEND|os.O_CREATE|noFollow, 0o600)
+	f, err := openJournal(p.JournalFile(ref, session))
 	if err != nil {
 		return fmt.Errorf("opening the journal of %s: %w", session, err)
 	}
-	if _, err := f.Write(buf.Bytes()); err != nil {
-		f.Close()
+	defer f.Close()
+	size, torn, err := journalEnd(f)
+	if err != nil {
+		return fmt.Errorf("reading the journal of %s: %w", session, err)
+	}
+	data := buf.Bytes()
+	if torn {
+		data = append([]byte{'\n'}, data...)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Truncate(size)
+		return fmt.Errorf("writing the journal of %s: %w", session, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Truncate(size)
 		return fmt.Errorf("writing the journal of %s: %w", session, err)
 	}
 	return f.Close()
+}
+
+// openJournal opens a journal for appending; tests replace it to make
+// writes fail part-way.
+var openJournal = func(file string) (journalFile, error) {
+	return os.OpenFile(file, os.O_RDWR|os.O_APPEND|os.O_CREATE|noFollow, 0o600)
+}
+
+// journalFile is what appendJournal needs of an open journal.
+type journalFile interface {
+	io.ReadWriteCloser
+	io.ReaderAt
+	Stat() (fs.FileInfo, error)
+	Truncate(int64) error
+	Sync() error
+}
+
+// journalEnd returns a journal's size and whether its last line is
+// unterminated (a torn write).
+func journalEnd(f journalFile) (int64, bool, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, false, err
+	}
+	size := fi.Size()
+	if size == 0 {
+		return 0, false, nil
+	}
+	b := make([]byte, 1)
+	if _, err := f.ReadAt(b, size-1); err != nil {
+		return 0, false, err
+	}
+	return size, b[0] != '\n', nil
 }
 
 // journalSessions lists the session IDs that have a journal in a project.

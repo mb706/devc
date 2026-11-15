@@ -318,6 +318,15 @@ func TestGit(t *testing.T) {
 	if got := boxSh(t, e, ref, "cd "+main+" && git rev-parse origin/main github/main HEAD"); got != upMain2+"\n"+upMain2+"\n"+upMain {
 		t.Errorf("box after pull: %q", got)
 	}
+	// A bank before the box merges keeps the pull's fast-forward: the box
+	// has not moved main since the last bank (finding B8).
+	e.MustRun("bank", ref)
+	if refs = relayRefs(t, e, ref); refs["refs/heads/main"] != upMain2 {
+		t.Errorf("bank after pull took main back to %s (want %s)", refs["refs/heads/main"], upMain2)
+	}
+	if got := boxSh(t, e, ref, "cd "+main+" && git rev-parse origin/main"); got != upMain2 {
+		t.Errorf("box origin/main after pull and bank: %s, want %s", got, upMain2)
+	}
 
 	// 11. In the box: git fetch, git pull (after devc pull), git push.
 	boxSh(t, e, ref, "cd "+main+" && git fetch origin && git pull --ff-only")
@@ -388,6 +397,33 @@ func TestGit(t *testing.T) {
 		t.Errorf("wt rm did not bank t2's work: %v", withPrefix(refs, "refs/devc/snap/"))
 	}
 	boxSh(t, e, ref, "git -C "+main+" rev-parse --verify agent/t2") // the branch stays
+
+	// Work that cannot be banked is not removed, and the box is not
+	// stopped (finding B4): no snapshot can be made while the box's /tmp is
+	// not writable.
+	e.MustRun("wt", "new", "t3", ref)
+	boxSh(t, e, ref, "echo precious > "+inBox(ref)+"/t3/work.txt")
+	e.MustRun("root", ref, "--", "chmod", "0555", "/tmp")
+	if res := e.Run("wt", "rm", "t3", ref, "--force"); res.ExitCode == 0 || !strings.Contains(res.Stderr, "was not banked") {
+		t.Errorf("wt rm --force without a snapshot: %d %s", res.ExitCode, res.Stderr)
+	}
+	if got := boxSh(t, e, ref, "cat "+inBox(ref)+"/t3/work.txt"); got != "precious" {
+		t.Errorf("t3 after the refused removal: %q", got)
+	}
+	if res := e.Run("down", ref); res.ExitCode == 0 || !strings.Contains(res.Stderr, "--no-bank") || !inspect(t, ref).State.Running {
+		t.Errorf("down without a snapshot: %d running %v\n%s", res.ExitCode, inspect(t, ref).State.Running, res.Stderr)
+	}
+	if res := e.MustRun("wt", "rm", "t3", ref, "--discard"); !strings.Contains(res.Stderr, "without banking") {
+		t.Errorf("wt rm --discard: %s", res.Stderr)
+	}
+	if _, ok := wtLs(t, e, ref)["t3"]; ok {
+		t.Error("t3 still listed after wt rm --discard")
+	}
+	if res := e.MustRun("down", ref, "--no-bank"); !strings.Contains(res.Stderr, "not banked (--no-bank)") || inspect(t, ref).State.Running {
+		t.Errorf("down --no-bank: %s", res.Stderr)
+	}
+	e.MustRun("up", ref)
+	e.MustRun("root", ref, "--", "chmod", "1777", "/tmp")
 	res = e.MustRun("fake", ref, "-w", "t1", "--detach")
 	sid := strings.TrimSpace(res.Stdout)
 	wts = wtLs(t, e, ref)
@@ -610,6 +646,32 @@ func TestBankAll(t *testing.T) {
 	res = e.MustRun("bank", "--all", "--quiet")
 	if strings.TrimSpace(res.Stdout) != "" {
 		t.Errorf("bank --all --quiet without problems printed:\n%s", res.Stdout)
+	}
+
+	// Session events reach the durable journal through bank --all and
+	// devc ingest, for a box without a relay too, with no devc ps in
+	// between (finding B3).
+	project(e, hello, "harnesses = [\"fake\"]\n")
+	sid := startDetached(t, e)
+	spool := filepath.Join(spoolDir(e), sid+".jsonl")
+	for i := 0; i < 100; i++ {
+		if b, err := os.ReadFile(spool); err == nil && strings.Contains(string(b), `"harness"`) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	jfile := filepath.Join(e.StateDir, "durable", "realms", itest.RealmA, "journal", "hello", sid+".jsonl")
+	if _, err := os.Stat(jfile); err == nil {
+		t.Fatal("the journal exists before anything ingested")
+	}
+	e.MustRun("bank", "--all", "--quiet")
+	if got := types(journal(t, e, sid)); len(got) < 2 || got[0] != "session.start" {
+		t.Errorf("journal after bank --all: %q", got)
+	}
+	e.MustRun("stop", sid)
+	e.MustRun("ingest", "--all", "--quiet")
+	if res := e.MustRun("ingest", hello); !strings.Contains(res.Stdout, hello+": ") {
+		t.Errorf("ingest: %q", res.Stdout)
 	}
 	// up refuses a project with an upstream whose relay is missing.
 	if err := os.RemoveAll(relayDir(e, refs[2])); err != nil {
