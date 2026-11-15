@@ -1,0 +1,54 @@
+# Test manifest: the fake agent with the private home strategy, a
+# subdirectory shared across the realm, seeds, an env-token credential and
+# a baseline. Tests replace @FAKEAGENT@ with the path of bin/fakeagent and
+# copy this file and the templates beside it into <config>/harness/.
+id = "fake"
+display = "Fake agent"
+bin = "fake"
+
+[install]
+method = "local"
+path = "@FAKEAGENT@"
+exe = "bin/fakeagent"
+version_cmd = ["--version"]
+
+[home]
+strategy = "private"
+dir = ".fakeagent"
+env = { FAKEAGENT_DIR = "/home/dev/.fakeagent" }
+shared = ["state"]
+
+[[home.seed]]
+path = "seed.json"
+template = "fake-seed.json.tmpl"
+when = "missing"
+
+[[home.seed]]
+path = "always.txt"
+template = "fake-always.txt.tmpl"
+when = "always"
+
+[auth]
+method = "env-token"
+login = ["fake", "-p", "say paste the token below"]
+status = ["fake", "-p", "say ok"]
+env = "FAKE_TOKEN"
+secret = "fake-token"
+
+[baseline.settings]
+path = "/etc/fakeagent/settings.json"
+format = "json"
+template = "fake-settings.json.tmpl"
+
+[baseline.instructions]
+path = "/etc/fakeagent/AGENTS.md"
+
+[env]
+FAKEAGENT_SECRETS = "FAKE_TOKEN"
+
+[launch]
+args = []
+resume = ["--resume", "{id}"]
+
+[hooks]
+kind = "fake"

@@ -18,7 +18,19 @@ import (
 //     CLONE_NEWUSER bit of their flags is clear; clone3, whose flags live in
 //     memory where seccomp cannot see them, falls to the default action
 //     (ENOSYS), so libc falls back to clone.
-//  2. No AF_ALG sockets. socket(38, …) fails with EAFNOSUPPORT.
+//  2. No AF_ALG sockets. socket(38, …) fails with EAFNOSUPPORT. The 32-bit
+//     multiplexer socketcall passes its arguments in memory, where seccomp
+//     cannot see the domain, so it is refused as a whole with EPERM; 32-bit
+//     programs must use the direct socket system calls (Linux 4.3 and later
+//     have them on i386), where the AF_ALG rule applies. ENOSYS, which would
+//     invite a libc to fall back, cannot be used: runc drops rules whose
+//     action equals the default, and without an explicit unconditional
+//     socketcall rule libseccomp turns every socket rule into a socketcall
+//     rule on the x86 sub-architecture (the domain comparison replaced by
+//     the call number), where rules with different actions collide
+//     ("error adding seccomp rule for syscall socket: file exists"). The
+//     explicit rule must precede the socket rules, which then become
+//     redundant on x86 and are skipped.
 //
 // libseccomp cannot AND two comparisons on one argument, and separate allow
 // rules are ORed, so a rule "allow socket if domain != 16" cannot simply be
@@ -43,6 +55,7 @@ const (
 	opMaskedEQ   = "SCMP_CMP_MASKED_EQ"
 	cloneNewUser = 0x10000000
 	afALG        = 38
+	errEPERM     = 1
 	errENOSYS    = 38
 	errEAFNOSUP  = 97
 	// DevcComment prefixes the comment of every rule devc adds.
@@ -148,11 +161,15 @@ func DeriveProfile(base []byte) ([]byte, error) {
 	if err := restrictSockets(p); err != nil {
 		return nil, err
 	}
+	if err := refuseSocketcall(p); err != nil {
+		return nil, err
+	}
 	return p.Marshal()
 }
 
-func restrictNamespaces(p *Profile) error {
-	targets := []string{"clone", "clone3", "unshare"}
+// removeUnconditional deletes the named calls from every unconditional
+// allow rule and reports which were found.
+func removeUnconditional(p *Profile, targets []string) map[string]bool {
 	removed := map[string]bool{}
 	for i := range p.Syscalls {
 		s := &p.Syscalls[i]
@@ -168,6 +185,35 @@ func restrictNamespaces(p *Profile) error {
 		})
 	}
 	p.Syscalls = slices.DeleteFunc(p.Syscalls, func(s Syscall) bool { return len(s.Names) == 0 })
+	return removed
+}
+
+// defaultIsENOSYS reports whether unlisted calls fail with ENOSYS.
+func defaultIsENOSYS(p *Profile) bool {
+	return p.DefaultAction == actErrno && p.DefaultErrnoRet != nil && *p.DefaultErrnoRet == errENOSYS
+}
+
+// refuseSocketcall makes socketcall fail with EPERM (see the top of the
+// file), with the rule first in the list.
+func refuseSocketcall(p *Profile) error {
+	removeUnconditional(p, []string{"socketcall"})
+	for _, s := range p.Syscalls {
+		if s.Action == actAllow && slices.Contains(s.Names, "socketcall") && len(s.Includes.Caps) == 0 {
+			return fmt.Errorf("seccomp base profile allows socketcall in a form the derivation does not handle (%q); review internal/toolbox/seccomp.go", s.Comment)
+		}
+	}
+	if p.DefaultAction == actErrno && p.DefaultErrnoRet != nil && *p.DefaultErrnoRet == errEPERM {
+		return errors.New("seccomp base profile: the default action is EPERM, so an explicit socketcall rule would be dropped; review internal/toolbox/seccomp.go")
+	}
+	rule := Syscall{Names: []string{"socketcall"}, Action: actErrno, Args: []Arg{}, ErrnoRet: uintp(errEPERM), Errno: "EPERM",
+		Comment: DevcComment + "socketcall hides the socket domain; must precede the socket rules"}
+	p.Syscalls = append([]Syscall{rule}, p.Syscalls...)
+	return nil
+}
+
+func restrictNamespaces(p *Profile) error {
+	targets := []string{"clone", "clone3", "unshare"}
+	removed := removeUnconditional(p, targets)
 	// Anything still allowing these calls without a capability condition
 	// would reopen user namespaces; capability-gated variants are left alone
 	// (boxes have no capabilities).
@@ -198,7 +244,7 @@ func restrictNamespaces(p *Profile) error {
 	// clone3 must fail with ENOSYS. When that is the default action the
 	// call simply stays unlisted: libseccomp rejects rules whose action
 	// equals the default.
-	if p.DefaultAction != actErrno || p.DefaultErrnoRet == nil || *p.DefaultErrnoRet != errENOSYS {
+	if !defaultIsENOSYS(p) {
 		p.Syscalls = append(p.Syscalls, Syscall{Names: []string{"clone3"}, Action: actErrno, Args: []Arg{},
 			ErrnoRet: uintp(errENOSYS), Errno: "ENOSYS", Comment: DevcComment + "clone3 hides its flags; libc falls back to clone"})
 	}

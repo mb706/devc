@@ -195,6 +195,16 @@ func (p *Paths) BaselineRoot() string {
 func (p *Paths) BaselineDir(harness string) string {
 	return filepath.Join(p.BaselineRoot(), must(names.KindHarness, harness))
 }
+
+// BaselineInstructions is added to the instructions of every harness.
+func (p *Paths) BaselineInstructions() string {
+	return filepath.Join(p.BaselineRoot(), "instructions.md")
+}
+
+// RealmInstructions is added to the instructions of every box of a realm.
+func (p *Paths) RealmInstructions(realm string) string {
+	return filepath.Join(p.RealmDir(realm), "instructions.md")
+}
 func (p *Paths) DotfilesDir() string    { return filepath.Join(p.configDir, "dotfiles") }
 func (p *Paths) UserHarnessDir() string { return filepath.Join(p.configDir, "harness") }
 func (p *Paths) UserHarnessFile(id string) string {
@@ -282,10 +292,25 @@ func (p *Paths) BoxHomeDir(r names.ProjectRef) string {
 	return filepath.Join(p.BoxLocalDir(r), "home")
 }
 
-// BoxEtcDir holds the files rendered for /etc/devc and the harness baselines.
+// BoxEtcDir holds the files rendered for /etc/devc.
 func (p *Paths) BoxEtcDir(r names.ProjectRef) string {
 	return filepath.Join(p.BoxLocalDir(r), "etc")
 }
+
+// BoxBaselineDir holds a harness's rendered baseline; it is mounted
+// read-only at the directory of the manifest's baseline paths.
+func (p *Paths) BoxBaselineDir(r names.ProjectRef, harness string) string {
+	return filepath.Join(p.BoxLocalDir(r), "baseline", must(names.KindHarness, harness))
+}
+
+// BoxHarnessDir holds the per-box subdirectories of a harness whose home is
+// shared across the realm.
+func (p *Paths) BoxHarnessDir(r names.ProjectRef, harness string) string {
+	return filepath.Join(p.BoxLocalDir(r), "harness", must(names.KindHarness, harness))
+}
+
+// TmpDir is for short-lived host directories (temporary homes for logins).
+func (p *Paths) TmpDir() string        { return filepath.Join(p.LocalDir(), "tmp") }
 func (p *Paths) SavepointsDir() string { return filepath.Join(p.LocalDir(), "savepoints") }
 func (p *Paths) CacheDir() string      { return filepath.Join(p.stateDir, "cache") }
 func (p *Paths) RealmPkgCacheDir(realm string) string {
@@ -324,6 +349,17 @@ func (p *Paths) BoxRuntimeDir(boxID string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(rt, boxID), nil
+}
+
+// BoxSecretsDir holds the secrets delivered to a box; it is mounted
+// read-only at /run/devc-secrets. It is a sibling of the box-writable
+// runtime directory, not inside it, and lives on the runtime tmpfs.
+func (p *Paths) BoxSecretsDir(boxID string) (string, error) {
+	d, err := p.BoxRuntimeDir(boxID)
+	if err != nil {
+		return "", err
+	}
+	return d + "-secrets", nil
 }
 
 // SpoolDir is where the box writes event files; read it only through safefs.

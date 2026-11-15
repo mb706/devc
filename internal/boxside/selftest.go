@@ -3,7 +3,9 @@ package boxside
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,7 +27,10 @@ type Check struct {
 // would answer differently (EINVAL for a multi-threaded caller or for
 // CLONE_NEWUSER|CLONE_FS, or success followed by an AppArmor denial), so
 // these items show that the seccomp rule itself is active.
-func SelfTest(info *Info) []Check {
+//
+// probe runs `devc box probe <name>` in a child process and returns its
+// output; it is used for checks that could crash the caller. nil skips them.
+func SelfTest(info *Info, probe func(name string) (string, error)) []Check {
 	var cs []Check
 	add := func(id string, ok bool, format string, args ...any) {
 		cs = append(cs, Check{ID: id, OK: ok, Detail: fmt.Sprintf(format, args...)})
@@ -63,6 +68,10 @@ func SelfTest(info *Info) []Check {
 	// The kernel truncates the domain to 32 bits; seccomp sees all 64.
 	ok, detail = socketCheck(1<<32|unix.AF_ALG, unix.SOCK_SEQPACKET, 0)
 	add("af-alg-high-bits", ok, "%s", detail)
+	if probe != nil {
+		ok, detail = socketcallCheck(probe)
+		add("socketcall", ok, "%s", detail)
+	}
 	ok, detail = socketsWork()
 	add("sockets", ok, "%s", detail)
 
@@ -133,6 +142,69 @@ func socketCheck(domain uint64, typ int, want syscall.Errno) (bool, string) {
 		return false, fmt.Sprintf("socket(%#x): succeeded", domain)
 	}
 	return want == 0 || e == want, fmt.Sprintf("socket(%#x): %s", domain, errText(e))
+}
+
+// socketcallCheck: 32-bit programs could create AF_ALG sockets through
+// socketcall, whose arguments seccomp cannot inspect, so the profile
+// refuses the call with EPERM (the kernel would answer socketcall(0) with
+// EINVAL). The probe runs in a child because a kernel without the 32-bit
+// entry kills the caller with SIGSEGV.
+func socketcallCheck(probe func(string) (string, error)) (bool, string) {
+	out, err := probe(ProbeSocketcall)
+	out = strings.TrimSpace(out)
+	var ee *exec.ExitError
+	switch {
+	case err == nil && out == "EPERM":
+		return true, "socketcall through the 32-bit entry: EPERM (refused by seccomp)"
+	case err == nil && out == probeUnsupported:
+		return true, "not applicable: no 32-bit x86 system calls on this architecture"
+	case errors.As(err, &ee) && ee.ProcessState != nil:
+		if ws, ok := ee.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() && (ws.Signal() == syscall.SIGSEGV || ws.Signal() == syscall.SIGILL) {
+			return true, "the kernel has no 32-bit system call entry (" + ws.Signal().String() + "), so socketcall is unreachable"
+		}
+		return false, fmt.Sprintf("probe failed: %v", err)
+	case err != nil:
+		return false, fmt.Sprintf("probe failed: %v", err)
+	}
+	return false, fmt.Sprintf("socketcall through the 32-bit entry: %s (want EPERM from seccomp)", out)
+}
+
+// Probe names for `devc box probe`.
+const (
+	ProbeSocketcall  = "socketcall"
+	probeUnsupported = "unsupported"
+)
+
+// RunProbe is the child side of a probe: it prints the outcome on out.
+func RunProbe(name string, out io.Writer) error {
+	switch name {
+	case ProbeSocketcall:
+		e, ok := probeSocketcall()
+		switch {
+		case !ok:
+			fmt.Fprintln(out, probeUnsupported)
+		case e == 0:
+			fmt.Fprintln(out, "succeeded")
+		default:
+			n := unix.ErrnoName(syscall.Errno(e))
+			if n == "" {
+				n = fmt.Sprintf("errno %d", e)
+			}
+			fmt.Fprintln(out, n)
+		}
+		return nil
+	}
+	return fmt.Errorf("unknown probe %q", name)
+}
+
+// ChildProbe returns a probe function that runs `<exe> box probe <name>`.
+func ChildProbe(exe string) func(string) (string, error) {
+	return func(name string) (string, error) {
+		cmd := exec.Command(exe, "box", "probe", name)
+		cmd.Dir = "/"
+		out, err := cmd.Output()
+		return string(out), err
+	}
 }
 
 func socketsWork() (bool, string) {

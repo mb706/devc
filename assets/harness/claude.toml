@@ -5,11 +5,11 @@ display = "Claude Code"
 bin = "claude"                 # the command users type; a shim with this name is created
 
 [install]
-method = "script"              # script | none
+method = "script"              # script | local | none
 url = "https://claude.ai/install.sh"
-args = []
-env = { }
-exe = "home/.local/bin/claude" # real executable, relative to the harness directory in the toolbox
+args = ["{version}"]           # install.sh [stable|latest|VERSION]; dropped when no version is requested
+env = { }                      # "{dir}" in a value is the version directory
+exe = "home/.local/bin/claude" # real executable, relative to the version directory (HOME is <dir>/home)
 needs = []                     # toolbox components, for example ["node"]
 version_cmd = ["--version"]
 
@@ -21,7 +21,7 @@ shared = ["projects"]          # private strategy: subdirectories mounted from r
 per_box = []                   # shared strategy: subdirectories kept per box
 
 [[home.seed]]
-path = ".claude.json"          # relative to dir
+path = ".claude.json"          # relative to dir; with CLAUDE_CONFIG_DIR set, Claude Code keeps .claude.json there
 template = "claude.json.tmpl"
 when = "missing"               # missing | always
 
@@ -42,6 +42,7 @@ path = "/etc/claude-code/CLAUDE.md"
 
 [env]
 DISABLE_UPDATES = "1"
+DISABLE_AUTOUPDATER = "1"
 
 [launch]
 args = []

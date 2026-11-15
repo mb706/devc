@@ -75,6 +75,17 @@ func newToolboxCmd(a *app) *cobra.Command {
 			}
 			fmt.Fprintf(a.stdout, "helper   %s\n", okText(info.Helper))
 			fmt.Fprintf(a.stdout, "seccomp  %s\n", okText(info.Seccomp))
+			switch {
+			case info.Tmux == "":
+				fmt.Fprintf(a.stdout, "tmux     missing: run 'devc toolbox build tmux'\n")
+			case info.Tmux != info.TmuxPinned:
+				fmt.Fprintf(a.stdout, "tmux     %s (this devc builds %s: run 'devc toolbox build tmux')\n", info.Tmux, info.TmuxPinned)
+			default:
+				fmt.Fprintf(a.stdout, "tmux     %s\n", info.Tmux)
+			}
+			if len(info.Shims) > 0 {
+				fmt.Fprintf(a.stdout, "shims    %s\n", strings.Join(info.Shims, " "))
+			}
 			for _, p := range info.Problems {
 				fmt.Fprintf(a.stderr, "devc: toolbox: %s\n", p)
 			}
@@ -82,7 +93,7 @@ func newToolboxCmd(a *app) *cobra.Command {
 		},
 	}
 	ls.Flags().BoolVar(&lsJSON, "json", false, "print JSON")
-	return group("toolbox", "Manage the toolbox mounted into every box", false, sync, ls)
+	return group("toolbox", "Manage the toolbox mounted into every box", false, sync, ls, newToolboxBuildCmd(a))
 }
 
 func okText(ok bool) string {

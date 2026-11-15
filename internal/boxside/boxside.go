@@ -1,7 +1,8 @@
 // Package boxside is everything the devc binary does inside a box, reached
-// through the hidden `devc box …` commands (plan 3.3): the container's main
-// process (init), the identity fix run by `devc up`, the login shell used by
-// `devc sh`, and a self-test of the hardening.
+// through the hidden `devc box …` commands (plan 3.3) and the harness shims:
+// the container's main process (init, which also applies harness seeds),
+// the identity fix run by `devc up`, the login shell used by `devc sh`, the
+// harness launcher, and a self-test of the hardening.
 //
 // Security rules: code here runs in the box and trusts nothing the box can
 // write. It reads its own description only from /etc/devc, which the host
@@ -41,6 +42,9 @@ type Info struct {
 	Network     string `json:"network"`
 	Shell       string `json:"shell"` // configured shell; empty means pick one
 	DevcVersion string `json:"devc_version"`
+	// HomeMounts are the top-level entries of the home that exist only as
+	// mount points (.cache, harness homes); they do not make a home "used".
+	HomeMounts []string `json:"home_mounts,omitempty"`
 }
 
 // InfoSchema is the current version of box.json.

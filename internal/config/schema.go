@@ -220,14 +220,24 @@ type Harness struct {
 	Transcripts HarnessTranscript `toml:"transcripts" json:"transcripts"`
 }
 
+// HarnessInstall says how a harness gets into the toolbox. Exe is relative
+// to the installation's version directory for "script" and "local", and an
+// absolute path in the image for "none".
 type HarnessInstall struct {
-	Method     string            `toml:"method" json:"method"`
-	URL        string            `toml:"url" json:"url"`
-	Args       []string          `toml:"args" json:"args"`
-	Env        map[string]string `toml:"env" json:"env,omitempty"`
-	Exe        string            `toml:"exe" json:"exe"`
-	Needs      []string          `toml:"needs" json:"needs"`
-	VersionCmd []string          `toml:"version_cmd" json:"version_cmd"`
+	Method string `toml:"method" json:"method"`
+	// URL is the installer script ("script").
+	URL string `toml:"url" json:"url"`
+	// Args go to the script; "{version}" is replaced by the requested
+	// version, and an argument containing it is dropped when none is given.
+	Args []string `toml:"args" json:"args"`
+	// Env is the script's environment; "{dir}" in a value is replaced by
+	// the version directory.
+	Env map[string]string `toml:"env" json:"env,omitempty"`
+	// Path is the host file copied to Exe ("local").
+	Path       string   `toml:"path" json:"path,omitempty"`
+	Exe        string   `toml:"exe" json:"exe"`
+	Needs      []string `toml:"needs" json:"needs"`
+	VersionCmd []string `toml:"version_cmd" json:"version_cmd"`
 }
 
 type HarnessHome struct {

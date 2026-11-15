@@ -54,6 +54,10 @@ type Manager struct {
 	ReadyTimeout time.Duration
 	// Contributors add mounts and environment to every box.
 	Contributors []Contributor
+	// Preparers write host files before a box starts; Cleaners remove
+	// per-box state after down and rm.
+	Preparers []Preparer
+	Cleaners  []Cleaner
 	// Now is the clock for the root log.
 	Now func() time.Time
 
@@ -112,6 +116,7 @@ type plan struct {
 	source   ImageSource
 	spec     *Spec
 	runtime  string
+	inputs   Inputs
 }
 
 func (m *Manager) plan(ctx context.Context, ref names.ProjectRef, ensure, build bool) (*plan, error) {
@@ -155,15 +160,16 @@ func (m *Manager) plan(ctx context.Context, ref names.ProjectRef, ensure, build 
 	if err != nil {
 		return nil, err
 	}
-	spec, err := BuildSpec(Inputs{
+	in := Inputs{
 		Resolved: r, Paths: m.Config.Paths, Toolbox: m.Toolbox, Host: facts,
 		SELinuxMode: m.Config.Global.SELinux.Mode, ImageRef: src.Ref, Image: img,
 		Seccomp: profile, RuntimeDir: rt,
-	}, m.Contributors...)
+	}
+	spec, err := BuildSpec(in, m.Contributors...)
 	if err != nil {
 		return nil, err
 	}
-	return &plan{resolved: r, source: src, spec: spec, runtime: rt}, nil
+	return &plan{resolved: r, source: src, spec: spec, runtime: rt, inputs: in}, nil
 }
 
 // UpOptions are the switches of `devc up`.
@@ -186,8 +192,13 @@ func (m *Manager) Up(ctx context.Context, ref names.ProjectRef, o UpOptions) err
 	for _, w := range pl.spec.Warnings {
 		m.printf("devc: warning: %s\n", w)
 	}
-	if err := writeEtc(m.Config.Paths, pl.resolved, m.Version); err != nil {
+	if err := writeEtc(m.Config.Paths, pl.resolved, m.Version, pl.spec.HomeMountPoints()); err != nil {
 		return fmt.Errorf("rendering %s: %w", paths.InBoxEtc, err)
+	}
+	for _, p := range m.Preparers {
+		if err := p.Prepare(ctx, &pl.inputs, pl.spec); err != nil {
+			return err
+		}
 	}
 	if err := prepareDirs(m.Config.Paths, pl.spec, pl.runtime); err != nil {
 		return err
@@ -336,13 +347,27 @@ func (m *Manager) Down(ctx context.Context, ref names.ProjectRef) error {
 	switch {
 	case ci == nil:
 		m.printf("devc: %s does not exist\n", name)
-		return nil
+		return m.cleanup(ctx, ref)
 	case !ci.State.Running:
 		m.printf("devc: %s is not running\n", name)
-		return nil
+		return m.cleanup(ctx, ref)
 	}
 	m.printf("devc: stopping %s\n", name)
-	return m.Engine.Stop(ctx, name, 10*time.Second)
+	if err := m.Engine.Stop(ctx, name, 10*time.Second); err != nil {
+		return err
+	}
+	return m.cleanup(ctx, ref)
+}
+
+// cleanup runs the cleaners; all run even when one fails.
+func (m *Manager) cleanup(ctx context.Context, ref names.ProjectRef) error {
+	var errs []error
+	for _, c := range m.Cleaners {
+		if err := c.Cleanup(ctx, ref); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Remove stops and removes a project's box; with home it also deletes the
@@ -360,6 +385,9 @@ func (m *Manager) Remove(ctx context.Context, ref names.ProjectRef, home bool) e
 		if err := m.Engine.Remove(ctx, name); err != nil {
 			return err
 		}
+	}
+	if err := m.cleanup(ctx, ref); err != nil {
+		return err
 	}
 	if !home {
 		return nil

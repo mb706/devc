@@ -67,6 +67,13 @@ type Engine interface {
 	// Unshare runs a host command inside the engine's user namespace, where
 	// the user is root and subordinate IDs are mapped.
 	Unshare(ctx context.Context, args []string) (execx.Result, error)
+
+	// Run starts a throwaway container and captures its output; a non-zero
+	// exit returns *execx.ExitError.
+	Run(ctx context.Context, o RunOptions) (execx.Result, error)
+	// RunStream starts a throwaway container connected to o's streams (or
+	// the terminal) and returns its exit code.
+	RunStream(ctx context.Context, o RunOptions) (int, error)
 }
 
 // Version is the engine client version.

@@ -1,7 +1,12 @@
 # A small glibc image that satisfies the devc image contract (spec 6.5):
 # sh, git and an OpenSSH client. Everything else devc needs comes from the
 # toolbox.
-FROM docker.io/library/debian:trixie-slim
+#
+# Debian bookworm rather than trixie: trixie's apt verifies signatures with
+# sqv, which asks statx() for a file's birth time, and that hangs on hosts
+# with an affected fuse-overlayfs (see docs/dev/LEFTOVER.md). Switch to
+# trixie-slim where the bug is absent.
+FROM docker.io/library/debian:bookworm-slim
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

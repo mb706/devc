@@ -16,6 +16,7 @@
 package box
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -120,6 +121,18 @@ type Spec struct {
 // the argument list stays in one place.
 type Contributor interface {
 	Contribute(in *Inputs, s *Spec) error
+}
+
+// Preparer writes host files a box needs before it starts (harness
+// baselines, launch descriptions, secrets). Up calls every preparer after
+// rendering /etc/devc and before creating the mount sources.
+type Preparer interface {
+	Prepare(ctx context.Context, in *Inputs, s *Spec) error
+}
+
+// Cleaner removes per-box host state when a box stops or is removed.
+type Cleaner interface {
+	Cleanup(ctx context.Context, ref names.ProjectRef) error
 }
 
 // ContributorFunc adapts a function to Contributor.
@@ -253,6 +266,26 @@ func BuildSpec(in Inputs, contribs ...Contributor) (*Spec, error) {
 		}
 	}
 	return s, nil
+}
+
+// HomeMountPoints lists the top-level entries of /home/dev that are mount
+// points (or contain one); box init does not count them as user files.
+func (s *Spec) HomeMountPoints() []string {
+	seen := map[string]bool{}
+	for _, m := range s.Mounts {
+		rel, ok := strings.CutPrefix(m.Target, paths.InBoxHome+"/")
+		if !ok || rel == "" {
+			continue
+		}
+		first, _, _ := strings.Cut(rel, "/")
+		seen[first] = true
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // AddMount adds a bind mount. Paths must be clean and absolute, and must

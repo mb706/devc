@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mb706/devc/internal/boxside"
+	"github.com/mb706/devc/internal/names"
 )
 
 // requireBox refuses to run an in-box command on the host: fix-identity
@@ -42,7 +44,13 @@ func newBoxCmd(a *app) *cobra.Command {
 			defer stop()
 			// SIGHUP must not end the box.
 			signal.Ignore(syscall.SIGHUP)
-			return boxside.Init(ctx, boxside.DefaultInitOptions(a.stderr))
+			var mounts []string
+			if info, err := boxside.ReadInfo("/"); err == nil {
+				mounts = info.HomeMounts
+			} else {
+				fmt.Fprintf(a.stderr, "devc box init: warning: %v\n", err)
+			}
+			return boxside.Init(ctx, boxside.DefaultInitOptions(a.stderr, mounts))
 		},
 	}
 
@@ -105,7 +113,11 @@ func newBoxCmd(a *app) *cobra.Command {
 				fmt.Fprintf(a.stderr, "devc box selftest: warning: %v\n", err)
 				info = nil
 			}
-			checks := boxside.SelfTest(info)
+			var probe func(string) (string, error)
+			if exe, err := a.executable(); err == nil {
+				probe = boxside.ChildProbe(exe)
+			}
+			checks := boxside.SelfTest(info, probe)
 			failed := false
 			for _, c := range checks {
 				failed = failed || !c.OK
@@ -135,5 +147,63 @@ func newBoxCmd(a *app) *cobra.Command {
 	}
 	selftest.Flags().BoolVar(&stJSON, "json", false, "print JSON")
 
-	return group("box", "Commands that run inside a box (internal)", true, initCmd, fixIdentity, shell, selftest)
+	probe := &cobra.Command{
+		Use:    "probe <name>",
+		Short:  "Run one self-test probe in this process (used by selftest)",
+		Args:   cobra.ExactArgs(1),
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := requireBox(a.getenv); err != nil {
+				return err
+			}
+			return boxside.RunProbe(args[0], a.stdout)
+		},
+	}
+
+	launch := &cobra.Command{
+		Use:   "launch <harness> [-- args...]",
+		Short: "Start a harness with its credential, settings and session (what a shim runs)",
+		Args: func(cmd *cobra.Command, args []string) error {
+			at := cmd.ArgsLenAtDash()
+			if len(args) == 0 || at == 0 || (at < 0 && len(args) != 1) || at > 1 {
+				return usageErrorf("usage: devc box launch <harness> [-- args...]")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := requireBox(a.getenv); err != nil {
+				return err
+			}
+			l, err := boxside.ReadLaunch("/", args[0])
+			if err != nil {
+				return err
+			}
+			return boxside.RunLaunch(l, args[1:], a.launchEnv())
+		},
+	}
+
+	// hook is a placeholder until C04: the baseline settings already call
+	// it, and a harness must never see a failing hook. It reads and
+	// discards its input and prints nothing.
+	hook := &cobra.Command{
+		Use:    "hook <kind> <event>",
+		Short:  "Receive a harness hook (placeholder; always succeeds)",
+		Args:   cobra.ArbitraryArgs,
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, _ = io.Copy(io.Discard, io.LimitReader(cmd.InOrStdin(), 1<<20))
+			return nil
+		},
+	}
+
+	return group("box", "Commands that run inside a box (internal)", true, initCmd, fixIdentity, shell, selftest, probe, launch, hook)
+}
+
+// launchEnv is the launcher's view of this process.
+func (a *app) launchEnv() boxside.LaunchEnv {
+	self, _ := a.executable()
+	if r, err := filepath.EvalSymlinks(self); err == nil {
+		self = r
+	}
+	return boxside.LaunchEnv{Root: "/", Environ: os.Environ(), Self: self, Stderr: a.stderr, NewSession: names.NewSessionID}
 }

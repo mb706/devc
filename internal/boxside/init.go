@@ -23,12 +23,19 @@ type InitOptions struct {
 	// MountPoints are entries of the home that are mounts set up by the
 	// host (.cache); they do not make a home "used".
 	MountPoints []string
-	Log         io.Writer
+	// SeedRoot prefixes the paths of harness seeds ("/" in a box); empty
+	// skips seeding.
+	SeedRoot string
+	Log      io.Writer
 }
 
-// DefaultInitOptions are the paths used in a box.
-func DefaultInitOptions(log io.Writer) InitOptions {
-	return InitOptions{Home: "/home/dev", Dotfiles: DotfilesDir, Skel: "/etc/skel", Run: RunDir, MountPoints: []string{".cache"}, Log: log}
+// DefaultInitOptions are the paths used in a box. mountPoints comes from
+// box.json; without it only .cache is known.
+func DefaultInitOptions(log io.Writer, mountPoints []string) InitOptions {
+	if len(mountPoints) == 0 {
+		mountPoints = []string{".cache"}
+	}
+	return InitOptions{Home: "/home/dev", Dotfiles: DotfilesDir, Skel: "/etc/skel", Run: RunDir, MountPoints: mountPoints, SeedRoot: "/", Log: log}
 }
 
 // Init is the box's main process: it prepares the home, links the dotfiles,
@@ -43,6 +50,11 @@ func Init(ctx context.Context, o InitOptions) error {
 	}
 	for _, err := range PrepareHome(o) {
 		logf("%v", err)
+	}
+	if o.SeedRoot != "" {
+		for _, err := range ApplySeeds(o.SeedRoot) {
+			logf("%v", err)
+		}
 	}
 	spool := filepath.Join(o.Run, SpoolDirName)
 	if err := os.MkdirAll(spool, 0o700); err != nil {

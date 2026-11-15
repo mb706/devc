@@ -17,7 +17,7 @@ var (
 	selinuxModes     = []string{SELinuxLabels, SELinuxDisable}
 	savepointDrivers = []string{"auto", "reflink", "restic", "borg", "none"}
 	mountModes       = []string{"ro", "rw"}
-	installMethods   = []string{"script", "none"}
+	installMethods   = []string{"script", "local", "none"}
 	homeStrategies   = []string{"private", "shared"}
 	seedWhen         = []string{"missing", "always"}
 	authMethods      = []string{"env-token", "shared-home", "api-key", "none"}
@@ -217,15 +217,45 @@ func validateHarness(h *Harness, ps *problems) {
 
 	in := &h.Install
 	k.enum("install.method", in.Method, installMethods)
-	if in.Method == "script" {
-		if u, err := url.Parse(in.URL); err != nil || u.Scheme != "https" || u.Host == "" {
-			k.bad("install.url", "%q must be an https:// URL when install.method is \"script\"", in.URL)
+	switch in.Method {
+	case "script":
+		if u, err := url.Parse(in.URL); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+			k.bad("install.url", "%q must be an https:// URL without user information when install.method is \"script\"", in.URL)
 		}
 		k.relPath("install.exe", in.Exe, "executable path")
-	} else if in.Exe != "" {
+	case "local":
+		if in.Path == "" {
+			k.bad("install.path", "required when install.method is \"local\"")
+		} else if strings.HasPrefix(in.Path, "~/") {
+			if strings.ContainsAny(in.Path, "\x00\n\r") || strings.Contains(in.Path, "/../") {
+				k.bad("install.path", "%q must be a clean path", in.Path)
+			}
+		} else {
+			k.absPath("install.path", in.Path, "file to install")
+		}
 		k.relPath("install.exe", in.Exe, "executable path")
+	case "none":
+		// The executable is part of the image. Without one the harness
+		// cannot be launched; devc up says so rather than refusing the
+		// whole configuration.
+		if in.Exe != "" {
+			k.absPath("install.exe", in.Exe, "executable path in the image (install.method \"none\")")
+		}
+	}
+	if in.Method != "local" && in.Path != "" {
+		k.bad("install.path", "only applies to install.method \"local\"")
+	}
+	for i, a := range in.Args {
+		if strings.ContainsAny(a, "\x00\n\r") {
+			k.bad(idx("install.args", i), "contains a control character")
+		}
 	}
 	k.envMap("install.env", in.Env)
+	for i, a := range in.VersionCmd {
+		if strings.ContainsRune(a, 0) {
+			k.bad(idx("install.version_cmd", i), "contains a NUL character")
+		}
+	}
 	for i, n := range in.Needs {
 		k.name(idx("install.needs", i), "toolbox component", n)
 	}
@@ -286,6 +316,27 @@ func validateHarness(h *Harness, ps *problems) {
 	if in := h.Baseline.Instructions; in != nil {
 		k.absPath("baseline.instructions.path", in.Path, "instructions path")
 	}
+	// The directory of the baseline paths is mounted read-only over the
+	// image, so it must be a dedicated directory, and one directory only.
+	var baseDir string
+	for _, p := range []struct{ key, path string }{
+		{"baseline.settings.path", pathOf(h.Baseline.Settings)},
+		{"baseline.instructions.path", pathOfInstr(h.Baseline.Instructions)},
+	} {
+		if p.path == "" {
+			continue
+		}
+		d := path.Dir(p.path)
+		switch {
+		case baseDir != "" && d != baseDir:
+			k.bad(p.key, "must be in the same directory as baseline.settings.path (%s): that directory is mounted as a whole", baseDir)
+		case strings.Count(d, "/") < 2 || reservedBaselineDir(d):
+			k.bad(p.key, "the directory %s is mounted read-only over the image; use a dedicated directory such as /etc/<harness>", d)
+		}
+		if baseDir == "" {
+			baseDir = d
+		}
+	}
 	k.envMap("env", h.Env)
 
 	if len(h.Launch.Resume) > 0 && !slices.ContainsFunc(h.Launch.Resume, func(s string) bool { return strings.Contains(s, "{id}") }) {
@@ -309,6 +360,31 @@ func validateHarness(h *Harness, ps *problems) {
 			}
 		}
 	}
+}
+
+func pathOf(s *BaselineSettings) string {
+	if s == nil {
+		return ""
+	}
+	return s.Path
+}
+
+func pathOfInstr(s *BaselineInstructions) string {
+	if s == nil {
+		return ""
+	}
+	return s.Path
+}
+
+// reservedBaselineDir reports whether d is, contains or lies inside a path
+// devc or the system needs as it is.
+func reservedBaselineDir(d string) bool {
+	for _, r := range []string{"/etc/devc", "/opt/devc", "/home", "/w", "/ctx", "/run", "/proc", "/sys", "/dev", "/tmp", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/var"} {
+		if d == r || strings.HasPrefix(d, r+"/") || strings.HasPrefix(r, d+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func validateEnv(e *Env, ps *problems) {

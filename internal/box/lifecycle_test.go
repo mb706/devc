@@ -463,3 +463,52 @@ func TestImageSources(t *testing.T) {
 		t.Errorf("build_from_repo: %v", err)
 	}
 }
+
+type hookRecorder struct {
+	calls []string
+	mount string // a mount source the preparer must create
+}
+
+func (h *hookRecorder) Contribute(in *Inputs, s *Spec) error {
+	h.mount = filepath.Join(in.Paths.StateDir(), "contributed")
+	return s.AddMount(Mount{Source: h.mount, Target: "/home/dev/.tool", ReadOnly: true})
+}
+
+func (h *hookRecorder) Prepare(_ context.Context, in *Inputs, s *Spec) error {
+	h.calls = append(h.calls, "prepare "+in.Resolved.Project+" "+strings.Join(s.HomeMountPoints(), ","))
+	return nil
+}
+
+func (h *hookRecorder) Cleanup(_ context.Context, ref names.ProjectRef) error {
+	h.calls = append(h.calls, "cleanup "+ref.Project)
+	return nil
+}
+
+func TestPreparersAndCleaners(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	h := &hookRecorder{}
+	r.m.Contributors = append(r.m.Contributors, h)
+	r.m.Preparers = append(r.m.Preparers, h)
+	r.m.Cleaners = append(r.m.Cleaners, h)
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Fatalf("up: %v\n%s", err, r.out)
+	}
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.m.Down(ctx, hello); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.m.Remove(ctx, hello, false); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"prepare hello .cache,.tool", "prepare hello .cache,.tool", "cleanup hello", "cleanup hello"}
+	if !slices.Equal(h.calls, want) {
+		t.Errorf("calls %q, want %q", h.calls, want)
+	}
+	b, err := os.ReadFile(filepath.Join(r.m.Config.Paths.BoxEtcDir(hello), "box.json"))
+	if err != nil || !strings.Contains(string(b), `"home_mounts": [`) || !strings.Contains(string(b), `".tool"`) {
+		t.Errorf("box.json: %v %s", err, b)
+	}
+}

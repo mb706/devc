@@ -138,7 +138,7 @@ func TestBuiltinManifests(t *testing.T) {
 	if cx.Home.Strategy != "shared" || cx.Auth.Method != "shared-home" || cx.Baseline.Instructions != nil ||
 		cx.Baseline.Settings.Format != "toml" || cx.Input.SubmitKey != "Tab" || cx.Memory.Kind != "" ||
 		!slices.Equal(cx.Launch.Resume, []string{"resume", "{id}"}) || len(cx.Home.PerBox) != 4 ||
-		cx.Install.Exe != "home/packages/standalone/current/bin/codex" {
+		cx.Install.Exe != "home/.local/bin/codex" || cx.Install.Env["CODEX_HOME"] != "{dir}/home/.codex" {
 		t.Errorf("codex manifest: %+v", cx)
 	}
 }
@@ -359,7 +359,7 @@ func TestBrokenConfigurations(t *testing.T) {
 		{"mount missing", add(hello, "[[mounts]]\nproject = \"tools\""), hello, "mounts[0].project", "no project \"tools\" in realm \"demo\""},
 		{"mount mode", set(analysis, "env = \"base\"\n[[mounts]]\nproject = \"hello\"\nmode = \"wx\"\n"), analysis, "mounts[0].mode", "not one of ro, rw"},
 		{"github grant", add(hello, "[grants]\ngithub = \"maybe\""), hello, "grants.github", "must be \"relay\", \"none\" or \"token:<secret-name>\""},
-		{"github token name", add(hello, "[grants]\ngithub = \"token:Bad\""), hello, "grants.github", "invalid secret name"},
+		{"github token name", add(hello, "[grants]\ngithub = \"token:.bad\""), hello, "grants.github", "invalid secret name"},
 		{"secret grant name", add(hello, "[grants]\nsecrets = [\"a b\"]"), hello, "grants.secrets[0]", "invalid secret name"},
 		{"ssh alias", add(hello, "[grants]\nssh = [\"-oProxyCommand=x\"]"), hello, "grants.ssh[0]", "not a valid SSH host alias"},
 		{"box memory", add(hello, "[box]\nmemory = \"16 GB\""), hello, "box.memory", "not a size"},
@@ -392,6 +392,14 @@ func TestBrokenConfigurations(t *testing.T) {
 		{"manifest bin", set("harness/pi.toml", "id = \"pi\"\nbin = \"../pi\"\n[home]\ndir = \".pi\"\n"), "harness/pi.toml", "bin", "not a valid command name"},
 		{"root log is no longer in env.toml", set("envs/base/env.toml", "[[root_log]]\ntime = 2026-11-14T12:00:00Z\nbox = \"demo/hello\"\ncommand = [\"true\"]\n"), "envs/base/env.toml", "root_log", "unknown key"},
 		{"selinux mode", set("config.toml", "default_env = \"base\"\n[selinux]\nmode = \"permissive\"\n"), "config.toml", "selinux.mode", "not one of labels, disable"},
+		{"manifest local needs path", set("harness/pi.toml", "id = \"pi\"\nbin = \"pi\"\n[install]\nmethod = \"local\"\nexe = \"bin/pi\"\n[home]\ndir = \".pi\"\n"), "harness/pi.toml", "install.path", "required"},
+		{"manifest local relative path", set("harness/pi.toml", "id = \"pi\"\nbin = \"pi\"\n[install]\nmethod = \"local\"\npath = \"pi\"\nexe = \"bin/pi\"\n[home]\ndir = \".pi\"\n"), "harness/pi.toml", "install.path", "clean absolute path"},
+		{"manifest local exe escapes", set("harness/pi.toml", "id = \"pi\"\nbin = \"pi\"\n[install]\nmethod = \"local\"\npath = \"/x/pi\"\nexe = \"../pi\"\n[home]\ndir = \".pi\"\n"), "harness/pi.toml", "install.exe", "must not contain .."},
+		{"manifest none relative exe", set("harness/pi.toml", "id = \"pi\"\nbin = \"pi\"\n[install]\nexe = \"bin/pi\"\n[home]\ndir = \".pi\"\n"), "harness/pi.toml", "install.exe", "clean absolute path"},
+		{"manifest path only for local", set("harness/pi.toml", "id = \"pi\"\nbin = \"pi\"\n[install]\nexe = \"/usr/bin/pi\"\npath = \"/x\"\n[home]\ndir = \".pi\"\n"), "harness/pi.toml", "install.path", "only applies"},
+		{"manifest baseline dirs differ", set("harness/pi.toml", minimalManifest("pi")+"[baseline.settings]\npath = \"/etc/pi/s.json\"\nformat = \"json\"\n[baseline.instructions]\npath = \"/etc/pix/I.md\"\n"), "harness/pi.toml", "baseline.instructions.path", "same directory"},
+		{"manifest baseline over /etc", set("harness/pi.toml", minimalManifest("pi")+"[baseline.settings]\npath = \"/etc/pi.json\"\nformat = \"json\"\n"), "harness/pi.toml", "baseline.settings.path", "dedicated directory"},
+		{"manifest baseline over devc", set("harness/pi.toml", minimalManifest("pi")+"[baseline.settings]\npath = \"/etc/devc/pi/s.json\"\nformat = \"json\"\n"), "harness/pi.toml", "baseline.settings.path", "dedicated directory"},
 		{"realm name with dash", func(t *testing.T, d string) {
 			os.MkdirAll(filepath.Join(d, "realms", "my-realm"), 0o755)
 			os.WriteFile(filepath.Join(d, "realms", "my-realm", "realm.toml"), nil, 0o644)

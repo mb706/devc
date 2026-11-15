@@ -52,6 +52,15 @@ func TestUsageErrors(t *testing.T) {
 		{"up", "a/b", "c/d"},
 		{"env", "build"},
 		{"env", "build", "Bad"},
+		{"harness", "install"},
+		{"harness", "install", "a", "b"},
+		{"harness", "install", "Bad"},
+		{"secret", "set", "demo"},
+		{"secret", "set", "demo", ".bad"},
+		{"secret", "ls"},
+		{"login", "demo"},
+		{"login", "status"},
+		{"toolbox", "build", "nonsense"},
 	} {
 		code, _, errOut := run(t, nil, args...)
 		if code != 2 || !strings.Contains(errOut, "--help") {
@@ -72,8 +81,8 @@ func TestUsageErrors(t *testing.T) {
 }
 
 func TestBoxCommandsRefuseOnHost(t *testing.T) {
-	for _, sub := range []string{"init", "fix-identity", "shell", "selftest"} {
-		code, _, errOut := run(t, nil, "box", sub)
+	for _, sub := range []string{"init", "fix-identity", "shell", "selftest", "probe socketcall", "launch fake"} {
+		code, _, errOut := run(t, nil, append([]string{"box"}, strings.Fields(sub)...)...)
 		if code != 1 || !strings.Contains(errOut, "only inside a devc box") {
 			t.Errorf("box %s: exit %d, %q", sub, code, errOut)
 		}

@@ -18,7 +18,7 @@ usage() {
 	cat <<'EOF'
 usage: ./dev <command> [args...]
 
-  build              build bin/devc for the host architecture
+  build              build bin/devc and the test harness bin/fakeagent for the host architecture
   build-all          build bin/devc-linux-amd64 and bin/devc-linux-arm64
   test [args...]     unit tests (default ./...); extra args go to `go test`
   itest [flags...]   build bin/devc and bin/itest, run integration tests on the host
@@ -88,7 +88,11 @@ cmd="${1:-}"
 case "$cmd" in
 build)
 	mkdir -p bin
-	go_in_container build -trimpath -ldflags "$(ldflags)" -o bin/devc ./cmd/devc
+	run_in_container -- sh -c '
+		set -e
+		go build -trimpath -ldflags "$1" -o bin/devc ./cmd/devc
+		go build -trimpath -ldflags "-s -w" -o bin/fakeagent ./test/fakeharness
+	' sh "$(ldflags)"
 	;;
 build-all)
 	mkdir -p bin
@@ -111,6 +115,7 @@ itest)
 	run_in_container -- sh -c '
 		set -e
 		go build -trimpath -ldflags "$1" -o bin/devc ./cmd/devc
+		go build -trimpath -ldflags "-s -w" -o bin/fakeagent ./test/fakeharness
 		go test -c -tags integration -o bin/itest ./test/integration
 	' sh "$(ldflags)"
 	# Translate `go test` style flags (-v, -run X) into test-binary flags.
@@ -124,7 +129,10 @@ itest)
 		esac
 	done
 	cd "$REPO/test/integration"
-	DEVC_BIN="$REPO/bin/devc" DEVC_REPO_ROOT="$REPO" "$REPO/bin/itest" "${args[@]}"
+	# DEVC_ITEST_CACHE keeps what tests may reuse between runs (the static
+	# tmux build).
+	DEVC_BIN="$REPO/bin/devc" DEVC_FAKEAGENT="$REPO/bin/fakeagent" DEVC_REPO_ROOT="$REPO" \
+		DEVC_ITEST_CACHE="$CACHE/itest" "$REPO/bin/itest" "${args[@]}"
 	;;
 vet)
 	go_in_container vet -tags integration ./...

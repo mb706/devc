@@ -147,18 +147,9 @@ func New(t *testing.T) *Env {
 	return e
 }
 
-var (
-	envLineRE  = regexp.MustCompile(`(?m)^(\s*(?:default_env|env)\s*=\s*)"base"`)
-	fromTrixie = regexp.MustCompile(`(?m)^FROM docker\.io/library/debian:trixie-slim$`)
-)
+var envLineRE = regexp.MustCompile(`(?m)^(\s*(?:default_env|env)\s*=\s*)"base"`)
 
 // renameForTests applies the renames described in the package comment.
-//
-// It also builds the base env from Debian bookworm instead of trixie: on
-// the development host, statx() on files of an image layer hangs inside
-// fuse-overlayfs 1.17 with libfuse 3.18, and trixie's apt verifies
-// signatures with sqv, which calls statx. Bookworm's apt uses gpgv. See
-// docs/dev/LEFTOVER.md.
 func renameForTests(dir string) error {
 	for _, r := range [][2]string{
 		{"realms/demo", "realms/" + RealmA},
@@ -178,9 +169,6 @@ func renameForTests(dir string) error {
 			return err
 		}
 		out := envLineRE.ReplaceAll(b, []byte(`${1}"`+EnvBase+`"`))
-		if filepath.Base(p) == "Containerfile" {
-			out = fromTrixie.ReplaceAll(out, []byte("FROM docker.io/library/debian:bookworm-slim"))
-		}
 		if bytes.Equal(out, b) {
 			return nil
 		}
@@ -251,8 +239,10 @@ func EnsureBaseImage(t *testing.T, e *Env) {
 // always removed at the end of a run; pulled images only if they were
 // absent when the run started.
 var (
-	OwnImages    = []string{BaseImage, "localhost/devc-env/ituid:latest"}
-	PulledImages = []string{"docker.io/library/debian:bookworm-slim", "docker.io/library/debian:trixie-slim"}
+	OwnImages = []string{BaseImage, "localhost/devc-env/ituid:latest"}
+	// The installer image localhost/devc-aux/installer stays cached
+	// between runs; so does the tmux build in DEVC_ITEST_CACHE.
+	PulledImages = []string{"docker.io/library/debian:bookworm-slim", "docker.io/library/debian:trixie-slim", "docker.io/library/alpine:3.24.4"}
 )
 
 func imageExists(ref string) bool {

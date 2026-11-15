@@ -157,6 +157,44 @@ func TestSeccompSockets(t *testing.T) {
 	}
 }
 
+// TestSeccompSocketcall: the base allows socketcall unconditionally; the
+// derived profile refuses it with EPERM on every architecture, and the rule
+// comes before every socket rule (runc and libseccomp need that order).
+func TestSeccompSocketcall(t *testing.T) {
+	b, d := derived(t)
+	if got := decide(t, b, "socketcall", map[uint]uint64{0: 1}, nil, "x86"); got != actAllow {
+		t.Fatalf("base profile: socketcall %s; the test no longer checks a change", got)
+	}
+	for _, arch := range []string{"x86", "amd64", "arm", "s390x"} {
+		for _, caps := range [][]string{nil, {"CAP_SYS_ADMIN", "CAP_AUDIT_WRITE"}} {
+			for _, call := range []uint64{0, 1 /* SYS_SOCKET */, 3, 20} {
+				if got := decide(t, d, "socketcall", map[uint]uint64{0: call}, caps, arch); got != actErrno+"/EPERM" {
+					t.Errorf("socketcall(%d) on %s caps=%v: %s, want EPERM", call, arch, caps, got)
+				}
+			}
+		}
+	}
+	first := slices.IndexFunc(d.Syscalls, func(s Syscall) bool { return slices.Contains(s.Names, "socketcall") })
+	for i, s := range d.Syscalls {
+		if slices.Contains(s.Names, "socket") && i < first {
+			t.Errorf("socket rule %d (%q) precedes the socketcall rule %d", i, s.Comment, first)
+		}
+	}
+	if d.Syscalls[first].Action != actErrno || len(d.Syscalls[first].Args) != 0 || !d.Syscalls[first].Unconditional() {
+		t.Errorf("socketcall rule: %+v", d.Syscalls[first])
+	}
+	// The direct calls a 32-bit libc can use stay as they were.
+	for _, name := range []string{"socketpair", "bind", "connect", "sendmsg"} {
+		if got := decide(t, d, name, nil, nil, "x86"); got != actAllow {
+			t.Errorf("%s: %s", name, got)
+		}
+	}
+	if _, err := DeriveProfile([]byte(`{"defaultAction":"SCMP_ACT_ERRNO","defaultErrnoRet":1,"syscalls":[{"names":["clone","unshare"],"action":"SCMP_ACT_ALLOW"},` +
+		`{"names":["socket"],"action":"SCMP_ACT_ALLOW","args":[{"index":0,"value":40,"op":"SCMP_CMP_NE"}]}]}`)); err == nil {
+		t.Error("a base with default EPERM was accepted")
+	}
+}
+
 // TestSeccompNothingElseChanged undoes the documented changes and expects
 // the base profile back.
 func TestSeccompNothingElseChanged(t *testing.T) {
@@ -178,7 +216,7 @@ func TestSeccompNothingElseChanged(t *testing.T) {
 		}
 		if s.Action == actAllow && len(s.Args) == 0 && s.Unconditional() {
 			s.Names = slices.DeleteFunc(slices.Clone(s.Names), func(n string) bool {
-				return n == "clone" || n == "clone3" || n == "unshare"
+				return n == "clone" || n == "clone3" || n == "unshare" || n == "socketcall"
 			})
 		}
 		bKept = append(bKept, s)
@@ -198,7 +236,7 @@ func TestSeccompNothingElseChanged(t *testing.T) {
 			added[strings.Join(s.Names, ",")]++
 		}
 	}
-	if added["clone"] != 2 || added["unshare"] != 1 || added["socket"] < 3 || len(added) != 3 {
+	if added["clone"] != 2 || added["unshare"] != 1 || added["socket"] < 3 || added["socketcall"] != 1 || len(added) != 4 {
 		t.Errorf("added rules: %v", added)
 	}
 }
@@ -209,6 +247,9 @@ func TestSeccompRejectsUnexpectedBase(t *testing.T) {
 		"allow default":  `{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[]}`,
 		"no clone":       `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],"action":"SCMP_ACT_ALLOW"}]}`,
 		"no socket rule": `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["clone","unshare","socket"],"action":"SCMP_ACT_ALLOW"}]}`,
+		"arch-only socketcall": `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["clone","unshare"],"action":"SCMP_ACT_ALLOW"},` +
+			`{"names":["socketcall"],"action":"SCMP_ACT_ALLOW","includes":{"arches":["x86"]}},` +
+			`{"names":["socket"],"action":"SCMP_ACT_ALLOW","args":[{"index":0,"value":40,"op":"SCMP_CMP_NE"}]}]}`,
 		"arch-only clone": `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["clone","unshare"],"action":"SCMP_ACT_ALLOW"},` +
 			`{"names":["clone"],"action":"SCMP_ACT_ALLOW","includes":{"arches":["arm"]}},` +
 			`{"names":["socket"],"action":"SCMP_ACT_ALLOW","args":[{"index":0,"value":40,"op":"SCMP_CMP_NE"}]}]}`,

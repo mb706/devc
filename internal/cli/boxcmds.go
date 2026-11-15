@@ -14,7 +14,9 @@ import (
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/engine"
+	"github.com/mb706/devc/internal/harness"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/secrets"
 	"github.com/mb706/devc/internal/version"
 )
 
@@ -41,6 +43,10 @@ func (a *app) boxEnv() (*boxEnv, error) {
 	}
 	eng := engine.NewPodman(c.Global.Engine, a.runner)
 	m := box.NewManager(c, eng, a.runner, exe, version.Version, a.stderr)
+	hooks := &harness.BoxHooks{Config: c, Toolbox: m.Toolbox, Secrets: secrets.NewFileStore(c.Paths), Out: a.stderr}
+	m.Contributors = append(m.Contributors, hooks)
+	m.Preparers = append(m.Preparers, hooks)
+	m.Cleaners = append(m.Cleaners, hooks)
 	return &boxEnv{cfg: c, mgr: m}, nil
 }
 

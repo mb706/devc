@@ -128,7 +128,7 @@ Model: the box sees the relay as `origin`. Refs in the relay are in spec section
 
 - Secret store interface with a file backend first (`durable/realms/<realm>/secrets/<name>`, 0600, directory 0700).
 - `devc login <realm> <harness>` runs the manifest's login command interactively in a throwaway container. For `env-token` harnesses it then asks the user to paste the token (hidden input) and stores it. Nothing parses vendor output.
-- Delivery in phase 1: at `devc up` the granted secrets and tokens are written to a tmpfs directory mounted only into that box (`/run/devc/secrets`, 0400). From C11 the launcher asks the daemon instead and nothing is stored in the box.
+- Delivery in phase 1: at `devc up` the granted secrets and tokens are written to a tmpfs directory mounted only into that box (`/run/devc-secrets`, 0400). From C11 the launcher asks the daemon instead and nothing is stored in the box.
 
 ### 3.11 Daemon and hub (phase 2)
 

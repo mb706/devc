@@ -1,0 +1,26 @@
+# Test manifest: the fake agent with the shared home strategy (the whole
+# home is shared across the realm) and one per-box subdirectory; its login
+# writes a credential file into the realm's shared home.
+id = "fakeshared"
+display = "Fake agent (shared home)"
+bin = "fakeshared"
+
+[install]
+method = "local"
+path = "@FAKEAGENT@"
+exe = "bin/fakeagent"
+version_cmd = ["--version"]
+
+[home]
+strategy = "shared"
+dir = ".fakeshared"
+env = { FAKEAGENT_DIR = "/home/dev/.fakeshared" }
+per_box = ["perbox"]
+
+[auth]
+method = "shared-home"
+login = ["fakeshared", "-p", "touch-state auth.json"]
+status = ["fakeshared", "-p", "sh test -f /home/dev/.fakeshared/auth.json && echo logged-in"]
+
+[hooks]
+kind = "fake"

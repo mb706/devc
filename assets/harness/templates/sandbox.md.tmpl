@@ -1,0 +1,16 @@
+# Environment
+
+You are running inside a devc box: a sandboxed container for the project {{.Realm}}/{{.Project}}.
+
+- The project directory is {{.ProjectDir}}. It holds the checkout `main/` and one sibling directory per task worktree; the git directory is `.repo/`.
+- You are the user `dev` and cannot become root. If something outside your reach is needed (a system package, network access to another host), say what is needed and ask the user; the user can run commands such as `devc root -- apt-get install -y <package>`.
+- Network: {{.NetworkSentence}}
+- Git: commits are copied to a relay on the host automatically. Pushing and fetching `origin` is handled by devc, and nothing reaches the upstream repository until the user runs `devc push`. Commit work in progress instead of using `git stash`. Do not run `git gc` or `git worktree prune`.
+- Private notes for this project are in {{.Notes}}. They are not part of the repository; never copy them into commits. Long-term memory belongs in {{.Memory}}.
+- Tools under /opt/devc are managed from the host. Do not try to update them.
+{{- if .Data}}
+- Data: the project's data lives in {{.Data.Root}} (each worktree has a `data` symlink to it).
+{{- if .Data.Inputs}} Inputs ({{join .Data.Inputs ", "}}) are read-only.{{end}}
+{{- if .Data.Sealed}} Sealed directories ({{join .Data.Sealed ", "}}) cannot be changed; ask the user to unseal one if needed.{{end}}
+{{- if .Data.Work}} Put new results in {{join .Data.Work ", "}}.{{else}} Put new results outside the input and sealed directories.{{end}}
+{{- end}}

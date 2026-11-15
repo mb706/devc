@@ -42,6 +42,10 @@ type Fake struct {
 	// UnshareFunc answers Unshare; nil succeeds.
 	UnshareFunc func(args []string) (execx.Result, error)
 	Unshares    [][]string
+	// RunFunc answers Run and RunStream; nil succeeds with no output.
+	RunFunc func(RunOptions) (execx.Result, error)
+	// Runs records every throwaway container.
+	Runs []RunOptions
 	// Errors make the named lifecycle verb fail ("create", "start", …).
 	Errors map[string]error
 
@@ -356,4 +360,39 @@ func (f *Fake) Unshare(_ context.Context, args []string) (execx.Result, error) {
 		return execx.Result{}, nil
 	}
 	return fn(args)
+}
+
+func (f *Fake) run(o RunOptions) (execx.Result, error) {
+	if _, err := o.Args(); err != nil {
+		return execx.Result{}, err
+	}
+	f.mu.Lock()
+	f.Runs = append(f.Runs, o)
+	fn := f.RunFunc
+	f.mu.Unlock()
+	if fn == nil {
+		return execx.Result{}, nil
+	}
+	return fn(o)
+}
+
+// Run implements Engine.
+func (f *Fake) Run(_ context.Context, o RunOptions) (execx.Result, error) {
+	return f.run(o)
+}
+
+// RunStream implements Engine: captured output is written to o.Stdout and
+// o.Stderr when set.
+func (f *Fake) RunStream(_ context.Context, o RunOptions) (int, error) {
+	res, err := f.run(o)
+	if o.Stdout != nil {
+		o.Stdout.Write(res.Stdout)
+	}
+	if o.Stderr != nil {
+		o.Stderr.Write(res.Stderr)
+	}
+	if ee, ok := err.(*execx.ExitError); ok {
+		return ee.Result.ExitCode, nil
+	}
+	return res.ExitCode, err
 }

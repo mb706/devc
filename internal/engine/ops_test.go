@@ -216,3 +216,32 @@ func TestFakeLifecycle(t *testing.T) {
 		t.Errorf("log = %q", f.Log)
 	}
 }
+
+func TestRunArgs(t *testing.T) {
+	o := RunOptions{Image: "localhost/devc-aux/installer:latest", Labels: map[string]string{"devc.role": "aux"}, Network: "none",
+		SecurityOpts: []string{"no-new-privileges"}, Mounts: []RunMount{{Source: "/a", Target: "/b", ReadOnly: true}},
+		Tmpfs: []string{"/opt"}, Env: []string{"HOME=/h"}, Workdir: "/h", Interactive: true, TTY: true, Cmd: []string{"bash", "-c", "x"}}
+	got, err := o.Args()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"run", "--rm", "--pull=missing", "--label", "devc.role=aux", "--network", "none", "--security-opt", "no-new-privileges",
+		"--mount", "type=bind,source=/a,destination=/b,ro", "--mount", "type=tmpfs,destination=/opt", "--env", "HOME=/h", "--workdir", "/h", "-i", "-t", "--detach-keys=",
+		"localhost/devc-aux/installer:latest", "bash", "-c", "x"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("args:\n%q\nwant\n%q", got, want)
+	}
+	for name, bad := range map[string]RunOptions{
+		"image":   {Image: "-x", Cmd: []string{"a"}},
+		"no cmd":  {Image: "img"},
+		"network": {Image: "img", Network: "host", Cmd: []string{"a"}},
+		"mount":   {Image: "img", Mounts: []RunMount{{Source: "/a,b", Target: "/b"}}, Cmd: []string{"a"}},
+		"env":     {Image: "img", Env: []string{"A B=1"}, Cmd: []string{"a"}},
+		"secopt":  {Image: "img", SecurityOpts: []string{"--privileged"}, Cmd: []string{"a"}},
+		"tmpfs":   {Image: "img", Tmpfs: []string{"/"}, Cmd: []string{"a"}},
+	} {
+		if _, err := bad.Args(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

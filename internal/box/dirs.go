@@ -154,7 +154,7 @@ func describeMode(m fs.FileMode) string {
 // writeEtc renders /etc/devc for a box: box.json and a copy of the
 // configured dotfiles. The directory is mounted read-only, so the box
 // cannot change it; the configuration directory itself is never mounted.
-func writeEtc(p *paths.Paths, r *config.Resolved, version string) error {
+func writeEtc(p *paths.Paths, r *config.Resolved, version string, homeMounts []string) error {
 	ref := names.ProjectRef{Realm: r.Realm, Project: r.Project}
 	dir := p.BoxEtcDir(ref)
 	if err := p.Ensure(dir); err != nil {
@@ -178,6 +178,7 @@ func writeEtc(p *paths.Paths, r *config.Resolved, version string) error {
 		Network:     r.Network,
 		Shell:       r.Box.Shell,
 		DevcVersion: version,
+		HomeMounts:  homeMounts,
 	}
 	b, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {

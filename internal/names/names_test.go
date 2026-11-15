@@ -139,3 +139,20 @@ func TestValidSessionID(t *testing.T) {
 		t.Error("valid ID rejected")
 	}
 }
+
+func TestSecretNames(t *testing.T) {
+	for _, s := range []string{"claude-token", "OPENAI_API_KEY", "_X", "a.b", "A1"} {
+		if !ValidSecret(s) || Check(KindSecret, s) != nil || !ValidKind(KindSecret, s) {
+			t.Errorf("%q should be a valid secret name", s)
+		}
+	}
+	for _, s := range []string{"", ".env", "-x", "a/b", "a b", "ä", strings.Repeat("A", 64)} {
+		if ValidSecret(s) || Check(KindSecret, s) == nil {
+			t.Errorf("%q should be invalid", s)
+		}
+	}
+	// Other kinds keep the lower-case rule.
+	if Check(KindHarness, "Claude") == nil {
+		t.Error("upper-case harness name accepted")
+	}
+}

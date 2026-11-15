@@ -32,9 +32,18 @@ const MaxLen = 63
 const MaxRealmLen = 32
 
 var (
-	nameRE  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
-	realmRE = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
+	nameRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+	realmRE  = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
+	secretRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,62}$`)
 )
+
+// ValidSecret reports whether s is a valid secret name: the general rule
+// with upper-case letters and '_' additionally allowed (also as the first
+// character), so that secrets meant as environment variables can carry
+// their variable's name, such as OPENAI_API_KEY.
+func ValidSecret(s string) bool {
+	return secretRE.MatchString(s)
+}
 
 // Valid reports whether s matches ^[a-z0-9][a-z0-9._-]{0,62}$.
 func Valid(s string) bool {
@@ -51,8 +60,11 @@ func ValidRealm(s string) bool {
 // ValidKind applies the rule for kind: the realm rule for KindRealm, the
 // general name rule otherwise.
 func ValidKind(kind, s string) bool {
-	if kind == KindRealm {
+	switch kind {
+	case KindRealm:
 		return ValidRealm(s)
+	case KindSecret:
+		return ValidSecret(s)
 	}
 	return Valid(s)
 }
@@ -60,8 +72,14 @@ func ValidKind(kind, s string) bool {
 // Check returns nil if s is a valid name of the given kind, otherwise an
 // error naming the kind and the first offending part of s.
 func Check(kind, s string) error {
-	if kind == KindRealm {
+	switch kind {
+	case KindRealm:
 		return checkRealm(s)
+	case KindSecret:
+		if ValidSecret(s) {
+			return nil
+		}
+		return fmt.Errorf("invalid secret name %q (allowed: A-Z, a-z, 0-9, '.', '_', '-'; first character a letter, a digit or '_'; at most %d characters)", s, MaxLen)
 	}
 	if Valid(s) {
 		return nil

@@ -65,6 +65,17 @@ func out(t *testing.T, e *itest.Env, args ...string) string {
 	return strings.TrimSpace(e.MustRun(args...).Stdout)
 }
 
+// harnessMount reports whether a mount comes from the harness contributor
+// (C03): baselines, harness state and the secrets directory.
+func harnessMount(dst string) bool {
+	for _, p := range []string{"/etc/claude-code", "/etc/codex", "/home/dev/.claude/", "/home/dev/.codex", "/run/devc-secrets"} {
+		if dst == p || strings.HasPrefix(dst, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestBoxLifecycle covers work order section 10, items 1-6.
 func TestBoxLifecycle(t *testing.T) {
 	e := itest.New(t)
@@ -112,6 +123,9 @@ func TestBoxLifecycle(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, m := range ci.Mounts {
+		if harnessMount(m.Destination) {
+			continue // checked by the harness tests
+		}
 		if m.Destination == "/run/devc" {
 			seen[m.Destination] = m.RW && strings.HasPrefix(m.Source, e.RuntimeDir+"/")
 			continue

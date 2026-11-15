@@ -1,7 +1,7 @@
 // Package toolbox manages the toolbox directory: the read-only tree mounted
 // at /opt/devc in every box. It holds the devc helper binary, the root
-// filesystem of the helper container and the box seccomp profile; later
-// chunks add tmux and harness installations.
+// filesystem of the helper container, the box seccomp profile, a static
+// tmux with a terminfo database, harness installations and their shims.
 //
 // Layout (all links relative, so they resolve the same on the host and in a
 // box):
@@ -11,6 +11,13 @@
 //	bin/devc -> ../devc/current/devc
 //	helper-rootfs/bin/devc  hard link to (or copy of) the current binary; nothing else
 //	seccomp.json            the box profile (seccomp.go)
+//	tmux/, bin/tmux, terminfo/   the static tmux (tmux.go)
+//	harness/, shims/        harness installations (harness.go)
+//
+// Installers and the tmux build run in throwaway containers with the box
+// seccomp profile and no new privileges; only the directory being filled is
+// mounted, and every value reaches their scripts as a positional parameter
+// or environment variable, never as shell text (README rule 3).
 //
 // Security rules: the toolbox lives in the state directory and is never
 // writable from a box (it is mounted read-only). Everything inside is
@@ -164,18 +171,36 @@ func (t *Toolbox) pruneHelperRootfs() error {
 
 // Info describes an installed toolbox.
 type Info struct {
-	Dir      string   `json:"dir"`
-	Current  string   `json:"current"`
-	Builds   []string `json:"builds"`
-	Helper   bool     `json:"helper_rootfs"`
-	Seccomp  bool     `json:"seccomp"`
-	Problems []string `json:"problems"`
+	Dir     string   `json:"dir"`
+	Current string   `json:"current"`
+	Builds  []string `json:"builds"`
+	Helper  bool     `json:"helper_rootfs"`
+	Seccomp bool     `json:"seccomp"`
+	// Tmux is the installed tmux version ("" when missing); TmuxPinned is
+	// the version this devc builds.
+	Tmux       string   `json:"tmux"`
+	TmuxPinned string   `json:"tmux_pinned"`
+	TmuxRecipe string   `json:"tmux_recipe"`
+	Terminfo   bool     `json:"terminfo"`
+	Shims      []string `json:"shims"`
+	Problems   []string `json:"problems"`
 }
 
 // List reports what is installed. A toolbox that was never synced yields
 // an Info with problems, not an error.
 func (t *Toolbox) List() (Info, error) {
-	in := Info{Dir: t.Dir, Builds: []string{}, Problems: []string{}}
+	in := Info{Dir: t.Dir, Builds: []string{}, Shims: []string{}, Problems: []string{}, TmuxPinned: TmuxVersion, TmuxRecipe: TmuxRecipe()}
+	in.Tmux = t.InstalledTmux()
+	if fi, err := os.Stat(t.TerminfoDir()); err == nil && fi.IsDir() {
+		in.Terminfo = true
+	}
+	if sdes, err := os.ReadDir(t.ShimsDir()); err == nil {
+		for _, de := range sdes {
+			if de.Type()&fs.ModeSymlink != 0 {
+				in.Shims = append(in.Shims, de.Name())
+			}
+		}
+	}
 	des, err := os.ReadDir(t.devcDir())
 	switch {
 	case errors.Is(err, fs.ErrNotExist):

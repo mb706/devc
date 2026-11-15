@@ -1,0 +1,11 @@
+# The auxiliary installer image: harness installers, logins and (from C04)
+# git on the context repository run in throwaway containers from it.
+# Debian bookworm rather than trixie: trixie's apt verifies signatures with
+# sqv, which asks statx() for the birth time, and that hangs in some
+# fuse-overlayfs versions (see docs/dev/LEFTOVER.md).
+FROM docker.io/library/debian:bookworm-slim
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      bash curl ca-certificates tar xz-utils unzip git \
+ && rm -rf /var/lib/apt/lists/*

@@ -165,8 +165,11 @@ func newRoot(a *app) *cobra.Command {
 		newEnvCmd(a),
 		newToolboxCmd(a),
 		newBoxCmd(a),
+		newSecretCmd(a),
+		newLoginCmd(a),
 	)
 	root.AddCommand(newLifecycleCmds(a)...)
+	root.AddCommand(newHarnessCmds(a)...)
 	return root
 }
 
