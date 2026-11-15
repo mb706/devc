@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -33,7 +34,48 @@ func newTestHub(t *testing.T, public string) *testHub {
 	if err != nil {
 		t.Fatal(err)
 	}
+	st, err := OpenStore(Layout{Dir: dir}.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetPassword(testPasswordHash(t)); err != nil {
+		t.Fatal(err)
+	}
 	return &testHub{t: t, dir: dir, ca: ca, certs: map[string]*Issued{}, public: public}
+}
+
+// testPassword is the password of every test hub.
+const testPassword = "correct horse battery"
+
+var (
+	testHashOnce sync.Once
+	testHash     string
+)
+
+// testPasswordHash hashes testPassword once per test binary.
+func testPasswordHash(t *testing.T) string {
+	testHashOnce.Do(func() {
+		var err error
+		if testHash, err = HashPassword(testPassword); err != nil {
+			t.Fatal(err)
+		}
+	})
+	return testHash
+}
+
+// loginFor makes a login session for a certificate directly in the store
+// and returns its token.
+func loginFor(t *testing.T, st *Store, is *Issued, now time.Time) string {
+	t.Helper()
+	tok, id, err := NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddLogin(Login{ID: id, Fingerprint: is.Fingerprint, Device: is.Name, Created: now, LastUsed: now}); err != nil {
+		t.Fatal(err)
+	}
+	return tok
 }
 
 // issue issues and registers a certificate.
@@ -74,6 +116,7 @@ func TestProxyFront(t *testing.T) {
 	if _, err := s.st.Revoke("lost", ""); err != nil {
 		t.Fatal(err)
 	}
+	cookie := loginFor(t, s.st, dev, time.Now())
 
 	do := func(method, path, remote, header string, mod func(*http.Request)) (int, string) {
 		t.Helper()
@@ -88,7 +131,10 @@ func TestProxyFront(t *testing.T) {
 		}
 		if method == http.MethodPost {
 			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set(RequestHeader, "1")
+			r.Header.Set("Origin", "https://hub.test")
 		}
+		r.AddCookie(&http.Cookie{Name: SessionCookie, Value: cookie})
 		if mod != nil {
 			mod(r)
 		}
@@ -110,7 +156,8 @@ func TestProxyFront(t *testing.T) {
 		{"base64 DER", "GET", "/api/inbox", lo, base64.StdEncoding.EncodeToString(dev.Cert.Raw), nil, 200, `"sections"`},
 		{"IPv6 loopback", "GET", "/api/machines", "[::1]:40000", proxyHeader(dev), nil, 200, ""},
 		{"not from loopback", "GET", "/api/machines", "192.0.2.7:40000", proxyHeader(dev), nil, 403, "reverse proxy"},
-		{"no header", "GET", "/api/machines", lo, "", nil, 401, "required"},
+		{"no header: the gate", "GET", "/api/machines", lo, "", nil, 404, "not found"},
+		{"empty header: the gate", "GET", "/api/machines", lo, "", func(r *http.Request) { r.Header.Set(ProxyHeader, " ") }, 404, "not found"},
 		{"garbage header", "GET", "/api/machines", lo, "%%%not-a-cert", nil, 401, "invalid"},
 		{"another CA", "GET", "/api/machines", lo, proxyHeader(stranger), nil, 401, "not from this hub"},
 		{"revoked", "GET", "/api/machines", lo, proxyHeader(gone), nil, 403, "revoked"},
@@ -122,11 +169,16 @@ func TestProxyFront(t *testing.T) {
 		{"two headers", "GET", "/api/machines", lo, proxyHeader(dev), func(r *http.Request) { r.Header.Add(ProxyHeader, proxyHeader(mach)) }, 401, ""},
 		{"unknown path", "GET", "/etc/passwd", lo, proxyHeader(dev), nil, 404, ""},
 		{"unknown API path", "GET", "/api/nothing", lo, proxyHeader(dev), nil, 404, ""},
+		{"no session", "GET", "/api/inbox", lo, proxyHeader(dev), func(r *http.Request) { r.Header.Del("Cookie") }, 401, "log in"},
 		{"command, machine offline", "POST", "/api/commands", lo, proxyHeader(dev), nil, 404, "no machine m1"},
 		{"command, not JSON", "POST", "/api/commands", lo, proxyHeader(dev), func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") }, 415, ""},
 		{"command, other origin", "POST", "/api/commands", lo, proxyHeader(dev), func(r *http.Request) { r.Header.Set("Origin", "https://evil.test") }, 403, "cross-origin"},
-		{"command, own origin", "POST", "/api/commands", lo, proxyHeader(dev), func(r *http.Request) { r.Header.Set("Origin", "https://hub.test") }, 404, "no machine"},
+		{"command, no origin", "POST", "/api/commands", lo, proxyHeader(dev), func(r *http.Request) { r.Header.Del("Origin") }, 403, "cross-origin"},
+		{"command, no request header", "POST", "/api/commands", lo, proxyHeader(dev), func(r *http.Request) { r.Header.Del(RequestHeader) }, 403, RequestHeader},
+		{"command, request header 0", "POST", "/api/commands", lo, proxyHeader(dev), func(r *http.Request) { r.Header.Set(RequestHeader, "0") }, 403, RequestHeader},
 		{"command, cross-site", "POST", "/api/commands", lo, proxyHeader(dev), func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "cross-site") }, 403, "cross-site"},
+		{"stream, other origin", "GET", "/api/stream", lo, proxyHeader(dev), func(r *http.Request) { r.Header.Set("Origin", "https://evil.test") }, 403, "cross-origin"},
+		{"read, cross-site", "GET", "/api/inbox", lo, proxyHeader(dev), func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "cross-site") }, 403, "cross-site"},
 		{"bad filter", "GET", "/api/sessions?realm=..", lo, proxyHeader(dev), nil, 400, ""},
 		{"bad session", "GET", "/api/sessions/m1/x", lo, proxyHeader(dev), nil, 400, ""},
 		{"missing session", "GET", "/api/sessions/m1/s0000000000000000000a", lo, proxyHeader(dev), nil, 404, ""},
@@ -157,15 +209,20 @@ func TestProxyFront(t *testing.T) {
 	if code != 400 || !strings.Contains(body, "unknown command type") {
 		t.Errorf("unknown type: %d %s", code, body)
 	}
-	// Responses carry no CORS headers and forbid sniffing and framing.
+	// Responses carry no CORS headers, forbid sniffing and framing, and
+	// carry the security headers.
 	r := httptest.NewRequest("GET", "http://hub.test/api/machines", nil)
 	r.RemoteAddr = lo
 	r.Header.Set(ProxyHeader, proxyHeader(dev))
-	r.Header.Set("Origin", "https://evil.test")
+	r.AddCookie(&http.Cookie{Name: SessionCookie, Value: cookie})
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, r)
-	if w.Header().Get("Access-Control-Allow-Origin") != "" || w.Header().Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(w.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
-		t.Errorf("headers: %v", w.Header())
+	hd := w.Header()
+	if w.Code != 200 || hd.Get("Access-Control-Allow-Origin") != "" || hd.Get("X-Content-Type-Options") != "nosniff" ||
+		!strings.Contains(hd.Get("Content-Security-Policy"), "frame-ancestors 'none'") || !strings.Contains(hd.Get("Content-Security-Policy"), "default-src 'self'") ||
+		strings.Contains(hd.Get("Content-Security-Policy"), "unsafe-inline") || hd.Get("Referrer-Policy") != "no-referrer" ||
+		hd.Get("Cross-Origin-Opener-Policy") != "same-origin" || hd.Get("Strict-Transport-Security") != "" {
+		t.Errorf("headers: %d %v", w.Code, hd)
 	}
 }
 

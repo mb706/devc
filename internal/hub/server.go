@@ -13,10 +13,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"mime"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -73,10 +73,26 @@ type Server struct {
 	now      func() time.Time
 	ctx      context.Context
 
+	// cfg is hub.toml; publicURL the hub's https URL (links in
+	// notifications).
+	cfg       *Config
+	publicURL string
+	// mux routes requests with a certificate, enrolMux those without
+	// (built from routeTable).
+	mux, enrolMux *http.ServeMux
+	lim           *limiter
+	// hashSem bounds concurrent password hashing (64 MiB each).
+	hashSem  chan struct{}
+	notifier *notifier
+	// routeHook, in tests, sees every request that reaches a route's guard.
+	routeHook func(route)
+
 	mu     sync.Mutex
 	links  map[string]*machineLink
 	live   map[*liveConn]struct{}
-	apiMux http.Handler
+	seenAt map[string]time.Time
+	// watch counts the event streams that name each session.
+	watch map[SessionKey]int
 }
 
 // Identity is who a request comes from, per the registry.
@@ -167,12 +183,64 @@ func New(o Options) (*Server, error) {
 		st.Close()
 		return nil, err
 	}
+	cfg, err := LoadConfig(l)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	if fi, err := os.Stat(l.ConfigFile()); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		o.Log.Warn("hub.toml is readable or writable by others; it may hold the ntfy token (chmod 600)", "file", l.ConfigFile())
+	}
 	pool := x509.NewCertPool()
 	pool.AddCert(ca)
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	return &Server{o: o, l: l, st: st, pool: pool, log: o.Log, instance: hex.EncodeToString(b), host: host, port: port, now: time.Now,
-		links: map[string]*machineLink{}, live: map[*liveConn]struct{}{}}, nil
+	s := &Server{o: o, l: l, st: st, pool: pool, log: o.Log, instance: hex.EncodeToString(b), host: host, port: port, now: time.Now,
+		cfg: cfg, lim: newLimiter(), hashSem: make(chan struct{}, 2),
+		links: map[string]*machineLink{}, live: map[*liveConn]struct{}{}, seenAt: map[string]time.Time{}, watch: map[SessionKey]int{}}
+	s.publicURL = s.origin()
+	if cfg.PublicURL != "" {
+		if err := checkPublicURL(cfg.PublicURL, host, port); err != nil {
+			st.Close()
+			return nil, fmt.Errorf("%s: %w", l.ConfigFile(), err)
+		}
+		s.publicURL = cfg.PublicURL
+	}
+	s.buildMuxes()
+	s.notifier = newNotifier(s, cfg.Ntfy)
+	return s, nil
+}
+
+// handleMachineRoute is the /machine route.
+func (s *Server) handleMachineRoute(w http.ResponseWriter, r *http.Request) {
+	s.handleMachine(w, r, identityOf(r))
+}
+
+// addWatch and dropWatch count the event streams that name sessions (no
+// notifications go out for those).
+func (s *Server) addWatch(keys []SessionKey) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, k := range keys {
+		s.watch[k]++
+	}
+}
+
+func (s *Server) dropWatch(keys []SessionKey) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, k := range keys {
+		if s.watch[k]--; s.watch[k] <= 0 {
+			delete(s.watch, k)
+		}
+	}
+}
+
+// watched reports whether a logged-in client follows a session's events.
+func (s *Server) watched(k SessionKey) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.watch[k] > 0
 }
 
 // Store returns the server's database (tests).
@@ -211,13 +279,21 @@ func (s *Server) listen() (net.Listener, error) {
 	cfg := &tls.Config{
 		MinVersion:   tls.VersionTLS12,
 		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    s.pool,
-		NextProtos:   []string{"http/1.1"},
+		// A certificate that is given must verify against the CA. One may
+		// be missing because enrolment needs connections without one; the
+		// HTTP layer's gate (Server.gate) then refuses everything but the
+		// enrolment path.
+		ClientAuth: tls.VerifyClientCertIfGiven,
+		ClientCAs:  s.pool,
+		NextProtos: []string{"http/1.1"},
 		// The registry decides at the handshake already, so an unknown or
-		// revoked certificate gets no HTTP at all.
+		// revoked certificate gets no HTTP at all; nor does a connection
+		// without a certificate while no enrolment token is outstanding.
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 {
+				if s.enrolOpen() {
+					return nil
+				}
 				return errors.New("no client certificate")
 			}
 			rec, ok, err := s.st.Cert(Fingerprint(cs.PeerCertificates[0]))
@@ -264,6 +340,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	go s.watchRegistry(ctx)
 	go s.housekeeping(ctx)
+	notified := make(chan struct{})
+	go func() { defer close(notified); s.notifier.run(ctx) }()
+	defer func() { cancel(); <-notified }()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 	select {
@@ -358,6 +437,16 @@ func (s *Server) housekeeping(ctx context.Context) {
 		} else if n > 0 {
 			s.log.Info("pruned old sessions", "sessions", n)
 		}
+		now := s.now()
+		for what, err := range map[string]error{
+			"login sessions": s.st.PruneLogins(now.Add(-SessionIdle)),
+			"enrolments":     s.st.PruneEnrolments(now),
+			"action tokens":  s.st.PruneActions(now),
+		} {
+			if err != nil {
+				s.log.Warn("pruning "+what, "err", err)
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -432,29 +521,39 @@ func parseProxyCert(v string) (*x509.Certificate, error) {
 
 // identify finds who sent a request: the verified TLS client certificate
 // or, behind a proxy, the certificate in the proxy header from a loopback
-// peer, checked against the CA again; then the registry decides. The
-// status is 0 on success.
-func (s *Server) identify(r *http.Request) (Identity, int, string) {
+// peer, checked against the CA again; then the registry decides. hasCert
+// is false (and status 0) when the request carries no certificate at all;
+// status is non-zero when it carries one that is not accepted (or comes
+// from a peer that may not send requests).
+func (s *Server) identify(r *http.Request) (id Identity, hasCert bool, status int, msg string) {
 	var cert *x509.Certificate
 	if s.o.BehindProxy {
 		if !loopbackPeer(r.RemoteAddr) {
-			return Identity{}, http.StatusForbidden, "connections are accepted only from the reverse proxy"
+			return Identity{}, false, http.StatusForbidden, "connections are accepted only from the reverse proxy"
 		}
 		vals := r.Header.Values(ProxyHeader)
-		if len(vals) != 1 {
-			return Identity{}, http.StatusUnauthorized, "a client certificate is required"
+		switch {
+		case len(vals) == 0, len(vals) == 1 && strings.TrimSpace(vals[0]) == "":
+			// A proxy may send the header empty when the client gave no
+			// certificate.
+			return Identity{}, false, 0, ""
+		case len(vals) > 1:
+			return Identity{}, true, http.StatusUnauthorized, "more than one client certificate"
 		}
 		c, err := parseProxyCert(vals[0])
 		if err != nil {
-			return Identity{}, http.StatusUnauthorized, "the client certificate from the proxy is invalid"
+			return Identity{}, true, http.StatusUnauthorized, "the client certificate from the proxy is invalid"
 		}
 		if _, err := c.Verify(x509.VerifyOptions{Roots: s.pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, CurrentTime: s.now()}); err != nil {
-			return Identity{}, http.StatusUnauthorized, "the client certificate is not from this hub's CA"
+			return Identity{}, true, http.StatusUnauthorized, "the client certificate is not from this hub's CA"
 		}
 		cert = c
 	} else {
-		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 || len(r.TLS.VerifiedChains) == 0 {
-			return Identity{}, http.StatusUnauthorized, "a client certificate is required"
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			return Identity{}, false, 0, ""
+		}
+		if len(r.TLS.VerifiedChains) == 0 {
+			return Identity{}, true, http.StatusUnauthorized, "the client certificate is not from this hub's CA"
 		}
 		cert = r.TLS.PeerCertificates[0]
 	}
@@ -462,91 +561,10 @@ func (s *Server) identify(r *http.Request) (Identity, int, string) {
 	rec, ok, err := s.st.Cert(fp)
 	if err != nil {
 		s.log.Error("reading the registry", "err", err)
-		return Identity{}, http.StatusInternalServerError, "internal error"
+		return Identity{}, true, http.StatusInternalServerError, "internal error"
 	}
 	if !ok || !rec.Valid(s.now()) {
-		return Identity{}, http.StatusForbidden, "the client certificate is unknown, expired or revoked"
+		return Identity{}, true, http.StatusForbidden, "the client certificate is unknown, expired or revoked"
 	}
-	return Identity{Role: rec.Role, Name: rec.Name, Fingerprint: fp}, 0, ""
-}
-
-// ServeHTTP is the front: security headers, the Host check, the identity,
-// the role of the path, the body limit, then the routes.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h := w.Header()
-	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Cache-Control", "no-store")
-	h.Set("Referrer-Policy", "no-referrer")
-	h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
-	if !s.hostOK(r.Host) {
-		writeError(w, http.StatusMisdirectedRequest, "this hub answers only as %s", s.o.PublicName)
-		return
-	}
-	id, status, msg := s.identify(r)
-	if status != 0 {
-		if status == http.StatusForbidden && s.o.BehindProxy && !loopbackPeer(r.RemoteAddr) {
-			h.Set("Connection", "close")
-		}
-		writeError(w, status, "%s", msg)
-		return
-	}
-	r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, id))
-	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-	switch {
-	case r.URL.Path == "/machine":
-		if id.Role != RoleMachine {
-			writeError(w, http.StatusForbidden, "only machine certificates may connect here")
-			return
-		}
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		s.handleMachine(w, r, id)
-	case strings.HasPrefix(r.URL.Path, "/api/"):
-		if id.Role != RoleDevice {
-			writeError(w, http.StatusForbidden, "only device certificates may use the API")
-			return
-		}
-		if !s.checkUser(w, r, id) {
-			return
-		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead && !s.sameOrigin(w, r) {
-			return
-		}
-		s.api().ServeHTTP(w, r)
-	default:
-		writeError(w, http.StatusNotFound, "not found")
-	}
-}
-
-// checkUser is the one place where the user's session is checked for the
-// API. In C11a a valid device certificate is sufficient; C11b adds login
-// here.
-func (s *Server) checkUser(w http.ResponseWriter, r *http.Request, id Identity) bool {
-	_ = w
-	_ = r
-	_ = id
-	return true
-}
-
-// sameOrigin guards state-changing requests: JSON only (a browser cannot
-// send that cross-site without a preflight, which the hub never answers),
-// and an Origin or Sec-Fetch-Site header, when present, must say the
-// request comes from the hub's own pages.
-func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
-	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mt != "application/json" {
-		writeError(w, http.StatusUnsupportedMediaType, "send application/json")
-		return false
-	}
-	if o := r.Header.Get("Origin"); o != "" && o != s.origin() {
-		writeError(w, http.StatusForbidden, "cross-origin requests are refused")
-		return false
-	}
-	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
-		writeError(w, http.StatusForbidden, "cross-site requests are refused")
-		return false
-	}
-	return true
+	return Identity{Role: rec.Role, Name: rec.Name, Fingerprint: fp}, true, 0, ""
 }

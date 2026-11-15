@@ -113,7 +113,7 @@ func OpenStore(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(8)
 	s := &Store{db: db, changed: make(chan struct{})}
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.Exec(schema + accessSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("opening the hub database %s: %w", path, err)
 	}
@@ -261,7 +261,8 @@ func (s *Store) Certs() ([]CertRecord, error) {
 
 // Revoke revokes every unrevoked certificate whose name is match (or
 // whose fingerprint starts with match, at least 8 hex characters), limited
-// to role when given. It returns the revoked records.
+// to role when given, and deletes the login sessions bound to them. It
+// returns the revoked records.
 func (s *Store) Revoke(match, role string) ([]CertRecord, error) {
 	all, err := s.Certs()
 	if err != nil {
@@ -289,6 +290,9 @@ func (s *Store) Revoke(match, role string) ([]CertRecord, error) {
 	now := time.Now().UTC()
 	for i := range hit {
 		if _, err := tx.Exec(`UPDATE certs SET revoked = ? WHERE fingerprint = ?`, ts(now), hit[i].Fingerprint); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(`DELETE FROM logins WHERE fingerprint = ?`, hit[i].Fingerprint); err != nil {
 			return nil, err
 		}
 		hit[i].Revoked = &now

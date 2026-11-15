@@ -262,7 +262,7 @@ Other checks and deferred work:
 
 | Item | Needs |
 |---|---|
-| **Login, devices, enrolment and notifications** are C11b. Until then any valid device certificate may use the whole API; the session check goes into `hub.Server.checkUser`, the one place every `/api/` request passes. `hub.role` is recorded (`machines.notifier`) but nothing notifies yet | C11b |
+| ~~**Login, devices, enrolment and notifications** are C11b.~~ Done in C11b (the session check is `Server.checkSession`, run by `guard` for every `accessUser` route) | — |
 | **PKCS#12 bundles on real devices.** Bundles decode with go-pkcs12 (modern and `--legacy-p12`); importing one into Android, iOS, Firefox or Chrome and reaching the hub with it was not tried (no phone or desktop browser here) | a phone and a desktop browser |
 | **Direct TLS with browsers.** The direct mode serves HTTP/1.1 only (the machines' WebSocket needs it; Go's server would offer h2 to browsers otherwise). A browser over HTTP/1.1 holds at most six connections per host, which an app with several event streams may hit; behind a proxy the browser side is HTTP/2 | C12: decide whether to enable h2 for browsers in direct mode |
 | **Server certificate renewal.** A certificate from a public CA given with `--tls-cert` is read at start; renewing it needs a restart of the hub (behind a proxy the proxy renews) | a reload on SIGHUP, if wanted |
@@ -273,3 +273,21 @@ Other checks and deferred work:
 | **Paging backwards** (`?before=`) asks the machine with `events.read` from `before − limit − 1`, which relies on a session's seqs being consecutive (they are, by construction of the journal) | nothing |
 | **SELinux not tried.** Nothing new crosses the box boundary: the hub link is a TCP connection of the daemon on the host | a Fedora machine, enforcing |
 | **Binary size.** modernc.org/sqlite makes `bin/devc` about 19 MB (stripped); every machine carries the hub's code | a decision, if size matters (a build tag for a machine-only binary) |
+
+### From C11b
+
+| Item | Needs |
+|---|---|
+| **Passkeys deferred.** The second factor is a password with optional TOTP, as the work order decides; passkeys need a credential provider on the phone and could not be tested here. `specs-v2.md` section 13 says so | a passkey design (go-webauthn is on the approved list) and a phone |
+| **Nothing was tried on a real phone or against a real ntfy server.** Publishing follows the ntfy documentation as summarised in `../v2-research/10-unified-interface.md` section 3: JSON to the server root with `sequence_id`, clearing with `PUT /<topic>/<seq>/clear`, `http` actions with headers and `clear`. Whether a given ntfy server version honours `sequence_id` in JSON, and whether the ntfy Android app presents its client certificate for an action button's request to another host (the hub), is unverified; the tests use a fake server | a phone with ntfy from F-Droid, a self-hosted ntfy |
+| **Importing an enrolled bundle** in a phone's browser by opening the URL (download, then import into the certificate store) was not tried; in direct TLS mode the hub now always asks for a client certificate (optional), and how browsers without one behave on that prompt was not looked at | a phone and a desktop browser |
+| **The proxy configurations** (enrolment path without a certificate, `X-Real-IP`) were checked with nginx 1.28.0 and Caddy 2.10.0 containers by a script, not by the suite; the two images were removed afterwards. A machine daemon through the proxies was not tried again (the `/machine` location only gained headers) | re-run by hand when the configurations change |
+| **TOTP enable** prints the secret once and turns TOTP on without asking for a first code; a mistyped secret is fixed with `disable` and `enable` on the hub | a confirmation step, if wanted |
+| **Rate limits** count HTTP failures only; in direct TLS mode, failed handshakes (no or unknown certificates) are not counted, and a client may open TLS handshakes freely. Behind a proxy the address comes from `X-Real-IP`; a proxy that does not set it makes every client one address | a connection limit in front, if the hub is attacked |
+| **A certificate holder can lock out its own device's logins** for 15 minutes with five wrong passwords (per-certificate lockout by design); another device can still log in | nothing |
+| **Notification text comes from boxes** (questions, messages). It is sent as plain text (no Markdown), but the ntfy app may turn URLs in it into links, so a box could put a misleading link into a notification body; the click target and the buttons always point to the hub | nothing (or strip URLs, if it matters) |
+| **No debounce:** a session that flips between a notifying state and another quickly (needs-you, working, needs-you) causes publish/clear pairs; a question-less needs-you right after an answer is skipped | a short delay before publishing, if it is noisy in practice |
+| **The hub reads its CA key** to sign a machine's certificate request at enrolment; before, the server process read only the CA certificate | nothing (the alternative: a foreground `enroll` that waits for the request) |
+| **`set-password` keeps existing login sessions**; it says so and points to `devc hub sessions revoke --all` | nothing |
+| **Web app (C12)** must handle 401 with `"login": true`, send `X-Devc-Request: 1` and the Origin on state changes, follow `GET /api/me`, and live with the CSP (`default-src 'self'`, no inline script) | C12 |
+

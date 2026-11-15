@@ -29,6 +29,7 @@ type fakeMachine struct {
 	gets     []string
 	reads    []proto.EventsReadParams
 	commands []json.RawMessage
+	answers  []proto.AnswerParams
 	conn     *proto.Conn
 }
 
@@ -142,6 +143,17 @@ func (m *fakeMachine) handlers() map[string]proto.Handler {
 		proto.MethodRequestsList: func(context.Context, *proto.Conn, json.RawMessage) (any, error) {
 			return proto.RequestsListResult{Requests: []proto.Request{}}, nil
 		},
+		proto.MethodSessionAnswer: func(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
+			var p proto.AnswerParams
+			if err := proto.DecodeParams(params, &p); err != nil {
+				return nil, err
+			}
+			m.mu.Lock()
+			m.answers = append(m.answers, p)
+			m.mu.Unlock()
+			now := time.Now().UTC()
+			return proto.Receipt{Command: p.ID, Kind: proto.CommandAnswer, Session: p.Session, Outcome: proto.OutcomeDelivered, Accepted: now, At: now, Final: true}, nil
+		},
 		proto.MethodSessionSend: func(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 			var p proto.SendParams
 			if err := proto.DecodeParams(params, &p); err != nil {
@@ -210,9 +222,41 @@ type apiClient struct {
 	t    *testing.T
 	addr string
 	cert *Issued
+	// cookie is the login session ("" for none).
+	cookie string
+}
+
+// newAPIClient logs in with cert (the hub's password is testPassword).
+func newAPIClient(t *testing.T, addr string, cert *Issued) apiClient {
+	t.Helper()
+	a := apiClient{t: t, addr: addr, cert: cert}
+	code, body, hdr := a.doHeader("POST", "/api/login", `{"password":"`+testPassword+`"}`)
+	if code != 200 {
+		t.Fatalf("login: %d %s", code, body)
+	}
+	a.cookie = sessionCookie(t, hdr)
+	return a
+}
+
+// sessionCookie returns the session token a response set.
+func sessionCookie(t *testing.T, h http.Header) string {
+	t.Helper()
+	for _, c := range (&http.Response{Header: h}).Cookies() {
+		if c.Name == SessionCookie {
+			return c.Value
+		}
+	}
+	t.Fatalf("no session cookie in %v", h)
+	return ""
 }
 
 func (a apiClient) do(method, path, body string) (int, string) {
+	a.t.Helper()
+	code, b, _ := a.doHeader(method, path, body)
+	return code, b
+}
+
+func (a apiClient) doHeader(method, path, body string) (int, string, http.Header) {
 	a.t.Helper()
 	var rd io.Reader
 	if body != "" {
@@ -224,13 +268,20 @@ func (a apiClient) do(method, path, body string) (int, string) {
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if method != http.MethodGet {
+		req.Header.Set(RequestHeader, "1")
+		req.Header.Set("Origin", "https://hub.test")
+	}
+	if a.cookie != "" {
+		req.AddCookie(&http.Cookie{Name: SessionCookie, Value: a.cookie})
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		a.t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(b)
+	return resp.StatusCode, string(b), resp.Header
 }
 
 // detail returns a session's detail (an empty one while it does not
@@ -265,7 +316,7 @@ func TestMachineLink(t *testing.T) {
 	mach := h.issue(RoleMachine, "m1")
 	dev := h.issue(RoleDevice, "phone")
 	addr, _ := runHub(t, h)
-	api := apiClient{t: t, addr: addr, cert: dev}
+	api := newAPIClient(t, addr, dev)
 	m := newFakeMachine(t)
 	s1, s2 := "s0000000000000000000a", "s0000000000000000000b"
 	m.add(s1, proto.TypeSessionStart, proto.SessionStart{Harness: "fake"})
@@ -334,7 +385,7 @@ func TestMachineLink(t *testing.T) {
 	}
 
 	// The stream: a new event arrives; a reconnect with the last ID resumes.
-	sse := openStream(t, addr, dev, "?session=m1/"+s1, "")
+	sse := openStream(t, api, "?session=m1/"+s1, "")
 	first := sse.next(t)
 	if first.event != "ready" {
 		t.Fatalf("first message %+v", first)
@@ -358,7 +409,7 @@ func TestMachineLink(t *testing.T) {
 	m.notify(m.add(s2, proto.TypeNote, proto.Note{Text: "other"}))
 	m.notify(m.add(s1, proto.TypeNote, proto.Note{Text: "n9"}))
 	waitFor(t, "n9", func() bool { return api.detail(s1, "").Session.LastSeq == 9 })
-	sse = openStream(t, addr, dev, "?session=m1/"+s1, lastID)
+	sse = openStream(t, api, "?session=m1/"+s1, lastID)
 	var got []int64
 	for len(got) < 2 {
 		msg := sse.next(t)
@@ -444,11 +495,12 @@ type sseStream struct {
 	msgs chan sseMsg
 }
 
-func openStream(t *testing.T, addr string, cert *Issued, query, last string) *sseStream {
+func openStream(t *testing.T, a apiClient, query, last string) *sseStream {
 	t.Helper()
-	req, _ := http.NewRequest("GET", "http://"+addr+"/api/stream"+query, nil)
+	req, _ := http.NewRequest("GET", "http://"+a.addr+"/api/stream"+query, nil)
 	req.Host = "hub.test"
-	req.Header.Set(ProxyHeader, proxyHeader(cert))
+	req.Header.Set(ProxyHeader, proxyHeader(a.cert))
+	req.AddCookie(&http.Cookie{Name: SessionCookie, Value: a.cookie})
 	if last != "" {
 		req.Header.Set("Last-Event-ID", last)
 	}

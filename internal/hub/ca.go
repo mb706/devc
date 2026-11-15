@@ -202,31 +202,11 @@ type Issued struct {
 // certificate and the CA) protected by a generated passphrase; legacy
 // selects the weaker encryption older phones need.
 func (ca *CA) IssueClient(role, name string, legacy bool) (*Issued, error) {
-	if role != RoleMachine && role != RoleDevice {
-		return nil, fmt.Errorf("unknown role %q", role)
-	}
 	key, err := newKey()
 	if err != nil {
 		return nil, err
 	}
-	serial, err := newSerial()
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now()
-	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: name, OrganizationalUnit: []string{role}, Organization: []string{Organisation}},
-		NotBefore:    now.Add(-backdate),
-		NotAfter:     now.Add(clientLifetime),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, &key.PublicKey, ca.key)
-	if err != nil {
-		return nil, err
-	}
-	cert, err := x509.ParseCertificate(der)
+	cert, err := ca.signClient(role, name, &key.PublicKey)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +214,7 @@ func (ca *CA) IssueClient(role, name string, legacy bool) (*Issued, error) {
 	if err != nil {
 		return nil, err
 	}
-	is := &Issued{Role: role, Name: name, Cert: cert, CertPEM: certPEM(der), KeyPEM: kp, Fingerprint: Fingerprint(cert)}
+	is := &Issued{Role: role, Name: name, Cert: cert, CertPEM: certPEM(cert.Raw), KeyPEM: kp, Fingerprint: Fingerprint(cert)}
 	if role == RoleDevice {
 		is.Passphrase, err = newPassphrase()
 		if err != nil {
@@ -250,6 +230,33 @@ func (ca *CA) IssueClient(role, name string, legacy bool) (*Issued, error) {
 		}
 	}
 	return is, nil
+}
+
+// signClient signs a one-year client certificate for pub with name and
+// role in the subject (the key was made here or, for enrolment, on the
+// machine).
+func (ca *CA) signClient(role, name string, pub any) (*x509.Certificate, error) {
+	if role != RoleMachine && role != RoleDevice {
+		return nil, fmt.Errorf("unknown role %q", role)
+	}
+	serial, err := newSerial()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: name, OrganizationalUnit: []string{role}, Organization: []string{Organisation}},
+		NotBefore:    now.Add(-backdate),
+		NotAfter:     now.Add(clientLifetime),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, pub, ca.key)
+	if err != nil {
+		return nil, err
+	}
+	return x509.ParseCertificate(der)
 }
 
 // newPassphrase returns four groups of five characters from an alphabet

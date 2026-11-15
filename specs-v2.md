@@ -404,7 +404,7 @@ The in-box helper listens on a Unix socket in the runtime directory and the host
 Phase 2.
 
 - **Reachability.** Machine daemons dial out over TLS on port 443. Machines need no inbound port and no VPN.
-- **Authentication.** The reverse proxy in front of the hub requires a client certificate from a small private CA before any HTTP is spoken. Inside that, devices are paired and use a passkey.
+- **Authentication.** The hub, or the reverse proxy in front of it, requires a client certificate from a small private CA before any HTTP is spoken; the only exception is the enrolment path, which exists while a single-use enrolment token is outstanding. Inside that, the API needs a login with the hub's password and, when enabled, a TOTP code; the session is bound to the device's certificate. Passkeys are planned but not implemented.
 - **Role.** Stores the latest projection per session and a bounded event log, derives the inbox, serves the web app, publishes to a self-hosted ntfy server, and receives the archive of durable state.
 - **Notifications.** One ntfy message per event that needs attention: the question as body, up to three buttons (the first two answers and Open), a link to the session. It is cleared when answered elsewhere.
 - **Web app.**

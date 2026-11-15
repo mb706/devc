@@ -272,14 +272,18 @@ reverse proxy, is described in [hub-deployment.md](hub-deployment.md). On a
 machine:
 
 ```sh
+devc join https://hub.example.org --token <token> [--ca ca.crt]   # token from 'devc hub enroll machine <name>'
 devc join https://hub.example.org --cert laptop.crt --key laptop.key [--ca ca.crt]
 devc hub status            # each hub, connected or not, and which one notifies
 devc leave https://hub.example.org
 ```
 
+With `--token` the machine makes its key itself and the hub signs a
+certificate for it; with `--cert` and `--key` it takes files the hub issued.
 `devc join` stores the certificate under `durable/node/hubs/` and adds the hub
 to `config.toml`; the daemon connects within seconds and keeps the connection
-while it runs. A hub can read the sessions' events, type into sessions, start
+while it runs. The first connected hub in the list sends notifications to
+your phone through ntfy. A hub can read the sessions' events, type into sessions, start
 and stop them, and decide low-risk requests; it cannot stop the daemon, run
 anything on the host, change the configuration, or approve high-risk
 requests.

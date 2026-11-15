@@ -29,30 +29,6 @@ const (
 	forwardTimeout  = 90 * time.Second
 )
 
-func (s *Server) routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/machines", s.apiMachines)
-	mux.HandleFunc("GET /api/inbox", s.apiInbox)
-	mux.HandleFunc("GET /api/sessions", s.apiSessions)
-	mux.HandleFunc("GET /api/sessions/{machine}/{session}", s.apiSession)
-	mux.HandleFunc("POST /api/commands", s.apiCommand)
-	mux.HandleFunc("GET /api/commands/{machine}/{id}", s.apiCommandGet)
-	mux.HandleFunc("GET /api/requests", s.apiRequests)
-	mux.HandleFunc("POST /api/requests/{machine}/{id}/decide", s.apiDecide)
-	mux.HandleFunc("GET /api/stream", s.apiStream)
-	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) { writeError(w, http.StatusNotFound, "not found") })
-	return mux
-}
-
-func (s *Server) api() http.Handler {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.apiMux == nil {
-		s.apiMux = s.routes()
-	}
-	return s.apiMux
-}
-
 // validMachine reports whether s may name a machine (registry names follow
 // the name rules).
 func validMachine(s string) bool { return names.Valid(s) }

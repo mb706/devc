@@ -7,7 +7,8 @@ package hub
 // session only to streams that name it (?session=<machine>/<id>, up to
 // 32). A stream that starts without an ID begins at the present; one whose
 // ID is older than the change log gets a reset message and starts at the
-// present, and the client reads its snapshot again.
+// present, and the client reads its snapshot again. While a stream names
+// a session, the hub sends no notifications for it.
 
 import (
 	"context"
@@ -22,9 +23,12 @@ import (
 
 const (
 	maxStreamSessions = 32
-	streamHeartbeat   = 15 * time.Second
 	streamPage        = 500
 )
+
+// streamHeartbeat is how often a stream sends a comment and checks its
+// login session (a variable for tests).
+var streamHeartbeat = 15 * time.Second
 
 // streamFilter says which session events a stream wants.
 type streamFilter map[[2]string]bool
@@ -76,8 +80,16 @@ func (s *Server) apiStream(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	id := identityOf(r)
+	login := loginOf(r)
 	live := s.addLive(id.Fingerprint, cancel)
 	defer s.dropLive(live)
+	// A session a logged-in client follows gets no notifications.
+	keys := make([]SessionKey, 0, len(f))
+	for k := range f {
+		keys = append(keys, SessionKey{Machine: k[0], Session: k[1]})
+	}
+	s.addWatch(keys)
+	defer s.dropWatch(keys)
 
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
@@ -139,6 +151,11 @@ func (s *Server) apiStream(w http.ResponseWriter, r *http.Request) {
 		case <-ch:
 			ch = s.st.Changed()
 		case <-beat.C:
+			// A stream ends with its login session (logout, revocation,
+			// expiry), at the next heartbeat.
+			if l, ok, err := s.st.LoginByID(login.ID); err == nil && (!ok || !s.now().Before(l.Expires())) {
+				return
+			}
 			_ = rc.SetWriteDeadline(time.Now().Add(30 * time.Second))
 			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
 				return

@@ -2,7 +2,8 @@ package cli
 
 // Hub commands (work order C11a): the hub server's own commands (`devc hub
 // init`, `ca`, `serve`, working on DEVC_HUB_DIR) and the machine's side
-// (`devc join`, `devc leave`, `devc hub status`).
+// (`devc join`, `devc leave`, `devc hub status`). The access commands of
+// C11b are in hubaccess.go.
 
 import (
 	"context"
@@ -256,9 +257,11 @@ func newHubCmd(a *app) *cobra.Command {
 		Use:   "serve --listen addr [--tls-cert file --tls-key file | --behind-proxy]",
 		Short: "Run the hub server in the foreground",
 		Long: "Run the hub. Direct TLS: the hub terminates TLS itself and requires a client certificate from its CA " +
-			"(default certificate: the one 'devc hub init --public-name' wrote). Behind a reverse proxy: --behind-proxy " +
-			"with a loopback --listen address; the proxy verifies the client certificate and passes it in the " +
-			"X-Devc-Client-Cert header. See docs/hub-deployment.md.",
+			"(default certificate: the one 'devc hub init --public-name' wrote), except on /enroll/<token> while an " +
+			"enrolment token is outstanding. Behind a reverse proxy: --behind-proxy with a loopback --listen address; " +
+			"the proxy verifies the client certificate and passes it in the X-Devc-Client-Cert header. The API also " +
+			"needs a login ('devc hub user set-password'). Notifications are configured in hub.toml. See " +
+			"docs/hub-deployment.md.",
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			lvl, err := parseLevel(level)
@@ -370,7 +373,8 @@ func newHubCmd(a *app) *cobra.Command {
 	}
 	status.Flags().BoolVar(&statusJSON, "json", false, "print JSON")
 
-	cmd := group("hub", "Run a hub, or show this machine's hubs", false, initCmd, ca, serve, status)
+	subs := append([]*cobra.Command{initCmd, ca, serve, status}, newHubAccessCmds(a, &dirFlag)...)
+	cmd := group("hub", "Run a hub, or show this machine's hubs", false, subs...)
 	cmd.PersistentFlags().StringVar(&dirFlag, "hub-dir", "", "hub directory (default $DEVC_HUB_DIR or ~/.local/share/devc-hub)")
 	return cmd
 }
@@ -395,20 +399,25 @@ func writeExclusive(path string, data []byte, mode os.FileMode) error {
 }
 
 func newJoinCmd(a *app) *cobra.Command {
-	var certFile, keyFile, caFile string
+	var certFile, keyFile, caFile, token string
 	cmd := &cobra.Command{
-		Use:   "join <hub-url> --cert <file> --key <file> [--ca <file>]",
+		Use:   "join <hub-url> (--token <token> | --cert <file> --key <file>) [--ca <file>]",
 		Short: "Report to a hub: store its credentials and add it to the hub list",
-		Long: "Store the machine certificate and key a hub issued ('devc hub ca issue machine') under " +
-			"durable/node/hubs/, and add the hub to the [[hubs]] list in config.toml. --ca is the CA that signed the " +
-			"hub's server certificate, when it is not a public one. The daemon connects within seconds; " +
+		Long: "With --token (from 'devc hub enroll machine <name>' on the hub; '-' reads it from stdin), make a key " +
+			"here, have the hub sign a machine certificate for it, and store both. With --cert and --key, store a " +
+			"certificate and key the hub issued ('devc hub ca issue machine'). The credentials go under " +
+			"durable/node/hubs/ and the hub is added to the [[hubs]] list in config.toml. --ca is the CA that signed " +
+			"the hub's server certificate, when it is not a public one. The daemon connects within seconds; " +
 			"'devc hub status' shows the connection.",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return usageErrorf("usage: devc join <hub-url> --cert <file> --key <file> [--ca <file>]")
+				return usageErrorf("usage: devc join <hub-url> (--token <token> | --cert <file> --key <file>) [--ca <file>]")
 			}
-			if certFile == "" || keyFile == "" {
-				return usageErrorf("--cert and --key are required")
+			switch {
+			case token != "" && (certFile != "" || keyFile != ""):
+				return usageErrorf("--token and --cert/--key exclude each other")
+			case token == "" && (certFile == "" || keyFile == ""):
+				return usageErrorf("give --token, or --cert and --key")
 			}
 			return nil
 		},
@@ -417,17 +426,24 @@ func newJoinCmd(a *app) *cobra.Command {
 			if err != nil {
 				return usageErrorf("%s", err.Error())
 			}
-			certPEM, err := os.ReadFile(certFile)
-			if err != nil {
-				return err
-			}
-			keyPEM, err := os.ReadFile(keyFile)
-			if err != nil {
-				return err
-			}
 			var caPEM []byte
 			if caFile != "" {
 				if caPEM, err = os.ReadFile(caFile); err != nil {
+					return err
+				}
+			}
+			var certPEM, keyPEM []byte
+			if token != "" {
+				ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
+				defer cancel()
+				if certPEM, keyPEM, err = a.joinWithToken(ctx, u, token, caPEM); err != nil {
+					return err
+				}
+			} else {
+				if certPEM, err = os.ReadFile(certFile); err != nil {
+					return err
+				}
+				if keyPEM, err = os.ReadFile(keyFile); err != nil {
 					return err
 				}
 			}
@@ -458,6 +474,7 @@ func newJoinCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&token, "token", "", "single-use enrolment token from 'devc hub enroll machine' ('-': read it from stdin)")
 	cmd.Flags().StringVar(&certFile, "cert", "", "machine certificate (PEM)")
 	cmd.Flags().StringVar(&keyFile, "key", "", "its key (PEM)")
 	cmd.Flags().StringVar(&caFile, "ca", "", "CA of the hub's server certificate (default: the system's roots)")

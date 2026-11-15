@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,51 @@ type hubClient struct {
 	// host and header are set behind a proxy: the Host header and the
 	// client certificate header.
 	host, header string
+	// cookie is the login session; origin the Origin of state-changing
+	// requests (default: base).
+	cookie, origin string
+}
+
+// hubPassword is the password of the tests' hubs.
+const hubPassword = "integration password"
+
+// setHubPassword sets the password of a hub directory.
+func setHubPassword(t *testing.T, e *itest.Env, dir string) {
+	t.Helper()
+	res := e.RunIn("/", hubPassword+"\n", "hub", "user", "set-password", "--hub-dir", dir)
+	if res.ExitCode != 0 {
+		t.Fatalf("set-password: %s%s", res.Stdout, res.Stderr)
+	}
+}
+
+// login logs in (code: a TOTP code or "") and keeps the session cookie.
+func (h *hubClient) login(password, code string) (int, string) {
+	h.t.Helper()
+	req, err := h.request("POST", "/api/login", map[string]string{"password": password, "totp": code})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	resp, err := h.c.Do(req)
+	if err != nil {
+		h.t.Fatalf("login: %v", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	for _, c := range resp.Cookies() {
+		if c.Name == hub.SessionCookie {
+			h.cookie = c.Value
+		}
+	}
+	return resp.StatusCode, string(b)
+}
+
+// mustLogin logs in with the hub password.
+func (h *hubClient) mustLogin() *hubClient {
+	h.t.Helper()
+	if code, body := h.login(hubPassword, ""); code != 200 {
+		h.t.Fatalf("login: %d %s", code, body)
+	}
+	return h
 }
 
 func readFile(t *testing.T, p string) []byte {
@@ -89,6 +135,17 @@ func (h *hubClient) request(method, path string, body any) (*http.Request, error
 	}
 	if h.header != "" {
 		req.Header.Set(hub.ProxyHeader, h.header)
+	}
+	if h.cookie != "" {
+		req.AddCookie(&http.Cookie{Name: hub.SessionCookie, Value: h.cookie})
+	}
+	if method != http.MethodGet {
+		origin := h.origin
+		if origin == "" {
+			origin = h.base
+		}
+		req.Header.Set(hub.RequestHeader, "1")
+		req.Header.Set("Origin", origin)
 	}
 	return req, nil
 }
@@ -295,9 +352,12 @@ func TestHub(t *testing.T) {
 	caA := hub.Layout{Dir: dirA}.CACert()
 	mcert, mkey := issueCert(t, e, dirA, "machine", machine)
 	dcert, dkey := issueCert(t, e, dirA, "device", "phone")
+	ntfyA := newFakeNtfy(t)
+	writeNtfyConfig(t, dirA, ntfyA)
+	setHubPassword(t, e, dirA)
 	hubA := itest.StartHub(t, e, dirA, "--listen", "127.0.0.1:"+strconv.Itoa(portA))
 	urlA := "https://127.0.0.1:" + strconv.Itoa(portA)
-	api := &hubClient{t: t, base: urlA, c: tlsClient(t, caA, dcert, dkey)}
+	api := (&hubClient{t: t, base: urlA, c: tlsClient(t, caA, dcert, dkey)}).mustLogin()
 
 	e.MustRun("join", urlA, "--cert", mcert, "--key", mkey, "--ca", caA)
 	d := itest.StartDaemon(t, e)
@@ -337,6 +397,11 @@ func TestHub(t *testing.T) {
 	}
 	hubWait(t, 30*time.Second, "out of needs-you", func() bool { return api.section(machine, sid) != hub.SectionNeedsYou })
 
+	// C11b 6. A question with two options: one ntfy message with title,
+	// body, click URL and buttons; its button answers in the box, once;
+	// the message is cleared.
+	notificationFlow(t, e, api, ntfyA, urlA, machine, sid)
+
 	// 2. A send reaches the harness; the receipt comes back; the same ID
 	// again types nothing.
 	id := newCommandID()
@@ -364,6 +429,7 @@ func TestHub(t *testing.T) {
 	if m, ok := s.next(t, 10*time.Second); !ok || m.event != "ready" {
 		t.Fatalf("first stream message: %+v", m)
 	}
+	published := ntfyA.settle(t)
 	api.command(machine, "send", newCommandID(), map[string]any{"session": sid, "text": "say streamed", "mode": "steer"}, 30)
 	var lastID string
 	var lastSeq int64
@@ -391,6 +457,12 @@ func TestHub(t *testing.T) {
 	}
 	if lastID == "" {
 		t.Fatal("no event on the stream")
+	}
+	// C11b 7. No notification while a client follows the session.
+	hubWait(t, 20*time.Second, "finished while followed", func() bool { return api.section(machine, sid) == hub.SectionFinished })
+	time.Sleep(time.Second)
+	if n := ntfyA.publishes(); n != published {
+		t.Errorf("%d notifications while a client follows the session: %+v", n-published, ntfyA.requests())
 	}
 	if slowest > time.Second {
 		t.Errorf("an event took %s from the journal to the stream", slowest)
@@ -450,7 +522,10 @@ func TestHub(t *testing.T) {
 	}
 	lcert, lkey := issueCert(t, e, dirA, "device", "lost")
 	lost := &hubClient{t: t, base: urlA, c: tlsClient(t, caA, lcert, lkey)}
-	if code, _ := lost.do("GET", "/api/inbox", nil, nil); code != 200 {
+	if code, _ := lost.do("GET", "/api/inbox", nil, nil); code != 401 {
+		t.Errorf("a new device without login: %d", code)
+	}
+	if code, _ := lost.mustLogin().do("GET", "/api/inbox", nil, nil); code != 200 {
 		t.Errorf("a new device: %d", code)
 	}
 	ls := lost.stream(t, "", "")
@@ -458,6 +533,9 @@ func TestHub(t *testing.T) {
 	res := e.RunEnv(e.HubEnv(dirA), "hub", "ca", "revoke", "lost")
 	if res.ExitCode != 0 || !strings.Contains(res.Stdout, "revoked the device certificate of lost") {
 		t.Errorf("revoke: %s%s", res.Stdout, res.Stderr)
+	}
+	if out := e.RunEnv(e.HubEnv(dirA), "hub", "sessions", "ls").Stdout; strings.Contains(out, "lost") {
+		t.Errorf("a session of the revoked device remains:\n%s", out)
 	}
 	ended := false
 	timeout := time.After(5 * time.Second)
@@ -537,9 +615,12 @@ wait:
 	caB := hub.Layout{Dir: dirB}.CACert()
 	bcert, bkey := issueCert(t, e, dirB, "machine", machine)
 	b2cert, b2key := issueCert(t, e, dirB, "device", "phone")
+	ntfyB := newFakeNtfy(t)
+	writeNtfyConfig(t, dirB, ntfyB)
+	setHubPassword(t, e, dirB)
 	itest.StartHub(t, e, dirB, "--listen", "127.0.0.1:"+strconv.Itoa(portB))
 	urlB := "https://127.0.0.1:" + strconv.Itoa(portB)
-	apiB := &hubClient{t: t, base: urlB, c: tlsClient(t, caB, b2cert, b2key)}
+	apiB := (&hubClient{t: t, base: urlB, c: tlsClient(t, caB, b2cert, b2key)}).mustLogin()
 	e.MustRun("join", urlB, "--cert", bcert, "--key", bkey, "--ca", caB)
 	hubWait(t, 30*time.Second, "the machine online on B", func() bool { return apiB.machines()[machine].Online })
 	hubWait(t, 30*time.Second, "B with the same tail", func() bool { return sameTail(t, apiB, e, machine, sid) })
@@ -549,6 +630,22 @@ wait:
 	hubWait(t, 30*time.Second, "both hubs with the new events", func() bool {
 		return sameTail(t, api, e, machine, sid) && sameTail(t, apiB, e, machine, sid)
 	})
+	// C11b 7. The hub that is not the notifier sends nothing; the notifier
+	// tells of the finished turn.
+	hubWait(t, 20*time.Second, "finished on both hubs", func() bool {
+		return api.section(machine, sid) == hub.SectionFinished && apiB.section(machine, sid) == hub.SectionFinished
+	})
+	hubWait(t, 20*time.Second, "the notifier's message of the finished turn", func() bool {
+		for _, r := range ntfyA.requests() {
+			if r.method == "POST" && r.note.Message == "to both" && r.note.Priority == 3 {
+				return true
+			}
+		}
+		return false
+	})
+	if n := len(ntfyB.requests()); n != 0 {
+		t.Errorf("the hub that is not the notifier sent %d notifications: %+v", n, ntfyB.requests())
+	}
 	hubA.Stop()
 	hubWait(t, 30*time.Second, "B the notifier", func() bool { return apiB.machines()[machine].Notifier })
 	hubA.Restart()
@@ -670,16 +767,39 @@ func TestHubBehindProxy(t *testing.T) {
 	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "loopback") {
 		t.Errorf("behind a proxy on 0.0.0.0: exit %d %s", res.ExitCode, res.Stderr)
 	}
+	setHubPassword(t, e, dir)
+	if err := os.WriteFile(filepath.Join(dir, "hub.toml"), []byte("public_url = \"https://hub.test\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	itest.StartHub(t, e, dir, "--behind-proxy", "--listen", "127.0.0.1:"+port, "--public-name", "hub.test")
 	pem := func(f string) string { return url.QueryEscape(string(readFile(t, f))) }
-	c := &hubClient{t: t, base: "http://127.0.0.1:" + port, c: &http.Client{Timeout: time.Minute}, host: "hub.test"}
+	c := &hubClient{t: t, base: "http://127.0.0.1:" + port, c: &http.Client{Timeout: time.Minute}, host: "hub.test", origin: "https://hub.test"}
 	c.header = pem(dcert)
-	if code, body := c.do("GET", "/api/inbox", nil, nil); code != 200 {
+	if code, _ := c.do("GET", "/api/inbox", nil, nil); code != 401 {
+		t.Errorf("device through the proxy header without login: %d", code)
+	}
+	if code, body := c.mustLogin().do("GET", "/api/inbox", nil, nil); code != 200 {
 		t.Errorf("device through the proxy header: %d %s", code, body)
 	}
 	c.header = ""
-	if code, _ := c.do("GET", "/api/inbox", nil, nil); code != 401 {
+	if code, _ := c.do("GET", "/api/inbox", nil, nil); code != 404 {
 		t.Errorf("without the header: %d", code)
+	}
+	// The enrolment path is the one thing reachable without a certificate,
+	// while a token is outstanding.
+	res = e.RunEnv(e.HubEnv(dir), "hub", "enroll", "device", "tab")
+	du := regexp.MustCompile(`https://hub\.test(/enroll/\S+)\n`).FindStringSubmatch(res.Stdout)
+	if res.ExitCode != 0 || du == nil {
+		t.Fatalf("enroll: %s%s", res.Stdout, res.Stderr)
+	}
+	if code, _ := c.do("GET", "/api/inbox", nil, nil); code != 404 {
+		t.Errorf("the API without the header while a token is outstanding: %d", code)
+	}
+	if code, body := c.do("GET", du[1], nil, nil); code != 200 || !strings.HasPrefix(body, "0") {
+		t.Errorf("the device download through the proxy: %d", code)
+	}
+	if code, _ := c.do("GET", du[1], nil, nil); code != 404 {
+		t.Errorf("the download twice: %d", code)
 	}
 	c.header = pem(mcert)
 	if code, _ := c.do("GET", "/api/inbox", nil, nil); code != 403 {
@@ -713,5 +833,71 @@ func TestHubBehindProxy(t *testing.T) {
 		t.Errorf("a connection to %s:%s was accepted", other, port)
 	} else if !strings.Contains(err.Error(), "refused") {
 		t.Errorf("connection to %s:%s: %v (want refused)", other, port, err)
+	}
+}
+
+// notificationFlow is item 6 of work order C11b: a fake-harness question
+// with two options produces one ntfy message; its first button answers the
+// question in the box; the button works once; the message is cleared.
+func notificationFlow(t *testing.T, e *itest.Env, api *hubClient, ntfy *fakeNtfy, base, machine, sid string) {
+	t.Helper()
+	before := len(ntfy.requests())
+	if code, _, body := api.command(machine, "send", newCommandID(), map[string]any{"session": sid, "text": "ask which colour? | red | blue", "mode": "steer"}, 30); code != 200 {
+		t.Fatalf("ask: %d %s", code, body)
+	}
+	hubWait(t, 30*time.Second, "needs-you for the question", func() bool { return api.section(machine, sid) == hub.SectionNeedsYou })
+	var pub ntfyReq
+	hubWait(t, 20*time.Second, "the notification", func() bool {
+		for _, r := range ntfy.requests()[before:] {
+			if r.method == "POST" && r.note.Message == "which colour?" {
+				pub = r
+				return true
+			}
+		}
+		return false
+	})
+	d, _ := api.detail(machine, sid)
+	n := pub.note
+	if n.Title != d.Session.Project+" · fakeosc" || n.Priority != 4 || n.Click != base+"/#/s/"+machine+"/"+sid || n.Topic != "devc-it" || n.SequenceID == "" ||
+		len(n.Actions) != 3 || n.Actions[0].Label != "red" || n.Actions[1].Label != "blue" || n.Actions[2].Label != "Open" || n.Actions[2].URL != n.Click ||
+		!strings.HasPrefix(n.Actions[0].URL, base+"/api/act/") || n.Actions[0].Method != "POST" || n.Actions[0].Headers[hub.RequestHeader] != "1" {
+		t.Errorf("notification %+v", n)
+	}
+	count := 0
+	for _, r := range ntfy.requests()[before:] {
+		if r.method == "POST" && r.note.Message == "which colour?" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("%d notifications of the question", count)
+	}
+	// The button: the device certificate, no login session.
+	button := &hubClient{t: t, base: base, c: api.c}
+	act := strings.TrimPrefix(n.Actions[0].URL, base)
+	code, body, err := button.try("POST", act, nil)
+	if err != nil || code != 200 || !strings.Contains(body, "Answered: red") {
+		t.Errorf("the button: %d %q %v", code, body, err)
+	}
+	hubWait(t, 30*time.Second, "the answer in the box", func() bool {
+		d, _ := api.detail(machine, sid)
+		return strings.Contains(d.Session.Message, "answer: 1")
+	})
+	if code, body, _ := button.try("POST", act, nil); code != 404 {
+		t.Errorf("the button twice: %d %s", code, body)
+	}
+	if code, _, _ := button.try("POST", strings.TrimPrefix(n.Actions[1].URL, base), nil); code != 404 {
+		t.Errorf("the other button after the answer: %d", code)
+	}
+	hubWait(t, 20*time.Second, "the notification cleared", func() bool {
+		for _, r := range ntfy.requests()[before:] {
+			if r.method == "PUT" && r.path == "/devc-it/"+n.SequenceID+"/clear" {
+				return true
+			}
+		}
+		return false
+	})
+	if code, _, _ := api.command(machine, "seen", newCommandID(), map[string]any{"session": sid}, 0); code != 200 {
+		t.Errorf("seen after the answer: %d", code)
 	}
 }

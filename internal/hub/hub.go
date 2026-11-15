@@ -1,27 +1,35 @@
-// Package hub is the hub server (work order C11a): one always-on process on
-// a server that machine daemons dial out to. It keeps a projection of every
-// session on every machine in SQLite (views, a bounded tail of events per
-// session, cursors, pending requests), derives the inbox, and offers a JSON
-// API with server-sent events for a user interface. Its CA issues the
-// client certificates that are the front door for machines and devices.
-// The hub holds nothing that cannot be rebuilt from the machines, except
-// its registry of certificates.
+// Package hub is the hub server (work orders C11a and C11b): one always-on
+// process on a server that machine daemons dial out to. It keeps a
+// projection of every session on every machine in SQLite (views, a bounded
+// tail of events per session, cursors, pending requests), derives the
+// inbox, offers a JSON API with server-sent events for a user interface,
+// and sends notifications through ntfy. Its CA issues the client
+// certificates that are the front door for machines and devices, by hand
+// or through single-use enrolment tokens. The hub holds nothing that
+// cannot be rebuilt from the machines, except its registry of certificates
+// and the user's password.
 //
-// Security rules: the hub is public-facing. Nothing speaks HTTP to it
-// without a client certificate from its CA, checked against the registry
-// (known, not expired, not revoked) on every request and, for long-lived
-// connections, whenever the registry changes; the role and name come from
-// the registry, never from the request. The reverse-proxy header is
-// honoured only in behind-proxy mode, from loopback peers, on a loopback
-// listener. Every request has a size limit, the Host header must name the
-// hub, state-changing requests must be JSON from the hub's own origin, and
-// no CORS headers are sent. Everything a machine sends is decoded strictly
+// Security rules: the hub is public-facing and can type into agent
+// sessions. Nothing reaches a route without a client certificate from its
+// CA, checked against the registry (known, not expired, not revoked) on
+// every request and, for long-lived connections, whenever the registry
+// changes; the role and name come from the registry, never from the
+// request. The one exception is the enrolment path, while a single-use
+// enrolment token is outstanding; one gate (Server.gate, front.go) decides
+// that. The API also needs a login session bound to the request's
+// certificate (C11b): argon2id password, optional TOTP, 256-bit tokens
+// stored hashed, constant-time comparisons, lockout and rate limits. The
+// reverse-proxy header is honoured only in behind-proxy mode, from
+// loopback peers, on a loopback listener. Every request has a size limit,
+// the Host header must name the hub, state-changing requests must carry
+// X-Devc-Request: 1 and come from the hub's own origin, and no CORS
+// headers are sent. Secrets never reach the log. Everything a machine sends is decoded strictly
 // and validated before it is stored (events through proto.ValidateData);
 // a machine can only write rows under its own registry name. Over the
 // machine link the hub only calls methods; which ones a hub may call, and
 // with what effect, is decided by the daemon (internal/daemon/hublink.go).
 // The CA key never leaves the hub directory (0600 in 0700); the server
-// itself reads only the CA certificate.
+// reads it only to sign a machine's certificate request at enrolment.
 package hub
 
 import (
