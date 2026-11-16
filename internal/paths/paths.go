@@ -458,6 +458,12 @@ func (p *Paths) SyncStagingDir(r names.ProjectRef) string {
 	return filepath.Join(p.LocalDir(), "staging", must(names.KindRealm, r.Realm), must(names.KindProject, r.Project))
 }
 
+// SyncLockFile serialises the pulls and pushes of a project with one
+// remote (finding D2-11). It lives in local/locks, which no box can reach.
+func (p *Paths) SyncLockFile(r names.ProjectRef, remote string) string {
+	return filepath.Join(p.LocalDir(), "locks", "sync-"+must(names.KindRealm, r.Realm)+"-"+must(names.KindProject, r.Project)+"-"+must(names.KindRemote, remote)+".lock")
+}
+
 // SavepointIndex lists a project's savepoints (one JSON object per line);
 // it is host-owned durable state, outside every box's reach.
 func (p *Paths) SavepointIndex(r names.ProjectRef) string {

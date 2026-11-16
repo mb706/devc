@@ -246,6 +246,11 @@ func NormalizeTarget(target string) (string, string, error) {
 				return "", "", errors.New("an encoded control character in the path")
 			case isUnreserved(d):
 				b.WriteByte(d)
+			case IsReserved(d):
+				// An upstream may decode it before it splits path
+				// parameters (";") or resolves segments, and then see
+				// another path than the rules did (finding D2-16).
+				return "", "", fmt.Errorf("an encoded reserved character (%%%s) in the path: write it unencoded", strings.ToUpper(rawPath[i+1:i+3]))
 			default:
 				b.WriteByte('%')
 				b.WriteString(strings.ToUpper(rawPath[i+1 : i+3]))
@@ -351,6 +356,12 @@ func unhex(c byte) byte {
 
 func isUnreserved(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~'
+}
+
+// IsReserved reports whether c is an RFC 3986 reserved character
+// (gen-delims and sub-delims).
+func IsReserved(c byte) bool {
+	return strings.IndexByte(":/?#[]@!$&'()*+,;=", c) >= 0
 }
 
 // isPathChar: RFC 3986 pchar without percent-encodings, and "/".

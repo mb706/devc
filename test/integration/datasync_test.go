@@ -116,6 +116,7 @@ type syncStatus struct {
 			Name   string `json:"name"`
 			Action string `json:"action"`
 			Same   bool   `json:"same"`
+			Sent   bool   `json:"sent"`
 		} `json:"remotes"`
 	} `json:"entries"`
 }
@@ -130,9 +131,11 @@ func dataStatus(t *testing.T, e *itest.Env, ref, path string) (state string, rem
 		if en.Path != path {
 			continue
 		}
+		// A remote counts as holding the entry as it is now when a pull
+		// received it so or a push sent it so (finding D2-12).
 		remotes = map[string]bool{}
 		for _, r := range en.Remotes {
-			remotes[r.Name] = r.Same
+			remotes[r.Name] = r.Same || r.Sent
 		}
 		if en.Last != nil {
 			last = en.Last.Action + " " + en.Last.Remote

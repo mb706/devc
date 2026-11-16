@@ -67,15 +67,28 @@ const proxyHint = "; if the task needs it, ask the user (in the box: devc reques
 type relayConn struct {
 	st *yamux.Stream
 	r  io.Reader
+	// limit, when set, is the end of the whole exchange (service streams,
+	// finding D2-04): no deadline is later, so no read or write on the
+	// stream outlives it.
+	limit time.Time
+}
+
+// clamp keeps a deadline within the exchange's limit; the zero time (no
+// deadline) becomes the limit.
+func (c *relayConn) clamp(t time.Time) time.Time {
+	if !c.limit.IsZero() && (t.IsZero() || t.After(c.limit)) {
+		return c.limit
+	}
+	return t
 }
 
 func (c *relayConn) Read(b []byte) (int, error)         { return c.r.Read(b) }
-func (c *relayConn) SetReadDeadline(t time.Time) error  { return c.st.SetReadDeadline(t) }
-func (c *relayConn) SetWriteDeadline(t time.Time) error { return c.st.SetWriteDeadline(t) }
+func (c *relayConn) SetReadDeadline(t time.Time) error  { return c.st.SetReadDeadline(c.clamp(t)) }
+func (c *relayConn) SetWriteDeadline(t time.Time) error { return c.st.SetWriteDeadline(c.clamp(t)) }
 
 // Write has a stall deadline, as every raw box stream (finding C1-09).
 func (c *relayConn) Write(b []byte) (int, error) {
-	_ = c.st.SetWriteDeadline(time.Now().Add(streamStall))
+	_ = c.st.SetWriteDeadline(c.clamp(time.Now().Add(streamStall)))
 	return c.st.Write(b)
 }
 

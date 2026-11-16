@@ -588,8 +588,10 @@ GitHub directly while `origin` is still the relay; sessions get the token as
 daemon each time, so git always gets a current token; **a long-running
 process keeps the `GH_TOKEN` it started with, for at most an hour** with an
 App. The token never lives in a file of the box. The mode is a capability of
-the box's start: changing it takes effect after `devc down` and `devc up`
-(removing it stops tokens at once). Token delivery needs the daemon.
+the box's start, and so are the repository and, for `app`, the realm's App
+and installation: changing any of them (the project's `upstream`, `app_id`,
+`installation_id`) stops tokens until `devc down` and `devc up`, and
+removing the mode stops them at once. Token delivery needs the daemon.
 
 The App mode needs, in `realm.toml`:
 
@@ -611,9 +613,15 @@ github = "app"
 permissions = { contents = "write", pull_requests = "write", issues = "read" }
 ```
 
-devc signs a short JWT with the App's key (RS256), mints a token restricted to
-the project's repository and these permissions, and reuses it until five
-minutes before it expires.
+devc signs a short JWT with the App's key (RS256) and first checks that the
+installation covers exactly the project's repository: the installation
+GitHub names for the repository must belong to its owner (and be the
+configured `installation_id`, if any), and a metadata-only probe token for
+the repository's name, revoked at once, must see that one repository; its
+ID is noted. devc then mints a token restricted to that repository ID and
+these permissions, and reuses it until five minutes before it expires.
+Tokens are cached per project and per App key, so changing the key never
+hands out a token minted with the old one.
 
 **The trade-off.** With a token in the box, the relay's ratchet no longer
 covers what that token can do: the agent can push to any branch the token
@@ -745,7 +753,11 @@ the files into the data root, owned by the box user (set-ID bits dropped):
 - new entries in a sealed zone arrive unsealed; seal them with `devc seal`.
 
 `--max-size` (default 2g, `0` for no limit) refuses a pull whose transfer would
-be larger in total. Every pull transfers the selected files in full, since the
+be larger in total. The count comes from rsync's dry run; a dry run whose
+output is cut (more than 256 MiB of listing) or has a line devc cannot read
+is refused rather than counted in part, so pull fewer paths at a time if
+that happens. One pull or push per project and remote runs at a time; a
+second one is refused until the first has finished. Every pull transfers the selected files in full, since the
 staging directory starts empty: pull the paths you need rather than whole
 zones. When a transfer is interrupted, what arrived is kept and the next pull
 from the same remote continues from it (and also brings what that interrupted
@@ -757,7 +769,7 @@ helper container first hard-links the selected files into
 belong to the vault: the box can read them but cannot add, remove, rename or
 replace anything there. rsync sends only that directory. Nothing is deleted on
 the remote; a file the push replaces is kept there in
-`<path>/.devc-backup/<time>/`. New files keep their permission bits, limited
+`<path>/.devc-backup/<time>-<id>/` (the ID makes every push's directory its own). New files keep their permission bits, limited
 by the remote's umask; a file that replaces another keeps that one's
 permissions (and takes over the executable bit); directories are created with
 the remote's defaults.
@@ -785,7 +797,12 @@ devc seal results/run7 --content          # seal and store a content hash
 `data status` shows each top-level entry of each zone as `new` (no record),
 `recorded` (as last recorded), `changed` or `absent` (recorded but not here),
 with the machines and remotes it was last recorded on; a `*` marks a record
-that differs from the entry now.
+that differs from the entry now. For a remote, a pull records what arrived
+from it separately from this machine's copy after the merge: a pull that
+left a sealed entry alone, or kept files that exist only here, is never
+shown as matching the remote. A `>` marks a remote that a push sent the
+entry to as it is now; the remote may keep other files besides, since devc
+never deletes there.
 
 **Clusters.** On a cluster the agent acts as you, with your account, and devc
 cannot sandbox it there: it can only help against accidents. Seal finished
@@ -1059,6 +1076,17 @@ start whose namespace it joined); `devc gui status` calls a sidecar of an
 earlier start *stale*. The desktop fails to start if a process in the box
 already listens on port 6001, 5901 or 6080.
 
+The sidecar has a cgroup of its own, beside the box's, and box programs make
+it allocate (pixmaps in the X server, a relay process per connection). It
+therefore gets limits of its own, set under `[gui]` in `config.toml`:
+`memory = "2g"`, `pids = 512` and `cpus = 2` by default. As for boxes, a
+limit that cannot be applied (its cgroup controller is not delegated) makes
+`devc gui up` fail; `memory = "none"`, `pids = -1` and `cpus = -1` switch a
+limit off explicitly. The X relay serves at most 64 connections at a time
+and the viewer's server 16; further connections wait. A box that holds
+those connections, or fills the desktop's memory, only disturbs its own
+desktop.
+
 **From a phone**, the viewer is reached like any forwarded port. Exposing it
 beyond the loopback interface needs the same care as the hub
 (see [docs/hub-deployment.md](hub-deployment.md)): the VNC password has
@@ -1237,7 +1265,7 @@ path = "/api/"                          # prefix at segment boundaries
 
 [limits]
 max_body = "10m"                        # each body, request and response
-timeout = "60s"                         # the whole exchange
+timeout = "60s"                         # the whole exchange, the box's side included
 ```
 
 ```toml
@@ -1266,8 +1294,10 @@ the daemon, which decides everything:
   only while the daemon runs.
 - The request is checked on its raw bytes first. Refused with 400: anything
   but `METHOD /path HTTP/1.1` (no absolute URLs, no `CONNECT`), `.` or `..`
-  segments (also before a `;`), empty segments, encoded `/`, `\` or `%`, a
-  `Host` other than `127.0.0.1:<port>` or `localhost:<port>`, duplicated or
+  segments (also before a `;`), empty segments, encoded `/`, `\` or `%`,
+  any other percent-encoded reserved character (`%3B` for `;`, `%3A`, `%40`
+  and the like, which an upstream might decode before it splits the path:
+  write them unencoded), a `Host` other than `127.0.0.1:<port>` or `localhost:<port>`, duplicated or
   conflicting `Content-Length` and `Transfer-Encoding`, obsolete line
   folding, bare line feeds; protocol upgrades (WebSocket) are refused with
   403. One request per connection.
@@ -1285,8 +1315,16 @@ the daemon, which decides everything:
 - On the way back `Set-Cookie`, `Proxy-*` and hop-by-hop headers are
   dropped, `Location` headers that point at the upstream are rewritten to
   the local address, 1xx responses and trailers never pass, and every header
-  is scrubbed of the credential (the value and its parts of 8 characters or
-  more). Bodies pass through within `max_body`.
+  is scrubbed of the credential (the value and its parts: the token after a
+  scheme such as `Bearer`, the user:password and password of `Basic`).
+  Bodies pass through within `max_body`. Every part of a credential must have
+  at least 8 characters, so that scrubbing it cannot garble ordinary
+  headers: a shorter header credential is refused (`devc service status`
+  says `invalid-secret`, boxes get 503), and so is a login whose cookies
+  have shorter values.
+- The whole exchange ends with `timeout` (and a few seconds' grace): a box
+  that stops reading the answer, or never finishes sending its body, loses
+  that connection then, and only that connection.
 - Each request is logged to `durable/realms/<realm>/service-log/<name>.jsonl`:
   time, box, method, path (without the query) and status. Headers and bodies
   are never logged.
@@ -1310,8 +1348,12 @@ container: the network on, nothing mounted but a scratch directory at
 directory and the secrets of `auth.secrets` in `/login/secrets/`. The
 command prints a JSON array of cookies (`name`, `value`, `domain`, `path`,
 `expiry` in Unix seconds, 0 for none) and nothing else on standard output;
-devc refuses anything else, cookies for other hosts, more than 64 cookies
-or values over 4 KiB. The jar is stored as the realm secret
+devc refuses anything else, cookies for other hosts, more than 64 cookies,
+values over 4 KiB or under 8 characters (leave short cookies, such as a
+language or a consent flag, out of the output). Errors about the output
+name cookies by their position and never repeat what was printed, and every
+error of a login is cleaned of the login's secret values before it is
+shown, logged or stored. The jar is stored as the realm secret
 `_jar.<service>` with the time of the login (it cannot be granted to a box,
 nor can the login secrets of a service the project uses).
 `examples/services/` has a worked example (a form login with curl) and notes
@@ -1408,10 +1450,18 @@ Without a version devc uses the installed one, else the current release. An
 R package installed from GitHub (its `DESCRIPTION` names a GitHub remote and
 commit) is fetched from that commit instead of CRAN. Sources: CRAN's source
 tarballs (current, then the archive), the source distribution PyPI's JSON
-API names, the npm registry's tarball, GitHub's tarball endpoint; published
-checksums (PyPI, npm, CRAN's current releases) are verified. Archives are
-unpacked with the same safe extractor as shares and are never built,
-installed or run.
+API names, the npm registry's tarball, GitHub's tarball endpoint. Where a
+registry publishes a checksum it is required and verified: PyPI's sha256,
+npm's integrity value (sha512, sha384, sha256 or sha1; the strongest is
+used) or, for old packages without one, its SHA-1 shasum, and the MD5 of
+CRAN's current releases. A missing or unusable checksum there refuses the
+download rather than skipping the check. CRAN's archived versions and
+GitHub's tarballs have no published checksum and are downloaded unchecked
+(a GitHub tarball is named by its commit). Archives are unpacked with the
+same safe extractor as shares and are never built, installed or run. A
+concrete version that is already in the cache (any registry version, or a
+GitHub commit) is answered without any network access; a branch, a tag or
+"the current release" needs the registry.
 
 The cache is `cache/realms/<realm>/src/` in devc's state, mounted at `/src`
 in every box of the realm as `/src/<ecosystem>/<name>/<version>/`. It is
@@ -1570,8 +1620,10 @@ everything that matters outside it, but it is not a virtual machine.
 - **The desktop** (`devc gui up`) is the box's: anything in the box can drive
   and read its display and see what you type or paste into the viewer, and
   the viewer's page comes from a container that shares the box's network, so
-  treat it like any page a box serves. A browser's debugging port (`devc browser`) gives whoever
-  connects to it full control of that browser.
+  treat it like any page a box serves. It runs with memory, process and CPU
+  limits of its own (`[gui]`). A browser's debugging port (`devc browser`)
+  gives whoever connects to it full control of that browser, and devc's
+  probe of that port never follows a redirect.
 - **Services** act with your account for every request their rules allow,
   and an upstream endpoint that reflects request headers in its body can
   show the credential to the box: keep rules narrow (see

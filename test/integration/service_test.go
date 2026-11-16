@@ -184,6 +184,38 @@ func boxGet(port int, path string) string {
 	return "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1:" + strconv.Itoa(port) + "\r\nConnection: close\r\n\r\n"
 }
 
+// credentialSearch asserts that none of values occurs in a file of the
+// box's trees or in a process environment (finding D2-15). The same search
+// must first find a planted control, in a file and in the environment of a
+// running process, and every run must exit 0 and reach its end marker, so
+// a search that did not run cannot pass.
+func credentialSearch(t *testing.T, e *itest.Env, ref, what string, values ...string) {
+	t.Helper()
+	const done = "DEVC-SEARCH-DONE"
+	search := `grep -rlsF -e "$1" /home /run /tmp /etc /opt /w /var 2>/dev/null; ` +
+		`for f in /proc/[0-9]*/environ; do grep -qsF -e "$1" "$f" && echo "env of $f"; done; echo ` + done
+	run := func(script, value string) string {
+		t.Helper()
+		res := e.Run("run", ref, "--", "bash", "-c", script, "bash", value)
+		out := strings.TrimSpace(res.Stdout)
+		if res.ExitCode != 0 || !strings.HasSuffix(out, done) {
+			t.Fatalf("the search did not run to its end: exit %d\nstdout: %s\nstderr: %s", res.ExitCode, res.Stdout, res.Stderr)
+		}
+		return strings.TrimSpace(strings.TrimSuffix(out, done))
+	}
+	ctl := "devc-control-" + randHex(8)
+	got := run(`printf '%s' "$1" > /tmp/devc-search-control; env DEVC_CTL="$1" sleep 60 & bg=$!; sleep 0.3; `+search+
+		`; kill $bg; rm -f /tmp/devc-search-control`, ctl)
+	if !strings.Contains(got, "/tmp/devc-search-control") || !strings.Contains(got, "env of /proc/") {
+		t.Fatalf("the search did not find its control in a file and an environment: %q", got)
+	}
+	for _, v := range values {
+		if got := run(search, v); got != "" {
+			t.Errorf("%s was found in the box: %s", what, got)
+		}
+	}
+}
+
 // TestServiceHeader covers items 1, 2, 4 and 5: a header service reached
 // from a granted box with the credential added; the box never sees it;
 // rules, traversal and encoded slashes; Set-Cookie and redirects; boxes
@@ -290,10 +322,7 @@ path = "/api/search"
 	}
 
 	// The credential is nowhere in the box: files, mounts, environments.
-	search := `grep -rlsF -e "$1" /home /run /tmp /etc /opt /w /var 2>/dev/null; for f in /proc/[0-9]*/environ; do grep -lsF -e "$1" "$f"; done; true`
-	if res := e.Run("run", ref, "--", "bash", "-c", search, "bash", secretPart); strings.TrimSpace(res.Stdout) != "" {
-		t.Errorf("the credential was found in the box: %s", res.Stdout)
-	}
+	credentialSearch(t, e, ref, "the credential", secretPart)
 	// The log names the requests, never the credential or the query.
 	logOut := e.MustRun("service", "log", itest.RealmA, "wiki", "-n", "0").Stdout
 	if !strings.Contains(logOut, "/api/page") || !strings.Contains(logOut, "403") || !strings.Contains(logOut, ref) {
@@ -430,12 +459,7 @@ path = "/intranet/"
 	if strings.Contains(out, sessions[0]) || strings.Contains(out, "tracking=") {
 		t.Errorf("the cookie or a Set-Cookie came back:\n%s", out)
 	}
-	search := `grep -rlsF -e "$1" /home /run /tmp /etc /opt /w /var 2>/dev/null; for f in /proc/[0-9]*/environ; do grep -lsF -e "$1" "$f"; done; true`
-	for _, v := range []string{sessions[0], up.pass} {
-		if res := e.Run("run", ref, "--", "bash", "-c", search, "bash", v); strings.TrimSpace(res.Stdout) != "" {
-			t.Errorf("a credential was found in the box: %s", res.Stdout)
-		}
-	}
+	credentialSearch(t, e, ref, "a credential (the session cookie or the password)", sessions[0], up.pass)
 
 	// The upstream ends the session (redirect to its login page): 503.
 	up.mu.Lock()

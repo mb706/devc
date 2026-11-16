@@ -3,8 +3,10 @@ package data
 import (
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -42,10 +44,16 @@ type Rsync struct {
 // length and the name (which rsync escapes when it is not printable).
 const ItemFormat = "%i %l %n"
 
-var backupDirRE = regexp.MustCompile(`^\` + boxside.BackupDirName + `/[0-9]{8}T[0-9]{6}Z$`)
+var (
+	backupDirRE = regexp.MustCompile(`^\` + boxside.BackupDirName + `/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$`)
+	backupIDRE  = regexp.MustCompile(`^[0-9a-f]{12}$`)
+)
 
-// BackupDir is the remote backup directory of a push stamped stamp.
-func BackupDir(stamp string) string { return boxside.BackupDirName + "/" + stamp }
+// BackupDir is the remote backup directory of a push stamped stamp with
+// the operation ID id (12 hex digits): every push has its own, so two
+// pushes in the same second never overwrite each other's backups
+// (finding D2-10).
+func BackupDir(stamp, id string) string { return boxside.BackupDirName + "/" + stamp + "-" + id }
 
 // RsyncArgs builds rsync's arguments. Fixed choices, for every case:
 //
@@ -161,28 +169,53 @@ func (it Item) File() bool {
 // New reports whether the item does not exist on the receiving side yet.
 func (it Item) New() bool { return strings.HasSuffix(it.Change, "+++++++++") }
 
-// ParseItems parses the ItemFormat lines of a dry run; other lines are
-// ignored.
-func ParseItems(out []byte) []Item {
+// itemRE is rsync's itemized change (%i, protocol 30 and later): the
+// update type, the file type and nine attribute flags.
+var itemRE = regexp.MustCompile(`^[<>ch.*][fdLDS][a-zA-Z.+ ?]{9}$`)
+
+// infoLines are the only other lines rsync prints on standard output in a
+// dry run with ItemFormat.
+var infoLines = []string{"created directory ", "skipping non-regular file "}
+
+// ErrPreview means a dry run's output could not be read completely, so
+// what a transfer would do is unknown (finding D2-06).
+var ErrPreview = errors.New("the preview of the transfer cannot be read completely")
+
+// ParseItems parses the ItemFormat lines of a dry run. A line that is
+// neither an item nor one of rsync's known messages, or an item whose size
+// does not parse, is an error: a preview that cannot be read whole cannot
+// be counted against a limit.
+func ParseItems(out []byte) ([]Item, error) {
 	var items []Item
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.SplitN(line, " ", 3)
-		if len(f) != 3 || len(f[0]) < 9 || len(f[0]) > 11 {
+	for i, line := range strings.Split(string(out), "\n") {
+		if line == "" || slices.ContainsFunc(infoLines, func(p string) bool { return strings.HasPrefix(line, p) }) {
 			continue
 		}
-		n, err := strconv.ParseInt(f[1], 10, 64)
-		if err != nil || n < 0 {
-			continue
+		// The change code may hold spaces; it is always 11 characters.
+		var f []string
+		var n int64
+		err := errors.New("not an item")
+		if len(line) > 12 && line[11] == ' ' && itemRE.MatchString(line[:11]) {
+			if f = strings.SplitN(line[12:], " ", 2); len(f) == 2 {
+				n, err = strconv.ParseInt(f[0], 10, 64)
+			}
 		}
-		items = append(items, Item{Change: proto.Printable(f[0]), Size: n, Name: proto.Printable(f[2])})
+		if err != nil || len(f) != 2 || n < 0 || f[1] == "" {
+			return nil, fmt.Errorf("%w: line %d is not one rsync prints (%.80q)", ErrPreview, i+1, proto.Printable(line))
+		}
+		items = append(items, Item{Change: line[:11], Size: n, Name: proto.Printable(f[1])})
 	}
-	return items
+	return items, nil
 }
 
-// Totals counts the files of a dry run and their bytes.
-func Totals(items []Item) (files, size, updated int64) {
+// Totals counts the files of a dry run and their bytes; a total beyond
+// what an int64 holds is an error, never a wrapped number.
+func Totals(items []Item) (files, size, updated int64, err error) {
 	for _, it := range items {
 		if it.File() {
+			if it.Size > math.MaxInt64-size {
+				return 0, 0, 0, fmt.Errorf("%w: the sizes add up to more than %d bytes", ErrPreview, int64(math.MaxInt64))
+			}
 			files++
 			size += it.Size
 			if !it.New() {
@@ -190,5 +223,5 @@ func Totals(items []Item) (files, size, updated int64) {
 			}
 		}
 	}
-	return files, size, updated
+	return files, size, updated, nil
 }

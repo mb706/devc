@@ -36,11 +36,14 @@ curl --fail --silent --show-error "${tls[@]}" \
 # curl's cookie file (Netscape format): domain, subdomains flag, path,
 # secure flag, expiry, name, value; HttpOnly cookies carry a "#HttpOnly_"
 # prefix. Values with quotes or backslashes cannot be cookie values; refuse
-# them rather than print broken JSON.
+# them rather than print broken JSON. devc refuses cookie values shorter
+# than 8 characters (it could not keep them out of responses), so short
+# cookies such as a language or a consent flag are left out here.
 awk -F '\t' '
 	BEGIN { printf "["; n = 0 }
 	/^#HttpOnly_/ { sub(/^#HttpOnly_/, "") }
 	/^#/ || NF < 7 { next }
+	length($7) < 8 { print "login.sh: leaving out a cookie with a value shorter than 8 characters" > "/dev/stderr"; next }
 	{
 		if ($6 ~ /["\\]/ || $7 ~ /["\\]/ || $1 ~ /["\\]/ || $3 ~ /["\\]/) {
 			print "login.sh: refusing an unusable cookie" > "/dev/stderr"

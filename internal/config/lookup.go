@@ -423,6 +423,7 @@ type GlobalView struct {
 	Engine       string        `toml:"engine" json:"engine"`
 	DefaultEnv   string        `toml:"default_env" json:"default_env"`
 	Box          GlobalBox     `toml:"box" json:"box"`
+	GUI          GlobalGUI     `toml:"gui" json:"gui"`
 	SELinux      GlobalSELinux `toml:"selinux" json:"selinux"`
 	Secrets      GlobalSecrets `toml:"secrets" json:"secrets"`
 	Hubs         []Hub         `toml:"hubs" json:"hubs"`
@@ -445,6 +446,7 @@ func (c *Config) View() GlobalView {
 		Engine:       c.Global.Engine,
 		DefaultEnv:   c.Global.DefaultEnv,
 		Box:          c.Global.Box,
+		GUI:          c.Global.GUI,
 		SELinux:      c.Global.SELinux,
 		Secrets:      c.Global.Secrets,
 		Hubs:         hubs,

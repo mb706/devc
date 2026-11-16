@@ -172,6 +172,14 @@ func (m *Manager) up(ctx context.Context, ref names.ProjectRef, boxCI *engine.Co
 			return m.reuse(ctx, ref, rec, o)
 		}
 	}
+	// Limits that cannot be applied fail before anything changes.
+	facts, err := m.Box.HostFacts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := LimitArgs(m.Box.Config.Global.GUI, facts.Controllers); err != nil {
+		return nil, err
+	}
 	if err := m.remove(ctx, ref, false); err != nil {
 		return nil, err
 	}
@@ -183,7 +191,8 @@ func (m *Manager) up(ctx context.Context, ref names.ProjectRef, boxCI *engine.Co
 		return nil, fmt.Errorf("drawing the desktop's secrets: %w", err)
 	}
 	args, err := SidecarArgs(SidecarOptions{Ref: ref, BoxID: boxCI.ID, BoxStart: StartID(boxCI),
-		Seccomp: m.Toolbox.SeccompPath(), Labels: selinuxOptions(boxCI), Image: Image})
+		Seccomp: m.Toolbox.SeccompPath(), Labels: selinuxOptions(boxCI), Image: Image,
+		Limits: m.Box.Config.Global.GUI, Controllers: facts.Controllers})
 	if err != nil {
 		return nil, err
 	}

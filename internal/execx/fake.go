@@ -121,6 +121,17 @@ func (f *Fake) Run(ctx context.Context, c Cmd) (Result, error) {
 		return Result{ExitCode: -1}, r.err
 	}
 	res := Result{Stdout: slices.Clone(r.res.Stdout), Stderr: slices.Clone(r.res.Stderr), ExitCode: r.res.ExitCode}
+	// The capture cap applies as in the real runner.
+	limit := c.MaxOutput
+	if limit <= 0 {
+		limit = DefaultMaxOutput
+	}
+	if len(res.Stdout) > limit {
+		res.Stdout, res.Truncated = res.Stdout[:limit], true
+	}
+	if len(res.Stderr) > limit {
+		res.Stderr, res.Truncated = res.Stderr[:limit], true
+	}
 	if res.ExitCode != 0 {
 		return res, newExitError(c, res)
 	}

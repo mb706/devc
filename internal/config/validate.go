@@ -242,6 +242,13 @@ func validateGlobal(c *Config, ps *problems) {
 	if g.Box.Shell != "" {
 		k.command("box.shell", g.Box.Shell)
 	}
+	k.memory("gui.memory", g.GUI.Memory)
+	if g.GUI.Pids == 0 || g.GUI.Pids < NoPidsLimit {
+		k.bad("gui.pids", "%d is not a limit: use a positive number, or -1 to run desktops without a PID limit", g.GUI.Pids)
+	}
+	if c := g.GUI.CPUs; c != NoCPULimit && !(c >= 0.01 && c <= 4096) {
+		k.bad("gui.cpus", "%v is not a limit: use a number of CPUs such as 2 or 0.5, or -1 to run desktops without a CPU limit", c)
+	}
 	k.enum("selinux.mode", g.SELinux.Mode, selinuxModes)
 	k.enum("secrets.delivery", g.Secrets.Delivery, []string{DeliveryFiles, DeliveryDaemon})
 	seenHubs := map[string]bool{}

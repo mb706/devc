@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
+	"github.com/mb706/devc/internal/github"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/paths"
@@ -353,43 +355,94 @@ func TestServiceCapabilities(t *testing.T) {
 }
 
 // TestGitHubCapabilities: token modes and grants.github_read follow the
-// start record (work order C15).
+// start record (work order C15), and so do the repository and the App
+// (finding D2-02).
 func TestGitHubCapabilities(t *testing.T) {
+	web, _ := url.Parse("https://github.com")
+	const upstream = "git@github.com:acme/app.git"
+	ghApp := &config.GitHubApp{AppID: 4242, KeySecret: "github-app-key"}
 	app := func(perms map[string]string, read ...string) *config.Resolved {
 		g := config.Grants{GitHub: "app", GitHubRead: read}
 		if perms != nil {
 			g.GitHubToken = &config.GitHubToken{Permissions: perms}
 		}
-		return &config.Resolved{Grants: g}
+		return &config.Resolved{Realm: "demo", Project: "hello", Upstream: upstream, Grants: g, GitHubApp: ghApp}
+	}
+	token := func(mode string) *config.Resolved {
+		return &config.Resolved{Realm: "demo", Project: "hello", Upstream: upstream, Grants: config.Grants{GitHub: mode}}
 	}
 	c := CapabilitiesOf(app(map[string]string{"contents": "write", "pull_requests": "write"}, "acme/lib", "acme/doc"), "cid", time.Now())
-	mode, perms, err := c.GitHubToken(app(map[string]string{"contents": "read", "pull_requests": "write", "issues": "write"}))
-	if err != nil || mode != "app" || len(perms) != 2 || perms["contents"] != "read" || perms["pull_requests"] != "write" {
-		t.Errorf("app: %q %v %v", mode, perms, err)
+	if c.GitHubUpstream != upstream || c.GitHubAppID != 4242 || c.GitHubInstallation != 0 {
+		t.Errorf("record: %+v", c)
 	}
-	if _, _, err := c.GitHubToken(app(map[string]string{"issues": "write"})); !errors.Is(err, ErrNoGitHubToken) {
+	g, err := c.GitHubToken(app(map[string]string{"contents": "read", "pull_requests": "write", "issues": "write"}), web)
+	if err != nil || g.Mode != "app" || len(g.Permissions) != 2 || g.Permissions["contents"] != "read" || g.Permissions["pull_requests"] != "write" ||
+		g.Repo != (github.Repo{Owner: "acme", Name: "app"}) {
+		t.Errorf("app: %+v %v", g, err)
+	}
+	if _, err := c.GitHubToken(app(map[string]string{"issues": "write"}), web); !errors.Is(err, ErrNoGitHubToken) {
 		t.Errorf("nothing in common: %v", err)
 	}
-	if _, _, err := c.GitHubToken(&config.Resolved{Grants: config.Grants{GitHub: "token:pat"}}); !errors.Is(err, ErrNoGitHubToken) {
+	if _, err := c.GitHubToken(token("token:pat"), web); !errors.Is(err, ErrNoGitHubToken) {
 		t.Errorf("mode changed: %v", err)
 	}
-	if _, _, err := c.GitHubToken(&config.Resolved{Grants: config.Grants{GitHub: "relay"}}); !errors.Is(err, ErrNoGitHubToken) {
+	if _, err := c.GitHubToken(token("relay"), web); !errors.Is(err, ErrNoGitHubToken) {
 		t.Errorf("relay now: %v", err)
+	}
+	// D2-02: another repository, another App or installation, or no App
+	// any more: no token until the box starts again.
+	for name, mod := range map[string]func(*config.Resolved){
+		"upstream changed":    func(r *config.Resolved) { r.Upstream = "git@github.com:acme/other.git" },
+		"owner changed":       func(r *config.Resolved) { r.Upstream = "https://github.com/evil/app" },
+		"upstream removed":    func(r *config.Resolved) { r.Upstream = "" },
+		"not GitHub any more": func(r *config.Resolved) { r.Upstream = "https://gitlab.com/acme/app" },
+		"App changed":         func(r *config.Resolved) { r.GitHubApp = &config.GitHubApp{AppID: 99, KeySecret: "k"} },
+		"installation changed": func(r *config.Resolved) {
+			r.GitHubApp = &config.GitHubApp{AppID: 4242, InstallationID: 7, KeySecret: "k"}
+		},
+		"App removed": func(r *config.Resolved) { r.GitHubApp = nil },
+	} {
+		r := app(nil)
+		mod(r)
+		if _, err := c.GitHubToken(r, web); !errors.Is(err, ErrNoGitHubToken) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// The same repository written another way, and the same App with
+	// another key secret, are the same.
+	same := app(nil)
+	same.Upstream, same.GitHubApp = "https://github.com/ACME/app.git", &config.GitHubApp{AppID: 4242, KeySecret: "renamed"}
+	if _, err := c.GitHubToken(same, web); err != nil {
+		t.Errorf("same repository and App: %v", err)
+	}
+	// A record written before the repository was recorded gets nothing.
+	old := c
+	old.GitHubUpstream = ""
+	if _, err := old.GitHubToken(app(nil), web); !errors.Is(err, ErrNoGitHubToken) {
+		t.Errorf("old record: %v", err)
 	}
 	// The default permissions when the table is absent.
 	d := CapabilitiesOf(app(nil), "cid", time.Now())
-	if _, perms, err := d.GitHubToken(app(nil)); err != nil || len(perms) != 2 || perms["metadata"] != "read" {
-		t.Errorf("defaults: %v %v", perms, err)
+	if g, err := d.GitHubToken(app(nil), web); err != nil || len(g.Permissions) != 2 || g.Permissions["metadata"] != "read" {
+		t.Errorf("defaults: %+v %v", g, err)
 	}
-	tok := CapabilitiesOf(&config.Resolved{Grants: config.Grants{GitHub: "token:pat"}}, "cid", time.Now())
-	if mode, perms, err := tok.GitHubToken(&config.Resolved{Grants: config.Grants{GitHub: "token:pat"}}); err != nil || mode != "token:pat" || perms != nil {
-		t.Errorf("token: %q %v %v", mode, perms, err)
+	tok := CapabilitiesOf(token("token:pat"), "cid", time.Now())
+	if g, err := tok.GitHubToken(token("token:pat"), web); err != nil || g.Mode != "token:pat" || g.Permissions != nil || tok.GitHubAppID != 0 {
+		t.Errorf("token: %+v %v", g, err)
 	}
-	if _, _, err := tok.GitHubToken(&config.Resolved{Grants: config.Grants{GitHub: "token:other"}}); !errors.Is(err, ErrNoGitHubToken) {
+	if _, err := tok.GitHubToken(token("token:other"), web); !errors.Is(err, ErrNoGitHubToken) {
 		t.Errorf("another secret: %v", err)
 	}
-	relay := CapabilitiesOf(&config.Resolved{Grants: config.Grants{GitHub: "relay"}}, "cid", time.Now())
-	if _, _, err := relay.GitHubToken(app(nil)); !errors.Is(err, ErrNoGitHubToken) {
+	moved := token("token:pat")
+	moved.Upstream = "git@github.com:acme/other.git"
+	if _, err := tok.GitHubToken(moved, web); !errors.Is(err, ErrNoGitHubToken) {
+		t.Errorf("token mode, upstream changed: %v", err)
+	}
+	relay := CapabilitiesOf(token("relay"), "cid", time.Now())
+	if relay.GitHubUpstream != "" {
+		t.Errorf("relay record: %+v", relay)
+	}
+	if _, err := relay.GitHubToken(app(nil), web); !errors.Is(err, ErrNoGitHubToken) {
 		t.Errorf("app granted after a relay start: %v", err)
 	}
 	if got := c.GitHubReadRepos(app(nil, "ACME/lib", "acme/new")); !slices.Equal(got, []string{"ACME/lib"}) {

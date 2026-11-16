@@ -3,6 +3,7 @@ package svclogin
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -256,6 +258,33 @@ func TestProxyLimits(t *testing.T) {
 	}
 }
 
+// TestProxyShortCredential: a credential with a part too short to scrub
+// never goes out (finding D2-07); the same request with a long one does.
+func TestProxyShortCredential(t *testing.T) {
+	srv, seen := testUpstream(t)
+	s := headerService(8601)
+	for name, c := range map[string]Credential{
+		"short value":      {Header: "X-Api-Key", Value: "k3y4567", Scrub: ScrubValues("k3y4567")},
+		"short token":      {Header: "Authorization", Value: "Bearer abc", Scrub: ScrubValues("Bearer abc")},
+		"short cookie":     {Header: "Cookie", Value: "lang=en; session=c00kie-v4lue", Scrub: []string{"en", "c00kie-v4lue", "lang=en; session=c00kie-v4lue"}},
+		"value not listed": {Header: "X-Api-Key", Value: "k3y", Scrub: nil},
+	} {
+		addr := testProxy(t, srv, s, func(context.Context, string) (Credential, error) { return c, nil }, nil, nil)
+		before := len(seen.reqs)
+		resp := rawExchange(t, addr, "GET /api/echo HTTP/1.1\r\nHost: "+addr+"\r\nConnection: close\r\n\r\n")
+		if !strings.HasPrefix(resp, "HTTP/1.1 503") || !strings.Contains(resp, "shorter than 8") || len(seen.reqs) != before {
+			t.Errorf("%s:\n%s", name, resp)
+		}
+	}
+	// Control: a long key of the same shape is sent and scrubbed.
+	long := Credential{Header: "X-Api-Key", Value: "k3y45678", Scrub: ScrubValues("k3y45678")}
+	addr := testProxy(t, srv, s, func(context.Context, string) (Credential, error) { return long, nil }, nil, nil)
+	resp := rawExchange(t, addr, "GET /api/echo HTTP/1.1\r\nHost: "+addr+"\r\nConnection: close\r\n\r\n")
+	if !strings.HasPrefix(resp, "HTTP/1.1 200") || seen.last().Header.Get("X-Api-Key") != "k3y45678" {
+		t.Errorf("long key:\n%s", resp)
+	}
+}
+
 func TestProxyCredentialErrors(t *testing.T) {
 	srv, seen := testUpstream(t)
 	s := headerService(8601)
@@ -306,21 +335,43 @@ func TestProxyCookieLogin(t *testing.T) {
 }
 
 func TestScrubValues(t *testing.T) {
-	vals := ScrubValues("Basic dXNlcjpwYXNzd29yZDEyMw==")
-	want := []string{"Basic dXNlcjpwYXNzd29yZDEyMw==", "dXNlcjpwYXNzd29yZDEyMw==", "user:password123", "password123"}
-	for _, w := range want {
-		found := false
-		for _, v := range vals {
-			found = found || v == w
-		}
-		if !found {
-			t.Errorf("ScrubValues misses %q: %q", w, vals)
+	for v, want := range map[string][]string{
+		"Basic dXNlcjpwYXNzd29yZDEyMw==": {"Basic dXNlcjpwYXNzd29yZDEyMw==", "dXNlcjpwYXNzd29yZDEyMw==", "user:password123", "password123"},
+		"Bearer s3cr3t-t0ken":            {"Bearer s3cr3t-t0ken", "s3cr3t-t0ken"},
+		// A single value is not decoded, even when it is valid base64
+		// holding a colon: it is an API key, not Basic.
+		"dXNlcjpwYXNzd29yZDEyMw==": {"dXNlcjpwYXNzd29yZDEyMw=="},
+	} {
+		if got := ScrubValues(v); !slices.Equal(got, want) {
+			t.Errorf("ScrubValues(%q) = %q, want %q", v, got, want)
 		}
 	}
-	s := newScrubber([]string{"short", "longsecretvalue"})
-	h := http.Header{"A": {"x longsecretvalue y", "en"}, "Longsecretvalue-Name": {"1"}, "Content-Length": {"5"}, "B": {"short"}}
+	// D2-07: every part must be long enough to be scrubbed; the message
+	// never shows the value.
+	for v, ok := range map[string]bool{
+		"12345678":                       true,
+		"1234567":                        false,
+		"Bearer s3cr3t-t0ken":            true,
+		"Bearer abc1234":                 false,
+		"Basic dXNlcjpwYXNzd29yZDEyMw==": true,
+		"Basic " + base64.StdEncoding.EncodeToString([]byte("user:pw12")):  false,
+		"Basic " + base64.StdEncoding.EncodeToString([]byte("u:pw345678")): true,
+	} {
+		err := CheckCredential(v)
+		if (err == nil) != ok || err != nil && (strings.Contains(err.Error(), v) || !strings.Contains(err.Error(), "at least 8")) {
+			t.Errorf("CheckCredential(%q): %v", v, err)
+		}
+	}
+	for stored, ok := range map[string]bool{"longsecret\n": true, "longsecret\r\n": true, "short\n": false, "two\nlines-here": false, "": false} {
+		if _, err := HeaderCredential([]byte(stored)); (err == nil) != ok {
+			t.Errorf("HeaderCredential(%q): %v", stored, err)
+		}
+	}
+	// Every value given is scrubbed, whatever its length.
+	s := newScrubber([]string{"seven77", "longsecretvalue"})
+	h := http.Header{"A": {"x longsecretvalue y", "en"}, "Longsecretvalue-Name": {"1"}, "Content-Length": {"5"}, "B": {"seven77"}, "C": {"other"}}
 	s.header(h)
-	if h.Get("A") != "x "+Redacted+" y" || h.Get("Longsecretvalue-Name") != "" || h.Get("B") != "short" || h.Get("Content-Length") != "5" {
+	if h.Get("A") != "x "+Redacted+" y" || h.Get("Longsecretvalue-Name") != "" || h.Get("B") != Redacted || h.Get("C") != "other" || h.Get("Content-Length") != "5" {
 		t.Errorf("scrubbed: %v", h)
 	}
 	// The scrubber also catches URL-encoded forms.

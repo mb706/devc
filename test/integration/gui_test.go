@@ -298,6 +298,66 @@ func TestGUI(t *testing.T) {
 		t.Error("the sidecar's root is writable")
 	}
 
+	// The desktop has limits of its own (the [gui] defaults), in force in
+	// its cgroup (finding D2-01).
+	if hc := ci.HostConfig; hc.Memory != 2<<30 || hc.PidsLimit != 512 || hc.NanoCpus != 2e9 {
+		t.Errorf("sidecar limits %+v", hc)
+	}
+	if out, err := sidecarExec(t, hello, "cat", "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/pids.max", "/sys/fs/cgroup/cpu.max"); err != nil ||
+		out != "2147483648\n512\n200000 100000" {
+		t.Errorf("sidecar cgroup limits %q %v", out, err)
+	}
+	// The relays fork a bounded number of processes for the box's
+	// connections: 24 viewer and 66 X connections held open in the box give
+	// 16 websockify handlers and 64 socat children; the rest wait. Each
+	// viewer connection sends the start of a request and stops, which keeps
+	// its handler waiting (an idle connection would end after websockify's
+	// 3 s handshake timeout, and a WebSocket would reach Xvnc, which refuses
+	// a sixth unauthenticated connection from 127.0.0.1).
+	relays := func() (web, x int) {
+		out, _ := sidecarExec(t, hello, "sh", "-c", "for p in /proc/[0-9]*; do cat $p/comm 2>/dev/null; done")
+		for _, l := range strings.Split(out, "\n") {
+			switch l {
+			case "python3":
+				web++
+			case "socat":
+				x++
+			}
+		}
+		return web, x
+	}
+	// A handler of an earlier request may still be ending; it counts
+	// towards the bound like any other.
+	web0, x0 := relays()
+	if web0 < 1 || web0 > 3 || x0 != 1 {
+		t.Errorf("relay processes before: websockify %d, socat %d", web0, x0)
+	}
+	hold := exec.Command(itest.Engine(), "exec", boxName(hello), "bash", "-c",
+		`req=$'GET /vnc.html HTTP/1.1\r\nHost: 127.0.0.1:6080\r\n'; `+
+			`for i in $(seq 24); do exec {fd}<>/dev/tcp/127.0.0.1/6080 || exit 1; printf '%s' "$req" >&$fd; done; `+
+			`for i in $(seq 66); do exec {fd}<>/dev/tcp/127.0.0.1/6001 || exit 1; done; echo opened; sleep 15`)
+	var holdOut strings.Builder
+	hold.Stdout, hold.Stderr = &holdOut, &holdOut
+	if err := hold.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var web, x int
+	pollFor(20*time.Second, func() bool { web, x = relays(); return web >= 17 && x >= 65 })
+	time.Sleep(time.Second)
+	web, x = relays()
+	if err := hold.Wait(); err != nil || !strings.Contains(holdOut.String(), "opened") {
+		t.Errorf("holding connections in the box: %v %s", err, holdOut.String())
+	}
+	if web != 17 || x != 65 {
+		t.Errorf("relay processes with the connections held: websockify %d (want 1+16), socat %d (want 1+64)", web, x)
+	}
+	if !pollFor(20*time.Second, func() bool { web, x = relays(); return web <= web0 && x == x0 }) {
+		t.Errorf("relay processes after the connections closed: websockify %d, socat %d", web, x)
+	}
+	if err := viewerAnswers(v); err != nil {
+		t.Errorf("viewer after the connections: %v", err)
+	}
+
 	// Joining disturbed neither the readiness nor the rules (C07r).
 	if res := e.MustRun("up", hello); !strings.Contains(res.Stderr+res.Stdout, "already running") {
 		t.Errorf("up after gui up: %s%s", res.Stdout, res.Stderr)

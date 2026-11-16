@@ -512,7 +512,12 @@ func (w *DataWorker) pullIn(req DataRequest, res *DataResult) error {
 	}
 	res.TrashID, res.Displaced, res.Same = pi.trashID, pi.moved, pi.same
 	res.Files, res.Size, res.Skipped = pi.copier.stats.files, pi.copier.stats.size, pi.copier.stats.skipped
-	res.Digests, err = recordDigests(req.Layout, targets, src, root, false)
+	if res.Digests, err = recordDigests(req.Layout, targets, src, root, false); err != nil {
+		return err
+	}
+	// What the remote had, entry by entry, as it arrived: compared with
+	// the local digests, it shows whether the merge made them equal.
+	res.RemoteDigests, err = recordDigests(req.Layout, targets, src, src, false)
 	return err
 }
 

@@ -3,9 +3,13 @@ package svclogin
 // Cookie jars of cookie services. A login command prints its cookies as a
 // JSON array on standard output; that output comes from a container that
 // ran with a password and the network, so it is parsed strictly: known
-// fields only, RFC 6265 names and values, a domain that matches the
-// service's host, bounded counts and sizes. devc stores the result with the
-// time of the login as the realm secret _jar.<service>.
+// fields only, RFC 6265 names and values, values of at least MinCredential
+// characters (finding D2-07: every cookie is scrubbed from responses), a
+// domain that matches the service's host, bounded counts and sizes. devc
+// stores the result with the time of the login as the realm secret
+// _jar.<service>. Error messages never repeat what the output held (finding
+// D2-08): cookies are named by their position, and JSON errors by kind
+// and offset.
 
 import (
 	"bytes"
@@ -68,7 +72,7 @@ func ParseLoginOutput(b []byte, host string, now time.Time) ([]Cookie, error) {
 	dec.DisallowUnknownFields()
 	var list []Cookie
 	if err := dec.Decode(&list); err != nil {
-		return nil, fmt.Errorf("the login command's output is not a JSON array of cookies (name, value, domain, path, expiry): %s", printable(truncate(err.Error(), 200)))
+		return nil, fmt.Errorf("the login command's output is not a JSON array of cookies (name, value, domain, path, expiry): %s", jsonProblem(err))
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, errors.New("the login command printed something after the JSON array")
@@ -91,6 +95,33 @@ func ParseLoginOutput(b []byte, host string, now time.Time) ([]Cookie, error) {
 	return list, nil
 }
 
+// jsonProblem describes a decoding error without repeating any of the
+// input (an unknown field's name, a string's content).
+func jsonProblem(err error) string {
+	var (
+		se *json.SyntaxError
+		te *json.UnmarshalTypeError
+	)
+	switch {
+	case errors.As(err, &se):
+		return fmt.Sprintf("invalid JSON at byte %d", se.Offset)
+	case errors.As(err, &te):
+		switch te.Field {
+		case "", "name", "value", "domain", "path", "expiry":
+			if te.Field == "" {
+				return fmt.Sprintf("a value of the wrong type at byte %d", te.Offset)
+			}
+			return fmt.Sprintf("the field %s has the wrong type at byte %d", te.Field, te.Offset)
+		}
+		return fmt.Sprintf("a value of the wrong type at byte %d", te.Offset)
+	case strings.HasPrefix(err.Error(), "json: unknown field"):
+		return "an unknown field"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "the JSON ends early"
+	}
+	return "invalid JSON"
+}
+
 // checkCookies validates a list of cookies for host.
 func checkCookies(list []Cookie, host string) error {
 	if len(list) == 0 {
@@ -101,26 +132,28 @@ func checkCookies(list []Cookie, host string) error {
 	}
 	seen := map[string]bool{}
 	for i, c := range list {
-		what := fmt.Sprintf("cookie %d", i+1)
+		what := fmt.Sprintf("cookie %d (in the order printed)", i+1)
 		switch {
 		case c.Name == "" || len(c.Name) > maxCookieName || !isToken(c.Name):
 			return fmt.Errorf("%s: invalid name", what)
 		case len(c.Value) > maxCookieValue:
-			return fmt.Errorf("%s (%s): the value is longer than %d bytes", what, c.Name, maxCookieValue)
+			return fmt.Errorf("%s: the value is longer than %d bytes", what, maxCookieValue)
 		case !cookieValue(c.Value):
-			return fmt.Errorf("%s (%s): the value contains characters a cookie value may not hold (white space, quotes, comma, semicolon, backslash or control characters)", what, c.Name)
+			return fmt.Errorf("%s: the value contains characters a cookie value may not hold (white space, quotes, comma, semicolon, backslash or control characters)", what)
+		case len(c.Value) < MinCredential:
+			return fmt.Errorf("%s: the value has %d characters; devc needs at least %d to keep a cookie out of responses, so leave short cookies (a language, a consent flag) out of the login's output", what, len(c.Value), MinCredential)
 		case !validDomain(c.Domain):
-			return fmt.Errorf("%s (%s): %q is not a domain", what, c.Name, printable(truncate(c.Domain, 80)))
+			return fmt.Errorf("%s: the domain is not a host name or address", what)
 		case !DomainMatches(c.Domain, host):
-			return fmt.Errorf("%s (%s): it is for %s, not for the service's host %s", what, c.Name, printable(c.Domain), host)
+			return fmt.Errorf("%s: its domain is not the service's host %s or a domain above it", what, host)
 		case !validCookiePath(c.Path):
-			return fmt.Errorf("%s (%s): invalid path", what, c.Name)
+			return fmt.Errorf("%s: invalid path", what)
 		case c.Expiry < 0 || c.Expiry > maxExpiry:
-			return fmt.Errorf("%s (%s): invalid expiry (Unix seconds, 0 for none)", what, c.Name)
+			return fmt.Errorf("%s: invalid expiry (Unix seconds, 0 for none)", what)
 		}
 		key := c.Name + "\x00" + strings.TrimPrefix(c.Domain, ".") + "\x00" + c.Path
 		if seen[key] {
-			return fmt.Errorf("%s (%s): listed twice for the same domain and path", what, c.Name)
+			return fmt.Errorf("%s: listed twice for the same domain and path", what)
 		}
 		seen[key] = true
 	}
@@ -232,7 +265,7 @@ func ParseJar(b []byte, service string) (*Jar, error) {
 	dec.DisallowUnknownFields()
 	var j Jar
 	if err := dec.Decode(&j); err != nil {
-		return nil, fmt.Errorf("the stored cookie jar is not valid JSON: %s", printable(truncate(err.Error(), 200)))
+		return nil, fmt.Errorf("the stored cookie jar is not a valid jar: %s", jsonProblem(err))
 	}
 	if j.V != 1 || j.Service != service || j.LoginAt.IsZero() {
 		return nil, errors.New("the stored cookie jar is not a jar of this service")

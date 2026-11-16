@@ -8,8 +8,9 @@ package daemon
 // scrubbed of the credential, on the stream that asked. host.github.token
 // hands a box the token of its project's mode, "token:<secret>" (stored) or
 // "app" (minted for the one repository with the permissions in force),
-// when the box was started with that mode and the configuration still
-// says so (box.Capabilities, finding C1-02). Tokens are never logged.
+// when the box was started with that mode, repository and App and the
+// configuration still says so (box.Capabilities, findings C1-02 and
+// D2-02). Tokens are never logged.
 
 import (
 	"context"
@@ -190,15 +191,17 @@ func (d *Daemon) githubToken(ctx context.Context, ref names.ProjectRef, containe
 	if perr != nil {
 		return nil, perr
 	}
-	mode, perms, err := caps.GitHubToken(r)
+	if _, perr := d.githubRepo(r); perr != nil {
+		return nil, perr
+	}
+	// The mode, the repository and the App are those of the box's start
+	// (findings C1-02, D2-02).
+	g, err := caps.GitHubToken(r, d.o.GitHub.Web)
 	if err != nil {
 		d.log.Warn("refused a GitHub token", "ref", ref.String(), "err", err)
 		return nil, proto.Errorf(proto.CodeRefused, "%s; ask the user to bring the box up again ('devc down %s' and 'devc up %s')", proto.Printable(err.Error()), ref, ref)
 	}
-	repo, perr := d.githubRepo(r)
-	if perr != nil {
-		return nil, perr
-	}
+	mode, perms, repo := g.Mode, g.Permissions, g.Repo
 	store := d.secretStore(e)
 	web := d.o.GitHub.Web
 	reply := proto.GitHubTokenReply{Username: "x-access-token", Protocol: web.Scheme, Host: web.Host}
@@ -212,7 +215,7 @@ func (d *Daemon) githubToken(ctx context.Context, ref names.ProjectRef, containe
 			d.log.Warn("reading the GitHub App key", "ref", ref.String(), "secret", app.KeySecret, "err", err)
 			return nil, proto.Errorf(proto.CodeNotFound, "the GitHub App's key is not available on the host: ask the user to run 'devc secret set %s %s < key.pem'", r.Realm, app.KeySecret)
 		}
-		tok, err := d.minter.Token(ctx, d.o.GitHub.API, github.App{ID: app.AppID, InstallationID: app.InstallationID}, key, repo, perms)
+		tok, err := d.minter.Token(ctx, d.o.GitHub.API, ref.String(), github.App{ID: app.AppID, InstallationID: app.InstallationID}, key, repo, perms)
 		if err != nil {
 			d.log.Warn("minting a GitHub token", "ref", ref.String(), "repo", repo.String(), "err", proto.Printable(err.Error()))
 			return nil, proto.Errorf(proto.CodeInternal, "the host could not get a token from the GitHub App: %s", proto.Printable(proto.Truncate(err.Error(), 300)))

@@ -111,6 +111,11 @@ type DataResult struct {
 	// Digests describe the entries for the manifest (seal, setup with
 	// Digest, reflink-save, pull-in, push-stage, digest).
 	Digests []EntryDigest `json:"digests,omitempty"`
+	// RemoteDigests (pull-in) describe the same entries as the remote had
+	// them, from the staged tree: the remote's observation, which differs
+	// from Digests when sealed entries were skipped or local-only content
+	// was kept (finding D2-12).
+	RemoteDigests []EntryDigest `json:"remote_digests,omitempty"`
 	// ls
 	Zones   []ZoneInfo   `json:"zones,omitempty"`
 	Entries []EntryInfo  `json:"entries,omitempty"`

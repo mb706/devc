@@ -392,58 +392,230 @@ func TestRead(t *testing.T) {
 	}
 }
 
+// appFake is a fake of GitHub's App endpoints: installations per
+// repository (with their account), metadata probes that see the repository
+// a name means in the installation, revocation, and mints restricted by
+// repository ID.
+type appFake struct {
+	mu       sync.Mutex
+	pub      *rsa.PublicKey
+	now      func() time.Time
+	installs map[string]string // "owner/repo" -> "<installation id>:<account>"
+	repos    map[string]int64  // "<installation>/<name>" -> repository ID
+	full     map[int64]string  // repository ID -> full name
+	probes   map[string]int64  // live probe tokens -> repository ID
+	lookups  int
+	revoked  int
+	mints    []string // bodies of real mints
+	extraIDs bool     // answer real mints with one more repository
+	n        int
+	f        *fakeAPI
+}
+
+func newAppFake(t *testing.T, pub *rsa.PublicKey, now func() time.Time) *appFake {
+	a := &appFake{pub: pub, now: now, probes: map[string]int64{},
+		installs: map[string]string{"acme/app": "77:acme", "acme/tools": "77:acme", "other/tools": "88:other", "trick/app": "77:acme"},
+		repos:    map[string]int64{"77/app": 1001, "77/tools": 1002, "88/tools": 2002},
+		full:     map[int64]string{1001: "acme/app", 1002: "acme/tools", 2002: "other/tools"}}
+	a.f = newFakeAPI(t, a.serve)
+	return a
+}
+
+func (a *appFake) serve(w http.ResponseWriter, r *http.Request, body string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	auth, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if id, ok := a.probes[auth]; ok {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/installation/repositories":
+			fmt.Fprintf(w, `{"total_count":1,"repositories":[{"id":%d,"full_name":%q}]}`, id, a.full[id])
+		case r.Method == "DELETE" && r.URL.Path == "/installation/token":
+			delete(a.probes, auth)
+			a.revoked++
+			w.WriteHeader(204)
+		default:
+			w.WriteHeader(403)
+		}
+		return
+	}
+	if r.Method == "DELETE" && r.URL.Path == "/installation/token" && strings.HasPrefix(auth, "ghs_minted") {
+		a.revoked++
+		w.WriteHeader(204)
+		return
+	}
+	if _, err := verifyJWT(a.pub, auth); err != nil {
+		w.WriteHeader(401)
+		return
+	}
+	if repo, ok := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/repos/"), "/installation"); ok && r.Method == "GET" {
+		a.lookups++
+		inst, acct, ok := strings.Cut(a.installs[repo], ":")
+		if !ok {
+			w.WriteHeader(404)
+			return
+		}
+		fmt.Fprintf(w, `{"id":%s,"account":{"login":%q}}`, inst, acct)
+		return
+	}
+	inst, ok := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/app/installations/"), "/access_tokens")
+	if !ok || r.Method != "POST" {
+		w.WriteHeader(404)
+		return
+	}
+	var b struct {
+		Repositories  []string          `json:"repositories"`
+		RepositoryIDs []int64           `json:"repository_ids"`
+		Permissions   map[string]string `json:"permissions"`
+	}
+	if json.Unmarshal([]byte(body), &b) != nil {
+		w.WriteHeader(422)
+		return
+	}
+	a.n++
+	exp := a.now().Add(time.Hour).Format(time.RFC3339)
+	switch {
+	case len(b.Repositories) == 1 && len(b.RepositoryIDs) == 0 && len(b.Permissions) == 1 && b.Permissions["metadata"] == "read":
+		id, ok := a.repos[inst+"/"+b.Repositories[0]]
+		if !ok {
+			w.WriteHeader(422)
+			return
+		}
+		tok := fmt.Sprintf("ghs_probe%d", a.n)
+		a.probes[tok] = id
+		w.WriteHeader(201)
+		fmt.Fprintf(w, `{"token":%q,"expires_at":%q}`, tok, exp)
+	case len(b.Repositories) == 0 && len(b.RepositoryIDs) == 1:
+		if !strings.HasPrefix(a.full[b.RepositoryIDs[0]], map[string]string{"77": "acme/", "88": "other/"}[inst]) {
+			w.WriteHeader(422)
+			return
+		}
+		a.mints = append(a.mints, body)
+		ids := fmt.Sprintf(`{"id":%d}`, b.RepositoryIDs[0])
+		if a.extraIDs {
+			ids += `,{"id":9999}`
+		}
+		w.WriteHeader(201)
+		fmt.Fprintf(w, `{"token":"ghs_minted%d","expires_at":%q,"repositories":[%s]}`, len(a.mints), exp, ids)
+	default:
+		w.WriteHeader(422)
+	}
+}
+
+func (a *appFake) counts() (lookups, mints, probes, revoked int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lookups, len(a.mints), a.n - len(a.mints), a.revoked
+}
+
 func TestMinter(t *testing.T) {
 	k, pemKey := testKey(t)
 	var now time.Time
-	var mints int
-	var installLookups int
-	f := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request, body string) {
-		auth, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if _, err := verifyJWT(&k.PublicKey, auth); err != nil {
-			w.WriteHeader(401)
-			return
-		}
-		switch {
-		case r.Method == "GET" && r.URL.Path == "/repos/acme/app/installation":
-			installLookups++
-			io.WriteString(w, `{"id":77}`)
-		case r.Method == "POST" && r.URL.Path == "/app/installations/77/access_tokens":
-			mints++
-			var b struct {
-				Repositories []string          `json:"repositories"`
-				Permissions  map[string]string `json:"permissions"`
-			}
-			if json.Unmarshal([]byte(body), &b) != nil || len(b.Repositories) != 1 || b.Repositories[0] != "app" || b.Permissions["contents"] != "write" {
-				w.WriteHeader(422)
-				return
-			}
-			w.WriteHeader(201)
-			fmt.Fprintf(w, `{"token":"ghs_minted%d","expires_at":%q}`, mints, now.Add(time.Hour).Format(time.RFC3339))
-		default:
-			w.WriteHeader(404)
-		}
-	})
+	a := newAppFake(t, &k.PublicKey, func() time.Time { return now })
 	now = time.Now()
+	ctx := context.Background()
 	m := &Minter{Now: func() time.Time { return now }}
-	api := mustURL(t, f.srv.URL)
+	api := mustURL(t, a.f.srv.URL)
 	perms := map[string]string{"contents": "write", "metadata": "read"}
-	tok, err := m.Token(context.Background(), api, App{ID: 9}, pemKey, Repo{"acme", "app"}, perms)
+	acme := Repo{"acme", "app"}
+	tok, err := m.Token(ctx, api, "demo/hello", App{ID: 9}, pemKey, acme, perms)
 	if err != nil || tok.Value != "ghs_minted1" {
 		t.Fatalf("first: %+v %v", tok, err)
 	}
+	// The installation was looked up, a probe read the repository's ID
+	// and was revoked, and the token is restricted by that ID.
+	if l, n, p, rv := a.counts(); l != 1 || n != 1 || p != 1 || rv != 1 {
+		t.Errorf("lookups %d mints %d probes %d revoked %d", l, n, p, rv)
+	}
+	if a.mints[0] != `{"permissions":{"contents":"write","metadata":"read"},"repository_ids":[1001]}` {
+		t.Errorf("mint body %s", a.mints[0])
+	}
 	now = now.Add(50 * time.Minute)
-	if tok, _ := m.Token(context.Background(), api, App{ID: 9}, pemKey, Repo{"acme", "app"}, perms); tok.Value != "ghs_minted1" || mints != 1 {
-		t.Errorf("cached: %+v after %d mints", tok, mints)
+	if tok, _ := m.Token(ctx, api, "demo/hello", App{ID: 9}, pemKey, acme, perms); tok.Value != "ghs_minted1" {
+		t.Errorf("cached: %+v", tok)
 	}
 	now = now.Add(5*time.Minute + time.Second)
-	if tok, _ := m.Token(context.Background(), api, App{ID: 9}, pemKey, Repo{"acme", "app"}, perms); tok.Value != "ghs_minted2" || installLookups != 1 {
-		t.Errorf("after expiry: %+v, %d lookups", tok, installLookups)
+	if tok, _ := m.Token(ctx, api, "demo/hello", App{ID: 9}, pemKey, acme, perms); tok.Value != "ghs_minted2" {
+		t.Errorf("after expiry: %+v", tok)
 	}
-	if _, err := m.Token(context.Background(), api, App{ID: 9}, pemKey, Repo{"acme", "app"}, map[string]string{"workflows": "write"}); err == nil {
+	if l, n, p, _ := a.counts(); l != 1 || n != 2 || p != 1 {
+		t.Errorf("after expiry: lookups %d mints %d probes %d", l, n, p)
+	}
+	if _, err := m.Token(ctx, api, "demo/hello", App{ID: 9}, pemKey, acme, map[string]string{"workflows": "write"}); err == nil {
 		t.Error("workflows minted")
 	}
-	if _, err := m.Token(context.Background(), api, App{ID: 9, InstallationID: 78}, pemKey, Repo{"acme", "app"}, perms); err == nil {
-		t.Error("a missing installation minted")
+	// The configured installation is the one GitHub names.
+	if _, err := m.Token(ctx, api, "demo/hello", App{ID: 9, InstallationID: 77}, pemKey, acme, perms); err != nil {
+		t.Errorf("configured installation: %v", err)
+	}
+
+	// D2-03: an installation that does not cover the project's owner and
+	// repository never mints for it.
+	_, before, _, _ := a.counts()
+	for name, c := range map[string]struct {
+		app  App
+		repo Repo
+		want string
+	}{
+		"configured installation of another account": {App{ID: 9, InstallationID: 77}, Repo{"other", "tools"}, "does not cover other/tools"},
+		"no installation":                 {App{ID: 9}, Repo{"nobody", "tools"}, "installation"},
+		"installation of another account": {App{ID: 9}, Repo{"trick", "app"}, `belongs to "acme"`},
+	} {
+		if _, err := m.Token(ctx, api, "demo/"+strings.ReplaceAll(name, " ", "-"), c.app, pemKey, c.repo, perms); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want …%s…", name, err, c.want)
+		}
+	}
+	// The probe sees a repository of another name: refused.
+	a.mu.Lock()
+	a.full[1002] = "acme/other-tools"
+	a.mu.Unlock()
+	if _, err := m.Token(ctx, api, "demo/tools", App{ID: 9}, pemKey, Repo{"acme", "tools"}, perms); err == nil || !strings.Contains(err.Error(), "does not cover exactly acme/tools") {
+		t.Errorf("probe of another repository: %v", err)
+	}
+	if _, n, _, _ := a.counts(); n != before {
+		t.Errorf("%d tokens minted for repositories outside the installation", n-before)
+	}
+	// Control: the right owner's installation mints.
+	if _, err := m.Token(ctx, api, "demo/other", App{ID: 9}, pemKey, Repo{"other", "tools"}, perms); err != nil {
+		t.Errorf("other/tools in its own installation: %v", err)
+	}
+	// A token whose answer covers more than the one repository is revoked
+	// and refused.
+	a.mu.Lock()
+	a.extraIDs = true
+	a.mu.Unlock()
+	_, _, _, rv := a.counts()
+	if _, err := m.Token(ctx, api, "demo/extra", App{ID: 9}, pemKey, acme, perms); err == nil || !strings.Contains(err.Error(), "not only 1001") {
+		t.Errorf("extra repositories: %v", err)
+	}
+	if _, _, _, rv2 := a.counts(); rv2 != rv+2 {
+		t.Errorf("revocations %d, want %d (the probe and the refused token)", rv2, rv+2)
+	}
+	a.mu.Lock()
+	a.extraIDs = false
+	a.mu.Unlock()
+
+	// D2-09: caches are per project and per key. Another project gets a
+	// token of its own, not demo/hello's cached one.
+	if tok, err := m.Token(ctx, api, "other/hello", App{ID: 9}, pemKey, acme, perms); err != nil || tok.Value == "ghs_minted2" {
+		t.Errorf("another project: %+v %v", tok, err)
+	}
+	// An invalid key fails before any cache lookup, also for the project
+	// whose token is cached.
+	if _, err := m.Token(ctx, api, "demo/hello", App{ID: 9}, []byte("not a key"), acme, perms); err == nil {
+		t.Error("an invalid key received the cached token")
+	}
+	// Another valid key is a new identity: GitHub refuses its JWT and the
+	// cached token is not handed out.
+	_, otherKey := testKey(t)
+	if tok, err := m.Token(ctx, api, "demo/hello", App{ID: 9}, otherKey, acme, perms); err == nil {
+		t.Errorf("another key received %+v", tok)
+	}
+	// Control: the right key still gets the cached token.
+	if tok, err := m.Token(ctx, api, "demo/hello", App{ID: 9}, pemKey, acme, perms); err != nil || tok.Value != "ghs_minted2" {
+		t.Errorf("cached for the right key: %+v %v", tok, err)
+	}
+	if _, err := m.Token(ctx, api, "", App{ID: 9}, pemKey, acme, perms); err == nil {
+		t.Error("no scope accepted")
 	}
 }
 

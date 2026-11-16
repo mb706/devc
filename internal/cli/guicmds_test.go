@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -42,5 +46,50 @@ func TestGUIHelp(t *testing.T) {
 		if code != 0 || !strings.Contains(out, sub) {
 			t.Errorf("gui: %d %s", code, out)
 		}
+	}
+}
+
+// TestBrowserProbeNoRedirect: the probe of a box's debugging port never
+// follows a redirect, which would be fetched from the host (finding D2-05).
+func TestBrowserProbeNoRedirect(t *testing.T) {
+	var hits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = io.WriteString(w, `{"Browser":"Target/1.0"}`)
+	}))
+	defer target.Close()
+	for _, code := range []int{http.StatusFound, http.StatusMovedPermanently, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		box := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+"/admin?action=reset", code)
+		}))
+		addr := strings.TrimPrefix(box.URL, "http://")
+		if browserAnswers(addr) {
+			t.Errorf("%d: a redirect counted as a browser", code)
+		}
+		if n := hits.Load(); n != 0 {
+			t.Errorf("%d: the redirect target was fetched %d times", code, n)
+		}
+		// Positive control: an ordinary client follows the same redirect.
+		resp, err := http.Get(box.URL + "/json/version")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if hits.Swap(0) != 1 {
+			t.Errorf("%d: control: the redirect was not followed by a default client", code)
+		}
+		box.Close()
+	}
+	// A browser that answers is recognised.
+	browser := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/json/version" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"Browser":"Chrome/140.0"}`)
+	}))
+	defer browser.Close()
+	if !browserAnswers(strings.TrimPrefix(browser.URL, "http://")) {
+		t.Error("a browser was not recognised")
 	}
 }

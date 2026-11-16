@@ -310,6 +310,7 @@ type HostConfig struct {
 	Privileged  bool     `json:"Privileged"`
 	Memory      int64    `json:"Memory"`
 	PidsLimit   int64    `json:"PidsLimit"`
+	NanoCpus    int64    `json:"NanoCpus"`
 	NetworkMode string   `json:"NetworkMode"`
 	Init        bool     `json:"Init"`
 }

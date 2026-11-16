@@ -288,6 +288,7 @@ func TestDefaultsApplyWhenKeysAbsent(t *testing.T) {
 		t.Fatal(probs)
 	}
 	if c.Global.Engine != "podman" || c.Global.Box.Memory != "16g" || c.Global.Box.Pids != 4096 ||
+		c.Global.GUI != (GlobalGUI{Memory: "2g", Pids: 512, CPUs: 2}) ||
 		!strings.HasSuffix(c.Paths.ProjectsRoot(), "/home/devc") {
 		t.Errorf("global defaults: %+v", c.Global)
 	}
@@ -461,6 +462,11 @@ func TestBrokenConfigurations(t *testing.T) {
 		{"global memory", set("config.toml", "default_env = \"base\"\n[box]\nmemory = \"lots\"\n"), "config.toml", "box.memory", "not a size"},
 		{"negative pids", add(hello, "[box]\npids = -2"), hello, "box.pids", "not a limit"},
 		{"global pids zero", set("config.toml", "default_env = \"base\"\n[box]\npids = 0\n"), "config.toml", "box.pids", "-1"},
+		{"gui memory", set("config.toml", "default_env = \"base\"\n[gui]\nmemory = \"lots\"\n"), "config.toml", "gui.memory", "not a size"},
+		{"gui pids zero", set("config.toml", "default_env = \"base\"\n[gui]\npids = 0\n"), "config.toml", "gui.pids", "-1"},
+		{"gui cpus zero", set("config.toml", "default_env = \"base\"\n[gui]\ncpus = 0\n"), "config.toml", "gui.cpus", "-1"},
+		{"gui cpus negative", set("config.toml", "default_env = \"base\"\n[gui]\ncpus = -2.5\n"), "config.toml", "gui.cpus", "not a limit"},
+		{"gui cpus nan", set("config.toml", "default_env = \"base\"\n[gui]\ncpus = nan\n"), "config.toml", "gui.cpus", "not a limit"},
 		{"manifest shared nests", set("harness/pi.toml", minimalManifest("pi")+"shared = [\"state\", \"state/p/child\"]\n"), "harness/pi.toml", "home.shared[1]", "nest"},
 		{"manifest per_box nests", set("harness/pi.toml", minimalManifest("pi")+"strategy = \"shared\"\nper_box = [\"a/b\", \"a\"]\n"), "harness/pi.toml", "home.per_box[1]", "nest"},
 		{"manifest shared home itself", set("harness/pi.toml", minimalManifest("pi")+"shared = [\".\"]\n"), "harness/pi.toml", "home.shared[0]", "not the home itself"},

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -251,7 +252,14 @@ func (f *Fake) Create(_ context.Context, args []string) (string, error) {
 			ci.Env = append(ci.Env, next())
 		case a == "--network":
 			ci.HostConfig.NetworkMode = next()
-		case a == "--hostname", a == "--tz", a == "--workdir", a == "--memory", a == "--pids-limit", a == "--passwd-entry",
+		case a == "--memory":
+			ci.HostConfig.Memory, _ = strconv.ParseInt(next(), 10, 64)
+		case a == "--pids-limit":
+			ci.HostConfig.PidsLimit, _ = strconv.ParseInt(next(), 10, 64)
+		case a == "--cpus":
+			c, _ := strconv.ParseFloat(next(), 64)
+			ci.HostConfig.NanoCpus = int64(c * 1e9)
+		case a == "--hostname", a == "--tz", a == "--workdir", a == "--passwd-entry",
 			a == "--entrypoint", a == "--device", a == "--group-add", a == "--sysctl":
 			next()
 		case a == "--rootfs":

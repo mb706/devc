@@ -89,6 +89,19 @@ type Manager struct {
 	facts *HostFacts // cached for the lifetime of the manager (one command)
 }
 
+// HostFacts returns the host facts that change container arguments,
+// detected once for the lifetime of the manager.
+func (m *Manager) HostFacts(ctx context.Context) (HostFacts, error) {
+	if m.facts == nil {
+		f, err := DetectHost(ctx, m.Engine, m.HostRoot)
+		if err != nil {
+			return HostFacts{}, err
+		}
+		m.facts = &f
+	}
+	return *m.facts, nil
+}
+
 // NewManager returns a manager with production defaults.
 func NewManager(c *config.Config, eng engine.Engine, runner execx.Runner, exe, version string, out io.Writer) *Manager {
 	return &Manager{
@@ -159,14 +172,10 @@ func (m *Manager) plan(ctx context.Context, ref names.ProjectRef, ensure, build 
 	if err != nil {
 		return nil, err
 	}
-	if m.facts == nil {
-		f, err := DetectHost(ctx, m.Engine, m.HostRoot)
-		if err != nil {
-			return nil, err
-		}
-		m.facts = &f
+	facts, err := m.HostFacts(ctx)
+	if err != nil {
+		return nil, err
 	}
-	facts := *m.facts
 	var img engine.ImageInfo
 	if ensure {
 		// Ensure creates the state root with mode 0700 if needed; Sync

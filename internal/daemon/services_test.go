@@ -327,3 +327,86 @@ func TestServiceHostileStreams(t *testing.T) {
 	}
 	r.waitChannel(c, proto.ChannelConnected)
 }
+
+// TestServiceStreamDeadlines: a box that stops reading the answer, or never
+// finishes its body, holds its stream, its relay place and the handler only
+// until the service's timeout and the grace; the channel stays (finding
+// D2-04).
+func TestServiceStreamDeadlines(t *testing.T) {
+	old := serviceGrace
+	serviceGrace = 500 * time.Millisecond
+	t.Cleanup(func() { serviceGrace = old })
+	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/api/big":
+			chunk := make([]byte, 64<<10)
+			for i := 0; i < 256; i++ { // 16 MiB, far beyond every window
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
+			}
+		case "/api/upload":
+			n, _ := io.Copy(io.Discard, req.Body)
+			fmt.Fprintf(w, "got %d", n)
+		default:
+			fmt.Fprint(w, "fine")
+		}
+	}))
+	defer up.Close()
+	port := freeTCPPort(t)
+	r := newRig(t)
+	dir := filepath.Join(r.p.ConfigDir(), "realms", "demo", "services", "wiki")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "service.toml"), []byte(fmt.Sprintf("upstream = %q\nport = %d\n[auth]\nkind = \"header\"\nheader = \"Authorization\"\nvalue_secret = \"WIKI_TOKEN\"\n"+
+		"[[allow]]\nmethods = [\"GET\", \"POST\"]\npath = \"/api/\"\n[limits]\ntimeout = \"1s\"\nmax_body = \"64m\"\n", up.URL, port)), 0o644)
+	r.writeProject(t, "harnesses = [\"claude\"]\n[grants]\nservices = [\"wiki\"]\n")
+	r.tweak = func(o *Options) { o.ServiceTransport = up.Client().Transport }
+	r.boxUp(true)
+	r.start()
+	r.agent(nil)
+	c := r.client(nil)
+	r.waitChannel(c, proto.ChannelConnected)
+	r.recordStart()
+	secrets.NewFileStore(r.p).Set("demo", "WIKI_TOKEN", []byte(svcToken+"\n"))
+	w := r.d.worker(hello)
+	busy := func() int { return len(w.relays) }
+	control := func(when string) {
+		t.Helper()
+		sc := r.rawBoxStream(t, proto.MethodHostService, proto.ServiceStreamParams{Name: "wiki"})
+		fmt.Fprint(sc, svcGet(port, "/api/x"))
+		if b, _ := io.ReadAll(sc); !strings.Contains(string(b), "200 OK") || !strings.Contains(string(b), "fine") {
+			t.Errorf("%s: a request that is read: %q", when, b)
+		}
+	}
+	control("before")
+	if !waitFor(5*time.Second, func() bool { return busy() == 0 }) {
+		t.Fatalf("relay places taken after a finished request: %d", busy())
+	}
+	for _, tc := range []struct{ name, req string }{
+		{"stalled reader", svcGet(port, "/api/big")},
+		{"unfinished body", fmt.Sprintf("POST /api/upload HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Length: 100000\r\nConnection: close\r\n\r\npartial", port)},
+	} {
+		start := time.Now()
+		sc := r.rawBoxStream(t, proto.MethodHostService, proto.ServiceStreamParams{Name: "wiki"})
+		fmt.Fprint(sc, tc.req)
+		// The stream holds its place while the exchange runs …
+		time.Sleep(400 * time.Millisecond)
+		if busy() != 1 {
+			t.Errorf("%s: %d relay places taken while it runs, want 1", tc.name, busy())
+		}
+		// … and gives it up after the timeout (1 s) and the grace.
+		if !waitFor(10*time.Second, func() bool { return busy() == 0 }) {
+			t.Errorf("%s: the relay place is still taken after %v", tc.name, time.Since(start))
+		} else if el := time.Since(start); el > 4*time.Second {
+			t.Errorf("%s: freed after %v", tc.name, el)
+		}
+		_ = sc.SetDeadline(time.Now().Add(5 * time.Second))
+		b, err := io.ReadAll(sc)
+		if err != nil || len(b) >= 16<<20 || strings.Contains(string(b), "got ") {
+			t.Errorf("%s: the stream did not end: %d bytes, %v", tc.name, len(b), err)
+		}
+		// Only the stream ended: the channel is still up and serves.
+		r.waitChannel(c, proto.ChannelConnected)
+		control("after " + tc.name)
+	}
+}

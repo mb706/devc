@@ -53,10 +53,14 @@ type fakeGitHub struct {
 }
 
 type mint struct {
-	Token        string
-	Repositories []string
-	Permissions  map[string]string
+	Token         string
+	Repositories  []string
+	RepositoryIDs []int64 `json:"repository_ids"`
+	Permissions   map[string]string
 }
+
+// fakeRepoID is acme/app's repository ID in the fake.
+const fakeRepoID = 4711
 
 func newFakeGitHub(t *testing.T, hostToken string, pub *rsa.PublicKey) *fakeGitHub {
 	t.Helper()
@@ -142,6 +146,18 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, r.Method+" "+path)
 	f.mu.Unlock()
 	auth, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	// The metadata probe of the installation check (finding D2-03).
+	if strings.HasPrefix(auth, "ghs_probe_") {
+		switch {
+		case r.Method == http.MethodGet && path == "/installation/repositories":
+			fmt.Fprintf(w, `{"total_count":1,"repositories":[{"id":%d,"full_name":"acme/app"}]}`, fakeRepoID)
+		case r.Method == http.MethodDelete && path == "/installation/token":
+			w.WriteHeader(204)
+		default:
+			w.WriteHeader(403)
+		}
+		return
+	}
 	if strings.HasPrefix(path, "/app/") || path == "/repos/acme/app/installation" {
 		f.serveApp(w, r, path, auth, body)
 		return
@@ -203,11 +219,17 @@ func (f *fakeGitHub) serveApp(w http.ResponseWriter, r *http.Request, path, auth
 	f.jwtIssuer = append(f.jwtIssuer, claims["iss"].(float64))
 	switch {
 	case r.Method == http.MethodGet && path == "/repos/acme/app/installation":
-		io.WriteString(w, `{"id":55}`)
+		io.WriteString(w, `{"id":55,"account":{"login":"acme"}}`)
 	case r.Method == http.MethodPost && path == "/app/installations/55/access_tokens":
 		var m mint
 		if err := json.Unmarshal(body, &m); err != nil {
 			w.WriteHeader(422)
+			return
+		}
+		exp := time.Now().Add(5*time.Minute + 8*time.Second).UTC().Format(time.RFC3339)
+		if strings.Join(m.Repositories, ",") == "app" && len(m.Permissions) == 1 && m.Permissions["metadata"] == "read" {
+			w.WriteHeader(201)
+			fmt.Fprintf(w, `{"token":"ghs_probe_%d","expires_at":%q}`, len(f.mints)+1, exp)
 			return
 		}
 		b := make([]byte, 12)
@@ -215,7 +237,7 @@ func (f *fakeGitHub) serveApp(w http.ResponseWriter, r *http.Request, path, auth
 		m.Token = fmt.Sprintf("ghs_it%d_%s", len(f.mints)+1, hex.EncodeToString(b))
 		f.mints = append(f.mints, m)
 		w.WriteHeader(201)
-		fmt.Fprintf(w, `{"token":%q,"expires_at":%q}`, m.Token, time.Now().Add(5*time.Minute+8*time.Second).UTC().Format(time.RFC3339))
+		fmt.Fprintf(w, `{"token":%q,"expires_at":%q}`, m.Token, exp)
 	default:
 		w.WriteHeader(404)
 	}
@@ -302,22 +324,31 @@ func setSecret(t *testing.T, e *itest.Env, name, value string) {
 // process environments that contain s. The pattern is passed with its first
 // character in brackets, so the search's own arguments never hold s. With
 // control, a process with s in its environment runs during the search.
-func boxSearch(e *itest.Env, ref, s string, control bool) string {
+// The search must exit 0 and reach its end marker (finding D2-15), so a
+// search that did not run cannot report "nothing found".
+func boxSearch(t *testing.T, e *itest.Env, ref, s string, control bool) string {
+	t.Helper()
+	const done = "DEVC-SEARCH-DONE"
 	pat := "[" + s[:1] + "]" + s[1:]
 	pre, post := "", ""
 	if control {
 		pre, post = "env CTL="+s+" sleep 30 & bg=$!; ", "kill $bg; "
 	}
 	script := pre + "grep -rlE --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev -s '" + pat + "' /home /w /tmp /run /etc /var /opt /ctx; " +
-		"for f in /proc/[0-9]*/environ; do tr '\\0' '\\n' < $f 2>/dev/null | grep -qE '" + pat + "' && echo \"env of $f\"; done; " + post + "true"
-	return strings.TrimSpace(boxRun(e, ref, script).Stdout)
+		"for f in /proc/[0-9]*/environ; do tr '\\0' '\\n' < $f 2>/dev/null | grep -qE '" + pat + "' && echo \"env of $f\"; done; " + post + "echo " + done
+	res := boxRun(e, ref, script)
+	out := strings.TrimSpace(res.Stdout)
+	if res.ExitCode != 0 || !strings.HasSuffix(out, done) {
+		t.Fatalf("the search did not run to its end: exit %d\nstdout: %s\nstderr: %s", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	return strings.TrimSpace(strings.TrimSuffix(out, done))
 }
 
 // notInBox asserts that s appears in no file and no process environment of
 // the box.
 func notInBox(t *testing.T, e *itest.Env, ref, what, s string) {
 	t.Helper()
-	if out := boxSearch(e, ref, s, false); out != "" {
+	if out := boxSearch(t, e, ref, s, false); out != "" {
 		t.Errorf("%s found in the box: %q", what, out)
 	}
 }
@@ -457,7 +488,7 @@ func TestGitHub(t *testing.T) {
 	// The search finds what is there (a file and an environment).
 	ctl := "CONTROL" + itest.Nonce + "MARK"
 	boxRun(e, ref, "echo "+ctl+" > /tmp/control")
-	if out := boxSearch(e, ref, ctl, true); !strings.Contains(out, "/tmp/control") || !strings.Contains(out, "env of") {
+	if out := boxSearch(t, e, ref, ctl, true); !strings.Contains(out, "/tmp/control") || !strings.Contains(out, "env of") {
 		t.Errorf("the search does not find a control: %q", out)
 	}
 	notInBox(t, e, ref, "the host credential", hostTok)
@@ -516,7 +547,8 @@ func TestGitHubTokens(t *testing.T) {
 	f.mu.Lock()
 	auth, bad, issuers := append([]string{}, f.pushAuth...), f.jwtBad, append([]float64{}, f.jwtIssuer...)
 	f.mu.Unlock()
-	if len(mints) != 1 || strings.Join(mints[0].Repositories, ",") != "app" || len(mints[0].Permissions) != 2 ||
+	if len(mints) != 1 || len(mints[0].Repositories) != 0 || len(mints[0].RepositoryIDs) != 1 || mints[0].RepositoryIDs[0] != fakeRepoID ||
+		len(mints[0].Permissions) != 2 ||
 		mints[0].Permissions["contents"] != "write" || mints[0].Permissions["pull_requests"] != "write" {
 		t.Errorf("mints: %+v", mints)
 	}

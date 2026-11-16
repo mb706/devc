@@ -34,7 +34,8 @@ type serviceStatus struct {
 	Upstream string   `json:"upstream"`
 	Projects []string `json:"projects"`
 	Rules    []string `json:"rules"`
-	// Login is "ok", "needs-login", "no-secret" or "invalid"; Detail says
+	// Login is "ok", "needs-login", "no-secret", "invalid-secret" (too
+	// short, or not one line) or "invalid"; Detail says
 	// more.
 	Login  string `json:"login"`
 	Detail string `json:"detail,omitempty"`
@@ -66,10 +67,16 @@ func statusOf(c *config.Config, s *config.Service, store secrets.Store, now time
 	}
 	switch s.Auth.Kind {
 	case config.ServiceAuthHeader:
-		if _, err := store.Get(s.Realm, s.Auth.ValueSecret); err != nil {
+		v, err := store.Get(s.Realm, s.Auth.ValueSecret)
+		switch {
+		case err != nil:
 			st.Login, st.Detail = "no-secret", fmt.Sprintf("the secret %s is not set ('devc secret set %s %s')", s.Auth.ValueSecret, s.Realm, s.Auth.ValueSecret)
-		} else {
-			st.Login, st.Detail = "ok", "header "+s.Auth.Header+" from the secret "+s.Auth.ValueSecret
+		default:
+			if _, err := svclogin.HeaderCredential(v); err != nil {
+				st.Login, st.Detail = "invalid-secret", fmt.Sprintf("the secret %s cannot be used: %s ('devc secret set %s %s')", s.Auth.ValueSecret, err, s.Realm, s.Auth.ValueSecret)
+			} else {
+				st.Login, st.Detail = "ok", "header "+s.Auth.Header+" from the secret "+s.Auth.ValueSecret
+			}
 		}
 	case config.ServiceAuthCookie:
 		st.Refresh, st.Auto = s.Auth.Refresh, s.Auth.Auto
@@ -146,7 +153,7 @@ func newServiceLoginCmds(a *app) []*cobra.Command {
 			fmt.Fprintln(tw, "SERVICE\tKIND\tPORT\tUPSTREAM\tLOGIN\tPROJECTS")
 			for _, r := range rows {
 				login := r.Login
-				if r.Login == "needs-login" || r.Login == "no-secret" || r.Login == "invalid" {
+				if r.Login != "ok" {
 					login += " (" + r.Detail + ")"
 				} else if r.ValidTill != nil {
 					login += " until " + r.ValidTill.Local().Format("2006-01-02 15:04")

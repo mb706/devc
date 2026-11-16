@@ -33,7 +33,8 @@ const boxID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func TestSidecarArgs(t *testing.T) {
 	o := SidecarOptions{Ref: hello, BoxID: boxID, BoxStart: "1234@1700000000000000000", Seccomp: "/s/toolbox/seccomp.json",
-		Labels: []string{"label=level:s0:c1,c2"}, Image: Image}
+		Labels: []string{"label=level:s0:c1,c2"}, Image: Image,
+		Limits: config.GlobalGUI{Memory: "2g", Pids: 512, CPUs: 2}, Controllers: []string{"cpu", "memory", "pids"}}
 	args, err := SidecarArgs(o)
 	if err != nil {
 		t.Fatal(err)
@@ -49,6 +50,7 @@ func TestSidecarArgs(t *testing.T) {
 		"--security-opt", "no-new-privileges",
 		"--security-opt", "seccomp=/s/toolbox/seccomp.json",
 		"--security-opt", "label=level:s0:c1,c2",
+		"--memory", "2147483648", "--pids-limit", "512", "--cpus", "2",
 		"--read-only", "--read-only-tmpfs=false",
 		"--mount", "type=tmpfs,destination=/tmp",
 		"--init", "--pull=never", "--http-proxy=false",
@@ -84,6 +86,8 @@ func TestSidecarArgs(t *testing.T) {
 		"no image":       func(o *SidecarOptions) { o.Image = "" },
 		"invalid ref":    func(o *SidecarOptions) { o.Ref = names.ProjectRef{Realm: "Demo", Project: "x"} },
 		"label injected": func(o *SidecarOptions) { o.Labels = []string{"label=disable\n--privileged"} },
+		"no controllers": func(o *SidecarOptions) { o.Controllers = nil },
+		"no limits":      func(o *SidecarOptions) { o.Limits = config.GlobalGUI{} },
 	} {
 		oo := o
 		mod(&oo)
@@ -93,6 +97,41 @@ func TestSidecarArgs(t *testing.T) {
 	}
 	if SidecarName(hello) == names.BoxName(hello) || strings.ContainsAny(names.BoxName(hello), "_") {
 		t.Error("sidecar name could be a box name")
+	}
+}
+
+// TestLimitArgs: every limit needs its controller, "none" and -1 switch a
+// limit off, and invalid values are refused (finding D2-01).
+func TestLimitArgs(t *testing.T) {
+	all := []string{"cpu", "memory", "pids"}
+	def := config.GlobalGUI{Memory: "2g", Pids: 512, CPUs: 2}
+	for _, c := range []struct {
+		name  string
+		l     config.GlobalGUI
+		ctrls []string
+		want  []string
+		err   string
+	}{
+		{"defaults", def, all, []string{"--memory", "2147483648", "--pids-limit", "512", "--cpus", "2"}, ""},
+		{"fraction", config.GlobalGUI{Memory: "512m", Pids: 64, CPUs: 0.5}, all, []string{"--memory", "536870912", "--pids-limit", "64", "--cpus", "0.5"}, ""},
+		{"all off", config.GlobalGUI{Memory: "none", Pids: -1, CPUs: -1}, nil, nil, ""},
+		{"memory off", config.GlobalGUI{Memory: "none", Pids: 512, CPUs: 2}, []string{"cpu", "pids"}, []string{"--pids-limit", "512", "--cpus", "2"}, ""},
+		{"no memory controller", def, []string{"cpu", "pids"}, nil, "memory are not delegated"},
+		{"no pids controller", def, []string{"cpu", "memory"}, nil, "pids are not delegated"},
+		{"no cpu controller", def, []string{"memory", "pids"}, nil, "cpu are not delegated"},
+		{"nothing delegated", def, nil, nil, `memory = "none", pids = -1 and cpus = -1 under [gui]`},
+		{"bad memory", config.GlobalGUI{Memory: "lots", Pids: 1, CPUs: 1}, all, nil, "not a size"},
+		{"empty memory", config.GlobalGUI{Memory: "", Pids: 1, CPUs: 1}, all, nil, "not a size"},
+		{"zero pids", config.GlobalGUI{Memory: "1g", Pids: 0, CPUs: 1}, all, nil, "not a limit"},
+		{"zero cpus", config.GlobalGUI{Memory: "1g", Pids: 1, CPUs: 0}, all, nil, "not a limit"},
+	} {
+		got, err := LimitArgs(c.l, c.ctrls)
+		switch {
+		case c.err != "" && (err == nil || !strings.Contains(err.Error(), c.err)):
+			t.Errorf("%s: %q %v, want an error with %q", c.name, got, err, c.err)
+		case c.err == "" && (err != nil || !slices.Equal(got, c.want)):
+			t.Errorf("%s: %q %v, want %q", c.name, got, err, c.want)
+		}
 	}
 }
 
@@ -374,6 +413,10 @@ func TestUpDownStatus(t *testing.T) {
 		!slices.Contains(args, "devc.gui.box-start="+StartID(&boxCI)) || !slices.Contains(args, "seccomp="+r.box.Toolbox.SeccompPath()) {
 		t.Errorf("create args %q", args)
 	}
+	// The default limits of [gui] (finding D2-01).
+	if hc := side.HostConfig; hc.Memory != 2<<30 || hc.PidsLimit != 512 || hc.NanoCpus != 2e9 {
+		t.Errorf("sidecar limits %+v", hc)
+	}
 	// The secrets went in on standard input, as root of nothing: as the
 	// box's user, never in arguments or the environment.
 	var execs []engine.ExecOptions
@@ -544,6 +587,29 @@ func TestUpFailures(t *testing.T) {
 		r.ready = func() (execx.Result, error) { return execx.Result{}, nil }
 		if _, err := r.gui.Up(ctx, hello, UpOptions{}); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("limits cannot be applied", func(t *testing.T) {
+		r := newRig(t)
+		// The box needs only memory and pids; the desktop's CPU limit
+		// cannot be applied.
+		r.eng.InfoVal.CgroupControllers = []string{"memory", "pids"}
+		r.boxUp()
+		_, err := r.gui.Up(ctx, hello, UpOptions{})
+		if err == nil || !strings.Contains(err.Error(), "cpu are not delegated") {
+			t.Fatalf("up: %v", err)
+		}
+		if _, ok := r.eng.Containers["devc-demo-hello_gui"]; ok || len(r.fwd.started) != 0 {
+			t.Error("a sidecar was created or forwarded without its limits")
+		}
+		// Switched off explicitly, it starts without that limit.
+		r.box.Config.Global.GUI.CPUs = config.NoCPULimit
+		if _, err := r.gui.Up(ctx, hello, UpOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		hc := r.eng.Containers["devc-demo-hello_gui"].HostConfig
+		if hc.Memory != 2<<30 || hc.PidsLimit != 512 || hc.NanoCpus != 0 {
+			t.Errorf("limits %+v", hc)
 		}
 	})
 	t.Run("box disturbed", func(t *testing.T) {

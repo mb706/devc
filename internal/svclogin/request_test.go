@@ -15,9 +15,11 @@ func TestNormalizeTarget(t *testing.T) {
 		{"/api/x", "/api/x", ""},
 		{"/api/x/", "/api/x/", ""},
 		{"/api/x?a=1&b=%2F", "/api/x", "a=1&b=%2F"},
-		{"/%61pi/%7euser", "/api/~user", ""},   // unreserved decoded
-		{"/a%20b/%c3%a9", "/a%20b/%C3%A9", ""}, // others kept, upper case
-		{"/a;b=c/d", "/a;b=c/d", ""},           // parameters are ordinary characters
+		{"/%61pi/%7euser", "/api/~user", ""},                           // unreserved decoded
+		{"/a%20b/%c3%a9", "/a%20b/%C3%A9", ""},                         // others kept, upper case
+		{"/a;b=c/d", "/a;b=c/d", ""},                                   // parameters are ordinary characters
+		{"/a:b@c/d+e", "/a:b@c/d+e", ""},                               // reserved characters unencoded
+		{"/%22%3C%3E%5E%60%7B%7C%7D", "/%22%3C%3E%5E%60%7B%7C%7D", ""}, // neither unreserved nor reserved: kept
 		{"/api/file.tar.gz", "/api/file.tar.gz", ""},
 		{"/api/...", "/api/...", ""},
 		{"/a?x=/../y", "/a", "x=/../y"}, // the query is not a path
@@ -38,6 +40,11 @@ func TestNormalizeTarget(t *testing.T) {
 		"/api/%zz", "/api/%2", "/api/x#frag",
 		"/api/ x", "/api/\"x", "/api/<x>", "/api/é", "/api/x?a b", "/api/x?a=%g1",
 		"api/x", "http://example.org/api",
+		// D2-16: encoded reserved characters, which an upstream may decode
+		// before it splits parameters or resolves segments.
+		"/api/..%3Bx/admin", "/api/..%3bx/admin", "/api/x%3Bjsessionid=1", "/api/%3A", "/api/%40user", "/api/%3F", "/api/%23",
+		"/api/%5B", "/api/%5D", "/api/%21", "/api/%24", "/api/%26", "/api/%27", "/api/%28", "/api/%29", "/api/%2A", "/api/%2B",
+		"/api/%2C", "/api/%3D", "/api/%5C", "/api/%00x",
 	}
 	for _, in := range bad {
 		if p, q, err := NormalizeTarget(in); err == nil {

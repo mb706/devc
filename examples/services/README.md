@@ -24,8 +24,9 @@ The login command runs in a throwaway container from devc's installer image
 (bash and curl) with the network on and nothing mounted but a scratch
 directory. Its output is untrusted: devc accepts only a JSON array of
 cookies (`name`, `value`, `domain`, `path`, `expiry`) for the upstream's
-host, at most 64 cookies of at most 4 KiB each, and nothing else on
-standard output. Put a private CA certificate next to the script as
+host, at most 64 cookies with values of 8 characters to 4 KiB each, and
+nothing else on standard output (the example script leaves shorter cookies
+out). Put a private CA certificate next to the script as
 `ca.pem` if the upstream needs one; the script passes it to curl. The
 daemon itself uses the host's trust store.
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -248,10 +249,10 @@ func DecodeResult(b []byte, op string) (*boxside.DataResult, error) {
 	if r.Stage != "" && !boxside.ValidStageName(r.Stage) {
 		return nil, fmt.Errorf("invalid staging directory %q", proto.Printable(r.Stage))
 	}
-	if len(r.Digests) > 100000 {
+	if len(r.Digests) > 100000 || len(r.RemoteDigests) > 100000 {
 		return nil, errors.New("too many digests")
 	}
-	for _, d := range r.Digests {
+	for _, d := range append(slices.Clone(r.Digests), r.RemoteDigests...) {
 		if err := checkEntryDigest(d); err != nil {
 			return nil, err
 		}

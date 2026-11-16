@@ -12,6 +12,14 @@ memory = "16g"
 pids = 4096
 shell = ""                     # empty: first of zsh, bash, sh present in the image
 
+# Limits of the desktop sidecar (`devc gui up`), which runs beside the box in
+# a cgroup of its own. "none" and -1 switch a limit off; a limit that cannot be
+# applied makes `devc gui up` fail.
+[gui]
+memory = "2g"
+pids = 512
+cpus = 2
+
 # Only used on SELinux hosts.
 [selinux]
 mode = "labels"                # labels: expect the file-context rule from `devc doctor`, never relabel

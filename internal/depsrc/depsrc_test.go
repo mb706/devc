@@ -3,6 +3,10 @@ package depsrc
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"net/http/httptest"
 	"os"
@@ -240,5 +244,149 @@ func TestFetch(t *testing.T) {
 	vars["DEVC_SRC_NPM"] = "http://127.0.0.1:1"
 	if _, err := fetch("npm:react@1.0.0", none); err == nil || !strings.Contains(err.Error(), `preset "npm"`) || !strings.Contains(err.Error(), "devc request net 127.0.0.1:1:443") {
 		t.Errorf("allowlist hint: %v", err)
+	}
+}
+
+// TestFetchChecksums: a registry that normally publishes a checksum must
+// publish a usable one, and the download must match it; CRAN's archived
+// versions and GitHub's tarballs, which have none, still come (finding
+// D2-13).
+func TestFetchChecksums(t *testing.T) {
+	reg := depsrctest.New()
+	srv := httptest.NewServer(reg)
+	defer srv.Close()
+	vars := map[string]string{}
+	for _, kv := range depsrctest.Env(srv.URL) {
+		k, v, _ := strings.Cut(kv, "=")
+		vars[k] = v
+	}
+	none := Env{Getenv: func(string) string { return "" }, DefaultRLibs: []string{}}
+	fetch := func(spec string) (*Result, error) {
+		t.Helper()
+		s, err := ParseSpec(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Fetch(context.Background(), s, none, Options{Root: t.TempDir(), Getenv: func(k string) string { return vars[k] }})
+	}
+	b64 := func(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+	sha256sum := func(a []byte) []byte { s := sha256.Sum256(a); return s[:] }
+	sha1hex := func(a []byte) string { s := sha1.Sum(a); return hex.EncodeToString(s[:]) }
+	for _, c := range []struct {
+		name string
+		dist func([]byte) (string, string)
+		want string // "" means accepted
+	}{
+		{"sha256 integrity", func(a []byte) (string, string) { return "sha256-" + b64(sha256sum(a)), "" }, ""},
+		{"several, the strongest wins", func(a []byte) (string, string) {
+			return "sha1-" + b64(make([]byte, 20)) + " sha256-" + b64(sha256sum(a)), ""
+		}, ""},
+		{"SRI options", func(a []byte) (string, string) { return "sha256-" + b64(sha256sum(a)) + "?foo", "" }, ""},
+		{"shasum only", func(a []byte) (string, string) { return "", sha1hex(a) }, ""},
+		{"wrong sha256 integrity", func(a []byte) (string, string) { return "sha256-" + b64(make([]byte, 32)), "" }, "refusing"},
+		{"unknown algorithm, no shasum", func(a []byte) (string, string) { return "md5-" + b64(make([]byte, 16)), "" }, "no checksum devc can verify"},
+		{"unknown algorithm with a shasum", func(a []byte) (string, string) { return "sha3-" + b64(make([]byte, 32)), sha1hex(a) }, "no checksum devc can verify"},
+		{"truncated digest", func(a []byte) (string, string) { return "sha512-" + b64(sha256sum(a)), "" }, "no checksum devc can verify"},
+		{"bad base64", func(a []byte) (string, string) { return "sha512-!!!", "" }, "no checksum devc can verify"},
+		{"nothing", func([]byte) (string, string) { return "", "" }, "neither an integrity value nor a SHA-1 shasum"},
+		{"bad shasum", func([]byte) (string, string) { return "", "zz" }, "neither an integrity value nor a SHA-1 shasum"},
+	} {
+		reg.NPMDist = c.dist
+		before := reg.Downloads("npm")
+		res, err := fetch("npm:plain@1.0.0")
+		switch {
+		case c.want == "" && (err != nil || res.Cached):
+			t.Errorf("npm %s: %+v %v", c.name, res, err)
+		case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+			t.Errorf("npm %s: %v, want …%s…", c.name, err, c.want)
+		case c.want != "" && c.want != "refusing" && reg.Downloads("npm") != before:
+			t.Errorf("npm %s: downloaded without a usable checksum", c.name)
+		}
+	}
+	reg.NPMDist = nil
+	for name, d := range map[string]map[string]string{
+		"no digests":   {},
+		"md5 only":     {"md5": strings.Repeat("a", 32)},
+		"short sha256": {"sha256": strings.Repeat("a", 63)},
+		"not hex":      {"sha256": strings.Repeat("g", 64)},
+	} {
+		reg.PyPIDigests = d
+		before := reg.Downloads("pypi")
+		if _, err := fetch("pypi:my-lib@2.0.0"); err == nil || !strings.Contains(err.Error(), "no usable sha256") || reg.Downloads("pypi") != before {
+			t.Errorf("pypi %s: %v", name, err)
+		}
+	}
+	reg.PyPIDigests = nil
+	if _, err := fetch("pypi:my-lib@2.0.0"); err != nil {
+		t.Errorf("pypi control: %v", err)
+	}
+	reg.CRANNoMD5 = true
+	if _, err := fetch("r:mypkg@1.2.0"); err == nil || !strings.Contains(err.Error(), "no usable MD5sum") {
+		t.Errorf("CRAN current release without MD5: %v", err)
+	}
+	// Archived versions have no checksum on CRAN: they still come.
+	if _, err := fetch("r:mypkg@1.1.0"); err != nil {
+		t.Errorf("CRAN archived version: %v", err)
+	}
+	reg.CRANNoMD5 = false
+	if _, err := fetch("r:mypkg"); err != nil {
+		t.Errorf("CRAN control: %v", err)
+	}
+}
+
+// TestFetchCachedOffline: a concrete version in the cache is answered
+// without any request, also when the registry cannot be reached; versions
+// that need the registry to be resolved still fail (finding D2-14).
+func TestFetchCachedOffline(t *testing.T) {
+	reg := depsrctest.New()
+	srv := httptest.NewServer(reg)
+	vars := map[string]string{}
+	for _, kv := range depsrctest.Env(srv.URL) {
+		k, v, _ := strings.Cut(kv, "=")
+		vars[k] = v
+	}
+	root := t.TempDir()
+	none := Env{Getenv: func(string) string { return "" }, DefaultRLibs: []string{}}
+	fetch := func(spec string) (*Result, error) {
+		t.Helper()
+		s, err := ParseSpec(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Fetch(context.Background(), s, none, Options{Root: root, Getenv: func(k string) string { return vars[k] }})
+	}
+	specs := []string{"r:mypkg@1.2.0", "r:mypkg@1.1.0", "pypi:my-lib@2.0.0", "npm:plain@1.0.0", "github:owner/repo@" + depsrctest.Commit}
+	for _, s := range append(specs, "npm:plain@v1.0.0") {
+		if _, err := fetch(s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	// The registry is still up, but nothing asks it.
+	n := reg.Requests()
+	for _, s := range append(specs, "npm:plain@v1.0.0") {
+		if res, err := fetch(s); err != nil || !res.Cached {
+			t.Errorf("%s from the cache: %+v %v", s, res, err)
+		}
+	}
+	if reg.Requests() != n {
+		t.Errorf("%d requests for cached versions", reg.Requests()-n)
+	}
+	// The registry goes away: the same answers.
+	srv.Close()
+	for _, s := range specs {
+		if res, err := fetch(s); err != nil || !res.Cached {
+			t.Errorf("%s with the registry gone: %+v %v", s, res, err)
+		}
+	}
+	// The alias the registry's normalisation left answers too.
+	if res, err := fetch("npm:plain@v1.0.0"); err != nil || !res.Cached || res.Spec.Version != "1.0.0" || res.Path != filepath.Join(root, "npm", "plain", "1.0.0") {
+		t.Errorf("normalised version: %+v %v", res, err)
+	}
+	// Control: what needs the registry (a branch, the latest release, a
+	// version not cached) fails without it.
+	for _, s := range []string{"github:owner/repo@main", "npm:plain", "pypi:my-lib@1.0.0"} {
+		if _, err := fetch(s); err == nil {
+			t.Errorf("%s answered without the registry", s)
+		}
 	}
 }

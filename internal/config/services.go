@@ -320,8 +320,9 @@ func CheckRulePath(p string) error {
 				return fmt.Errorf("%q has an invalid percent-encoding", p)
 			}
 			b := unhex(p[i+1])<<4 | unhex(p[i+2])
-			if isUnreserved(b) || b == '/' || b == '\\' || b == '%' || b < 0x20 || b == 0x7f || p[i+1] >= 'a' || p[i+2] >= 'a' {
-				return fmt.Errorf("%q: write %%%c%c as the character itself or in upper case; encoded /, \\, %% and control characters are never allowed", p, p[i+1], p[i+2])
+			if isUnreserved(b) || b == '/' || b == '\\' || b == '%' || b < 0x20 || b == 0x7f || p[i+1] >= 'a' || p[i+2] >= 'a' ||
+				strings.IndexByte(":?#[]@!$&'()*+,;=", b) >= 0 {
+				return fmt.Errorf("%q: write %%%c%c as the character itself or in upper case; encoded /, \\, %%, reserved and control characters are never allowed", p, p[i+1], p[i+2])
 			}
 			i += 2
 		case !isPathChar(c):

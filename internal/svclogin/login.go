@@ -6,7 +6,9 @@ package svclogin
 // the other files of the service's directory and the login secrets
 // (auth.secrets) as 0600 files. Its standard output is the cookie jar
 // (ParseLoginOutput); its standard error is shown to the user with every
-// secret value removed. The jar becomes the realm secret _jar.<service>.
+// secret value removed. Every error Run returns is redacted the same way
+// before it is shown, logged or stored (finding D2-08). The jar becomes
+// the realm secret _jar.<service>.
 
 import (
 	"bytes"
@@ -16,6 +18,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -89,7 +93,17 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 
 // Run logs in to s and stores the jar. Logins of one service are
 // serialised across processes (the CLI and the daemon's automatic login).
+// A failure's message holds none of the login's secret values.
 func (l *Login) Run(ctx context.Context, s *config.Service) (*Result, error) {
+	var redact []string
+	res, err := l.run(ctx, s, &redact)
+	if err != nil {
+		return nil, errors.New(cleanStderr(err.Error(), redact))
+	}
+	return res, nil
+}
+
+func (l *Login) run(ctx context.Context, s *config.Service, redactp *[]string) (*Result, error) {
 	if s.Auth.Kind != config.ServiceAuthCookie {
 		return nil, fmt.Errorf("the service %s uses a header credential, which needs no login: store it with 'devc secret set %s %s'", s.Name, s.Realm, s.Auth.ValueSecret)
 	}
@@ -113,6 +127,7 @@ func (l *Login) Run(ctx context.Context, s *config.Service) (*Result, error) {
 
 	values := map[string][]byte{}
 	var redact []string
+	defer func() { *redactp = redact }()
 	for _, n := range s.Auth.Secrets {
 		v, err := l.Store.Get(s.Realm, n)
 		if errors.Is(err, secrets.ErrNotFound) {
@@ -239,11 +254,14 @@ func copyLoginFiles(src, dst string) error {
 	return nil
 }
 
-// cleanStderr removes secret values and control characters from the
-// command's standard error.
+// cleanStderr removes secret values (every one, longest first, so that a
+// value inside another goes too) and control characters from the command's
+// standard error or a message derived from its output.
 func cleanStderr(s string, redact []string) string {
-	for _, v := range redact {
-		if len(v) >= 4 {
+	vals := slices.Clone(redact)
+	sort.Slice(vals, func(i, j int) bool { return len(vals[i]) > len(vals[j]) })
+	for _, v := range vals {
+		if v != "" {
 			s = strings.ReplaceAll(s, v, Redacted)
 		}
 	}

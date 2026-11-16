@@ -2,6 +2,8 @@ package data
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"github.com/mb706/devc/internal/boxside"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/execx"
+	"github.com/mb706/devc/internal/flock"
 	"github.com/mb706/devc/internal/gate"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/proto"
@@ -157,12 +160,20 @@ func (s *Service) dryRun(ctx context.Context, spec Rsync) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.Runner.Run(ctx, execx.Cmd{Name: s.rsyncBin(), Args: args, Timeout: rsyncDryTimeout, MaxOutput: 256 << 20})
+	res, err := s.Runner.Run(ctx, execx.Cmd{Name: s.rsyncBin(), Args: args, Timeout: rsyncDryTimeout, MaxOutput: maxPreview})
 	if err != nil {
 		return nil, rsyncError(err, res)
 	}
-	return ParseItems(res.Stdout), nil
+	// A preview that was cut or does not parse cannot be counted against
+	// --max-size: refuse rather than transfer an unknown amount (D2-06).
+	if res.Truncated {
+		return nil, fmt.Errorf("%w: it is longer than %d MiB; transfer fewer paths at a time", ErrPreview, maxPreview>>20)
+	}
+	return ParseItems(res.Stdout)
 }
+
+// maxPreview bounds the output of a dry run.
+var maxPreview = 256 << 20
 
 // transfer runs rsync with its output on Out.
 func (s *Service) transfer(ctx context.Context, spec Rsync) error {
@@ -227,12 +238,44 @@ func (s *Service) withLock(ctx context.Context, o SyncOptions, fn func() error) 
 	return fn()
 }
 
+// lockSync takes the lock of a project's syncs with remote for the whole
+// pull or push (finding D2-11): staging reuse, transfer, merge and cleanup
+// never meet another operation on the same staging directory or remote.
+func (s *Service) lockSync(ctx context.Context, p *Project, remote string) (func(), error) {
+	file := s.Config.Paths.SyncLockFile(p.Ref, remote)
+	if err := s.Config.Paths.Ensure(filepath.Dir(file)); err != nil {
+		return nil, err
+	}
+	unlock, err := flock.Acquire(ctx, file, flock.Options{Timeout: syncLockWait})
+	if errors.Is(err, flock.ErrTimeout) {
+		return nil, fmt.Errorf("another 'devc data pull' or 'push' of %s with the remote %s is running: wait until it has finished", p.Ref, remote)
+	}
+	return unlock, err
+}
+
+// syncLockWait bounds the wait for another sync with the same remote.
+var syncLockWait = 3 * time.Second
+
+// newBackupID is the operation ID of a push's backup directory.
+func (s *Service) newBackupID() (string, error) {
+	b := make([]byte, 6)
+	r := s.Rand
+	if r == nil {
+		r = rand.Reader
+	}
+	if _, err := io.ReadFull(r, b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // pullStageRE names pull staging directories: <stamp>-<remote>.
 var pullStageRE = regexp.MustCompile(`^([0-9]{8}T[0-9]{6}Z)-([a-z0-9][a-z0-9._-]{0,62})$`)
 
 // pullStaging returns the staging directory of a pull from remote: the
 // one an interrupted pull from the same remote left (its partial files
-// make rsync continue), else a new one.
+// make rsync continue), else a new one. The caller holds the sync lock, so
+// no other operation is using a directory found here.
 func (s *Service) pullStaging(p *Project, remote string) (string, bool, error) {
 	base := s.Config.Paths.SyncStagingDir(p.Ref)
 	if err := s.Config.Paths.Ensure(base); err != nil {
@@ -281,6 +324,11 @@ func (s *Service) Pull(ctx context.Context, p *Project, o SyncOptions) (*SyncRes
 	if err != nil {
 		return nil, err
 	}
+	unlock, err := s.lockSync(ctx, p, o.Remote)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	res := &SyncResult{Remote: o.Remote, Paths: targets, DryRun: o.DryRun, Items: []Item{}}
 	// Refusals (a target inside a sealed entry) come before the transfer.
 	err = s.withLock(ctx, o, func() error {
@@ -313,7 +361,12 @@ func (s *Service) Pull(ctx context.Context, p *Project, o SyncOptions) (*SyncRes
 		return nil, err
 	}
 	res.Items = items
-	res.Files, res.Size, res.Updated = Totals(items)
+	if res.Files, res.Size, res.Updated, err = Totals(items); err != nil {
+		if !reused {
+			discard()
+		}
+		return nil, err
+	}
 	if o.MaxSize > 0 && res.Size > o.MaxSize {
 		if !reused {
 			discard()
@@ -353,7 +406,7 @@ func (s *Service) Pull(ctx context.Context, p *Project, o SyncOptions) (*SyncRes
 		return res, fmt.Errorf("%w; the pulled files are kept in %s, and the next 'devc data pull %s' uses them", err, dir, o.Remote)
 	}
 	s.reportSkipped(res.Worker.Skipped)
-	res.Records = s.records(ActionPull, o.Remote, "", res.Worker.Digests)
+	res.Records = withRemoteDigests(s.records(ActionPull, o.Remote, "", res.Worker.Digests), res.Worker.RemoteDigests)
 	s.record(ctx, p, res.Records)
 	discard()
 	return res, nil
@@ -369,8 +422,17 @@ func (s *Service) Push(ctx context.Context, p *Project, o SyncOptions) (*SyncRes
 	if err != nil {
 		return nil, err
 	}
+	unlock, err := s.lockSync(ctx, p, o.Remote)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	now := s.now()
-	res := &SyncResult{Push: true, Remote: o.Remote, Paths: targets, DryRun: o.DryRun, Items: []Item{}, BackupDir: BackupDir(now.Format(boxside.StampFormat))}
+	id, err := s.newBackupID()
+	if err != nil {
+		return nil, err
+	}
+	res := &SyncResult{Push: true, Remote: o.Remote, Paths: targets, DryRun: o.DryRun, Items: []Item{}, BackupDir: BackupDir(now.Format(boxside.StampFormat), id)}
 	shell, via := s.remoteShell(ctx, r.Host)
 	res.Via = via
 	err = s.withLock(ctx, o, func() error {
@@ -400,7 +462,9 @@ func (s *Service) Push(ctx context.Context, p *Project, o SyncOptions) (*SyncRes
 		return nil, err
 	}
 	res.Items = items
-	res.Files, res.Size, res.Updated = Totals(items)
+	if res.Files, res.Size, res.Updated, err = Totals(items); err != nil {
+		return nil, err
+	}
 	if (!o.Yes || o.DryRun) && o.Preview != nil {
 		o.Preview(res)
 	}
@@ -431,8 +495,14 @@ type RecordedAt struct {
 	Name   string `json:"name"`
 	Time   string `json:"time"`
 	Action string `json:"action"`
-	// Same is set when that record's digest is the entry's current one.
+	// Same is set when that record's observation of the machine or remote
+	// is the entry's current digest: for a machine its copy, for a remote
+	// what a pull received from it (never this machine's copy after the
+	// merge, finding D2-12).
 	Same bool `json:"same"`
+	// Sent (remotes) is set when the last record is a push of the entry as
+	// it is now: the remote received these files but may keep others.
+	Sent bool `json:"sent,omitempty"`
 }
 
 // Entry states of `devc data status`.
@@ -547,15 +617,25 @@ func fillRecords(e *StatusEntry, rs []Record) {
 			remotes[r.Remote] = r
 		}
 	}
-	at := func(m map[string]Record) []RecordedAt {
+	at := func(m map[string]Record, remote bool) []RecordedAt {
 		out := []RecordedAt{}
 		for name, r := range m {
-			out = append(out, RecordedAt{Name: name, Time: r.Time, Action: r.Action, Same: e.Present && r.Digest == e.Digest})
+			ra := RecordedAt{Name: name, Time: r.Time, Action: r.Action}
+			switch {
+			case !e.Present:
+			case !remote:
+				ra.Same = r.Digest == e.Digest
+			case r.Action == ActionPull:
+				ra.Same = r.RemoteDigest != "" && r.RemoteDigest == e.Digest
+			case r.Action == ActionPush:
+				ra.Sent = r.Digest == e.Digest
+			}
+			out = append(out, ra)
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 		return out
 	}
-	e.Machines, e.Remotes = at(machines), at(remotes)
+	e.Machines, e.Remotes = at(machines, false), at(remotes, true)
 }
 
 // Verification is `devc data verify`.

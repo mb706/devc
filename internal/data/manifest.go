@@ -56,6 +56,13 @@ type Record struct {
 	// save.
 	Remote    string `json:"remote,omitempty"`
 	Savepoint string `json:"savepoint,omitempty"`
+	// RemoteDigest (pull) is the remote's observation: the digest of the
+	// entry as it arrived from the remote. Digest is always this machine's
+	// copy; the two differ when the pull skipped a sealed entry or kept
+	// local-only content (finding D2-12). Push records have none: what was
+	// sent is Digest, and the remote may keep further files (devc never
+	// deletes there).
+	RemoteDigest string `json:"remote_digest,omitempty"`
 }
 
 // Check validates a record read back from the manifest.
@@ -94,6 +101,8 @@ func (r Record) Check() error {
 		return errors.New("invalid digest")
 	case r.Content != "" && !boxside.ValidDigest(r.Content):
 		return errors.New("invalid content hash")
+	case r.RemoteDigest != "" && (r.Action != ActionPull || !boxside.ValidDigest(r.RemoteDigest)):
+		return errors.New("invalid remote digest")
 	}
 	return nil
 }
@@ -205,6 +214,19 @@ func (s *Service) records(action, remote, savepoint string, ds []boxside.EntryDi
 			Digest: d.Digest, Content: d.Content, Remote: remote, Savepoint: savepoint})
 	}
 	return out
+}
+
+// withRemoteDigests adds the remote's observations of a pull to its
+// records (by path); a record without one claims nothing about the remote.
+func withRemoteDigests(recs []Record, remote []boxside.EntryDigest) []Record {
+	by := map[string]string{}
+	for _, d := range remote {
+		by[d.Path] = d.Digest
+	}
+	for i := range recs {
+		recs[i].RemoteDigest = by[recs[i].Path]
+	}
+	return recs
 }
 
 // record appends records to the manifest. The operation they describe has

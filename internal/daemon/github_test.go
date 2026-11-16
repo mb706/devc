@@ -50,6 +50,18 @@ func newGHFake(t *testing.T, pub *rsa.PublicKey) *ghFake {
 		f.paths = append(f.paths, r.Method+" "+r.URL.Path)
 		f.mu.Unlock()
 		auth, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		// The metadata probe of the installation check (finding D2-03).
+		if strings.HasPrefix(auth, "ghs_probe_") {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/installation/repositories":
+				io.WriteString(w, `{"total_count":1,"repositories":[{"id":5150,"full_name":"acme/app"}]}`)
+			case r.Method == http.MethodDelete && r.URL.Path == "/installation/token":
+				w.WriteHeader(204)
+			default:
+				w.WriteHeader(403)
+			}
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/app/") || strings.HasSuffix(r.URL.Path, "/installation") {
 			if !jwtValid(f.pub, auth) {
 				w.WriteHeader(401)
@@ -57,23 +69,30 @@ func newGHFake(t *testing.T, pub *rsa.PublicKey) *ghFake {
 			}
 			switch r.URL.Path {
 			case "/repos/acme/app/installation":
-				io.WriteString(w, `{"id":31}`)
+				io.WriteString(w, `{"id":31,"account":{"login":"acme"}}`)
 			case "/app/installations/31/access_tokens":
 				var b struct {
-					Repositories []string          `json:"repositories"`
-					Permissions  map[string]string `json:"permissions"`
+					Repositories  []string          `json:"repositories"`
+					RepositoryIDs []int64           `json:"repository_ids"`
+					Permissions   map[string]string `json:"permissions"`
 				}
-				if json.Unmarshal(body, &b) != nil || strings.Join(b.Repositories, ",") != "app" {
+				switch {
+				case json.Unmarshal(body, &b) != nil:
 					w.WriteHeader(422)
-					return
+				case strings.Join(b.Repositories, ",") == "app" && len(b.Permissions) == 1 && b.Permissions["metadata"] == "read":
+					w.WriteHeader(201)
+					fmt.Fprintf(w, `{"token":"ghs_probe_1","expires_at":%q}`, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+				case len(b.Repositories) == 0 && len(b.RepositoryIDs) == 1 && b.RepositoryIDs[0] == 5150:
+					f.mu.Lock()
+					f.mints++
+					n := f.mints
+					f.mu.Unlock()
+					w.WriteHeader(201)
+					perms, _ := json.Marshal(b.Permissions)
+					fmt.Fprintf(w, `{"token":"ghs_minted_%d_%s","expires_at":%q,"repositories":[{"id":5150}]}`, n, base64.RawURLEncoding.EncodeToString(perms), time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+				default:
+					w.WriteHeader(422)
 				}
-				f.mu.Lock()
-				f.mints++
-				n := f.mints
-				f.mu.Unlock()
-				w.WriteHeader(201)
-				perms, _ := json.Marshal(b.Permissions)
-				fmt.Fprintf(w, `{"token":"ghs_minted_%d_%s","expires_at":%q}`, n, base64.RawURLEncoding.EncodeToString(perms), time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 			default:
 				w.WriteHeader(404)
 			}
@@ -264,6 +283,27 @@ func TestGitHubToken(t *testing.T) {
 	perms, _ = base64.RawURLEncoding.DecodeString(tok.Token[strings.LastIndex(tok.Token, "_")+1:])
 	if string(perms) != `{"contents":"read","pull_requests":"write"}` {
 		t.Errorf("narrowed: %s", perms)
+	}
+	// D2-02: the upstream changes while the box runs (another repository
+	// the App could mint for): no token until the box starts again.
+	r.setProject(t, `upstream = "git@github.com:acme/app.git"`, `upstream = "git@github.com:acme/other.git"`)
+	if _, err := token(); !proto.IsCode(err, proto.CodeRefused) || !strings.Contains(err.Error(), "upstream changed") {
+		t.Errorf("upstream changed: %v", err)
+	}
+	r.setProject(t, `upstream = "git@github.com:acme/other.git"`, `upstream = "git@github.com:acme/app.git"`)
+	// Another App (or installation) for the realm: the same.
+	realm := filepath.Join(r.p.ConfigDir(), "realms", "demo", "realm.toml")
+	rb, _ := os.ReadFile(realm)
+	os.WriteFile(realm, []byte(strings.Replace(string(rb), "app_id = 7", "app_id = 8", 1)), 0o644)
+	r.d.reload(true)
+	if _, err := token(); !proto.IsCode(err, proto.CodeRefused) || !strings.Contains(err.Error(), "GitHub App changed") {
+		t.Errorf("App changed: %v", err)
+	}
+	os.WriteFile(realm, rb, 0o644)
+	r.d.reload(true)
+	// Control: back to what the box started with, the token comes again.
+	if again, err := token(); err != nil || again.Token != tok.Token {
+		t.Errorf("after restoring the configuration: %+v %v", again, err)
 	}
 	// token: mode delivers the stored token.
 	r.setProject(t, "github = \"app\"", "github = \"token:pat\"")

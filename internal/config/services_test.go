@@ -207,7 +207,7 @@ func TestCheckRulePath(t *testing.T) {
 			t.Errorf("%q: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "api", "/api/./x", "/api/..;/x", "/a//b", "/a%2fb", "/a%25", "/a%2a", "/a%7E", "/a\\b", "/é", "/a?b", "/a#b"} {
+	for _, bad := range []string{"", "api", "/api/./x", "/api/..;/x", "/a//b", "/a%2fb", "/a%25", "/a%2a", "/a%7E", "/a\\b", "/é", "/a?b", "/a#b", "/a%3Bb", "/a%3A", "/a%40"} {
 		if err := CheckRulePath(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"github.com/mb706/devc/internal/boxside"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/execx"
+	"github.com/mb706/devc/internal/flock"
 )
 
 var fixedArgs = []string{"--recursive", "--links", "--times", "--no-owner", "--no-group", "--no-devices", "--no-specials", "--partial", "--relative", "--protect-args"}
@@ -35,10 +37,10 @@ func TestRsyncArgs(t *testing.T) {
 			[]string{"--perms", "--dry-run", "--out-format=%i %l %n", "--rsh=ssh -F '/t/my config' -S /r/gate/m-1.sock -o ControlMaster=no", "c1:scratch/p/./results", "/s/stage/"}},
 		{"pull over ordinary ssh", Rsync{Remote: ssh, Local: "/s/stage", Paths: []string{"results"}, Progress: true},
 			[]string{"--perms", "--info=progress2", "c1:scratch/p/./results", "/s/stage/"}},
-		{"push to a directory", Rsync{Push: true, Remote: local, Local: stage, Paths: []string{"raw", "results/run1"}, BackupDir: ".devc-backup/20261115T040500Z"},
-			[]string{"--no-perms", "--executability", "--chmod=D0777", "--backup", "--backup-dir=.devc-backup/20261115T040500Z", stage + "/./raw", stage + "/./results/run1", "/mnt/nas/p/"}},
-		{"dry push over a master", Rsync{Push: true, Remote: ssh, Local: stage, Paths: []string{"raw"}, BackupDir: ".devc-backup/20261115T040500Z", DryRun: true, Progress: true, Shell: master},
-			[]string{"--no-perms", "--executability", "--chmod=D0777", "--backup", "--backup-dir=.devc-backup/20261115T040500Z", "--dry-run", "--out-format=%i %l %n",
+		{"push to a directory", Rsync{Push: true, Remote: local, Local: stage, Paths: []string{"raw", "results/run1"}, BackupDir: ".devc-backup/20261115T040500Z-0123456789ab"},
+			[]string{"--no-perms", "--executability", "--chmod=D0777", "--backup", "--backup-dir=.devc-backup/20261115T040500Z-0123456789ab", stage + "/./raw", stage + "/./results/run1", "/mnt/nas/p/"}},
+		{"dry push over a master", Rsync{Push: true, Remote: ssh, Local: stage, Paths: []string{"raw"}, BackupDir: ".devc-backup/20261115T040500Z-0123456789ab", DryRun: true, Progress: true, Shell: master},
+			[]string{"--no-perms", "--executability", "--chmod=D0777", "--backup", "--backup-dir=.devc-backup/20261115T040500Z-0123456789ab", "--dry-run", "--out-format=%i %l %n",
 				"--rsh=ssh -F '/t/my config' -S /r/gate/m-1.sock -o ControlMaster=no", stage + "/./raw", "c1:scratch/p/"}},
 		{"remote root", Rsync{Remote: config.Remote{Path: "/"}, Local: "/s", Paths: []string{"raw"}}, []string{"--perms", "/./raw", "/s/"}},
 	}
@@ -76,9 +78,10 @@ func TestRsyncArgs(t *testing.T) {
 		"wildcard path":       func(r *Rsync) { r.Paths = []string{"raw/*"} },
 		"dot-dot path":        func(r *Rsync) { r.Paths = []string{"raw/../x"} },
 		"backup dir path":     func(r *Rsync) { r.Paths = []string{".devc-backup/x"} },
-		"pull with backup":    func(r *Rsync) { r.BackupDir = ".devc-backup/20261115T040500Z" },
+		"pull with backup":    func(r *Rsync) { r.BackupDir = ".devc-backup/20261115T040500Z-0123456789ab" },
 		"push without backup": func(r *Rsync) { r.Push = true },
 		"push bad backup":     func(r *Rsync) { r.Push, r.BackupDir = true, "../x" },
+		"backup without ID":   func(r *Rsync) { r.Push, r.BackupDir = true, ".devc-backup/20261115T040500Z" },
 		"shell newline":       func(r *Rsync) { r.Shell = []string{"ssh", "a\nb"} },
 		"empty shell word":    func(r *Rsync) { r.Shell = []string{"ssh", ""} },
 	} {
@@ -95,18 +98,40 @@ func TestRsyncArgs(t *testing.T) {
 }
 
 func TestParseItems(t *testing.T) {
-	out := "cd+++++++++ 4096 results/\n>f+++++++++ 12 results/a.txt\n>f.st...... 30 results/b\\#033.txt\n<f+++++++++ 5 x y\n" +
-		"cL+++++++++ 4 results/link\ngarbage\n>f+++++++++ -1 neg\n\n"
-	items := ParseItems([]byte(out))
-	if len(items) != 5 || items[3].Name != "x y" || items[2].Name != `results/b\#033.txt` {
-		t.Fatalf("items %+v", items)
+	out := "created directory /s/stage\nskipping non-regular file \"results/fifo\"\n" +
+		"cd+++++++++ 4096 results/\n>f+++++++++ 12 results/a.txt\n>f.st...... 30 results/b\\#033.txt\n<f+++++++++ 5 x y\n" +
+		"cL+++++++++ 4 results/link\n>f          7 results/same-but-sent\n\n"
+	items, err := ParseItems([]byte(out))
+	if err != nil || len(items) != 6 || items[3].Name != "x y" || items[2].Name != `results/b\#033.txt` || items[5].Change != ">f         " {
+		t.Fatalf("items %+v %v", items, err)
 	}
-	files, size, updated := Totals(items)
-	if files != 3 || size != 47 || updated != 1 {
-		t.Errorf("totals %d %d %d", files, size, updated)
+	files, size, updated, err := Totals(items)
+	if err != nil || files != 4 || size != 54 || updated != 2 {
+		t.Errorf("totals %d %d %d %v", files, size, updated, err)
 	}
-	if bad := ParseItems([]byte(">f+++++++++ 1 a\x1b[31m\n")); len(bad) != 1 || strings.ContainsRune(bad[0].Name, 0x1b) {
-		t.Errorf("name not made printable: %+v", bad)
+	if bad, err := ParseItems([]byte(">f+++++++++ 1 a\x1b[31m\n")); err != nil || len(bad) != 1 || strings.ContainsRune(bad[0].Name, 0x1b) {
+		t.Errorf("name not made printable: %+v %v", bad, err)
+	}
+	// D2-06: a line that is not an item or one of rsync's messages, or an
+	// item without a usable size, makes the preview unusable.
+	for _, bad := range []string{
+		">f+++++++++ 12 a\ngarbage\n",
+		">f+++++++++ -1 neg\n",
+		">f+++++++++ 1e9 big\n",
+		">f+++++++++ 99999999999999999999 huge\n",
+		">f+++++++++ 12\n",
+		">f+++++ 12 short-code\n",
+		"Xf+++++++++ 12 bad-type\n",
+		"sending incremental file list\n",
+	} {
+		if items, err := ParseItems([]byte(bad)); !errors.Is(err, ErrPreview) {
+			t.Errorf("%q: %+v %v", bad, items, err)
+		}
+	}
+	// Totals never wrap around.
+	huge := []Item{{Change: ">f+++++++++", Size: math.MaxInt64 - 5, Name: "a"}, {Change: ">f+++++++++", Size: 10, Name: "b"}}
+	if _, size, _, err := Totals(huge); !errors.Is(err, ErrPreview) {
+		t.Errorf("overflow: %d %v", size, err)
 	}
 }
 
@@ -448,7 +473,7 @@ func TestServicePush(t *testing.T) {
 		if c.Args[len(c.Args)-2] != stage+"/./scratch" || c.Args[len(c.Args)-1] != filepath.Join(w.dir, "nas")+"/" {
 			t.Errorf("operands %q", c.Args)
 		}
-		if !slices.Contains(c.Args, "--backup-dir=.devc-backup/20261115T040500Z") {
+		if !slices.Contains(c.Args, "--backup-dir=.devc-backup/20261115T040500Z-0123456789ab") {
 			t.Errorf("no backup directory: %q", c.Args)
 		}
 		var a, b syscall.Stat_t
@@ -460,11 +485,12 @@ func TestServicePush(t *testing.T) {
 		checked++
 	})
 	locks := 0
+	w.svc.Rand = bytes.NewReader([]byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54})
 	res, err := w.svc.Push(ctx, w.p, SyncOptions{Remote: "nas", Yes: true, Content: true, Lock: countLocks(&locks)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if checked != 2 || res.Files != 2 || res.Updated != 1 || res.BackupDir != ".devc-backup/20261115T040500Z" || locks != 2 {
+	if checked != 2 || res.Files != 2 || res.Updated != 1 || res.BackupDir != ".devc-backup/20261115T040500Z-0123456789ab" || locks != 2 {
 		t.Errorf("checked %d, result %+v, locks %d", checked, res, locks)
 	}
 	if _, err := os.Lstat(filepath.Join(w.p.HostDir, boxside.PushStagingDir)); err == nil {
@@ -484,6 +510,24 @@ func TestServicePush(t *testing.T) {
 	if len(ops) < 2 || ops[len(ops)-2] != "CHOWN,FOWNER,DAC_OVERRIDE" || ops[len(ops)-1] != "DAC_OVERRIDE,FOWNER" {
 		t.Errorf("worker capabilities %v", ops)
 	}
+	// D2-10: a second push in the same second has a backup directory of
+	// its own.
+	w.host.Reset()
+	w.host.On("rsync").Stdout(">f.st...... 1 scratch/b.txt\n")
+	res2, err := w.svc.Push(ctx, w.p, SyncOptions{Remote: "nas", Yes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.BackupDir != ".devc-backup/20261115T040500Z-fedcba987654" || res2.BackupDir == res.BackupDir {
+		t.Errorf("second push in the same second: %q after %q", res2.BackupDir, res.BackupDir)
+	}
+	if calls, _ := w.rsyncCalls(); len(calls) != 2 || !slices.Contains(calls[1], "--backup-dir="+res2.BackupDir) {
+		t.Errorf("second push: %q", calls)
+	}
+	w.svc.Rand = nil
+	if n := len(mustRead(t, w)); n != 4 {
+		t.Errorf("%d records after two pushes", n)
+	}
 	// A dry run sends nothing and leaves no staging directory.
 	w.host.Reset()
 	checked = 0
@@ -496,7 +540,7 @@ func TestServicePush(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(w.p.HostDir, boxside.PushStagingDir)); err == nil {
 		t.Error("the staging directory is still there after a dry run")
 	}
-	if len(mustRead(t, w)) != 2 {
+	if len(mustRead(t, w)) != 4 {
 		t.Error("a dry run was recorded")
 	}
 	// A failed transfer is an error, records nothing and still unstages.
@@ -507,6 +551,150 @@ func TestServicePush(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(w.p.HostDir, boxside.PushStagingDir)); err == nil {
 		t.Error("the staging directory is still there after a failure")
+	}
+}
+
+// TestSyncPreviewAndLock: a preview that was cut, does not parse or adds
+// up beyond int64 refuses the pull before any transfer (finding D2-06);
+// a pull or push while another runs with the same remote is refused, one
+// with another remote is not (finding D2-11).
+func TestSyncPreviewAndLock(t *testing.T) {
+	w := syncWorld(t)
+	ctx := context.Background()
+	w.put("scratch/a", "a")
+	opts := SyncOptions{Remote: "nas", Yes: true, MaxSize: 2 << 30}
+	transfers := func() int {
+		_, dry := w.rsyncCalls()
+		n := 0
+		for _, d := range dry {
+			if !d {
+				n++
+			}
+		}
+		return n
+	}
+	old := maxPreview
+	maxPreview = 64
+	t.Cleanup(func() { maxPreview = old })
+	for name, out := range map[string]string{
+		"cut":         ">f+++++++++ 10 scratch/a\n" + strings.Repeat(">f+++++++++ 1 scratch/long-name-filling-the-preview\n", 4),
+		"unparseable": ">f+++++++++ 10 scratch/a\nsomething else\n",
+		"overflow":    ">f+++++++++ 9223372036854775800 scratch/a\n>f+++++++++ 9223372036854775800 scratch/b\n",
+	} {
+		w.host.Reset()
+		w.host.On("rsync").Stdout(out)
+		_, err := w.svc.Pull(ctx, w.p, opts)
+		if !errors.Is(err, ErrPreview) || transfers() != 0 {
+			t.Errorf("%s: %v, %d transfers", name, err, transfers())
+		}
+		if ents, _ := os.ReadDir(w.svc.Config.Paths.SyncStagingDir(w.p.Ref)); slices.ContainsFunc(ents, func(e os.DirEntry) bool { return e.IsDir() }) {
+			t.Errorf("%s: staging left: %v", name, ents)
+		}
+	}
+	// Control: the same preview within the cap transfers.
+	maxPreview = old
+	w.host.Reset()
+	w.host.On("rsync").Stdout(">f+++++++++ 10 scratch/a\n").Do(func(c execx.Cmd) {
+		if !slices.Contains(c.Args, "--dry-run") {
+			dst := strings.TrimSuffix(c.Args[len(c.Args)-1], "/")
+			os.MkdirAll(filepath.Join(dst, "scratch"), 0o755)
+			os.WriteFile(filepath.Join(dst, "scratch", "a"), []byte("remote-a"), 0o644)
+		}
+	})
+	if _, err := w.svc.Pull(ctx, w.p, opts); err != nil || transfers() != 1 {
+		t.Fatalf("control pull: %v, %d transfers", err, transfers())
+	}
+
+	// Another operation holds the lock of nas: pull and push are refused
+	// at once and change nothing; c1 is not locked.
+	oldWait := syncLockWait
+	syncLockWait = 100 * time.Millisecond
+	t.Cleanup(func() { syncLockWait = oldWait })
+	unlock, err := flock.Acquire(ctx, w.svc.Config.Paths.SyncLockFile(w.p.Ref, "nas"), flock.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.host.Reset()
+	w.host.On("rsync").Stdout("")
+	w.host.On("ssh").Exit(255)
+	if _, err := w.svc.Pull(ctx, w.p, opts); err == nil || !strings.Contains(err.Error(), "is running") {
+		t.Errorf("pull while locked: %v", err)
+	}
+	if _, err := w.svc.Push(ctx, w.p, opts); err == nil || !strings.Contains(err.Error(), "is running") {
+		t.Errorf("push while locked: %v", err)
+	}
+	if calls, _ := w.rsyncCalls(); len(calls) != 0 {
+		t.Errorf("rsync ran while another sync held the lock: %q", calls)
+	}
+	if _, err := w.svc.Pull(ctx, w.p, SyncOptions{Remote: "c1", Paths: []string{"scratch"}, DryRun: true}); err != nil {
+		t.Errorf("another remote: %v", err)
+	}
+	unlock()
+	if _, err := w.svc.Pull(ctx, w.p, SyncOptions{Remote: "nas", DryRun: true}); err != nil {
+		t.Errorf("after the lock was released: %v", err)
+	}
+}
+
+// TestPullRemoteObservation: a pull that leaves a sealed entry alone, or
+// keeps local-only files, records the remote's copy separately, and status
+// never shows the remote as matching (finding D2-12).
+func TestPullRemoteObservation(t *testing.T) {
+	w := syncWorld(t)
+	ctx := context.Background()
+	w.put("results/run1/r", "local result")
+	w.put("results/run2/x", "same")
+	w.put("results/run3/local-only", "mine")
+	if _, err := w.svc.Seal(ctx, w.p, "results/run1", false); err != nil {
+		t.Fatal(err)
+	}
+	w.host.On("rsync").Stdout(">f+++++++++ 13 results/run1/r\n").Do(func(c execx.Cmd) {
+		if slices.Contains(c.Args, "--dry-run") {
+			return
+		}
+		dst := strings.TrimSuffix(c.Args[len(c.Args)-1], "/")
+		for rel, body := range map[string]string{"results/run1/r": "remote result", "results/run2/x": "same", "results/run3/shared": "theirs"} {
+			os.MkdirAll(filepath.Dir(filepath.Join(dst, rel)), 0o755)
+			os.WriteFile(filepath.Join(dst, rel), []byte(body), 0o644)
+		}
+	})
+	res, err := w.svc.Pull(ctx, w.p, SyncOptions{Remote: "nas", Paths: []string{"results"}, Yes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(w.p.HostRoot(), "results", "run1", "r")); string(b) != "local result" {
+		t.Fatalf("the sealed entry changed: %q", b)
+	}
+	byPath := map[string]Record{}
+	for _, r := range mustRead(t, w) {
+		if r.Action == ActionPull {
+			byPath[r.Path] = r
+		}
+	}
+	for path, wantSame := range map[string]bool{"results/run1": false, "results/run2": true, "results/run3": false} {
+		r, ok := byPath[path]
+		if !ok || r.RemoteDigest == "" || (r.RemoteDigest == r.Digest) != wantSame {
+			t.Errorf("%s: record %+v (remote and local equal: want %v)", path, r, wantSame)
+		}
+	}
+	if len(res.Records) != 3 {
+		t.Errorf("records %+v", res.Records)
+	}
+	st, err := w.svc.Status(ctx, w.p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range st.Entries {
+		want, ok := map[string]bool{"results/run1": false, "results/run2": true, "results/run3": false}[e.Path]
+		if !ok {
+			continue
+		}
+		if len(e.Remotes) != 1 || e.Remotes[0].Name != "nas" || e.Remotes[0].Same != want || e.Remotes[0].Sent {
+			t.Errorf("%s: remotes %+v, want same=%v", e.Path, e.Remotes, want)
+		}
+		// This machine's copy is what it recorded.
+		if len(e.Machines) == 0 || !e.Machines[len(e.Machines)-1].Same {
+			t.Errorf("%s: machines %+v", e.Path, e.Machines)
+		}
 	}
 }
 
@@ -564,7 +752,7 @@ func TestStatusAndVerify(t *testing.T) {
 		t.Errorf("raw/in.csv %+v", e)
 	}
 	if e := got["scratch/w"]; e.State != StateChanged || e.Files != 2 || len(e.Machines) != 1 || e.Machines[0].Name != "laptop" || e.Machines[0].Same ||
-		len(e.Remotes) != 1 || e.Remotes[0].Name != "nas" || e.Last.Action != ActionPush {
+		len(e.Remotes) != 1 || e.Remotes[0].Name != "nas" || e.Remotes[0].Same || e.Remotes[0].Sent || e.Last.Action != ActionPush {
 		t.Errorf("scratch/w %+v", e)
 	}
 	if e := got["results/run1"]; e.State != StateRecorded || len(e.Machines) != 1 || e.Machines[0].Name != "ws" || !e.Machines[0].Same || len(e.Remotes) != 0 {

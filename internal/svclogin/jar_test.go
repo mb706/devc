@@ -12,7 +12,7 @@ func TestParseLoginOutput(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	later := now.Unix() + 3600
 	good := `[{"name":"session","value":"abc123def456","domain":"intranet.example.org","path":"/","expiry":` + itoa(later) + `},
-	          {"name":"pref","value":"x","domain":".example.org"}]` + "\n"
+	          {"name":"pref","value":"xpref-12","domain":".example.org"}]` + "\n"
 	cs, err := ParseLoginOutput([]byte(good), "intranet.example.org", now)
 	if err != nil || len(cs) != 2 || cs[1].Path != "/" || cs[1].Expiry != 0 {
 		t.Fatalf("good output: %+v %v", cs, err)
@@ -23,27 +23,47 @@ func TestParseLoginOutput(t *testing.T) {
 		{`{"name":"a"}`, "not a JSON array"},
 		{`[]`, "no cookies"},
 		{`null`, "not a JSON array"},
-		{`[{"name":"a","value":"b","domain":"intranet.example.org","httpOnly":true}]`, "not a JSON array"},
-		{`[{"name":"a","value":"b","domain":"intranet.example.org"}] [1]`, "after the JSON array"},
-		{`[{"name":"a b","value":"b","domain":"intranet.example.org"}]`, "invalid name"},
-		{`[{"name":"","value":"b","domain":"intranet.example.org"}]`, "invalid name"},
+		{`[{"name":"a","value":"bvalue-1","domain":"intranet.example.org","httpOnly":true}]`, "not a JSON array"},
+		{`[{"name":"a","value":"bvalue-1","domain":"intranet.example.org"}] [1]`, "after the JSON array"},
+		{`[{"name":"a b","value":"bvalue-1","domain":"intranet.example.org"}]`, "invalid name"},
+		{`[{"name":"","value":"bvalue-1","domain":"intranet.example.org"}]`, "invalid name"},
 		{`[{"name":"a","value":"b;c","domain":"intranet.example.org"}]`, "characters a cookie value may not hold"},
 		{`[{"name":"a","value":"b\nSet-Cookie: x","domain":"intranet.example.org"}]`, "characters a cookie value may not hold"},
 		{`[{"name":"a","value":"\"q\"","domain":"intranet.example.org"}]`, "characters a cookie value may not hold"},
-		{`[{"name":"a","value":"b","domain":"evil.example"}]`, "not for the service's host"},
-		{`[{"name":"a","value":"b","domain":"org"}]`, "not for the service's host"},
-		{`[{"name":"a","value":"b","domain":"example.org.evil"}]`, "not for the service's host"},
-		{`[{"name":"a","value":"b","domain":"bad domain"}]`, "not a domain"},
-		{`[{"name":"a","value":"b","domain":"intranet.example.org","path":"api"}]`, "invalid path"},
-		{`[{"name":"a","value":"b","domain":"intranet.example.org","expiry":-1}]`, "invalid expiry"},
-		{`[{"name":"a","value":"b","domain":"intranet.example.org","expiry":1}]`, "already expired"},
-		{`[{"name":"a","value":"b","domain":"intranet.example.org"},{"name":"a","value":"c","domain":".intranet.example.org"}]`, "listed twice"},
+		{`[{"name":"a","value":"bvalue-1","domain":"evil.example"}]`, "not the service's host"},
+		{`[{"name":"a","value":"bvalue-1","domain":"org"}]`, "not the service's host"},
+		{`[{"name":"a","value":"bvalue-1","domain":"example.org.evil"}]`, "not the service's host"},
+		{`[{"name":"a","value":"bvalue-1","domain":"bad domain"}]`, "not a host name or address"},
+		{`[{"name":"a","value":"bvalue-1","domain":"intranet.example.org","path":"api"}]`, "invalid path"},
+		{`[{"name":"a","value":"bvalue-1","domain":"intranet.example.org","expiry":-1}]`, "invalid expiry"},
+		{`[{"name":"a","value":"bvalue-1","domain":"intranet.example.org","expiry":1}]`, "already expired"},
+		{`[{"name":"a","value":"bvalue-1","domain":"intranet.example.org"},{"name":"a","value":"cvalue-1","domain":".intranet.example.org"}]`, "listed twice"},
 		{`[{"name":"a","value":"` + strings.Repeat("v", 5000) + `","domain":"intranet.example.org"}]`, "longer than"},
 		{strings.Repeat(" ", MaxLoginOutput+1), "more than"},
+		// D2-07: every cookie is a credential and must be scrubbable.
+		{`[{"name":"lang","value":"en","domain":"intranet.example.org"}]`, "the value has 2 characters; devc needs at least 8"},
+		{`[{"name":"session","value":"abcdefgh","domain":"intranet.example.org"},{"name":"s2","value":"seven77","domain":"intranet.example.org"}]`, "cookie 2 (in the order printed): the value has 7 characters"},
 	}
 	for _, c := range bad {
 		if _, err := ParseLoginOutput([]byte(c.out), "intranet.example.org", now); err == nil || !strings.Contains(err.Error(), c.msg) {
 			t.Errorf("%.60q: %v, want …%s…", c.out, err, c.msg)
+		}
+	}
+	// D2-08: errors never repeat what the output held: an unknown field,
+	// a string where a number belongs, a domain, a cookie's name.
+	for _, out := range []string{
+		`[{"name":"a","value":"bvalue-1","domain":"intranet.example.org","SECRET-pass-123":1}]`,
+		`[{"name":"a","value":"bvalue-1","domain":"intranet.example.org","expiry":"SECRET-pass-123"}]`,
+		`[{"name":"a","value":"bvalue-1","domain":"SECRET-pass-123.example"}]`,
+		`[{"name":"a","value":"bvalue-1","domain":"SECRET pass 123"}]`,
+		`[{"name":"SECRET-pass-123","value":"short","domain":"intranet.example.org"}]`,
+		`[{"name":"SECRET-pass-123","value":"bvalue-1","domain":"intranet.example.org"},{"name":"SECRET-pass-123","value":"bvalue-1","domain":"intranet.example.org"}]`,
+		`["SECRET-pass-123"]`,
+		`[{"name":"a","value":"SECRET-pass-123`,
+	} {
+		_, err := ParseLoginOutput([]byte(out), "intranet.example.org", now)
+		if err == nil || strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), "pass-123") {
+			t.Errorf("%s: %v", out, err)
 		}
 	}
 	many := "["
@@ -51,17 +71,17 @@ func TestParseLoginOutput(t *testing.T) {
 		if i > 0 {
 			many += ","
 		}
-		many += `{"name":"c` + itoa(int64(i)) + `","value":"b","domain":"intranet.example.org"}`
+		many += `{"name":"c` + itoa(int64(i)) + `","value":"bvalue-1","domain":"intranet.example.org"}`
 	}
 	many += "]"
 	if _, err := ParseLoginOutput([]byte(many), "intranet.example.org", now); err == nil || !strings.Contains(err.Error(), "more than 64") {
 		t.Errorf("65 cookies: %v", err)
 	}
 	// IP hosts take only exactly matching cookies.
-	if _, err := ParseLoginOutput([]byte(`[{"name":"a","value":"b","domain":"127.0.0.1"}]`), "127.0.0.1", now); err != nil {
+	if _, err := ParseLoginOutput([]byte(`[{"name":"a","value":"bvalue-1","domain":"127.0.0.1"}]`), "127.0.0.1", now); err != nil {
 		t.Errorf("IP host: %v", err)
 	}
-	if _, err := ParseLoginOutput([]byte(`[{"name":"a","value":"b","domain":"0.0.1"}]`), "127.0.0.1", now); err == nil {
+	if _, err := ParseLoginOutput([]byte(`[{"name":"a","value":"bvalue-1","domain":"0.0.1"}]`), "127.0.0.1", now); err == nil {
 		t.Error("a suffix of an IP address was accepted")
 	}
 }

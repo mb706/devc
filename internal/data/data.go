@@ -70,6 +70,8 @@ type Service struct {
 	SSHConfig string
 	// RsyncBin is the rsync executable ("rsync" when empty).
 	RsyncBin string
+	// Rand draws push backup IDs (crypto/rand when nil).
+	Rand io.Reader
 
 	syncOnce sync.Once
 	syncErr  error

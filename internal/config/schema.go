@@ -17,6 +17,7 @@ type Global struct {
 	Terminal     GlobalTerminal `toml:"terminal" json:"terminal"`
 	Router       GlobalRouter   `toml:"router" json:"router"`
 	Sync         GlobalSync     `toml:"sync" json:"sync"`
+	GUI          GlobalGUI      `toml:"gui" json:"gui"`
 	// MachineName names this machine in the data manifest (work order
 	// C14); empty means the host name.
 	MachineName string `toml:"machine_name" json:"machine_name"`
@@ -97,11 +98,26 @@ type GlobalBox struct {
 	Shell  string `toml:"shell" json:"shell"`
 }
 
-// NoLimit switches the memory limit off; NoPidsLimit the PID limit.
+// NoLimit switches the memory limit off; NoPidsLimit the PID limit;
+// NoCPULimit the desktop's CPU limit.
 const (
 	NoLimit     = "none"
 	NoPidsLimit = -1
+	NoCPULimit  = -1
 )
+
+// GlobalGUI holds the limits of the desktop sidecar (C19r2, finding
+// D2-01). The sidecar runs in a cgroup of its own beside the box, and box
+// programs make it allocate (pixmaps, connections), so it gets limits of
+// its own: Memory a size or "none", Pids a positive number or -1, CPUs a
+// positive number of CPUs or -1. As for boxes, "none" and -1 switch a
+// limit off explicitly, and a limit that cannot be applied fails `devc gui
+// up`.
+type GlobalGUI struct {
+	Memory string  `toml:"memory" json:"memory"`
+	Pids   int     `toml:"pids" json:"pids"`
+	CPUs   float64 `toml:"cpus" json:"cpus"`
+}
 
 type Hub struct {
 	URL string `toml:"url" json:"url"`
@@ -112,6 +128,7 @@ func defaultGlobal() Global {
 		ProjectsRoot: "~/devc",
 		Engine:       "podman",
 		Box:          GlobalBox{Memory: "16g", Pids: 4096},
+		GUI:          GlobalGUI{Memory: "2g", Pids: 512, CPUs: 2},
 		SELinux:      GlobalSELinux{Mode: SELinuxLabels},
 		Secrets:      GlobalSecrets{Delivery: DeliveryFiles},
 		Router:       GlobalRouter{Listen: DefaultRouterListen},

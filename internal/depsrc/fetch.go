@@ -92,11 +92,15 @@ type Result struct {
 }
 
 // candidate is one place an archive may be downloaded from, with the
-// checksum the registry publishes for it (algorithm and expected digest;
-// empty when none).
+// checksum the registry publishes for it (algorithm and expected digest in
+// hex). A candidate without a checksum is downloaded only when unchecked
+// says that the registry publishes none for it (CRAN's archived versions,
+// GitHub's tarballs); everywhere else a missing or unusable checksum is
+// an error (finding D2-13).
 type candidate struct {
 	url       string
 	algo, sum string
+	unchecked bool
 }
 
 // Fetch puts the source of s into the cache and returns where it is.
@@ -128,6 +132,12 @@ func Fetch(ctx context.Context, s Spec, e Env, o Options) (*Result, error) {
 			s.Version = in.Version
 		}
 	}
+	// A concrete version already in the cache needs no registry (finding
+	// D2-14).
+	if r := cachedVersion(o.Root, s, res); r != nil {
+		return r, nil
+	}
+	requested := s.Version
 	var cands []candidate
 	var err error
 	switch s.Eco {
@@ -155,6 +165,7 @@ func Fetch(ctx context.Context, s Spec, e Env, o Options) (*Result, error) {
 	}
 	if fi, err := os.Lstat(dir); err == nil && fi.IsDir() {
 		res.Cached = true
+		rememberAlias(parent, s, requested)
 		return res, nil
 	}
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -204,7 +215,63 @@ func Fetch(ctx context.Context, s Spec, e Env, o Options) (*Result, error) {
 		}
 		return nil, fmt.Errorf("moving the source into the cache: %w", err)
 	}
+	rememberAlias(parent, s, requested)
 	return res, nil
+}
+
+// concrete reports whether v names one version for good: any version for
+// the registries, only a commit for GitHub (a branch or tag moves).
+func concrete(eco, v string) bool {
+	if v == "" || CheckVersion(v) != nil {
+		return false
+	}
+	return eco != EcoGitHub || shaRE.MatchString(v)
+}
+
+// aliasPrefix names the files that map a version as asked to the
+// registry's canonical form, kept beside the version directories.
+const aliasPrefix = ".alias-"
+
+// cachedVersion returns the cached tree of a concrete version, directly or
+// through an alias a registry's normalisation left, or nil.
+func cachedVersion(root string, s Spec, res *Result) *Result {
+	if !concrete(s.Eco, s.Version) {
+		return nil
+	}
+	parent := filepath.Join(root, s.Eco, filepath.FromSlash(s.Name))
+	v := s.Version
+	if fi, err := os.Lstat(filepath.Join(parent, v)); err != nil || !fi.IsDir() {
+		b, err := os.ReadFile(filepath.Join(parent, aliasPrefix+v))
+		if err != nil || len(b) > 256 {
+			return nil
+		}
+		v = strings.TrimSpace(string(b))
+		if !concrete(s.Eco, v) {
+			return nil
+		}
+		if fi, err := os.Lstat(filepath.Join(parent, v)); err != nil || !fi.IsDir() {
+			return nil
+		}
+	}
+	out := *res
+	out.Spec = s
+	out.Spec.Version = v
+	out.Path = filepath.Join(parent, v)
+	if s.Subdir != "" {
+		out.Path = filepath.Join(out.Path, filepath.FromSlash(s.Subdir))
+	}
+	out.Cached = true
+	return &out
+}
+
+// rememberAlias records that the version asked for is the registry's
+// canonical s.Version, when they differ, so the next request for it is
+// answered from the cache (best effort).
+func rememberAlias(parent string, s Spec, requested string) {
+	if requested == s.Version || !concrete(s.Eco, requested) || !concrete(s.Eco, s.Version) {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(parent, aliasPrefix+requested), []byte(s.Version+"\n"), 0o644)
 }
 
 // hint adds, at network level allowlist, which preset allows the registry.
@@ -316,12 +383,26 @@ func (o Options) download(ctx context.Context, eco string, c candidate, file str
 	switch c.algo {
 	case "sha256":
 		h = sha256.New()
+	case "sha384":
+		h = sha512.New384()
 	case "sha512":
 		h = sha512.New()
 	case "sha1":
 		h = sha1.New()
 	case "md5":
 		h = md5.New()
+	case "":
+		if !c.unchecked {
+			f.Close()
+			return fmt.Errorf("the registry publishes no checksum for %s: refusing to download it unchecked", c.url)
+		}
+	default:
+		f.Close()
+		return fmt.Errorf("unknown checksum algorithm %q for %s", c.algo, c.url)
+	}
+	if h != nil && !validHexSum(c.algo, c.sum) {
+		f.Close()
+		return fmt.Errorf("the registry's %s checksum for %s is not usable: refusing to download it unchecked", c.algo, c.url)
 	}
 	var w io.Writer = f
 	if h != nil {
@@ -341,6 +422,49 @@ func (o Options) download(ctx context.Context, eco string, c candidate, file str
 		}
 	}
 	return nil
+}
+
+// sumBytes are the digest lengths of the checksum algorithms.
+var sumBytes = map[string]int{"md5": 16, "sha1": 20, "sha256": 32, "sha384": 48, "sha512": 64}
+
+// validHexSum reports whether sum is a hex digest of algo's length.
+func validHexSum(algo, sum string) bool {
+	n, ok := sumBytes[algo]
+	if !ok || len(sum) != 2*n {
+		return false
+	}
+	_, err := hex.DecodeString(sum)
+	return err == nil
+}
+
+// npmChecksum picks the strongest usable checksum of an npm dist: from the
+// integrity string (Subresource Integrity, "<algo>-<base64>", possibly
+// several separated by white space), else the SHA-1 shasum that older
+// packages carry. Integrity that is present but unusable, or no checksum
+// at all, is an error rather than an unchecked download (finding D2-13).
+func npmChecksum(integrity, shasum string) (algo, sum string, err error) {
+	if strings.TrimSpace(integrity) != "" {
+		rank := map[string]int{"sha1": 1, "sha256": 2, "sha384": 3, "sha512": 4}
+		for _, tok := range strings.Fields(integrity) {
+			a, b64, ok := strings.Cut(tok, "-")
+			b64, _, _ = strings.Cut(b64, "?") // SRI options
+			raw, derr := base64.StdEncoding.DecodeString(b64)
+			if !ok || derr != nil || rank[a] == 0 || len(raw) != sumBytes[a] {
+				continue
+			}
+			if rank[a] > rank[algo] {
+				algo, sum = a, hex.EncodeToString(raw)
+			}
+		}
+		if algo == "" {
+			return "", "", fmt.Errorf("its integrity value %q holds no checksum devc can verify", printable(proto64(integrity)))
+		}
+		return algo, sum, nil
+	}
+	if validHexSum("sha1", strings.ToLower(shasum)) {
+		return "sha1", strings.ToLower(shasum), nil
+	}
+	return "", "", errors.New("it publishes neither an integrity value nor a SHA-1 shasum")
 }
 
 // headers are sent to a registry: GitHub's API version, and the user's
@@ -370,11 +494,13 @@ func (o Options) cran(ctx context.Context, s Spec) (string, []candidate, error) 
 	cur := ""
 	var md5sum string
 	var buf bytes.Buffer
-	if err := o.get(ctx, EcoR, base+"/src/contrib/PACKAGES", nil, &buf, maxDocument); err == nil {
-		cur, md5sum = cranCurrent(buf.Bytes(), s.Name)
-	} else if s.Version == "" {
+	// The package list is read for every download: it holds the checksum
+	// of the current release, so without it devc cannot tell whether a
+	// version should have one.
+	if err := o.get(ctx, EcoR, base+"/src/contrib/PACKAGES", nil, &buf, maxDocument); err != nil {
 		return "", nil, fmt.Errorf("reading CRAN's package list: %w", err)
 	}
+	cur, md5sum = cranCurrent(buf.Bytes(), s.Name)
 	v := s.Version
 	if v == "" {
 		if cur == "" {
@@ -386,11 +512,17 @@ func (o Options) cran(ctx context.Context, s Spec) (string, []candidate, error) 
 		return "", nil, fmt.Errorf("CRAN lists an unusable version %q for %s", v, s.Name)
 	}
 	file := url.PathEscape(s.Name + "_" + v + ".tar.gz")
-	current := candidate{url: base + "/src/contrib/" + file}
-	if v == cur && md5sum != "" {
-		current.algo, current.sum = "md5", md5sum
+	if v == cur {
+		// The current release: PACKAGES carries its MD5.
+		md5sum = strings.ToLower(md5sum)
+		if !validHexSum("md5", md5sum) {
+			return "", nil, fmt.Errorf("CRAN's package list has no usable MD5sum for %s %s: refusing to download it unchecked", s.Name, v)
+		}
+		return v, []candidate{{url: base + "/src/contrib/" + file, algo: "md5", sum: md5sum}}, nil
 	}
-	archive := candidate{url: base + "/src/contrib/Archive/" + url.PathEscape(s.Name) + "/" + file}
+	// CRAN publishes no checksum for archived versions.
+	current := candidate{url: base + "/src/contrib/" + file, unchecked: true}
+	archive := candidate{url: base + "/src/contrib/Archive/" + url.PathEscape(s.Name) + "/" + file, unchecked: true}
 	return v, []candidate{current, archive}, nil
 }
 
@@ -435,11 +567,11 @@ func (o Options) pypi(ctx context.Context, s Spec) (string, []candidate, error) 
 	}
 	for _, f := range doc.URLs {
 		if f.PackageType == "sdist" {
-			c := candidate{url: f.URL}
-			if sum := f.Digests["sha256"]; len(sum) == 64 {
-				c.algo, c.sum = "sha256", sum
+			sum := strings.ToLower(f.Digests["sha256"])
+			if !validHexSum("sha256", sum) {
+				return "", nil, fmt.Errorf("PyPI publishes no usable sha256 for the source distribution of %s %s: refusing to download it unchecked", s.Name, v)
 			}
-			return v, []candidate{c}, nil
+			return v, []candidate{{url: f.URL, algo: "sha256", sum: sum}}, nil
 		}
 	}
 	msg := fmt.Sprintf("%s %s has no source distribution on PyPI (only wheels)", s.Name, v)
@@ -478,16 +610,11 @@ func (o Options) npm(ctx context.Context, s Spec) (string, []candidate, error) {
 	if doc.Name != s.Name || CheckVersion(doc.Version) != nil {
 		return "", nil, fmt.Errorf("the npm registry answered for %q %q instead of %s", printable(doc.Name), printable(doc.Version), s.Name)
 	}
-	c := candidate{url: doc.Dist.Tarball}
-	if algo, b64, ok := strings.Cut(doc.Dist.Integrity, "-"); ok && algo == "sha512" {
-		if raw, err := base64.StdEncoding.DecodeString(b64); err == nil {
-			c.algo, c.sum = "sha512", hex.EncodeToString(raw)
-		}
+	algo, sum, err := npmChecksum(doc.Dist.Integrity, doc.Dist.Shasum)
+	if err != nil {
+		return "", nil, fmt.Errorf("the npm registry's entry for %s %s cannot be verified: %w", s.Name, doc.Version, err)
 	}
-	if c.algo == "" && len(doc.Dist.Shasum) == 40 {
-		c.algo, c.sum = "sha1", doc.Dist.Shasum
-	}
-	return doc.Version, []candidate{c}, nil
+	return doc.Version, []candidate{{url: doc.Dist.Tarball, algo: algo, sum: sum}}, nil
 }
 
 // github: the commit a ref names (the default branch when none), then the
@@ -515,7 +642,8 @@ func (o Options) github(ctx context.Context, s Spec) (string, []candidate, error
 		}
 		o.notef("%s is commit %s", s, sha)
 	}
-	return sha, []candidate{{url: base + "/repos/" + s.Name + "/tarball/" + sha}}, nil
+	// GitHub publishes no checksum for tarballs; the commit names the tree.
+	return sha, []candidate{{url: base + "/repos/" + s.Name + "/tarball/" + sha, unchecked: true}}, nil
 }
 
 func proto64(s string) string {

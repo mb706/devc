@@ -74,7 +74,7 @@ func newDataPushCmd(a *app) *cobra.Command {
 			"rsync over your own SSH. A helper container first hard-links the files into a staging directory that no box " +
 			"can change, and rsync reads only that. A list of what would be transferred is shown first and you are asked, " +
 			"unless --yes. Nothing is deleted on the remote; a file the push replaces is kept there in " +
-			".devc-backup/<time>/. The staged files are hard links: a process in the box that holds one open can still " +
+			".devc-backup/<time>-<id>/ (one per push). The staged files are hard links: a process in the box that holds one open can still " +
 			"change it during the transfer. The push is recorded in the data manifest; --content also stores a SHA-256 " +
 			"content hash of each entry.",
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -230,7 +230,9 @@ func newDataStatusCmd(a *app) *cobra.Command {
 		Short: "Compare every top-level entry of the zones with the data manifest",
 		Long: "For each top-level entry of each zone: its size and digest now, whether it differs from the last record in " +
 			"the data manifest (new, recorded, changed; absent for recorded entries that are not here), and on which " +
-			"machines and remotes it was last recorded (marked * when that record differs from the entry now).",
+			"machines and remotes it was last recorded (marked * when that record differs from the entry now; for a remote, " +
+			"what a pull received from it is compared, not this machine's copy after the merge; > marks a remote that a push " +
+			"sent the entry to as it is now, which may keep other files besides).",
 		Args: maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.withData(cmd, args, "", false, func(ctx context.Context, e *boxEnv, p *data.Project) error {
@@ -278,7 +280,9 @@ func printDataStatus(w io.Writer, st *data.DataStatus) error {
 }
 
 // places lists where an entry was recorded; * marks a record that differs
-// from the entry now.
+// from the entry now (or, for a remote, says nothing about the entry now),
+// > a remote that a push sent the entry to as it is now (it may keep other
+// files besides).
 func places(ps []data.RecordedAt) string {
 	if len(ps) == 0 {
 		return "-"
@@ -286,7 +290,10 @@ func places(ps []data.RecordedAt) string {
 	var out []string
 	for _, p := range ps {
 		s := p.Name
-		if !p.Same {
+		switch {
+		case p.Sent:
+			s += ">"
+		case !p.Same:
 			s += "*"
 		}
 		out = append(out, s)

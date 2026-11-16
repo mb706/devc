@@ -2,6 +2,7 @@ package svclogin
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,7 +111,15 @@ func TestLogin(t *testing.T) {
 	fail("exit status", execx.Result{ExitCode: 3, Stderr: []byte("wrong password hunter2-very-secret")}, &execx.ExitError{Result: execx.Result{ExitCode: 3}}, "exited with status 3")
 	fail("garbage", execx.Result{Stdout: []byte("<html>")}, nil, "not a JSON array")
 	fail("too much", execx.Result{Stdout: []byte(strings.Repeat("x", MaxLoginOutput+10))}, nil, "printed more than")
-	fail("other domain", execx.Result{Stdout: []byte(`[{"name":"a","value":"b","domain":"evil.example"}]`)}, nil, "not for the service's host")
+	fail("other domain", execx.Result{Stdout: []byte(`[{"name":"a","value":"bvalue-1","domain":"evil.example"}]`)}, nil, "not the service's host")
+	fail("short cookie", execx.Result{Stdout: []byte(`[{"name":"lang","value":"en","domain":"intranet.example.org"}]`)}, nil, "at least 8")
+	// D2-08: nothing derived from the output or the engine repeats a
+	// secret: not an unknown field named like the password, not the
+	// password as a domain, not an engine error that quotes it.
+	fail("password as a field", execx.Result{Stdout: []byte(`[{"name":"a","value":"bvalue-1","domain":"intranet.example.org","hunter2-very-secret":1}]`)}, nil, "an unknown field")
+	fail("password as a domain", execx.Result{Stdout: []byte(`[{"name":"a","value":"bvalue-1","domain":"hunter2-very-secret.example"}]`)}, nil, "not the service's host")
+	fail("engine error", execx.Result{}, errors.New("podman: cannot start with hunter2-very-secret"), "running the login command")
+	fail("password in stderr", execx.Result{ExitCode: 1, Stderr: []byte("login failed for alice/hunter2-very-secret")}, &execx.ExitError{Result: execx.Result{ExitCode: 1}}, Redacted+"/"+Redacted)
 	store.Delete("demo", "INTRANET_USER")
 	fail("missing secret", execx.Result{}, nil, "needs the secret INTRANET_USER")
 	h := *s

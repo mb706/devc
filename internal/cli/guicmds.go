@@ -246,14 +246,27 @@ func (a *app) browserHint(addr string, port int) {
 	fmt.Fprintf(a.stdout, "DevTools endpoint: http://%s/json/version\n", addr)
 	fmt.Fprintf(a.stdout, "in Chrome or Chromium on this machine open chrome://inspect, choose \"Configure…\" next to \"Discover network targets\", "+
 		"add %s, and the box's pages appear under \"Remote Target\"\n", addr)
-	cl := &http.Client{Timeout: 5 * time.Second}
-	resp, err := cl.Get("http://" + addr + "/json/version")
-	if err == nil {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK && strings.Contains(string(b), "Browser") {
-			return
-		}
+	if browserAnswers(addr) {
+		return
 	}
 	fmt.Fprintf(a.stderr, "devc: no browser answers on port %d in the box yet; start Chromium there with "+chromiumFlags+"\n", port, port)
+}
+
+// browserAnswers probes the forwarded DevTools endpoint. Whatever listens
+// there is the box's, so a redirect is never followed (finding D2-05): its
+// target would be fetched from the host's network namespace, past the
+// box's rules. A redirect means that no browser was found.
+func browserAnswers(addr string) bool {
+	cl := &http.Client{
+		Timeout:       5 * time.Second,
+		Transport:     &http.Transport{Proxy: nil, DisableKeepAlives: true},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := cl.Get("http://" + addr + "/json/version")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return resp.StatusCode == http.StatusOK && strings.Contains(string(b), "Browser")
 }

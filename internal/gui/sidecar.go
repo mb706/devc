@@ -21,17 +21,25 @@
 // vector (rule 3); names arrive validated (rule 4). The cookie is readable
 // in the box on purpose (box programs are the display's clients), so
 // anything in the box can drive and read the display.
+//
+// Box programs make the sidecar allocate (pixmaps in the X server, a
+// process per connection in the relays), and the sidecar has a cgroup of
+// its own, so it gets limits of its own ([gui] memory, pids, cpus in
+// config.toml); a configured limit that cannot be applied fails `devc gui
+// up` (rule 6), and the image bounds the processes each relay forks.
 package gui
 
 import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/mb706/devc/assets"
 	"github.com/mb706/devc/internal/box"
+	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/toolbox"
@@ -95,6 +103,52 @@ type SidecarOptions struct {
 	// sidecar.
 	Labels []string
 	Image  string
+	// Limits are the sidecar's resource limits; Controllers the cgroup
+	// controllers delegated to the user.
+	Limits      config.GlobalGUI
+	Controllers []string
+}
+
+// LimitArgs returns the engine arguments for the sidecar's resource limits
+// (finding D2-01). A configured limit whose cgroup controller is not
+// delegated is an error; "none" and -1 switch a limit off explicitly.
+func LimitArgs(l config.GlobalGUI, controllers []string) ([]string, error) {
+	var args, missing []string
+	if l.Memory != config.NoLimit {
+		n, err := config.ParseSize(l.Memory)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("[gui] memory %q is not a size", l.Memory)
+		}
+		if slices.Contains(controllers, "memory") {
+			args = append(args, "--memory", strconv.FormatInt(n, 10))
+		} else {
+			missing = append(missing, "memory")
+		}
+	}
+	switch {
+	case l.Pids == config.NoPidsLimit:
+	case l.Pids <= 0:
+		return nil, fmt.Errorf("[gui] pids %d is not a limit", l.Pids)
+	case slices.Contains(controllers, "pids"):
+		args = append(args, "--pids-limit", strconv.Itoa(l.Pids))
+	default:
+		missing = append(missing, "pids")
+	}
+	switch {
+	case l.CPUs == config.NoCPULimit:
+	case !(l.CPUs >= 0.01 && l.CPUs <= 4096):
+		return nil, fmt.Errorf("[gui] cpus %v is not a limit", l.CPUs)
+	case slices.Contains(controllers, "cpu"):
+		args = append(args, "--cpus", strconv.FormatFloat(l.CPUs, 'f', -1, 64))
+	default:
+		missing = append(missing, "cpu")
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("the cgroup controller(s) %s are not delegated to this user, so the desktop's limits cannot be applied: "+
+			"enable delegation (see 'devc doctor'), or switch the limits off explicitly with memory = \"none\", pids = -1 and cpus = -1 under [gui] in config.toml",
+			strings.Join(missing, " and "))
+	}
+	return args, nil
 }
 
 var (
@@ -122,6 +176,10 @@ func SidecarArgs(o SidecarOptions) ([]string, error) {
 	case o.Image == "":
 		return nil, fmt.Errorf("no image")
 	}
+	limits, err := LimitArgs(o.Limits, o.Controllers)
+	if err != nil {
+		return nil, err
+	}
 	args := []string{
 		"--name", SidecarName(o.Ref),
 		"--label", box.LabelRealm + "=" + o.Ref.Realm,
@@ -143,6 +201,7 @@ func SidecarArgs(o SidecarOptions) ([]string, error) {
 		}
 		args = append(args, "--security-opt", l)
 	}
+	args = append(args, limits...)
 	args = append(args,
 		"--read-only", "--read-only-tmpfs=false",
 		"--mount", "type=tmpfs,destination=/tmp",

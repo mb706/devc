@@ -38,6 +38,20 @@ type Registry struct {
 	Hostile bool
 	// WrongSum makes PyPI publish a wrong checksum.
 	WrongSum bool
+	// PyPIDigests, when set, are the digests PyPI publishes for the sdist;
+	// NPMDist, when set, gives the integrity and shasum npm publishes for
+	// an archive; CRANNoMD5 leaves the MD5sum out of PACKAGES.
+	PyPIDigests map[string]string
+	NPMDist     func(archive []byte) (integrity, shasum string)
+	CRANNoMD5   bool
+	requests    int
+}
+
+// Requests counts every request the registry answered.
+func (r *Registry) Requests() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.requests
 }
 
 // New returns an empty registry.
@@ -108,6 +122,10 @@ func (r *Registry) archive(eco, version string) []byte {
 // ServeHTTP implements the four registries below /cran, /pypi, /npm and
 // /github.
 func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	r.requests++
+	pyDigests, npmDist, noMD5 := r.PyPIDigests, r.NPMDist, r.CRANNoMD5
+	r.mu.Unlock()
 	p := req.URL.EscapedPath()
 	base := "http://" + req.Host
 	writeJSON := func(v any) { w.Header().Set("Content-Type", "application/json"); json.NewEncoder(w).Encode(v) }
@@ -115,6 +133,10 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case p == "/cran/src/contrib/PACKAGES":
 		a := r.archive("cran", "1.2.0")
 		sum := md5.Sum(a)
+		if noMD5 {
+			fmt.Fprint(w, "Package: other\nVersion: 0.1\n\nPackage: mypkg\nVersion: 1.2.0\n\n")
+			return
+		}
 		fmt.Fprintf(w, "Package: other\nVersion: 0.1\n\nPackage: mypkg\nVersion: 1.2.0\nMD5sum: %s\n\n", hex.EncodeToString(sum[:]))
 	case p == "/cran/src/contrib/mypkg_1.2.0.tar.gz":
 		r.count("cran")
@@ -129,9 +151,13 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if r.WrongSum {
 			digest = strings.Repeat("0", 64)
 		}
+		digests := map[string]string{"sha256": digest}
+		if pyDigests != nil {
+			digests = pyDigests
+		}
 		writeJSON(map[string]any{"info": map[string]any{"version": "2.0.0"}, "urls": []any{
 			map[string]any{"packagetype": "bdist_wheel", "url": base + "/pypi/files/my_lib-2.0.0-py3-none-any.whl"},
-			map[string]any{"packagetype": "sdist", "url": base + "/pypi/files/my_lib-2.0.0.tar.gz", "digests": map[string]string{"sha256": digest}},
+			map[string]any{"packagetype": "sdist", "url": base + "/pypi/files/my_lib-2.0.0.tar.gz", "digests": digests},
 		}})
 	case p == "/pypi/pypi/wheels-only/json":
 		writeJSON(map[string]any{"info": map[string]any{"version": "1.0", "project_urls": map[string]string{"Source": "https://github.com/o/wheels-only"}},
@@ -139,15 +165,26 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case p == "/pypi/files/my_lib-2.0.0.tar.gz":
 		r.count("pypi")
 		w.Write(r.archive("pypi", "2.0.0"))
-	case p == "/npm/@scope%2Fthing/latest" || p == "/npm/@scope%2Fthing/3.1.4", p == "/npm/plain/1.0.0":
+	case p == "/npm/@scope%2Fthing/latest" || p == "/npm/@scope%2Fthing/3.1.4", p == "/npm/plain/1.0.0", p == "/npm/plain/v1.0.0", p == "/npm/plain/latest":
+		// "v1.0.0" is normalised to 1.0.0, as registries do.
 		name, v := "@scope/thing", "3.1.4"
 		if strings.HasPrefix(p, "/npm/plain") {
 			name, v = "plain", "1.0.0"
 		}
 		a := r.archive("npm", v)
 		sum := sha512.Sum512(a)
-		writeJSON(map[string]any{"name": name, "version": v, "dist": map[string]any{
-			"tarball": base + "/npm/tarballs/" + v + ".tgz", "integrity": "sha512-" + base64.StdEncoding.EncodeToString(sum[:])}})
+		dist := map[string]any{"tarball": base + "/npm/tarballs/" + v + ".tgz", "integrity": "sha512-" + base64.StdEncoding.EncodeToString(sum[:])}
+		if npmDist != nil {
+			integrity, shasum := npmDist(a)
+			dist = map[string]any{"tarball": base + "/npm/tarballs/" + v + ".tgz"}
+			if integrity != "" {
+				dist["integrity"] = integrity
+			}
+			if shasum != "" {
+				dist["shasum"] = shasum
+			}
+		}
+		writeJSON(map[string]any{"name": name, "version": v, "dist": dist})
 	case strings.HasPrefix(p, "/npm/tarballs/"):
 		r.count("npm")
 		w.Write(r.archive("npm", strings.TrimSuffix(strings.TrimPrefix(p, "/npm/tarballs/"), ".tgz")))

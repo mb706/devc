@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -62,6 +63,13 @@ type Capabilities struct {
 	GitHub            string            `json:"github,omitempty"`
 	GitHubPermissions map[string]string `json:"github_permissions,omitempty"`
 	GitHubRead        []string          `json:"github_read,omitempty"`
+	// GitHubUpstream is the project's upstream at the start (token modes),
+	// GitHubAppID and GitHubInstallation the realm's [github.app] then
+	// (mode "app"): a token is delivered only while the repository and the
+	// App are still those (finding D2-02).
+	GitHubUpstream     string `json:"github_upstream,omitempty"`
+	GitHubAppID        int64  `json:"github_app_id,omitempty"`
+	GitHubInstallation int64  `json:"github_installation,omitempty"`
 	// Services are the services of grants.services (work order C18), each
 	// with the port and the fingerprint of its definition at the start.
 	Services []ServiceCap `json:"services,omitempty"`
@@ -95,8 +103,14 @@ func CapabilitiesOf(r *config.Resolved, containerID string, now time.Time) Capab
 	c := Capabilities{V: 1, ContainerID: containerID, Recorded: now.UTC(), Secrets: GrantedSecrets(r),
 		SSH: slices.Clone(r.Grants.SSH), SSHAllow: allow, Network: r.Network,
 		GitHub: r.Grants.GitHub, GitHubRead: slices.Clone(r.Grants.GitHubRead)}
+	if r.Grants.GitHubTokenMode() {
+		c.GitHubUpstream = r.Upstream
+	}
 	if r.Grants.GitHub == config.GitHubModeApp {
 		c.GitHubPermissions = r.Grants.GitHubPermissions()
+		if r.GitHubApp != nil {
+			c.GitHubAppID, c.GitHubInstallation = r.GitHubApp.AppID, r.GitHubApp.InstallationID
+		}
 	}
 	for i := range r.Services {
 		s := &r.Services[i]
@@ -238,25 +252,53 @@ func (c *Capabilities) SSHGrant(r *config.Resolved, host string) (config.SSHGran
 // ErrNoGitHubToken: the box holds no GitHub token, now or since its start.
 var ErrNoGitHubToken = errors.New("no GitHub token for this box")
 
-// GitHubToken is the token mode in force for the box (work order C15):
+// GitHubGrant is the GitHub token a box may receive: the mode, the
+// permissions of mode "app" and the repository the token is for.
+type GitHubGrant struct {
+	Mode        string
+	Permissions map[string]string
+	Repo        github.Repo
+}
+
+// GitHubToken is the token grant in force for the box (work order C15):
 // grants.github was "app" or "token:<secret>" at its start and is the same
-// now. For "app" the permissions are those granted then and now, each at
-// the lower level.
-func (c *Capabilities) GitHubToken(r *config.Resolved) (string, map[string]string, error) {
+// now, the project's repository is the one it was (finding D2-02), and for
+// "app" the realm's App and installation are too; the permissions are
+// those granted then and now, each at the lower level. web is GitHub's web
+// base, which decides what an upstream means.
+func (c *Capabilities) GitHubToken(r *config.Resolved, web *url.URL) (GitHubGrant, error) {
 	switch {
 	case !r.Grants.GitHubTokenMode():
-		return "", nil, fmt.Errorf("%w: grants.github is %q", ErrNoGitHubToken, r.Grants.GitHub)
+		return GitHubGrant{}, fmt.Errorf("%w: grants.github is %q", ErrNoGitHubToken, r.Grants.GitHub)
 	case c.GitHub != r.Grants.GitHub:
-		return "", nil, fmt.Errorf("%w: grants.github changed to %q after the box started with %q", ErrNoGitHubToken, r.Grants.GitHub, c.GitHub)
+		return GitHubGrant{}, fmt.Errorf("%w: grants.github changed to %q after the box started with %q", ErrNoGitHubToken, r.Grants.GitHub, c.GitHub)
+	case c.GitHubUpstream == "":
+		return GitHubGrant{}, fmt.Errorf("%w: the box's start record names no repository (it was started by an older devc)", ErrNoGitHubToken)
 	}
+	started, err := github.ParseRepo(c.GitHubUpstream, web)
+	if err != nil {
+		return GitHubGrant{}, fmt.Errorf("%w: the box started with the upstream %q, which is not a GitHub repository", ErrNoGitHubToken, c.GitHubUpstream)
+	}
+	now, err := github.ParseRepo(r.Upstream, web)
+	if err != nil || !now.Equal(started) {
+		return GitHubGrant{}, fmt.Errorf("%w: the project's upstream changed to %q after the box started with %s", ErrNoGitHubToken, r.Upstream, started)
+	}
+	g := GitHubGrant{Mode: r.Grants.GitHub, Repo: now}
 	if r.Grants.GitHub != config.GitHubModeApp {
-		return r.Grants.GitHub, nil, nil
+		return g, nil
 	}
-	perms := github.IntersectPermissions(c.GitHubPermissions, r.Grants.GitHubPermissions())
-	if len(perms) == 0 {
-		return "", nil, fmt.Errorf("%w: the permissions granted at the start and now have nothing in common", ErrNoGitHubToken)
+	switch {
+	case r.GitHubApp == nil:
+		return GitHubGrant{}, fmt.Errorf("%w: the realm %s has no [github.app]", ErrNoGitHubToken, r.Realm)
+	case c.GitHubAppID != r.GitHubApp.AppID || c.GitHubInstallation != r.GitHubApp.InstallationID:
+		return GitHubGrant{}, fmt.Errorf("%w: the realm's GitHub App changed to app_id %d, installation_id %d after the box started with %d, %d",
+			ErrNoGitHubToken, r.GitHubApp.AppID, r.GitHubApp.InstallationID, c.GitHubAppID, c.GitHubInstallation)
 	}
-	return r.Grants.GitHub, perms, nil
+	g.Permissions = github.IntersectPermissions(c.GitHubPermissions, r.Grants.GitHubPermissions())
+	if len(g.Permissions) == 0 {
+		return GitHubGrant{}, fmt.Errorf("%w: the permissions granted at the start and now have nothing in common", ErrNoGitHubToken)
+	}
+	return g, nil
 }
 
 // GitHubReadRepos lists the further repositories the read facade serves the box:

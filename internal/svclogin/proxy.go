@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/mb706/devc/internal/config"
+	"github.com/mb706/devc/internal/secrets"
 )
 
 // Credential is what the proxy adds to one request: Header set to Value.
@@ -80,9 +81,12 @@ type Proxy struct {
 	Transport http.RoundTripper
 }
 
-// minScrub is the shortest value scrubbed from responses: shorter values
-// are no secret worth the name, and would garble ordinary headers.
-const minScrub = 8
+// MinCredential is the shortest credential part devc accepts (finding
+// D2-07). Every accepted part is scrubbed from responses; a shorter value
+// could not be scrubbed without garbling ordinary headers, so it is
+// refused instead: when the header credential is read, when a login stores
+// cookies, and again here before a request goes out.
+const MinCredential = 8
 
 // Errors of the response path.
 var (
@@ -129,6 +133,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			fail(http.StatusBadGateway, fmt.Sprintf("devc service %s: the credential is not available: %s", s.Name, printable(truncate(err.Error(), 200))))
 		}
+		return
+	}
+	// Every part of the credential must be long enough to be scrubbed.
+	short := cred.Value != "" && len(cred.Value) < MinCredential
+	for _, v := range cred.Scrub {
+		short = short || len(v) < MinCredential
+	}
+	if short {
+		fail(http.StatusServiceUnavailable, fmt.Sprintf("devc service %s: its credential has a part shorter than %d characters, which devc cannot keep out of responses; ask the user to store a longer one", s.Name, MinCredential))
 		return
 	}
 	scrub := newScrubber(cred.Scrub)
@@ -451,27 +464,60 @@ func (b *endBody) Close() error {
 type scrubber struct{ values []string }
 
 // ScrubValues are the parts of a credential header value that must not
-// reach a box: the value, its white-space separated fields, and for Basic
-// credentials the decoded user:password and password.
+// reach a box: the value; with several fields, the fields after the first,
+// which names the scheme ("Bearer <token>"); and for "Basic <base64>" the
+// decoded user:password and the password.
 func ScrubValues(v string) []string {
 	out := []string{v}
-	for _, f := range strings.Fields(v) {
-		out = append(out, f)
-		if dec, err := base64.StdEncoding.DecodeString(f); err == nil && strings.Contains(string(dec), ":") {
-			out = append(out, string(dec))
-			if _, pw, _ := strings.Cut(string(dec), ":"); pw != "" {
-				out = append(out, pw)
+	f := strings.Fields(v)
+	if len(f) < 2 {
+		return out
+	}
+	out = append(out, f[1:]...)
+	if len(f) == 2 && strings.EqualFold(f[0], "Basic") {
+		if dec, err := base64.StdEncoding.DecodeString(f[1]); err == nil {
+			if _, pw, ok := strings.Cut(string(dec), ":"); ok {
+				out = append(out, string(dec), pw)
 			}
 		}
 	}
 	return out
 }
 
+// CheckCredential refuses a header credential with a part (ScrubValues)
+// shorter than MinCredential characters. The message never shows the value.
+func CheckCredential(v string) error {
+	for i, p := range ScrubValues(v) {
+		if len(p) >= MinCredential {
+			continue
+		}
+		what := "the credential"
+		if i > 0 {
+			what = "a part of the credential (the token after the scheme, or the password of Basic)"
+		}
+		return fmt.Errorf("%s has %d characters; devc needs at least %d to keep it out of responses", what, len(p), MinCredential)
+	}
+	return nil
+}
+
+// HeaderCredential is the header value of a stored credential secret: one
+// line, every part at least MinCredential characters long.
+func HeaderCredential(stored []byte) (string, error) {
+	v := string(secrets.TrimValue(stored))
+	if v == "" || strings.ContainsAny(v, "\r\n\x00") {
+		return "", errors.New("the stored credential is not a single-line header value")
+	}
+	if err := CheckCredential(v); err != nil {
+		return "", err
+	}
+	return v, nil
+}
+
 func newScrubber(vals []string) *scrubber {
 	seen := map[string]bool{}
 	var out []string
 	add := func(v string) {
-		if len(v) >= minScrub && !seen[v] {
+		if v != "" && !seen[v] {
 			seen[v] = true
 			out = append(out, v)
 		}

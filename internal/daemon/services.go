@@ -60,6 +60,10 @@ const (
 	autoLoginTimeout = 6 * time.Minute
 )
 
+// serviceGrace is how long a service stream may last beyond the service's
+// limits.timeout, for the answer that says the time is up (finding D2-04).
+var serviceGrace = 5 * time.Second
+
 // serviceManager serves the host.service streams of all boxes.
 type serviceManager struct {
 	d     *Daemon
@@ -263,7 +267,15 @@ func (w *boxWorker) serveService(ctx context.Context, st *yamux.Stream, br *bufi
 		writeRefusal(conn, http.StatusForbidden, svclogin.Needed(svc, head.Method, head.Path))
 		return
 	}
-	_ = st.SetReadDeadline(time.Time{})
+	// The whole exchange ends with the service's timeout (finding D2-04):
+	// every later read and write on the stream, by the HTTP server or the
+	// proxy, carries that deadline, so a box that stops reading or never
+	// finishes its body cannot hold the stream, its relay place and the
+	// handler; only this stream ends, not the channel.
+	limit := time.Now().Add(svc.TimeoutDuration() + serviceGrace)
+	conn.limit = limit
+	_ = conn.SetReadDeadline(limit)
+	_ = conn.SetWriteDeadline(limit)
 	up, err := svc.UpstreamURL()
 	if err != nil {
 		writeRefusal(conn, http.StatusBadGateway, "devc service "+svc.Name+": invalid upstream")
@@ -282,9 +294,15 @@ func (w *boxWorker) serveService(ctx context.Context, st *yamux.Stream, br *bufi
 		conn.Close()
 		return
 	}
+	// Past the limit the stream is closed whatever the handler is doing.
+	end := time.NewTimer(time.Until(limit) + time.Second)
+	defer end.Stop()
 	select {
 	case <-sc.done:
 	case <-ctx.Done():
+		_ = sc.Close()
+	case <-end.C:
+		d.log.Warn("ended a service stream past its time", "box", names.BoxName(ref), "service", svc.Name)
 		_ = sc.Close()
 	}
 }
@@ -304,9 +322,9 @@ func (m *serviceManager) credential(ctx context.Context, ref names.ProjectRef, s
 			d.log.Error("reading a service credential", "service", serviceID(svc.Realm, svc.Name), "err", err)
 			return svclogin.Credential{}, &svclogin.Unavailable{Msg: fmt.Sprintf("devc service %s: the host could not read its credential", svc.Name)}
 		}
-		val := string(secrets.TrimValue(v))
-		if val == "" || strings.ContainsAny(val, "\r\n\x00") {
-			return svclogin.Credential{}, &svclogin.Unavailable{Msg: fmt.Sprintf("devc service %s: the stored credential is not a single-line header value; ask the user to set it again", svc.Name)}
+		val, err := svclogin.HeaderCredential(v)
+		if err != nil {
+			return svclogin.Credential{}, &svclogin.Unavailable{Msg: fmt.Sprintf("devc service %s: %s; ask the user to set it again with 'devc secret set %s %s'", svc.Name, err, svc.Realm, svc.Auth.ValueSecret)}
 		}
 		return svclogin.Credential{Header: svc.Auth.Header, Value: val, Scrub: svclogin.ScrubValues(val)}, nil
 	case config.ServiceAuthCookie:
@@ -618,6 +636,9 @@ func (c *svcConn) Write(b []byte) (int, error) { return c.rc.Write(b) }
 func (c *svcConn) CloseWrite() error           { return c.rc.CloseWrite() }
 func (c *svcConn) LocalAddr() net.Addr         { return svcAddr{} }
 func (c *svcConn) RemoteAddr() net.Addr        { return svcAddr{} }
+
+// The deadlines the HTTP server sets are clamped to the exchange's limit
+// by relayConn (the server clears its read deadline after the head).
 func (c *svcConn) SetDeadline(t time.Time) error {
 	_ = c.rc.SetReadDeadline(t)
 	return c.rc.SetWriteDeadline(t)

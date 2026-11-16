@@ -18,6 +18,29 @@ set -euo pipefail
 readonly dir=/tmp/devc
 readonly xsock=/tmp/.X11-unix/X1
 
+# Box programs open connections at will, and each costs the relays a
+# process: socat forks one per X connection, websockify one per viewer
+# connection. Both are bounded (connections beyond the bound wait in the
+# listen queue); the container's PID and memory limits bound the rest.
+readonly max_x=64 max_web=16
+
+# websockify has no bound of its own: this runs it with its handler
+# processes (multiprocessing.Process, one per connection) limited to
+# argv[1] at a time; the accept loop waits while the limit is reached.
+readonly web_bounded='
+import multiprocessing, sys, time
+from websockify import websocketproxy
+limit = int(sys.argv[1])
+start = multiprocessing.Process.start
+def bounded(self):
+    while len(multiprocessing.active_children()) >= limit:
+        time.sleep(0.05)
+    start(self)
+multiprocessing.Process.start = bounded
+sys.argv = ["websockify"] + sys.argv[2:]
+sys.exit(websocketproxy.websockify_init())
+'
+
 log() { echo "devc-desktop: $*" >&2; }
 
 # owns PID PORT: the process PID holds the socket listening on
@@ -100,9 +123,9 @@ run)
 		kill -0 "$xvnc" 2>/dev/null || break
 		sleep 0.1
 	done
-	socat TCP-LISTEN:6001,bind=127.0.0.1,reuseaddr,fork "UNIX-CONNECT:$xsock" &
+	socat "TCP-LISTEN:6001,bind=127.0.0.1,reuseaddr,fork,max-children=$max_x" "UNIX-CONNECT:$xsock" &
 	relay=$!
-	websockify --web /usr/share/novnc 127.0.0.1:6080 127.0.0.1:5901 &
+	python3 -c "$web_bounded" "$max_web" --web /usr/share/novnc 127.0.0.1:6080 127.0.0.1:5901 &
 	web=$!
 	DISPLAY=:1 XAUTHORITY="$dir/secrets/xauthority" matchbox-window-manager -use_titlebar yes &
 	wm=$!
