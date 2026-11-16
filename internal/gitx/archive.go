@@ -1,3 +1,9 @@
+// This file implements the relay in the archive (work order C17): bundles
+// of new objects made by host git on the relay, and restoring a relay from
+// bundles. Bundle files come from a hub or an export and are hostile
+// input; git fetches them with the relay's fsck settings into a scratch
+// namespace, and refs are then created from a validated list, never moved.
+
 package gitx
 
 import (
@@ -6,12 +12,6 @@ import (
 	"sort"
 	"strings"
 )
-
-// The relay in the archive (work order C17): bundles of new objects made
-// by host git on the relay, and restoring a relay from bundles. Bundle
-// files come from a hub or an export and are hostile input; git fetches
-// them with the relay's fsck settings into a scratch namespace, and refs
-// are then created from a validated list, never moved.
 
 // RestorePrefix holds the refs a restore fetched until it is done.
 const RestorePrefix = "refs/devc/restore/"

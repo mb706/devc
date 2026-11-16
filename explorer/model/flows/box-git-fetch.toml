@@ -1,0 +1,156 @@
+id = "box-git-fetch"
+kind = "flow"
+title = "git fetch in a box"
+summary = "`git fetch origin` in a box through the relay service: the remote helper asks the host through the agent, the daemon brings the upstream into the relay first when the project allows it (at most once a minute), and upload-pack serves the relay without devc's records."
+concern = "git-ratchet"
+trigger = "git fetch origin (in the box)"
+actors = ["github", "host-git", "daemon", "box-agent", "box-tools", "box-git"]
+
+[[step]]
+section = "In the box"
+
+[[step]]
+at = "box-git"
+external = true
+label = "git fetch origin"
+text = "The harness or the user fetches (or pulls). git starts the remote helper for `devc::<realm>/<project>`."
+
+[[step]]
+from = "box-git"
+to = "box-tools"
+via = "exec"
+label = "git-remote-devc origin devc::<realm>/<project>"
+external = true
+text = "The toolbox's `git-remote-devc` is devc under another name ([[flow:binary-dispatch]])."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.RemoteHelperMain"
+unchecked = "git starts the helper as a process; cmd/devc routes it by its name"
+text = "With a host connected the helper offers `connect`, and git asks for `connect git-upload-pack`."
+detail = "Without a host the stub answers `list` with the box's own `refs/remotes/origin/*` as the remote's branches, so the fetch finds nothing to transfer and succeeds."
+
+[[step]]
+from = "box-tools"
+to = "box-agent"
+via = "stream"
+label = "@devc-agent: host.git {upload-pack}"
+ref = "internal/boxside.agentRelay.Open"
+text = "One request on the agent's socket; the answer may take up to three minutes."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.relay"
+unchecked = "the helper's connection to the abstract socket, accepted by localLoop"
+text = "The agent relays the stream unparsed to the host."
+
+[[step]]
+from = "box-agent"
+to = "daemon"
+via = "stream"
+label = "yamux stream: host.git"
+ref = "internal/boxside.Agent.relay"
+text = "The channel it arrives on names the project."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveStream"
+unchecked = "the stream is accepted by acceptStreams, which starts serveStream for it"
+text = "`host.git` takes the stream over."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveGit"
+checks = ["internal/proto.DecodeParams", "internal/config.Config.ProblemsFor", "internal/gitx.RelayExists"]
+text = "The same checks as for a push: parameters, a configuration without problems, a relay. upload-pack itself runs without the box lock."
+
+[[step]]
+section = "Fetch-through"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.rateLimit.allow"
+text = "Only for a project with an upstream and `git.fetch_through` (the default), and at most once a minute per project; a failed attempt counts too, so a broken upstream is not asked at every fetch."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.fetchThrough"
+text = "The box lock is waited for five seconds at most; a busy box skips the fetch-through. The fetch and the sync get twenty seconds."
+
+[[step]]
+from = "daemon"
+to = "host-git"
+via = "exec"
+label = "git fetch --prune --force github"
+ref = "internal/gitx.Service.fetchUpstream"
+text = "The upstream is fetched into `refs/remotes/github/*` and `refs/tags/*` with the user's git configuration and credentials, in the background: no terminal, no askpass, its own process group."
+
+[[step]]
+from = "host-git"
+to = "github"
+via = "exec"
+label = "fetch"
+external = true
+text = "git talks to the upstream over HTTPS or SSH."
+
+[[step]]
+from = "github"
+to = "host-git"
+via = "reply"
+label = "refs and a pack"
+external = true
+text = "The relay's configuration has every object checked; branches deleted upstream are pruned from `refs/remotes/github/*`."
+
+[[step]]
+at = "daemon"
+ref = "internal/gitx.Service.syncHeads"
+text = "Relay branches the upstream has moved ahead are fast-forwarded, missing ones created, each with a bank ref; diverged ones keep their tip. A failure anywhere is logged and the box gets what the relay has."
+
+[[step]]
+section = "Serving the relay"
+
+[[step]]
+at = "daemon"
+ref = "internal/gitx.ServeCall"
+text = "`git upload-pack --strict --timeout=600 <relay>` with `uploadpack.hideRefs=refs/devc`: the box sees branches, tags and `refs/remotes/github/*`, never devc's records."
+
+[[step]]
+from = "daemon"
+to = "box-tools"
+via = "reply"
+label = "{service: upload-pack}"
+ref = "internal/daemon.respond"
+text = "The answer line goes back; the stream now carries git's protocol."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.relayGit"
+text = "The helper relays bytes between git and the stream."
+
+[[step]]
+from = "daemon"
+to = "host-git"
+via = "exec"
+label = "git upload-pack <relay>"
+ref = "internal/gitx.Host.Serve"
+text = "upload-pack runs from `/` in a process group of its own, at most 30 minutes, and ends after ten minutes without traffic."
+
+[[step]]
+at = "host-git"
+external = true
+label = "advertise, pack"
+text = "upload-pack advertises the refs that are not hidden and sends the objects the box wants."
+
+[[step]]
+from = "host-git"
+to = "box-git"
+via = "stream"
+label = "pack (through daemon, agent, helper)"
+external = true
+text = "The bytes pass unparsed through the daemon, the agent and the helper."
+
+[[step]]
+at = "box-git"
+external = true
+label = "update origin/*, github/*, tags"
+text = "git in the box stores the pack and updates its refs by origin's refspecs: `refs/remotes/origin/*`, `refs/remotes/github/*`, and tags (`tagOpt = --tags`), refusing to overwrite a box tag with another value."

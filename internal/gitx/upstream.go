@@ -1,3 +1,7 @@
+// This file implements what passes between the relay and the upstream
+// (pull, push and the fast-forwarding of relay branches) and the user's
+// views of the relay (log, diff).
+
 package gitx
 
 import (

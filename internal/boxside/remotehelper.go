@@ -1,3 +1,12 @@
+// This file implements git-remote-devc, the remote helper git runs in a
+// box for origin (devc::<realm>/<project>). git starts a helper named
+// git-remote-<transport> for a URL of the form <transport>::<address> and
+// speaks the remote-helper protocol with it on standard input and output:
+// "capabilities", then commands such as "list", "fetch", "push" or
+// "connect <service>". With "connect" the helper joins git to that service
+// and only relays bytes from then on; "fallback" makes git use the other
+// capabilities instead.
+
 package boxside
 
 import (

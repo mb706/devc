@@ -1,0 +1,120 @@
+id = "devc-pull"
+kind = "flow"
+title = "devc pull"
+summary = "Upstream changes into the relay and the box: under the box lock the upstream is fetched with the user's credentials, relay branches are created or fast-forwarded with bank refs (diverged ones keep their tip), and the box receives remote-tracking refs and new tags while its own branches stay as they are."
+concern = "upstream"
+trigger = "devc pull demo/hello"
+actors = ["user", "cli", "host-git", "github", "box-git"]
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc pull"
+label = "devc pull demo/hello"
+external = true
+text = "The user names a project, or runs the command inside one."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.withGit"
+checks = ["internal/cli.app.refuseProblems"]
+text = "Refused while the project's configuration has problems; then the box lock is taken, and devc asks the engine whether the box runs and is ready."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.Pull"
+text = "The relay must exist and the project must have an upstream."
+
+[[step]]
+section = "Upstream to relay"
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Relay.SetUpstream"
+text = "The relay's remote `github` is set from project.toml's `upstream` before every use: URL, fetch refspec `+refs/heads/*:refs/remotes/github/*`, `tagOpt = --tags`."
+
+[[step]]
+from = "cli"
+to = "host-git"
+via = "exec"
+label = "git fetch --prune --force … github"
+ref = "internal/gitx.Service.fetchUpstream"
+text = "In upstream mode: the user's git configuration and credentials stay, variables that point git at another repository are removed, prompts reach the user's terminal."
+
+[[step]]
+from = "host-git"
+to = "github"
+via = "exec"
+label = "fetch"
+external = true
+text = "git fetches over HTTPS or SSH."
+
+[[step]]
+from = "github"
+to = "host-git"
+via = "reply"
+label = "refs and a pack"
+external = true
+text = "Every object is checked (the relay's `fetch.fsckObjects`). Branches land in `refs/remotes/github/*`, pruned when the upstream deleted them; tags in `refs/tags/*`, moved when the upstream moved them but never pruned."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.syncHeads"
+text = "For each upstream branch: missing in the relay, it is created; the relay's tip an ancestor, it is fast-forwarded; the relay ahead, it is left alone; diverged, it keeps its tip and is reported."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Relay.Update"
+text = "Each change is one transaction of the branch and, unless its newest bank ref already has the tip, a new bank ref, with the old value checked. Box tips are not touched, so the next bank keeps the fast-forward unless the box moved its own branch."
+
+[[step]]
+section = "Relay to box"
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.reflect"
+text = "A stopped box is skipped with a note. For a running one, the refspecs are those whose namespace has refs: relay branches to `origin/*` and upstream branches to `github/*`, both forced, and tags without force."
+
+[[step]]
+from = "cli"
+to = "host-git"
+via = "exec"
+label = "git push --porcelain ext::… <refspecs>"
+ref = "internal/gitx.Service.pushToBox"
+text = "Host git pushes into the box over the `ext::` transport, which only this invocation may use."
+
+[[step]]
+from = "host-git"
+to = "box-git"
+via = "exec"
+label = "podman exec -i -u 1000:1000 <box> git-receive-pack /w/<realm>/<project>/.repo"
+external = true
+text = "receive-pack runs in the box as `dev`, with whatever hooks and configuration the box repository has; nothing of it runs on the host."
+
+[[step]]
+at = "box-git"
+external = true
+label = "remote-tracking refs, new tags"
+text = "The box gets the refs. A tag it already has with another value is refused and kept; its branches and worktrees are untouched."
+
+[[step]]
+from = "box-git"
+to = "host-git"
+via = "reply"
+label = "ok / rejected per ref"
+external = true
+text = "Rejected refs are reported as notes; only a failure of the transfer itself is an error."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "fast-forwarded main (+3 commits)"
+ref = "internal/gitx.FormatPull"
+text = "New and fast-forwarded branches, diverged ones (to merge in the box), notes, or \"up to date\"."
+
+[[step]]
+at = "box-git"
+external = true
+label = "git merge github/main"
+text = "Bringing the changes into a branch is the box's own work: the agent or the user merges or rebases on `github/<branch>`."

@@ -1,3 +1,9 @@
+// This file implements the context repository in the archive (work order
+// C17): the context worker makes bundles of it for the hubs and exports,
+// and restores it from bundles. Both run in the context container like
+// every other git operation on it (ctxrepo); the host hands files in and
+// out through a directory of its own mounted at ContextIOMount.
+
 package boxside
 
 import (
@@ -18,12 +24,6 @@ import (
 
 	"github.com/mb706/devc/internal/safefs"
 )
-
-// The context repository in the archive (work order C17): the context
-// worker makes bundles of it for the hubs and exports, and restores it
-// from bundles. Both run in the context container like every other git
-// operation on it (ctxrepo); the host hands files in and out through a
-// directory of its own mounted at ContextIOMount.
 
 // ContextIOMount is where the context container sees the host's exchange
 // directory for bundles.
@@ -302,6 +302,9 @@ func safeContextPath(p string) bool {
 	return true
 }
 
+// limitWriter fails a write that would take a restored file past n bytes,
+// so a bundle cannot make the worker write a file larger than a snapshot
+// would have accepted.
 type limitWriter struct {
 	w io.Writer
 	n int64

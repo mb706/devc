@@ -1,13 +1,15 @@
-package daemon
+// This file implements the relay service (work order C10a section 1):
+// host.git streams from a box become git upload-pack or receive-pack on
+// that box's project's relay, with the stream as standard input and
+// output. The project is the one the channel is bound to; nothing the box
+// says (its origin URL, a session ID) selects or authorises anything. Host
+// git runs only against the relay, through gitx.Host's hardened
+// environment, from / and without a terminal; for receive-pack the daemon
+// also runs devc's relay hooks, holds the box lock, so a push and a bank
+// never interleave, and watches the relay's growth. It also holds the
+// dispatch of every stream a box opens (serveStream).
 
-// The relay service (work order C10a section 1): host.git streams from a
-// box become git upload-pack or receive-pack on that box's project's relay,
-// with the stream as standard input and output. The project is the one the
-// channel is bound to; nothing the box says (its origin URL, a session ID)
-// selects or authorises anything. Host git runs only against the relay,
-// through gitx.Host's hardened environment, from / and without a terminal;
-// receive-pack additionally runs devc's relay hooks and holds the box lock,
-// so a push and a bank never interleave.
+package daemon
 
 import (
 	"bufio"
@@ -194,9 +196,11 @@ type boxStream struct {
 
 func (s *boxStream) Read(b []byte) (int, error) { return s.r.Read(b) }
 
-// serveStream serves one stream the box opened: a host.git request takes
-// the stream over for git, a host.gate request for the SSH gate; anything
-// else is JSON-RPC.
+// serveStream serves one stream the box opened, by its first line:
+// host.proxy, host.dial and host.service are raw relays with a budget of
+// their own; host.git, host.gate and host.github take the stream over for
+// the relay service, the SSH gate and the GitHub facade; anything else is
+// JSON-RPC.
 func (w *boxWorker) serveStream(ctx context.Context, st *yamux.Stream, handlers map[string]proto.Handler, notify map[string]proto.NotifyHandler) {
 	// The stream holds a pending place until its first line has arrived;
 	// then it needs a place among the requests (maxBoxStreams) or, as a

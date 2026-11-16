@@ -1,0 +1,211 @@
+id = "box-git-push"
+kind = "flow"
+title = "git push in a box"
+summary = "`git push origin <branch>` in a box to commits recorded in the relay: the remote helper asks the host through the agent, the daemon checks the project, the lock and the storage and runs receive-pack under its watchdog, and devc's hooks refuse what the policy forbids and record every ref before git applies it."
+concern = "git-ratchet"
+trigger = "git push origin feature (in the box)"
+actors = ["relay-hooks", "host-git", "daemon", "box-agent", "box-tools", "box-git"]
+
+[[step]]
+section = "In the box"
+
+[[step]]
+at = "box-git"
+external = true
+label = "git push origin feature"
+text = "The harness or the user pushes. `origin` is `devc::<realm>/<project>`, so git starts the remote helper for the transport `devc`."
+
+[[step]]
+from = "box-git"
+to = "box-tools"
+via = "exec"
+label = "git-remote-devc origin devc::<realm>/<project>"
+external = true
+text = "`/opt/devc/bin/git-remote-devc` is a link to devc, which the name routes to the remote helper ([[flow:binary-dispatch]]). git speaks the remote-helper protocol with it on standard input and output."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.RemoteHelperMain"
+unchecked = "git starts the helper as a process; cmd/devc routes it by its name"
+text = "The helper pings the host through the agent (two seconds). Connected, it offers `connect`, and git asks for `connect git-receive-pack`."
+detail = "Without a host the helper is the stub [[internal/boxside.RemoteHelper]]: it reports every branch update as done, refuses deletions, transfers nothing and prints that commits are banked on the host. The commits then reach the relay at the next bank. A host that goes away between the ping and the request gets `fallback`, the same stub."
+
+[[step]]
+from = "box-tools"
+to = "box-agent"
+via = "stream"
+label = "@devc-agent: host.git {service, session}"
+ref = "internal/boxside.agentRelay.Open"
+text = "The helper sends one request on the agent's socket and waits up to three minutes for the answer: the host may first wait for the box lock."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.relay"
+unchecked = "the helper's connection to the abstract socket, accepted by localLoop"
+text = "The agent relays the line and everything after it, unparsed, on a new stream of the box channel."
+
+[[step]]
+from = "box-agent"
+to = "daemon"
+via = "stream"
+label = "yamux stream: host.git"
+ref = "internal/boxside.Agent.relay"
+text = "The stream arrives on this box's channel, which is all that tells the daemon whose push it is."
+
+[[step]]
+section = "Checks before git runs"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveStream"
+unchecked = "the stream is accepted by acceptStreams, which starts serveStream for it"
+text = "The first line must arrive within 30 seconds; `host.git` takes the stream over, within the budget of 32 request streams per box."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveGit"
+checks = ["internal/proto.DecodeParams", "internal/config.Config.ProblemsFor", "internal/gitx.RelayExists"]
+text = "Strictly decoded parameters; only `upload-pack` or `receive-pack`; a valid session ID or none. The configuration is reloaded, must have no problems for the channel's project, and the project must have a relay."
+
+[[step]]
+at = "daemon"
+ref = "internal/gitx.EnsureRelayHooks"
+text = "`local/git/relay-hooks` is made to hold exactly three links, `pre-receive`, `update` and `post-receive`, to this daemon's devc binary."
+
+[[step]]
+at = "daemon"
+ref = "internal/box.LockBox"
+text = "A relay held by an earlier push is refused at once. Then the box lock, waited for at most two minutes: no bank, pull or other push of this box runs until the push is over."
+
+[[step]]
+at = "daemon"
+ref = "internal/gitx.RelayUsage"
+text = "At least 1 GiB must be free on the state file system and the relay must be within `git.relay_quota`; both are measured before git writes anything."
+detail = "The daemon also creates an empty report file in `local/tmp` and passes the hooks `DEVC_RELAY_PROJECT` (the channel's project), `DEVC_RELAY_REPORT` and its own configuration, state and runtime directories ([[internal/daemon.hookEnv]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/gitx.ServeCall"
+text = "receive-pack's settings: hide `refs/devc` and `refs/remotes`, deny deletions, check every object, keep the pack, no garbage collection, no push options, no shallow updates, `receive.maxInputSize` from `git.max_push_size`, devc's hooks."
+
+[[step]]
+from = "daemon"
+to = "box-tools"
+via = "reply"
+label = "{service: receive-pack}"
+ref = "internal/daemon.respond"
+text = "The answer line goes back through the agent; from now on the stream carries git's protocol."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.relayGit"
+text = "The helper tells git the connection stands and copies bytes both ways until the host ends the stream."
+
+[[step]]
+section = "receive-pack and the hooks"
+
+[[step]]
+from = "daemon"
+to = "host-git"
+via = "exec"
+label = "git receive-pack <relay>"
+ref = "internal/gitx.Host.Serve"
+text = "receive-pack runs from `/`, in a session and process group of its own, without a terminal, with the stream fed through a pipe of the daemon's own and cut off at `git.max_push_size` plus 64 MiB."
+detail = "The command is `git --git-dir=<relay> -c core.hooksPath=<state>/local/git/relay-hooks -c core.fsmonitor=false --no-replace-objects` plus the settings above, `receive-pack <relay>`, with every `GIT_*` variable removed and `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_NO_REPLACE_OBJECTS=1`. It gets 30 minutes; a write to the box that stalls for two minutes ends the stream."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.watchPush"
+text = "Meanwhile the watchdog measures the quarantine every 200 ms and ends the push when the relay would exceed its budget or the file system has less than 512 MiB free."
+
+[[step]]
+at = "host-git"
+external = true
+label = "pack into quarantine"
+text = "receive-pack advertises the relay's refs without the hidden ones, takes the ref updates and the pack, and writes the pack into a quarantine directory while index-pack checks every object. Updates to hidden refs and branch deletions it refuses itself."
+
+[[step]]
+from = "host-git"
+to = "relay-hooks"
+via = "cmd:devc relay-hook"
+label = "pre-receive, every <old> <new> <ref> on stdin"
+external = true
+text = "git runs pre-receive once for the whole push; a non-zero exit refuses all of it and deletes the quarantine."
+
+[[step]]
+at = "relay-hooks"
+ref = "internal/cli.app.relayHook"
+checks = ["internal/gitx.ParseHookInput", "internal/config.Config.ProblemsFor", "internal/gitx.CheckPushSize"]
+text = "At most 1,000 well-formed lines; no configuration problems; the relay, quarantine included, within `git.relay_quota`. Anything else refuses the whole push."
+
+[[step]]
+at = "relay-hooks"
+ref = "internal/gitx.Service.BoxHeads"
+text = "The box's own branches are listed in the box and noted beside the report file, for the box-tip rule of the update hook."
+
+[[step]]
+from = "host-git"
+to = "relay-hooks"
+via = "cmd:devc relay-hook"
+label = "update <ref> <old> <new>"
+external = true
+text = "git has moved the objects out of quarantine into the relay; now it runs update once per ref, before it applies that ref."
+
+[[step]]
+at = "relay-hooks"
+ref = "internal/gitx.CheckUpdate"
+checks = ["internal/gitx.CheckUpdate", "internal/gitx.Relay.CheckRefFormat"]
+text = "Branches may be created and moved, also non-fast-forward, but not deleted or protected, and their names must pass devc's and git's checks; tags may only be created; every other ref is refused."
+
+[[step]]
+at = "relay-hooks"
+ref = "internal/gitx.Service.RecordUpdate"
+text = "The ref is recorded before git applies it: a new branch tip gets a bank ref unless it is the branch's newest one, the box tip moves when the box's own branch has this tip, a new tag gets a `refs/devc/tags/` record; one transaction with `core.fsync=reference`. If it fails, the ref is refused."
+
+[[step]]
+at = "host-git"
+external = true
+label = "update the ref"
+text = "Only now does git update the ref, for each ref whose hook succeeded."
+
+[[step]]
+from = "host-git"
+to = "relay-hooks"
+via = "cmd:devc relay-hook"
+label = "post-receive, the applied updates on stdin"
+external = true
+text = "post-receive gets the updates git applied; its exit status changes nothing."
+
+[[step]]
+at = "relay-hooks"
+ref = "internal/gitx.Service.ReportPush"
+text = "The records of applied updates become the push's report; branches matching `git.forward` are pushed to the upstream, never forced, all within two minutes per branch the push updated and ten minutes at most. The forwards' results reach the pusher as `remote:` lines."
+
+[[step]]
+section = "After git"
+
+[[step]]
+from = "host-git"
+to = "daemon"
+via = "reply"
+label = "exit status"
+external = true
+text = "receive-pack has exited, and with it every process of its group."
+
+[[step]]
+at = "daemon"
+ref = "internal/gitx.RemoveQuarantines"
+text = "What an ended push left in the quarantine is removed, only once the group is gone. A group still alive after 30 seconds instead leaves the relay held: quarantine and lock stay, and pushes are refused until its last process ends."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.pushed"
+text = "The report becomes a note in the pushing session's journal, if the session belongs to this project; then the report files go and the box lock is released."
+
+[[step]]
+from = "box-tools"
+to = "box-git"
+via = "reply"
+label = "ok/ng per ref, remote: lines"
+ref = "internal/boxside.relayGit"
+text = "git in the box prints receive-pack's answer: each ref accepted or refused with devc's reason."

@@ -38,7 +38,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | X3 Explorer: the app, views of the model | done | 279209e |
 | X4 Explorer content: foundations, configuration, toolbox, harnesses, host setup | done | d228d59 |
 | X5 Explorer content: boxes | done | f1105b1 |
-| X6 Explorer content: daemon, sessions, input, requests | in progress | |
+| X6 Explorer content: daemon, sessions, input, requests | done | 032a5f0 |
+| X7 Explorer content: git | in progress | |
 
 ## Resuming
 
@@ -1265,3 +1266,18 @@ The four confirmed findings of the closing check (`docs/dev/reviews/F1-review.md
 - `packages.toml`: roles of `internal/daemon` and `internal/session` corrected.
 
 **Comments** (33 Go files, comments only, `./dev explore comments-only` clean; `./dev fmt` and `./dev vet` clean): package comments with file overviews for daemon, session, proto, requests; file comments for every file of the area (and `internal/daemon/hub.go`, which the journal follower lives in); about 75 doc comments on the handlers, the commander, the journal follower, the channel and the CLI commands the pages point at. Corrected: the daemon's package comment (receipts and request logs are state too), `proto` ("(later) the hub", files missing), `proto/views.go` and `proto/rpc.go` ("later" for the hub), `proto.ChannelNoAgent` (not only boxes from before C08), `daemon.maxBoxStreams` (relays have their own budget), `boxWorker.ingestLoop` (when 250 ms applies), `Daemon.housekeepingLoop` (it also prunes receipts and expires requests), `apiRequests` (named a function `apiDecide` that does not exist), the daemon's requests file comment (`net allow` and `pr` are carried out too), `cli.newBoxCmd` (history), `session.endedLongAgo` (host events after the end).
+
+### X7 Explorer content: git
+
+**Model written** (`explorer/model/`):
+
+- Concerns (order 40–42): `git-ratchet` (diagram of the three repositories and the refs that pass between them; table of the relay's ref namespaces and what a box can do to each; the hooks protocol, every setting the host runs git with, the bounds of a push and what happens to an ended one), `upstream` (the remote, upstream mode, fetching and fast-forwarding, pull and fetch-through, push, forwards, the branch policy, project setup), `worktrees-and-context` (task worktrees, snapshots, banking after turns, the changes view, the context repository; diagram of who writes what in the context). 1,000–1,200 words each; 23 invariants with their code and tests. Every non-test file of the area belongs to a concern.
+- Flows: `box-git-push`, `box-git-fetch`, `devc-push`, `devc-pull`, `turn-snapshot`, `worktree-create`, all connected by the tool; `unchecked` only for the remote helper started by git, the agent's accept loop, the daemon's stream accept loop, and the hub's `onTurnEnd` function value.
+- `system.toml`: actor `box-git` (git in the box, no devc code); channels `box-transport` (host git to box git over `ext::`) and `box-git-helper` (git to git-remote-devc); checks and concerns for `relay-service`, `git-hooks`, `github-git`, `podman-exec`, `podman-context`, `box-streams`.
+- `glossary.toml`: 17 terms (git ratchet, box repository, task worktree, bank ref, snapshot, box tip, relay service, remote helper, relay hooks, quarantine, push watchdog, held relay, upstream, fetch-through, forward, protected branch, context repository).
+- `layout.toml`: a `projects` tree (the project directory, `.repo`, `main`, task worktrees); `context/.git`; the relay service's report files in `local/tmp`.
+- `packages.toml`: roles of `internal/gitx` and `internal/ctxrepo` completed.
+
+**Comments** (24 Go files, comments only, `./dev explore comments-only` clean; `./dev fmt` and `./dev vet` clean): the gitx package comment with a file overview; file comments for every file of the area (the block comments of `relayservice.go`, `changes.go`, `archive.go`, `contextarchive.go` and `daemon/relay.go` moved above `package`, where they count); doc comments on the hooks, the git commands and a few unexported helpers. Corrected: the gitx package comment (no relay service; receive-pack does run hooks), `gitx.Host` ("the only way devc runs host git": `devc init` and doctor run git too), `gitx.Relay.Create` (the template's hooks directory is removed, not emptied), `gitx.ServeCall` (git refuses only branch deletions itself), the ref-namespace comment in `policy.go`, `gitx.Service.RecordPush` (only tests call it), the relay service's file comment (pre-receive also refuses on configuration problems), `boxside`'s package comment (the remote helper is no longer only a stub), `ctxrepo`'s package comment (an exchange directory is mounted for bundles and restores), `paths.Paths.NoHooksDir` (the relay hooks run), `daemon.boxWorker.serveStream` (host.github and the raw relays were missing), `gitx.Service.WorktreeNew` (the default start point needs the relay's branch).
+
+**Found** (`LEFTOVER.md` part 7, "Git (X7)"): a bank has no storage budget; the refs a bank fetches are not bounded; the update hook's records can outlive a refused update, which lets a box block a branch's records for chosen seconds.

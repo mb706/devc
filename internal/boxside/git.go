@@ -1,3 +1,7 @@
+// This file holds the box repository as the in-box git commands see it:
+// box git run as a function, the worktrees devc manages, and the
+// repository report `devc project init` asks for.
+
 package boxside
 
 import (

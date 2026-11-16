@@ -6,10 +6,12 @@
 // turns harness hooks into spool events, the session commands that create,
 // list and stop tmux windows, a self-test of the hardening, and the git
 // work that must happen in the box (snapshot commits, worktrees, the
-// repository report, the worktree hook and the stub remote helper
-// git-remote-devc), and the worktree links to the data root. Workers run
-// outside boxes: rm-worker and the data workers (seal, trash, savepoints,
-// restore) in the helper container, the context worker in the context
+// repository report, the worktree hook and the remote helper
+// git-remote-devc, which reaches the host's relay service through the
+// agent, or answers as a stub when no host is connected), and the
+// worktree links to the data root. Workers run outside boxes: rm-worker
+// and the data workers (seal, trash, savepoints, restore) in the helper
+// container, the context worker in the context
 // container (internal/ctxrepo). Box init also runs the agent, the box end
 // of the channel to the host's daemon, which listens on
 // /run/devc/agent.sock for the host and on the abstract socket

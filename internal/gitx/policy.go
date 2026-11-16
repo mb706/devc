@@ -1,3 +1,6 @@
+// This file holds the relay's ref namespaces and the bank policy, a pure
+// function of the relay's refs and the refs fetched from the box.
+
 package gitx
 
 import (
@@ -10,7 +13,10 @@ import (
 	"github.com/mb706/devc/internal/names"
 )
 
-// Ref namespaces of the relay (spec 9.2), all written by the host only.
+// Ref namespaces of the relay (spec 9.2). Only host git writes them. A
+// box can name refs only in a push through the relay service, and only
+// refs/heads and refs/tags (CheckUpdate); a bank fetches the box's refs
+// into refs/devc/incoming, and the host decides what to record elsewhere.
 const (
 	HeadsPrefix    = "refs/heads/"
 	GithubPrefix   = "refs/remotes/github/"
@@ -174,7 +180,8 @@ func sortedKeys(m map[string]string) []string {
 	return out
 }
 
-// PlanBank applies the policy of work order section 5.3:
+// PlanBank decides what a bank records, from the refs fetched from the box
+// and the relay's own (the policy of work order section 5.3):
 //   - a branch whose box tip equals the one the last bank saw is left
 //     alone: the box has not moved it, and the relay's head may be ahead
 //     through a pull (finding B8);

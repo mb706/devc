@@ -1,25 +1,39 @@
 // Package gitx moves code between a project's box repository, its relay
 // and its upstream (work order C05, spec section 9): the relay, banking,
-// pull, push, log and diff, project initialisation and adoption, and the
-// host side of worktrees.
+// the relay service's policy and records for a box's own pushes, pull,
+// push, log and diff, project initialisation and adoption, the host side
+// of worktrees, the changes view and the relay's part of the archive.
 //
 // Two rules shape it (README rule 2):
 //
 //   - Host git runs only against the relay, a bare repository in the state
 //     directory whose configuration and hooks the host controls. Every host
-//     git command goes through Host.Cmd, which sets --git-dir to the relay,
-//     "/" as working directory and core.hooksPath to an empty directory owned
-//     by devc. Git never runs on the host with a box-writable directory as
-//     repository, working tree or current directory.
-//   - Git inside the box runs through `podman exec` as dev. The transport
-//     between relay and box is git's ext:: helper running `podman exec …
-//     git-upload-pack|git-receive-pack` in the box, so whatever hooks and
-//     configuration the box repository holds execute there.
+//     git command on a relay goes through Host.Cmd, which sets --git-dir to
+//     the relay, "/" as working directory and core.hooksPath to an empty
+//     directory owned by devc (only the relay service's receive-pack gets
+//     devc's relay hooks instead). Git never runs on the host with a
+//     box-writable directory as repository, working tree or current
+//     directory.
+//   - Git inside the box runs through `podman exec` as dev. When the host
+//     fetches from or pushes to the box repository, the transport is git's
+//     ext:: helper running `podman exec … git-upload-pack|git-receive-pack`
+//     in the box, so whatever hooks and configuration the box repository
+//     holds execute there.
 //
 // Everything that comes back from a box (ref names, snapshot reports,
 // worktree listings, commit messages shown to the user) is hostile input:
 // names are validated before they reach a ref or a message, reports are
 // decoded strictly, and text shown on a terminal is made printable.
+//
+// Files: host.go (Host, the only runner of host git on relays, and the
+// box transport's URL); relay.go (the relay repository, its configuration
+// and ref transactions); policy.go (the ref namespaces and the pure bank
+// policy); box.go (Service, and everything that reaches into the box);
+// bank.go (banking and forwarding); relayservice.go (the push policy, the
+// hooks' records and the storage checks of the relay service); upstream.go
+// (pull, push, log, diff); project.go (project init and adoption);
+// worktree.go; changes.go (the web app's changes view); github.go (the
+// box's GitHub remote); archive.go (bundles and restores of a relay).
 package gitx
 
 import (
@@ -79,7 +93,10 @@ type Call struct {
 	Config []string
 }
 
-// Host runs git on the host. It is the only way devc runs host git.
+// Host runs git on the host. Apart from `devc init`'s clone of the
+// configuration repository and doctor's version check, it is the only way
+// devc runs host git, so every git command on a relay gets the settings
+// of Cmd.
 type Host struct {
 	Runner execx.Runner
 	// Bin is the git executable (default "git").
@@ -124,8 +141,10 @@ var repoEnv = []string{
 // driver or text conversion configured anywhere runs on box content.
 var diffing = map[string]bool{"log": true, "diff": true, "show": true}
 
-// Cmd builds the command for c. It is exported for tests, which assert on
-// every argument and the environment.
+// Cmd builds the command for c: the relay as --git-dir, devc's hooks
+// directory, no fsmonitor, no replacement objects, the mode's environment
+// and "/" as working directory. Run and Serve use it; it is exported for
+// tests, which assert on every argument and the environment.
 func (h *Host) Cmd(c Call) (execx.Cmd, error) {
 	if !filepath.IsAbs(c.Relay) || filepath.Clean(c.Relay) != c.Relay {
 		return execx.Cmd{}, fmt.Errorf("git: relay %q is not a clean absolute path", c.Relay)

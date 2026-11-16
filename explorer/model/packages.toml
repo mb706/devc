@@ -219,7 +219,7 @@ role = "The host side of sessions: ingests the spool files a box writes into jou
 [package."internal/gitx"]
 layer = "area"
 group = "git"
-role = "Moves code between a project's box repository, its relay and its upstream: the relay, banking, pull, push, log and diff, project setup, and the host side of worktrees."
+role = "Moves code between a project's box repository, its relay and its upstream: the relay and its settings, banking, the relay service's push policy and records, pull, push and forwards, log and diff, project setup, the host side of worktrees, the changes view and relay bundles."
 
 [package."internal/svclogin"]
 layer = "area"
@@ -266,7 +266,7 @@ role = "The host side of the SSH gate: master connections, the gate's host key a
 [package."internal/ctxrepo"]
 layer = "assembly"
 group = "git"
-role = "Keeps each realm's context repository: the notes and memory directories boxes mount, versioned in a bare git repository no box sees."
+role = "Keeps each realm's context repository: the notes and memory directories boxes mount, versioned in a bare git repository no box sees by a worker container without network."
 
 [package."internal/gui"]
 layer = "assembly"

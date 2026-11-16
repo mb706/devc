@@ -1,12 +1,13 @@
-package gitx
+// This file implements the changes view of the web app (work order C12
+// section 3): what a session's worktree changed, computed on the relay
+// alone. Host git runs as for every relay command (Host.Cmd: --git-dir to
+// the relay, "/" as working directory, no hooks, isolated configuration)
+// and diffs get --no-ext-diff --no-textconv there, so no diff driver or
+// text conversion runs on box content. The project directory is never
+// read. Outputs are capped and made printable: paths and diff text come
+// from the box.
 
-// The changes view of the web app (work order C12 section 3): what a
-// session's worktree changed, computed on the relay alone. Host git runs as
-// for every relay command (Host.Cmd: --git-dir to the relay, "/" as working
-// directory, no hooks, isolated configuration) and diffs get
-// --no-ext-diff --no-textconv there, so no diff driver or text conversion
-// runs on box content. The project directory is never read. Outputs are
-// capped and made printable: paths and diff text come from the box.
+package gitx
 
 import (
 	"bytes"

@@ -117,6 +117,12 @@ writer = "both"
 ref = "internal/paths.Paths.ContextDir"
 
 [[tree.entry]]
+path = "durable/realms/<realm>/context/.git"
+text = "The context repository: a bare repository with the branch `main`, written only by the context worker in a container without network (`devc box context-worker`); no box mounts it, since boxes mount only `notes/<project>` and `memory/<group>`."
+writer = "host"
+ref = "internal/ctxrepo.Repo"
+
+[[tree.entry]]
 path = "durable/realms/<realm>/context/notes/<project>"
 text = "A project's notes, mounted at /ctx/notes."
 writer = "both"
@@ -349,6 +355,12 @@ path = "local/tmp"
 text = "Short-lived host directories, such as the temporary home of a login container."
 writer = "host"
 ref = "internal/paths.Paths.TmpDir"
+
+[[tree.entry]]
+path = "local/tmp/relay-report-<random>.json"
+text = "One push through the relay service: post-receive writes its report here for the daemon, and the hooks keep their notes beside it (`.heads`, the box's branches from pre-receive; `.records`, what each update hook recorded). Created empty (0600) by the daemon, removed when the push is over."
+writer = "host"
+ref = "internal/daemon.newReportFile"
 
 [[tree.entry]]
 path = "local/context-<realm>.lock"
@@ -689,3 +701,33 @@ target = "/w/<realm>/<project>/<data root>/<input zone>"
 mode = "ro"
 text = "Each input zone of a data project the box mounts, nested read-only over the project mount."
 ref = "internal/data.BoxHooks.Contribute"
+
+[[tree]]
+id = "projects"
+title = "Projects root"
+root = "~/devc"
+summary = "The project directories, one per project, each mounted read-write into its box at `/w/<realm>/<project>`. `projects_root` in config.toml moves it. Everything here is box-writable: host code never runs git or another tool in it and never walks it."
+
+[[tree.entry]]
+path = "<realm>/<project>"
+text = "The project directory: the box repository and its worktrees, and the data directory of a data project."
+writer = "box"
+ref = "internal/paths.Paths.HostProjectDir"
+
+[[tree.entry]]
+path = "<realm>/<project>/.repo"
+text = "The box repository's git directory (`git init --separate-git-dir`), whose `origin` is `devc::<realm>/<project>`. Snapshots live in it as `refs/devc/wip/<worktree>`; the host reaches it only through `podman exec`."
+writer = "box"
+ref = "internal/paths.InBoxRepoDir"
+
+[[tree.entry]]
+path = "<realm>/<project>/main"
+text = "The main worktree, with the default branch checked out by `devc project init`."
+writer = "box"
+ref = "internal/paths.InBoxWorktree"
+
+[[tree.entry]]
+path = "<realm>/<project>/<worktree>"
+text = "A task worktree beside main, on the branch `<branch_prefix><worktree>`; `devc wt rm` removes it after banking, and its branch stays."
+writer = "box"
+ref = "internal/gitx.Service.WorktreeNew"

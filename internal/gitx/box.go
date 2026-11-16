@@ -1,3 +1,8 @@
+// This file holds Service and everything it does in the box: git and
+// `devc box …` commands through `podman exec` as dev, fetches from and
+// pushes to the box repository over the ext:: transport, and the strict
+// decoding of what the box reports.
+
 package gitx
 
 import (

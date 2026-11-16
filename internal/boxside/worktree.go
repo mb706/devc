@@ -1,3 +1,6 @@
+// This file implements the task worktrees in the box: `devc box worktree
+// add|rm|list` and the answer to a harness's worktree hook.
+
 package boxside
 
 import (
@@ -56,6 +59,10 @@ func (r *Repo) AddWorktree(o AddWorktreeOptions) (string, bool, error) {
 	return dir, created, err
 }
 
+// addWorktree runs git worktree add for a worktree that does not exist
+// yet. Anything already at dir is refused rather than reused; an existing
+// branch is checked out, a new one starts at o.Start without tracking it
+// (--no-track).
 func (r *Repo) addWorktree(o AddWorktreeOptions, dir string) (string, bool, error) {
 	if _, err := os.Lstat(dir); err == nil {
 		return "", false, fmt.Errorf("%s exists and is not a worktree of this project: move it away first", dir)

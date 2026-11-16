@@ -1,0 +1,109 @@
+id = "devc-push"
+kind = "flow"
+title = "devc push"
+summary = "Banked commits from the relay to the upstream: under the box lock the box is banked first, devc shows what the upstream lacks, refuses a non-fast-forward without --force, asks, pushes exactly the commit it showed with the user's credentials (with a lease when forced) and records the upstream's new tip."
+concern = "upstream"
+trigger = "devc push demo/hello feature"
+actors = ["user", "cli", "host-git", "github"]
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc push"
+label = "devc push demo/hello feature"
+external = true
+text = "The first argument is the project when it names one; the others are branches. `--tag <t>` adds tags, `--force` allows a non-fast-forward, `--yes` answers the question."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.push"
+checks = ["internal/cli.app.refuseProblems"]
+text = "Nothing is pushed while the project's configuration has problems. The box lock is taken, so no bank or box push changes the relay meanwhile."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.Bank"
+text = "A running box is banked first, so the push includes its newest commits; a bank that could not preserve the work stops the push ([[flow:turn-snapshot]] shows a bank)."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.MainBranch"
+text = "Without branches or tags, the branch checked out in the box's `main` is pushed (asked with `git symbolic-ref` in the box), or the relay's HEAD branch when the box is down."
+
+[[step]]
+section = "What would change"
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.Push"
+checks = ["internal/gitx.CheckName"]
+text = "The relay must exist and the project must have an upstream; the remote `github` is set from project.toml. Each branch name is checked; the relay must have the branch, and one the upstream already has at the same tip is skipped."
+
+[[step]]
+from = "cli"
+to = "host-git"
+via = "exec"
+label = "git merge-base --is-ancestor <upstream tip> <relay tip>"
+ref = "internal/gitx.Relay.IsAncestor"
+text = "Is the push a fast-forward of the upstream's branch as last fetched?"
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.preview"
+text = "Up to 200 commits the upstream lacks and, when the upstream has the branch, a diffstat, from host git in display mode, with every control character except colours replaced. A non-fast-forward without `--force` stops after the preview and says to pull and merge in the box."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "Push feature to <upstream>? [y/N]"
+ref = "internal/cli.app.confirmFunc"
+text = "devc asks on the terminal; without a terminal it refuses unless `--yes` was given."
+
+[[step]]
+from = "user"
+to = "cli"
+via = "reply"
+label = "y"
+external = true
+text = "Only `y` or `yes` goes on; anything else is \"nothing pushed\" with exit status 1."
+
+[[step]]
+section = "The push"
+
+[[step]]
+from = "cli"
+to = "host-git"
+via = "exec"
+label = "git push --porcelain --no-verify github <oid>:refs/heads/feature"
+ref = "internal/gitx.Service.pushUpstream"
+text = "devc pushes the commit it showed, not the branch name, in upstream mode: the user's git configuration and credentials, attached to the terminal for prompts. With `--force` it adds `--force-with-lease=refs/heads/feature:<last fetched tip>`."
+
+[[step]]
+from = "host-git"
+to = "github"
+via = "exec"
+label = "push"
+external = true
+text = "git pushes over HTTPS or SSH with the user's credentials."
+
+[[step]]
+from = "github"
+to = "host-git"
+via = "reply"
+label = "ok, or rejected"
+external = true
+text = "The upstream accepts, or refuses (a non-fast-forward without force, a lease that no longer holds, its own rules); devc reports a refused ref with git's reason."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Relay.Update"
+text = "`refs/remotes/github/feature` is set to the pushed commit, so the next preview and `devc diff` compare with it."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "pushed feature to the upstream (<oid>)"
+ref = "internal/gitx.Service.printf"
+text = "One line per branch on standard error. Tags follow the same pattern: the newest `refs/devc/tags/<t>` record is pushed, and an upstream tag pointing elsewhere needs `--force`."

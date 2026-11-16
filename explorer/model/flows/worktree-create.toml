@@ -1,0 +1,98 @@
+id = "worktree-create"
+kind = "flow"
+title = "A worktree for a second session"
+summary = "`devc claude -w t2` in a project with a relay: under the box lock the host checks the name and picks the branch and start point, `devc box worktree add` makes the worktree beside main in the box, and the host checks the answer before the session starts there."
+concern = "worktrees-and-context"
+trigger = "devc claude demo/hello -w t2"
+actors = ["cli", "podman", "box-tools", "box-git"]
+
+[[step]]
+section = "On the host"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.startSession"
+checks = ["internal/names.Check"]
+text = "The user starts a second session in the worktree `t2`; the name must pass the general name rule before anything else happens."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.prepareSession"
+text = "The harness must be listed and installed and the box running ([[flow:session-launch]]). Only a project with a relay gets a worktree; without one the session starts in the project directory."
+detail = "Other ways to the same worktree: `devc wt new t2 [--from <start>]`; a session the daemon is asked to start in a new worktree ([[internal/daemon.commander.newWorktree]]), both through `WorktreeNew` under the box lock; and Claude Code's `WorktreeCreate` hook in the box, which runs `devc box worktree-hook create` and goes straight to `AddWorktree` ([[internal/boxside.Repo.WorktreeHook]])."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.worktreeNew"
+text = "The box lock is taken, so no bank or other worktree change runs meanwhile."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.WorktreeNew"
+checks = ["internal/boxside.CheckWorktreeName", "internal/gitx.CheckName", "internal/gitx.CheckStart"]
+text = "The name may not be `main`, `.repo`, `.devc` or the data root. The branch is `branch_prefix` plus the name and must be a valid branch name. The start point is `--from` (never something that reads as an option) or `origin/<default branch>` when the relay has that branch."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman exec … devc box worktree add t2 --branch <b> --start origin/main"
+ref = "internal/gitx.Service.boxHelper"
+text = "The work happens in the box, as `dev`, from `/`."
+
+[[step]]
+from = "podman"
+to = "box-tools"
+via = "cmd:devc box worktree add"
+label = "devc box worktree add"
+external = true
+text = "Podman runs the command in the box."
+
+[[step]]
+section = "In the box"
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.Repo.AddWorktree"
+checks = ["internal/boxside.CheckWorktreeName"]
+text = "The name is checked again, against the data root from `/etc/devc/box.json`. A worktree of that name that already exists is returned as it is."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.Repo.addWorktree"
+checks = ["internal/names.CheckRef"]
+text = "Anything else at `/w/<realm>/<project>/t2` is refused rather than reused. An existing branch of that name is checked out; otherwise a new one starts at the start point, without tracking it."
+
+[[step]]
+from = "box-tools"
+to = "box-git"
+via = "exec"
+label = "git --git-dir=.repo worktree add --no-track -b <b> <dir> <start>"
+ref = "internal/boxside.Repo.git"
+text = "Box git creates the worktree with its own checkout, sharing the repository in `.repo`."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.Repo.dataLink"
+text = "In a project with data zones the new worktree gets its `data` link to the data root, excluded from git."
+
+[[step]]
+from = "podman"
+to = "cli"
+via = "reply"
+label = "created /w/<realm>/<project>/t2"
+external = true
+text = "One line: `created <path>`, or `exists <path>`."
+
+[[step]]
+section = "Back on the host"
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.worktreeDir"
+text = "The path in the answer must be exactly `/w/<realm>/<project>/t2`; anything else is an error."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.startSession"
+text = "devc says it created the worktree and starts the session with `--worktree t2`; the session's tmux window opens in that directory ([[flow:session-launch]])."

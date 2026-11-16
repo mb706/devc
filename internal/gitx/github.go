@@ -1,3 +1,6 @@
+// This file sets up the box repository's second remote for the GitHub
+// token modes; the relay is not involved.
+
 package gitx
 
 import (

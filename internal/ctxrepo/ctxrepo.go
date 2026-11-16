@@ -7,11 +7,13 @@
 // host never runs git on it. Every git operation runs in a throwaway
 // container from the installer image with no network, no capabilities, no
 // new privileges and the box seccomp profile, with only the context
-// directory and the read-only toolbox mounted; inside, `devc box
+// directory, the read-only toolbox and, for bundles and restores, an
+// exchange directory of the host's mounted; inside, `devc box
 // context-worker` walks the tree without following anything and feeds the
-// accepted files to git fast-import. Output the worker prints (file names,
+// accepted files to git fast-import. One worker runs per realm at a time
+// (the realm's context lock). Output the worker prints (file names,
 // diffs) is box-influenced and is made printable before it reaches a
-// terminal.
+// terminal; its JSON answers are decoded strictly.
 package ctxrepo
 
 import (
@@ -63,7 +65,10 @@ func (r *Repo) run(ctx context.Context, realm string, args ...string) (execx.Res
 	return r.runWith(ctx, realm, nil, args...)
 }
 
-// runWith runs the worker with extra mounts.
+// runWith runs the worker with extra mounts: the toolbox is synced and the
+// installer image built first, then the container runs under the realm's
+// context lock (five minutes' wait), so the worker and manifest appends of
+// one realm never overlap.
 func (r *Repo) runWith(ctx context.Context, realm string, extra []engine.RunMount, args ...string) (execx.Result, error) {
 	if !names.ValidRealm(realm) {
 		return execx.Result{}, fmt.Errorf("invalid realm name %q", realm)

@@ -1,3 +1,7 @@
+// This file implements banking: copying a running box's commits, snapshots
+// and tags into its relay under records no box can move, and forwarding
+// branches to the upstream afterwards.
+
 package gitx
 
 import (

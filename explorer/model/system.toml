@@ -264,6 +264,13 @@ commands = ["devc box", "devc gh", "devc request", "devc src"]
 entry = ["cmd/devc.shim.remoteHelper"]
 
 [[actor]]
+id = "box-git"
+zone = "box"
+title = "git (box)"
+kind = "process"
+summary = "git in the box, on the box repository `/w/<realm>/<project>/.repo`: run by the harness or the user, it reaches `origin` (`devc::<realm>/<project>`) through git-remote-devc; started by the host through `podman exec`, it is the git-upload-pack or git-receive-pack end of a bank or a pull. It runs no devc code, and the box repository's hooks and configuration apply only here."
+
+[[actor]]
 id = "harness"
 zone = "box"
 title = "Harness"
@@ -333,7 +340,7 @@ transport = "A new yamux stream of the box channel per in-box client; the agent 
 carries = "The box's requests to the host ([[surface:host-api]]). The daemon attributes each to the box by the channel it arrives on; nothing the box says selects a project."
 boundary = true
 checks = ["internal/daemon.muxGuard", "internal/proto.ParseMessage", "internal/proto.DecodeParams", "internal/requests.Validate"]
-concerns = ["box-channel", "box-init-and-agent", "requests-and-approval", "sessions-and-events"]
+concerns = ["box-channel", "box-init-and-agent", "requests-and-approval", "sessions-and-events", "git-ratchet"]
 
 [[channel]]
 id = "spool-write"
@@ -381,8 +388,8 @@ title = "podman exec"
 transport = "`podman exec` as the box user with an argument vector."
 carries = "In-box commands the host runs (session start, stop and listing, snapshots, worktrees, the repository report); their output comes back to the host."
 boundary = true
-checks = ["internal/session.ParseLive"]
-concerns = ["box-lifecycle", "launching-a-harness", "watching-sessions"]
+checks = ["internal/session.ParseLive", "internal/gitx.Service.snapshot", "internal/gitx.Service.WorktreeList", "internal/gitx.Service.repoState"]
+concerns = ["box-lifecycle", "launching-a-harness", "watching-sessions", "worktrees-and-context"]
 
 [[channel]]
 id = "podman-box"
@@ -411,6 +418,8 @@ to = "context-worker"
 title = "Context run"
 transport = "`podman run --rm --network none` from the installer image with every capability dropped, the context directory and the toolbox mounted."
 carries = "A context repository operation (commit, diff, log, bundle, restore)."
+checks = ["internal/ctxrepo.decodeStrict"]
+concerns = ["worktrees-and-context"]
 
 [[channel]]
 id = "podman-installer"
@@ -536,7 +545,8 @@ title = "Relay service"
 transport = "git upload-pack or receive-pack on the project's relay, with the box's host.git stream as standard input and output."
 carries = "Fetches and pushes of the box's git remote helper; the project is the one the channel is bound to."
 boundary = true
-checks = ["internal/daemon.boxWorker.serveGit"]
+checks = ["internal/daemon.boxWorker.serveGit", "internal/gitx.ServeCall", "internal/daemon.Daemon.watchPush"]
+concerns = ["git-ratchet"]
 
 [[channel]]
 id = "git-hooks"
@@ -544,7 +554,29 @@ from = "host-git"
 to = "relay-hooks"
 title = "Relay hooks"
 transport = "receive-pack runs the relay's pre-receive, update and post-receive hooks, which are links to devc."
-carries = "The refs a push wants to update."
+carries = "The refs a push wants to update: names and object IDs the box chose."
+checks = ["internal/gitx.ParseHookInput", "internal/gitx.CheckPushSize", "internal/gitx.CheckUpdate"]
+concerns = ["git-ratchet"]
+
+[[channel]]
+id = "box-transport"
+from = "host-git"
+to = "box-git"
+title = "Box transport"
+transport = "git's ext:: transport: `podman exec -i -u 1000:1000 <box> git-upload-pack|git-receive-pack /w/<realm>/<project>/.repo`, allowed for these calls only (`protocol.ext.allow`)."
+carries = "A bank's fetch of the box's branches, snapshots and tags into `refs/devc/incoming/`; the push of the relay's branches, the upstream's branches and tags into the box (origin/*, github/*)."
+boundary = true
+checks = ["internal/gitx.Host.Cmd", "internal/gitx.PlanBank"]
+concerns = ["git-ratchet", "upstream", "worktrees-and-context"]
+
+[[channel]]
+id = "box-git-helper"
+from = "box-git"
+to = "box-tools"
+title = "Remote helper"
+transport = "git starts `/opt/devc/bin/git-remote-devc` for `devc::` URLs and speaks the remote-helper protocol on its standard input and output."
+carries = "`connect git-upload-pack|git-receive-pack`, after which the bytes of git's protocol pass unparsed to the host's relay service; without a host, the stub's list, fetch and push."
+concerns = ["git-ratchet"]
 
 [[channel]]
 id = "github-git"
@@ -552,8 +584,9 @@ from = "host-git"
 to = "github"
 title = "Upstream git"
 transport = "git over HTTPS or SSH with the host's own credentials."
-carries = "Fetches of the upstream into the relay and pushes of relay branches (devc pull, devc push, devc pr create)."
+carries = "Fetches of the upstream into the relay and pushes of relay branches (devc pull, devc push, devc pr create, forwards)."
 boundary = true
+concerns = ["upstream"]
 
 [[channel]]
 id = "github-api"

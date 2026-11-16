@@ -1,3 +1,7 @@
+// This file implements the context worker's commit, diff and log of a
+// realm's context repository; it runs in the context container, never in
+// a box.
+
 package boxside
 
 import (

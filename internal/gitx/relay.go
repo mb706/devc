@@ -1,3 +1,7 @@
+// This file implements the relay repository: creation, the configuration
+// that keeps everything it ever received, ref listings and update-ref
+// transactions with the old value checked.
+
 package gitx
 
 import (
@@ -22,7 +26,9 @@ type Relay struct {
 	Dir  string
 }
 
-// relayConfig is applied to every relay (work order section 2).
+// relayConfig is applied to every relay (work order section 2): git never
+// collects garbage or runs maintenance on its own, every ref change is
+// logged, and every object that arrives is checked.
 var relayConfig = [][2]string{
 	{"core.bare", "true"},
 	{"gc.auto", "0"},
@@ -81,7 +87,7 @@ func (r *Relay) Create(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	// Hooks shipped by git init's template are samples; nothing runs them
-	// (core.hooksPath), but an empty directory says so plainly.
+	// (core.hooksPath), but removing the directory says so plainly.
 	if err := os.RemoveAll(filepath.Join(tmp.Dir, "hooks")); err != nil {
 		cleanup()
 		return false, err

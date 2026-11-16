@@ -1,3 +1,6 @@
+// This file implements `devc box snapshot`: commits of the worktrees'
+// uncommitted work, made in the box so that a bank can fetch them.
+
 package boxside
 
 import (
@@ -77,6 +80,10 @@ func (r *Repo) Snapshot(only, tmpDir string) SnapshotReport {
 	return rep
 }
 
+// snapshotOne snapshots one worktree with a temporary index in tmpDir. An
+// unborn branch gives a commit without a parent; a commit equal in tree
+// and parent to the worktree's current snapshot is reused, so a bank
+// records nothing new for a worktree that did not change.
 func (r *Repo) snapshotOne(w Worktree, tmpDir string) (SnapshotWorktree, error) {
 	var res SnapshotWorktree
 	f, err := os.CreateTemp(tmpDir, "devc-snapshot-*.index")

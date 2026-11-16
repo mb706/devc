@@ -1,3 +1,7 @@
+// This file implements the host side of task worktrees: the host checks
+// names and start points, `devc box worktree` does the work in the box,
+// and its answers are validated.
+
 package gitx
 
 import (
@@ -34,9 +38,10 @@ func CheckStart(s string) error {
 }
 
 // WorktreeNew creates the task worktree name in the box (work order section
-// 8): branch <prefix><name> from start (default origin/<default branch>),
-// or the existing branch of that name. It returns the in-box path and
-// whether it was created. The caller holds the box lock.
+// 8): branch <prefix><name> from start (default origin/<default branch>
+// when the relay has that branch, else the box's own default), or the
+// existing branch of that name. It returns the in-box path and whether it
+// was created. The caller holds the box lock.
 func (s *Service) WorktreeNew(ctx context.Context, p *Project, name, start string) (string, bool, error) {
 	if err := boxside.CheckWorktreeName(name, p.Resolved.Data.Root); err != nil {
 		return "", false, err

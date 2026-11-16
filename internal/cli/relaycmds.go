@@ -1,3 +1,6 @@
+// This file implements the relay hooks: the checks and records git
+// receive-pack runs for a box's push through the relay service.
+
 package cli
 
 import (
@@ -48,6 +51,11 @@ func newRelayHookCmd(a *app) *cobra.Command {
 	}
 }
 
+// relayHook runs one hook for the project the daemon named. It loads the
+// configuration from disk, as the daemon did just before, and refuses
+// while the project has problems. A non-zero exit refuses the whole push
+// (pre-receive) or one ref (update); git ignores post-receive's status.
+// What it writes to standard error reaches the pusher.
 func (a *app) relayHook(ctx context.Context, args []string) error {
 	if a.getenv("DEVC_BOX") == "1" {
 		return errors.New("relay hooks run only on the host")

@@ -1,3 +1,7 @@
+// This file implements the git commands of the host: realm add, project
+// add, init and adopt, bank, pull, push, log, diff and wt, and banking
+// before a box stops.
+
 package cli
 
 import (
@@ -303,6 +307,9 @@ func (a *app) writeProject(ref names.ProjectRef, f projectFlags) (*config.Config
 	return c, nil
 }
 
+// newProjectGitCmds are `devc project add|init|adopt`: a project
+// definition (add and adopt write a new project.toml), then the relay and
+// the box repository.
 func newProjectGitCmds(a *app) []*cobra.Command {
 	var addFlags projectFlags
 	add := &cobra.Command{
@@ -500,6 +507,8 @@ func (a *app) projectBox(ctx context.Context, e *boxEnv, ref names.ProjectRef, d
 // timer); a box busy for longer is skipped until the next run.
 const bankAllLockTimeout = time.Minute
 
+// newGitCmds are the top-level git commands bank, pull, push, log, diff
+// and wt, with the service group.
 func newGitCmds(a *app) []*cobra.Command {
 	var bankAll, bankQuiet, bankJSON bool
 	bank := &cobra.Command{
@@ -612,6 +621,11 @@ func (a *app) withGit(cmd *cobra.Command, args []string, ingest bool, fn func(co
 	return fn(ctx, e, p)
 }
 
+// bank implements `devc bank`. One project: its session events are
+// ingested first, then it is banked under the box lock (a stopped box is
+// skipped with a note). --all, run by the daemon's housekeeping and the
+// timer: every running box with a relay, each waiting at most a minute
+// for its lock; exit status 1 when any could not be banked.
 func (a *app) bank(cmd *cobra.Command, args []string, all, quiet, asJSON bool) error {
 	if !all {
 		// Session events reach the durable journal with every bank, relay
@@ -704,6 +718,10 @@ func (a *app) bankOne(ctx context.Context, e *boxEnv, ref names.ProjectRef) (*gi
 	return e.git.Bank(ctx, p)
 }
 
+// push implements `devc push`: under the box lock, a running box is
+// banked first (a failed bank stops the push), so what is pushed includes
+// the box's latest commits; without branches or tags, the branch checked
+// out in main is pushed, or the relay's HEAD branch when the box is down.
 func (a *app) push(cmd *cobra.Command, args []string, o gitx.PushOptions) error {
 	e, err := a.boxEnv()
 	if err != nil {
@@ -860,6 +878,9 @@ func (a *app) stdoutTerminal() bool {
 
 // --- worktrees ---
 
+// newWorktreeCmd is `devc wt new|ls|rm`. Only rm banks first: a worktree
+// is removed only once its uncommitted work is in the relay, unless
+// --discard says to lose it.
 func newWorktreeCmd(a *app) *cobra.Command {
 	var from string
 	newCmd := &cobra.Command{
@@ -995,6 +1016,9 @@ type gitxDivergence struct {
 	Behind int    `json:"behind"`
 }
 
+// worktreeList implements `devc wt ls`: the box's worktree report,
+// validated, joined with the live sessions of each worktree. It takes no
+// lock, as it changes nothing.
 func (a *app) worktreeList(cmd *cobra.Command, args []string, asJSON bool) error {
 	e, err := a.boxEnv()
 	if err != nil {

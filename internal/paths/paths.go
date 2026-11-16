@@ -413,7 +413,8 @@ func (p *Paths) BoxHarnessDir(r names.ProjectRef, harness string) string {
 }
 
 // NoHooksDir is an empty directory owned by devc. Every host git command
-// uses it as core.hooksPath, so no hook ever runs on the host.
+// on a relay uses it as core.hooksPath, so no hook runs on the host; only
+// the relay service's receive-pack uses RelayHooksDir instead.
 func (p *Paths) NoHooksDir() string { return filepath.Join(p.LocalDir(), "git", "no-hooks") }
 
 // RelayHooksDir holds the relay service's hooks (links to the devc binary);

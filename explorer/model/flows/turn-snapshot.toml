@@ -1,0 +1,155 @@
+id = "turn-snapshot"
+kind = "flow"
+title = "From a turn's end to a snapshot ref"
+summary = "When an agent finishes a turn the daemon banks its box: `devc bank` snapshots every worktree's uncommitted work in the box, fetches branches, snapshots and tags into the relay's scratch refs, records what changed under refs devc owns, and shows the box the banked branches."
+concern = "worktrees-and-context"
+trigger = "a session goes from working to done"
+actors = ["daemon", "cli", "host-git", "podman", "box-tools", "box-git"]
+
+[[step]]
+section = "The daemon notices"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hub.tailLocked"
+text = "The journal follower folds a new `state` event into a live session's view: the session went from working to done or idle, so a turn has ended ([[flow:event-ingestion]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.turnBanker.turnEnded"
+unchecked = "called through the hub's onTurnEnd function value, which daemon.New sets to turnEnded"
+text = "A bank of the box is scheduled: at once, or 30 seconds after its previous one. A turn that ends while a bank runs gives one more afterwards; the call never blocks the follower."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.turnBanker.run"
+text = "When the timer fires: only if the project has a relay and its box runs."
+
+[[step]]
+from = "daemon"
+to = "cli"
+via = "cmd:devc bank"
+label = "devc bank demo/hello --quiet"
+ref = "internal/daemon.Daemon.runChild"
+text = "The bank is the CLI's, run as a child process of the same binary, from `/`, with the daemon's directories and 30 minutes at most, so it takes the same locks and checks as a bank the user starts."
+
+[[step]]
+section = "The bank"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.bank"
+text = "One project: its session events are ingested first."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.withGit"
+checks = ["internal/cli.app.refuseProblems"]
+text = "Refused while the configuration has problems; then the box lock, waited for at most ten minutes."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.Bank"
+text = "The relay must exist and the box must run and be ready."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman exec -u 1000:1000 <box> devc box snapshot --all"
+ref = "internal/gitx.Service.boxHelper"
+text = "The snapshot is made in the box, by devc from the read-only toolbox, as `dev`, from `/`, within 30 minutes."
+
+[[step]]
+from = "podman"
+to = "box-tools"
+via = "cmd:devc box snapshot"
+label = "devc box snapshot --all"
+external = true
+text = "Podman runs the command in the box."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.Repo.Snapshot"
+text = "Every worktree devc manages (`main` and the siblings below the project directory) gets a snapshot, each on its own."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.Repo.snapshotOne"
+text = "A temporary index is seeded from HEAD; tracked changes and untracked files that are not ignored (regular files up to 10 MiB, symlinks) go in; the tree becomes a commit with HEAD as parent in `refs/devc/wip/<worktree>`. A clean worktree gets none, an unchanged one keeps its commit."
+detail = "The worktree's own index and files are never touched. Left-out files (larger, special, nested repositories) are listed in the commit message and in the report, at most 100 per worktree."
+
+[[step]]
+from = "box-tools"
+to = "cli"
+via = "reply"
+label = "JSON report {v, worktrees}"
+ref = "internal/boxside.SnapshotReport"
+text = "The report names each worktree with its commit, the files left out, or an error."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.snapshot"
+checks = ["internal/gitx.decodeStrict"]
+text = "Decoded strictly, at most 1 MiB and 1,000 worktrees; names and object IDs validated, texts cut and made printable. A worktree whose snapshot failed counts as work not preserved."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Relay.ClearIncoming"
+text = "The relay's scratch namespace `refs/devc/incoming/` is emptied, before the fetch and again after the bank."
+
+[[step]]
+from = "cli"
+to = "host-git"
+via = "exec"
+label = "git fetch ext::… heads, wip, tags → refs/devc/incoming/*"
+ref = "internal/gitx.Service.fetchFromBox"
+text = "Host git fetches the box's branches, snapshot refs and tags, each into its part of `refs/devc/incoming/`, with `--no-tags` and no garbage collection."
+
+[[step]]
+from = "host-git"
+to = "box-git"
+via = "exec"
+label = "podman exec -i -u 1000:1000 <box> git-upload-pack /w/<realm>/<project>/.repo"
+external = true
+text = "git's `ext::` transport runs upload-pack in the box; whatever the box repository's configuration does happens there."
+
+[[step]]
+from = "box-git"
+to = "host-git"
+via = "reply"
+label = "refs and a pack"
+external = true
+text = "The box offers whatever refs and objects it likes. Host git checks every object, keeps the pack as it came, and writes refs only below `refs/devc/incoming/`."
+
+[[step]]
+section = "What the relay records"
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Relay.RefSet"
+text = "The relay's refs, sorted by namespace. A snapshot the box reported must have arrived, or that worktree's work counts as not preserved."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.PlanBank"
+checks = ["internal/gitx.Relay.CheckRefFormat", "internal/gitx.Protected"]
+text = "A snapshot that differs from the worktree's last one in tree or parents becomes `refs/devc/snap/<worktree>/<time>`. Branches the box moved are set to its tip with a bank ref, unless protected or badly named; box tags become `refs/devc/tags/` records; nothing is deleted."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Relay.Update"
+text = "Each branch is one `update-ref --stdin` transaction (head, bank ref, box tip) with the old values checked, so a conflict holds back only that branch; each snapshot ref and tag record is created only if it does not exist."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.reflect"
+text = "The box gets the banked branches as `origin/*`; then branches matching `git.forward` go to the upstream ([[flow:devc-push]] shows a push)."
+
+[[step]]
+from = "cli"
+to = "daemon"
+via = "reply"
+label = "exit status, problems only"
+ref = "internal/gitx.FormatBank"
+text = "With `--quiet` only refusals and failures are printed; the daemon logs them. The web app's changes view now shows the new snapshot ([[internal/gitx.Service.Changes]])."

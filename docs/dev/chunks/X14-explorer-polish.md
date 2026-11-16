@@ -23,3 +23,9 @@ Small problems in the tool and the app that the content authors met. This list g
 - Each `./dev explore query` starts the container and loads everything, so a loop over files takes minutes. Accept several questions in one run (from arguments or standard input).
 - A query that lists the declarations of a package or file that have no doc comment.
 
+## From X7
+
+- A query that prints a flow's connection paths (authors had to read `dist/data/core.js` to see them).
+- The shortest-path rule can name a misleading starting step: in `turn-snapshot`, `Relay.Update` is shown as coming from `ClearIncoming`. Prefer the nearest earlier step of the same actor, and fall back to earlier ones only when that fails.
+- `--check` needs a filter by file or directory: warnings from other areas hide an author's own.
+

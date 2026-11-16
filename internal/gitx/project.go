@@ -1,3 +1,7 @@
+// This file implements project setup: the relay filled from the upstream
+// or from a local clone, and the box repository created or brought up to
+// date in the box.
+
 package gitx
 
 import (

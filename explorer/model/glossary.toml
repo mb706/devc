@@ -431,3 +431,128 @@ aka = ["origin"]
 text = "Where a decision on a request came from: `local` (the daemon's socket), `auto` (the project's `[requests] auto` list) or `hub` (a hub link, or a local client that declares it). The connection decides the origin; a client can only declare a weaker one."
 refs = ["internal/requests.EffectiveOrigin", "internal/requests.MayDecide"]
 see = ["request", "risk-class"]
+
+[[term]]
+id = "git-ratchet"
+title = "Git ratchet"
+aka = ["ratchet"]
+text = "The guarantee that what a relay records (every tip of its branches, every snapshot, every tag created in the box) stays reachable whatever the box does: every tip a relay branch takes is recorded under `refs/devc/bank/`, records are only ever created, a box can delete no ref, and the relay never collects garbage."
+refs = ["internal/gitx.CheckUpdate", "internal/gitx.Service.RecordUpdate", "internal/gitx.PlanBank"]
+see = ["relay", "bank-ref", "banking"]
+
+[[term]]
+id = "box-repository"
+title = "Box repository"
+aka = [".repo"]
+text = "The project's git repository in the box: the git directory `/w/<realm>/<project>/.repo`, the worktree `main/` and one sibling per task worktree. Its `origin` is `devc::<realm>/<project>`, the relay. It is box-writable, and host git never opens it: the host reaches it only through `podman exec`."
+refs = ["internal/boxside.Repo", "internal/paths.InBoxRepoDir", "internal/gitx.Service.InitBox"]
+see = ["relay", "task-worktree"]
+
+[[term]]
+id = "task-worktree"
+title = "Task worktree"
+aka = ["worktree"]
+text = "A git worktree beside `main` in the project directory, `/w/<realm>/<project>/<name>`, on the branch `<branch_prefix><name>`, so that sessions can work on separate branches in one box. `devc wt new`, `devc <harness> -w <name>` and Claude Code's worktree hook create one."
+refs = ["internal/boxside.Repo.AddWorktree", "internal/gitx.Service.WorktreeNew"]
+see = ["box-repository"]
+
+[[term]]
+id = "bank-ref"
+title = "Bank ref"
+text = "`refs/devc/bank/<branch>/<unix time>` in a relay: created for every new tip of a relay branch by a bank, a push through the relay service, a pull or an adoption. Never moved or deleted, so a rewritten branch's old commits stay reachable. A push records the tip before git applies it, so an update git then refuses can leave a bank ref for a tip the branch never had."
+refs = ["internal/gitx.BankPrefix", "internal/gitx.PlanBank", "internal/gitx.Service.RecordUpdate"]
+see = ["git-ratchet", "banking"]
+
+[[term]]
+id = "snapshot"
+title = "Snapshot"
+aka = ["snapshot commit"]
+text = "A commit of a worktree's uncommitted work, made in the box with a temporary index and HEAD as parent, kept as `refs/devc/wip/<worktree>` in the box repository; a bank records it in the relay as `refs/devc/snap/<worktree>/<unix time>` when it differs from the last one."
+refs = ["internal/boxside.Repo.Snapshot", "internal/gitx.SnapPrefix"]
+see = ["banking"]
+
+[[term]]
+id = "box-tip"
+title = "Box tip"
+text = "`refs/devc/boxtip/<branch>`: the box's own tip of a branch as the last bank or push saw it. A bank leaves a relay branch alone while the box's tip has not moved, so a fast-forward from the upstream is not taken back."
+refs = ["internal/gitx.BoxTipPrefix", "internal/gitx.PlanBank"]
+see = ["banking"]
+
+[[term]]
+id = "relay-service"
+title = "Relay service"
+text = "The daemon serving a box's `git push` and `git fetch`: a `host.git` stream from the remote helper becomes git receive-pack or upload-pack on the relay of the channel's project, with the stream as standard input and output. Pushes pass devc's relay hooks."
+refs = ["internal/daemon.boxWorker.serveGit", "internal/gitx.ServeCall"]
+see = ["remote-helper", "relay-hooks", "relay"]
+
+[[term]]
+id = "remote-helper"
+title = "Remote helper"
+aka = ["git-remote-devc"]
+text = "`git-remote-devc`, which git runs in a box for `devc::` URLs. With a host connected it offers git's `connect` and relays bytes to the relay service through the agent; without one it is a stub whose push transfers nothing and says that a bank will copy the commits."
+refs = ["internal/boxside.RemoteHelperMain", "internal/boxside.RemoteHelper"]
+see = ["relay-service"]
+
+[[term]]
+id = "relay-hooks"
+title = "Relay hooks"
+text = "pre-receive, update and post-receive in `local/git/relay-hooks`, links to devc that git receive-pack runs for a box's push. pre-receive refuses a push that is too large in refs or storage, update applies the push policy and records each ref first, post-receive reports and forwards."
+refs = ["internal/cli.app.relayHook", "internal/gitx.EnsureRelayHooks"]
+see = ["relay-service", "bank-ref"]
+
+[[term]]
+id = "quarantine"
+title = "Quarantine"
+text = "The directory `objects/tmp_objdir-incoming-*` in which git receive-pack keeps a push's objects until pre-receive has accepted the push; git deletes it when pre-receive refuses. The push watchdog measures it, and the daemon removes what an ended push left there."
+refs = ["internal/gitx.QuarantinePrefix", "internal/gitx.QuarantineUsage", "internal/gitx.RemoveQuarantines"]
+see = ["push-watchdog"]
+
+[[term]]
+id = "push-watchdog"
+title = "Push watchdog"
+text = "The daemon's check every 200 ms during a box's push: the push is ended when the relay would exceed `git.relay_quota` or the state file system has less than 512 MiB free."
+refs = ["internal/daemon.Daemon.watchPush", "internal/daemon.Daemon.runPush"]
+see = ["quarantine", "held-relay"]
+
+[[term]]
+id = "held-relay"
+title = "Held relay"
+text = "A relay whose ended push left git processes the daemon could not end within 30 seconds: its quarantine and box lock stay, and pushes are refused, until the last process has gone."
+refs = ["internal/daemon.Daemon.holdRelay", "internal/daemon.Daemon.heldRefusal"]
+see = ["push-watchdog"]
+
+[[term]]
+id = "upstream"
+title = "Upstream"
+text = "The repository a project's `upstream` URL names (GitHub or any git host). The relay knows it as the remote `github`; the host fetches from it and pushes to it with the user's own credentials."
+refs = ["internal/gitx.UpstreamRemote", "internal/gitx.Relay.SetUpstream"]
+see = ["relay", "fetch-through", "forward"]
+
+[[term]]
+id = "fetch-through"
+title = "Fetch-through"
+text = "Before the relay service serves a box's fetch, the daemon fetches the upstream into the relay and fast-forwards relay branches, at most once a minute per project and within 20 seconds; on failure the box gets what the relay has. `git.fetch_through` turns it off."
+refs = ["internal/gitx.Service.FetchThrough", "internal/daemon.Daemon.fetchThrough"]
+see = ["upstream", "relay-service"]
+
+[[term]]
+id = "forward"
+title = "Forward"
+aka = ["forwarding"]
+text = "A push of a relay branch to the upstream that devc makes on its own, after a bank or a relay-service push, for branches matching `git.forward`. Never forced: the upstream refuses a non-fast-forward."
+refs = ["internal/gitx.Service.forward", "internal/gitx.Matches"]
+see = ["upstream"]
+
+[[term]]
+id = "protected-branch"
+title = "Protected branch"
+text = "A branch matching `git.protected`: a box's push to it is refused and a bank keeps the relay's tip; fast-forwards from the upstream still move it. A malformed pattern protects every branch."
+refs = ["internal/gitx.Protected", "internal/gitx.CheckUpdate"]
+see = ["git-ratchet"]
+
+[[term]]
+id = "context-repository"
+title = "Context repository"
+text = "A realm's bare repository `durable/realms/<realm>/context/.git` that versions the notes and memory boxes write (`context/notes/<project>`, `context/memory/<group>`). Only the context worker, in a container without network, runs git on it; no box sees it."
+refs = ["internal/ctxrepo.Repo", "internal/boxside.ContextWorker"]
+see = ["snapshot"]

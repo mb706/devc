@@ -1,22 +1,23 @@
-package gitx
-
-// The relay service (work order C10a section 1): a box's git push and
-// fetch reach the relay through the daemon, which runs git upload-pack or
-// git receive-pack on the relay with the box's channel stream as standard
-// input and output. The box never gets a path to the relay; the project is
-// the one bound to the channel.
+// This file implements the git side of the relay service (work order C10a
+// section 1): a box's git push and fetch reach the relay through the
+// daemon, which runs git upload-pack or git receive-pack on the relay with
+// the box's channel stream as standard input and output. The box never
+// gets a path to the relay; the project is the one bound to the channel.
 //
 // Pushes are checked by three hooks in a host-controlled directory, which
 // are links to the devc binary (no shell is involved): pre-receive refuses
-// a whole push that updates too many refs or would take the relay over its
-// storage budget (CheckPushSize, RelayUsage) and notes the box's own
-// branches; update applies the policy table (CheckUpdate) to each ref and
-// then records it the way a bank would (RecordUpdate) before receive-pack
-// applies it, refusing the update when that fails (finding C1-05: an
-// accepted push always has its bank refs); post-receive only forwards
-// branches listed in git.forward and reports (ReportPush). Ref names and
-// object names in hook input come from a box: they are validated before
-// use and only ever passed as single arguments or update-ref lines.
+// a whole push that updates too many refs, comes while the configuration
+// has problems or would take the relay over its storage budget
+// (CheckPushSize, RelayUsage), and notes the box's own branches; update
+// applies the policy table (CheckUpdate) to each ref and then records it
+// the way a bank would (RecordUpdate) before receive-pack applies it,
+// refusing the update when that fails (finding C1-05: an accepted push
+// always has its bank refs); post-receive only forwards branches listed
+// in git.forward and reports (ReportPush). Ref names and object names in
+// hook input come from a box: they are validated before use and only ever
+// passed as single arguments or update-ref lines.
+
+package gitx
 
 import (
 	"bufio"
@@ -68,10 +69,11 @@ const serveTimeout = 30 * time.Minute
 
 // ServeCall is the host git command that serves one service on a relay.
 // upload-pack hides devc's bookkeeping; receive-pack also hides
-// refs/remotes, refuses deletions on its own (the update hook refuses them
-// too), never collects garbage, keeps the incoming pack as it is, refuses
-// a pack above maxInput bytes (when positive) and runs the hooks in
-// hooksDir, with env added for them.
+// refs/remotes (git refuses updates to hidden refs before any hook runs),
+// refuses branch deletions on its own (the update hook refuses every
+// deletion too), never collects garbage, checks every object, keeps the
+// incoming pack as it is, refuses a pack above maxInput bytes (when
+// positive) and runs the hooks in hooksDir, with env added for them.
 func ServeCall(relay, service, hooksDir string, env []string, stdin io.Reader, maxInput int64) (Call, error) {
 	c := Call{Relay: relay, Stdin: stdin, Timeout: serveTimeout, Env: env}
 	switch service {
@@ -290,7 +292,8 @@ func (s *Service) BoxHeads(ctx context.Context, p *Project) map[string]string {
 }
 
 // RecordPush records every update of a push (RecordUpdate) and forwards
-// branches as post-receive does; for callers that record after the fact.
+// branches as post-receive does, for a push that was applied without the
+// hooks. Only tests call it; the relay service records in the update hook.
 func (s *Service) RecordPush(ctx context.Context, p *Project, pushed []PushedRef) *PushReport {
 	heads := s.BoxHeads(ctx, p)
 	var recs []PushRecord
