@@ -1,3 +1,6 @@
+// This file implements the request log: one file of JSON lines per project,
+// compacted when it grows.
+
 package requests
 
 import (

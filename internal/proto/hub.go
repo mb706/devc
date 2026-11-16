@@ -1,3 +1,6 @@
+// This file defines the machine link between a daemon and a hub, and what
+// the daemon reports about its hub links and archive uploads.
+
 package proto
 
 // The machine link (work order C11a section 3): a machine daemon dials out

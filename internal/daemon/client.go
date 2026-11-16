@@ -1,3 +1,5 @@
+// This file implements the client of the daemon's API that the CLI uses.
+
 package daemon
 
 import (

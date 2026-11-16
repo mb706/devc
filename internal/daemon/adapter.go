@@ -1,3 +1,6 @@
+// This file implements the input adapters that deliver a command to a
+// harness: paste, the harness extension, and those not built yet.
+
 package daemon
 
 // Input adapters (work order C09 section 4): one interface, chosen by the

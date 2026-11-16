@@ -1,31 +1,38 @@
 +++
 id = "sessions-and-events"
 title = "Sessions and events"
-summary = "How what a harness does in a box becomes events, and how they get from the box's spool into the host's journals and the daemon's view of every session."
-order = 10
+summary = "The host's half of a session: how events get from a box's spool into journals no box can reach, who owns a session ID, how sessions the box no longer runs are ended, and the view of each session derived from its journal."
+order = 32
 packages = ["internal/session"]
-files = ["internal/proto/proto.go", "internal/boxside/hook.go", "internal/boxside/spool.go", "internal/daemon/hub.go"]
+files = ["internal/proto/proto.go", "internal/proto/views.go", "internal/daemon/hub.go"]
 key = [
   "internal/proto.Event",
-  "internal/boxside.RunHook",
-  "internal/boxside.AppendEvents",
-  "internal/boxside.SendHintTo",
-  "internal/daemon.boxWorker.ingestLoop",
-  "internal/session.Store.Ingest",
   "internal/proto.ParseSpoolLine",
+  "internal/session.Store.Ingest",
   "internal/session.Store.Claim",
   "internal/session.Store.Refresh",
+  "internal/session.Store.AppendHostEvent",
+  "internal/proto.SessionView",
+  "internal/proto.SessionView.Apply",
+  "internal/daemon.boxWorker.ingestLoop",
   "internal/daemon.hub.poll",
 ]
 spec = ["doc:specs-v2.md#12", "doc:docs/dev/plan.md#3.6"]
 tests = [
-  "internal/boxside.TestHookMappings",
   "internal/proto.TestParseSpoolLineInvalid",
+  "internal/proto.TestSessionViewApply",
+  "internal/proto.TestTurnsAndSeen",
+  "internal/session.TestIngest",
   "internal/session.TestIngestHostile",
-  "internal/session.TestSessionOwnership",
+  "internal/session.TestIngestTruncated",
   "internal/session.TestIngestAppendFailure",
+  "internal/session.TestSessionOwnership",
+  "internal/session.TestRefresh",
+  "internal/session.TestRefreshObservesUnderLock",
+  "internal/daemon.TestSubscribeEndedAndCold",
   "test/integration.TestSessions",
 ]
+related = ["launching-a-harness", "daemon", "watching-sessions", "input-and-receipts"]
 
 [[invariant]]
 text = "Nothing a box writes reaches a journal as it was written: every spool line is parsed strictly, its data validated field by field, and the event re-encoded."
@@ -35,10 +42,11 @@ tests = ["internal/proto.TestParseSpoolLineInvalid", "internal/session.TestInges
 [[invariant]]
 text = "A box cannot write the event types only the host writes: `seen`, `answer` and `request`."
 refs = ["internal/proto.HostOnly", "internal/proto.ParseSpoolLine"]
+tests = ["internal/proto.TestC09Events"]
 
 [[invariant]]
-text = "A box cannot add events to a session of another project: the first project to record a session ID owns it."
-refs = ["internal/session.Store.Claim"]
+text = "A box cannot add events to a session of another project: the first project to record a session ID owns it, and that record is never replaced."
+refs = ["internal/session.Store.Claim", "internal/session.Store.writeOwner", "internal/session.Store.AppendHost"]
 tests = ["internal/session.TestSessionOwnership"]
 
 [[invariant]]
@@ -47,168 +55,271 @@ refs = ["internal/session.Store.Ingest", "internal/safefs.OpenRoot"]
 tests = ["internal/session.TestIngestHostile"]
 
 [[invariant]]
-text = "An event is appended to a journal at most once: the spool offset advances only past events that are durably in the journal."
-refs = ["internal/session.Store.ingestFile"]
+text = "An event reaches a journal at most once: the spool offset advances only past events that are durably in the journal."
+refs = ["internal/session.Store.ingestFile", "internal/session.appendJournal"]
 tests = ["internal/session.TestIngestAppendFailure"]
 
 [[invariant]]
-text = "A hook never disturbs the harness: the receiver does not fail and prints nothing but an answer to a question."
-refs = ["internal/boxside.RunHook"]
-tests = ["internal/boxside.TestHookMappings"]
+text = "Within a session, seq numbers are assigned once and in order, by whoever holds the box's ingestion lock."
+refs = ["internal/session.Store.Lock", "internal/session.loadJournalState"]
+
+[[invariant]]
+text = "Reconciliation never ends a session that a box started after the box was observed."
+refs = ["internal/session.Store.refresh"]
+tests = ["internal/session.TestRefreshObservesUnderLock"]
+
+[[invariant]]
+text = "After `session.end`, nothing changes a session's view but the turn a user marked seen."
+refs = ["internal/proto.SessionView.Apply"]
+tests = ["internal/proto.TestTurnsAndSeen"]
 
 [[diagram]]
-id = "event-path"
-title = "From a hook to the daemon's view"
+id = "session-states"
+title = "The state of a session's view, as the built-in hooks move it"
 kind = "graph"
 
 [[diagram.node]]
-id = "harness"
-label = "harness"
+id = "unknown"
+label = "unknown"
 col = 1
 row = 1
-zone = "box"
 
 [[diagram.node]]
-id = "hook"
-label = "devc box hook"
+id = "idle"
+label = "idle"
 col = 2
 row = 1
-zone = "box"
-ref = "internal/boxside.RunHook"
+ref = "internal/proto.StateIdle"
+
+[[diagram.node]]
+id = "working"
+label = "working"
+col = 3
+row = 1
+ref = "internal/proto.StateWorking"
+
+[[diagram.node]]
+id = "done"
+label = "done"
+col = 4
+row = 1
+ref = "internal/proto.StateDone"
+
+[[diagram.node]]
+id = "blocked"
+label = "blocked"
+col = 3
+row = 3
+ref = "internal/proto.StateBlocked"
+
+[[diagram.node]]
+id = "error"
+label = "error"
+col = 4
+row = 3
+ref = "internal/proto.StateError"
+
+[[diagram.node]]
+id = "any"
+label = "any live state"
+col = 1
+row = 3
+
+[[diagram.node]]
+id = "ended"
+label = "ended (not live)"
+col = 1
+row = 4
+ref = "internal/proto.TypeSessionEnd"
+
+[[diagram.edge]]
+from = "unknown"
+to = "idle"
+label = "session-start hook"
+
+[[diagram.edge]]
+from = "idle"
+to = "working"
+label = "prompt submitted"
+
+[[diagram.edge]]
+from = "working"
+to = "done"
+label = "turn ends"
+
+[[diagram.edge]]
+from = "done"
+to = "working"
+label = "next prompt"
+
+[[diagram.edge]]
+from = "working"
+to = "blocked"
+label = "permission, question"
+
+[[diagram.edge]]
+from = "blocked"
+to = "working"
+label = "answer via the hook"
+
+[[diagram.edge]]
+from = "blocked"
+to = "done"
+label = "turn ends"
+
+[[diagram.edge]]
+from = "working"
+to = "error"
+label = "status report (OSC)"
+
+[[diagram.edge]]
+from = "any"
+to = "ended"
+label = "session.end"
+
+[[diagram]]
+id = "event-path"
+title = "From a spool file to the daemon's views"
+kind = "graph"
 
 [[diagram.node]]
 id = "spool"
-label = "spool file"
-col = 3
+label = "spool file (box)"
+col = 1
 row = 1
 zone = "box"
-ref = "internal/boxside.AppendEvents"
-
-[[diagram.node]]
-id = "agent"
-label = "box agent"
-col = 2
-row = 2
-zone = "box"
-ref = "internal/boxside.Agent.relay"
+ref = "internal/paths.Paths.SpoolDir"
 
 [[diagram.node]]
 id = "ingester"
-label = "ingester"
-col = 3
+label = "ingestion (daemon or CLI)"
+col = 2
+row = 1
+zone = "host"
+ref = "internal/session.Store.Ingest"
+
+[[diagram.node]]
+id = "owners"
+label = "session owners"
+col = 2
 row = 2
 zone = "host"
-ref = "internal/daemon.boxWorker.ingestLoop"
+ref = "internal/paths.Paths.SessionOwnersDir"
 
 [[diagram.node]]
 id = "journal"
 label = "journal"
 col = 3
-row = 3
+row = 1
 zone = "host"
 ref = "internal/paths.Paths.JournalFile"
 
 [[diagram.node]]
+id = "reconcile"
+label = "reconcile"
+col = 3
+row = 2
+zone = "host"
+ref = "internal/session.Store.Refresh"
+
+[[diagram.node]]
 id = "view"
 label = "session views"
-col = 2
-row = 3
+col = 4
+row = 1
 zone = "host"
-ref = "internal/daemon.hub.poll"
+ref = "internal/daemon.hub"
 
 [[diagram.node]]
 id = "subscribers"
-label = "subscribers"
-col = 1
-row = 3
+label = "subscribers, commands"
+col = 4
+row = 2
 zone = "host"
-
-[[diagram.edge]]
-from = "harness"
-to = "hook"
-label = "hook input (JSON)"
-
-[[diagram.edge]]
-from = "hook"
-to = "spool"
-label = "append events"
-ref = "internal/boxside.AppendEvents"
-
-[[diagram.edge]]
-from = "hook"
-to = "agent"
-label = "host.hint"
-ref = "internal/boxside.SendHintTo"
-
-[[diagram.edge]]
-from = "agent"
-to = "ingester"
-label = "wake"
-ref = "internal/daemon.boxWorker.acceptStreams"
 
 [[diagram.edge]]
 from = "spool"
 to = "ingester"
 label = "read through safefs"
-ref = "internal/session.Store.Ingest"
+ref = "internal/safefs.Root.ReadFrom"
+
+[[diagram.edge]]
+from = "ingester"
+to = "owners"
+label = "claim the ID"
+ref = "internal/session.Store.Claim"
 
 [[diagram.edge]]
 from = "ingester"
 to = "journal"
 label = "validated, with seq"
-ref = "internal/session.Store.ingestFile"
+ref = "internal/session.appendJournal"
+
+[[diagram.edge]]
+from = "reconcile"
+to = "journal"
+label = "session.end: lost"
+ref = "internal/session.Store.endSessions"
 
 [[diagram.edge]]
 from = "journal"
 to = "view"
 label = "new lines"
-ref = "internal/daemon.hub.poll"
+ref = "internal/daemon.hub.tailLocked"
 
 [[diagram.edge]]
 from = "view"
 to = "subscribers"
-label = "events.subscribe"
+label = "batches, signals"
+ref = "internal/daemon.hub.enqueueLocked"
 +++
 ## What it is for
 
-A harness works in a box, out of sight. From the host, and from a phone through the hub, the user wants to know what each session is doing: working, waiting for a permission, asking a question, done. devc learns this from the harness itself, through its hooks, and keeps a record of every session that no box can change. That record is what `devc ps`, the daemon's commands and the hub rely on, so a compromised box must not be able to rewrite it, speak for another project's session, or overwhelm the host with it.
+A harness works in a box, out of sight. From the host, and from a phone through a hub, the user wants to know what each session is doing: working, waiting for a permission, asking a question, done. devc learns this from the harness itself and keeps a record of every session that no box can change. That record is what `devc ps`, the daemon's commands and the hubs rely on, so a compromised box must not be able to rewrite it, speak for another project's session, or overwhelm the host with it.
 
 ## How it works
 
-An event is one JSON object per line: version, session ID, timestamp, type and data ([[internal/proto.Event]]). The types are in [[surface:events]]. A session is one run of a harness ([[term:session]]).
+An event is one JSON object per line: version, session ID, timestamp, type and data ([[internal/proto.Event]]; types in [[surface:events]]). A [[term:session]] is one run of a harness. Its box's half, from hooks, the launcher and the status wrapper to the [[term:spool]] file, is [[concern:launching-a-harness]] ([[flow:hook-to-spool]]); this page starts at the spool.
 
-**In the box.** A harness's manifest installs hooks that run `devc box hook <kind> <event>` with the hook's JSON on standard input. [[internal/boxside.RunHook]] maps the input to events: for Claude Code ([[internal/boxside.mapClaude]]), a submitted prompt becomes a `prompt` event with the hash and length of the text and a `state` event "working". The session is the one in `DEVC_SESSION`, which the launcher set; without a valid one the hook does nothing. [[internal/boxside.AppendEvents]] validates each event as the host will, and appends them in one write to `/run/devc/spool/<session>.jsonl`, which is `<runtime>/<box-id>/spool` on the host ([[internal/paths.Paths.SpoolDir]]). Then the hook sends `host.hint` through the box agent ([[internal/boxside.SendHintTo]]), a notification that only means "look now". Events themselves never travel over the [[term:box-channel]].
+**Ingestion.** [[term:ingestion]] copies new events from a box's spool into journals. The daemon runs it for every running box ([[internal/daemon.boxWorker.ingestLoop]]): at once on a hint, every two seconds, and every 250 ms for five seconds after a run that brought events or while a run left more; a run is skipped when the spool's names and sizes have not changed. The CLI runs it itself in `devc ps` (without a daemon), `attach`, `stop`, `ingest`, `bank` and around `down`. Both take the box's ingestion lock, so seq numbers are never assigned twice.
 
-**Ingestion.** The daemon runs a worker for every running box with an ingester of its own ([[internal/daemon.boxWorker.ingestLoop]]). It runs at once on a hint, every 250 ms while events arrive and every 2 s otherwise, and skips a run when no spool file changed ([[internal/session.Store.SpoolSnapshot]]). [[internal/session.Store.Ingest]] takes the box's ingestion lock, opens the box's runtime directory through [[pkg:internal/safefs]], and reads each spool file from the offset it reached last time. Every line passes [[internal/proto.ParseSpoolLine]]. A valid event gets the next `seq` of its session and the host's time (`at`), and the batch is appended to the session's journal, `durable/realms/<realm>/journal/<project>/<session>.jsonl` ([[term:journal]]).
+[[internal/session.Store.Ingest]] opens the box's runtime directory as a [[pkg:internal/safefs]] root and lists `spool` beneath it. For each regular file named `<session ID>.jsonl` it claims the session (below), reads complete lines from the offset in `spool-offsets.json`, parses each with [[internal/proto.ParseSpoolLine]], and gives each valid event the session's next `seq`, the host's time `at` and its spool offset. The batch is appended to `durable/realms/<realm>/journal/<project>/<session>.jsonl` ([[term:journal]]) in one synced write, and only then is the offset saved. [[flow:event-ingestion]] follows one line to a subscriber.
 
-The CLI ingests the same files itself, under the same lock, when it shows or acts on sessions (`devc ps`, `devc attach`, `devc ingest`, `devc bank`): [[internal/session.Store.Refresh]] ingests and then reconciles, ending with reason `lost` every session the journal shows open but the box no longer runs.
+**Ownership.** Session IDs are chosen in the box, so a box could reuse another project's ID. [[internal/session.Store.Claim]] records the owner of every ID in `durable/session-owners/<id>` when it first appears, created whole and exclusively by a hard link. An ID without a record whose journals predate the records goes to the project whose journal's first event was ingested earliest. A spool file of another project's session is refused whole, remembered in the offending project's offsets and reported once ([[finding:C1-01]]).
 
-**The daemon's view.** The journals are the source of truth. The daemon's hub ([[internal/daemon.hub.poll]]) reads their new complete lines, after an ingestion run that brought events and on a timer, folds them into a view per session (state, pending question, last message, turns) and hands them to the subscribers of `events.subscribe`: `devc events --follow`, `devc ps --watch`, and the hubs over the machine link. The daemon's commands that wait for a prompt or a state change re-check the views whenever one changes ([[internal/daemon.commander.waitPrompt]]). Everything in the view can be rebuilt from the journals.
+**Host events.** `seen`, `answer` and `request` are written only by the host ([[internal/proto.HostOnly]]). [[internal/session.Store.AppendHostEvent]] appends one under the ingestion lock after ingesting the spool, so it follows everything the box reported before it.
+
+**Reconciliation.** A harness that dies without a word leaves its session open. [[term:reconciliation]] ([[internal/session.Store.Refresh]]) ingests, then observes the box under the same lock. A running box that is not ready is left alone. In a ready box, the sessions open at that moment are noted, the box is asked which sessions are alive (over the channel, or `devc box session ps --json` through the engine), the spool is ingested again, and the noted sessions the box did not report end with reason `lost`. A box that does not run ends every open session as `lost`; `devc down` ends them as `box-down` ([[internal/session.Store.RefreshStopped]]). The daemon reconciles every 30 seconds.
+
+**The derived view.** [[internal/proto.SessionView.Apply]] folds a journal's events into a [[term:session-view]]: harness, worktree, state, pending question, last message, turns. The state is that of the last `state` event ([[diagram:session-states]]); before one it is `unknown`, after `session.end` it is `ended`. A `prompt` adds a turn and clears the question; `done` marks the turn done; `seen` records the turn a user looked at. [[internal/proto.SessionView.NeedsYou]]: live and blocked, or done with a turn nobody marked seen. Times are the host's `at`, which a box cannot choose.
+
+**The daemon's views.** The daemon's journal follower ([[internal/daemon.hub]]) keeps a view per journal of every configured project. Journals of sessions that ended more than 30 days ago are registered but read only when asked for. Each second it re-lists a project's journals when the directory changed (or every 30 seconds) and reads the journals that grew; ended sessions are looked at every tenth pass, and always when one project is polled after an ingestion ([[concern:daemon]]).
 
 ## What can go wrong, and what prevents it
 
-The box controls its spool completely: the content of the files, their size, whether they are files at all.
+The box controls its spool completely: content, size, whether the entries are files at all.
 
-- **Redirection.** A symlink, FIFO or directory in place of a spool file is refused: the spool is resolved beneath the runtime directory's descriptor without following symlinks, and only regular files are read ([[internal/safefs.OpenRoot]]).
-- **Malformed lines.** [[internal/proto.ParseSpoolLine]] refuses unknown fields, trailing data, missing fields, another version, another session's ID, unknown types, host-only types and bad timestamps, and [[internal/proto.ValidateData]] checks each type's data field by field with size limits. Invalid lines are counted and reported, never stored. A line longer than 64 KiB is skipped as a whole.
-- **Raw bytes.** The journal holds the re-encoded event, never the box's bytes. Text may still contain control characters; [[internal/proto.Printable]] is applied before any of it reaches a terminal.
-- **Another project's session.** A box could name its spool file after a session ID it saw elsewhere. [[internal/session.Store.Claim]] records the owner of every session ID in `durable/session-owners/` when the ID first appears, and a spool file for a session of another project is refused and reported ([[finding:C1-01]]).
-- **Floods.** One run takes at most 8 MiB and 20,000 events from a file and comes back for the rest; at most 10,000 spool entries are looked at. A box that floods hints still gets at most one run per 50 ms.
-- **Truncation and crashes.** A spool file that shrinks below the offset gets a note in the journal, and ingestion continues at its end. The offset advances only past events that are durably in the journal; if it was not saved, ingestion resumes after the last event the journal holds ([[finding:B6]]).
-- **Late events.** After `session.end`, further events of that session are dropped; a spool file whose session has ended and that holds nothing more is removed.
+- **Redirection.** A symlink, FIFO or directory in place of `spool` or a spool file is refused or skipped.
+- **Malformed lines.** Unknown fields, trailing data, missing fields, another version, another session's ID, unknown and host-only types, bad timestamps and data that fails [[internal/proto.ValidateData]] are counted and reported, never stored. A line over 64 KiB is skipped whole, also across runs.
+- **Raw bytes.** Journals hold re-encoded events. Text may still hold control characters; [[internal/proto.Printable]] is applied before any of it reaches a terminal.
+- **Another project's session.** Ownership, above; and [[internal/session.Store.AppendHost]] never starts a journal for another project's session.
+- **Floods.** One run takes at most 8 MiB and 20,000 events per file and comes back for the rest; at most 10,000 spool entries are looked at; a box that floods hints still gets at most one run per 50 ms. Nothing bounds a journal's total size: journals are never rotated (an accepted limit).
+- **Truncation and crashes.** A file that shrinks below the offset gets a note in the journal and is read on from its end. A torn journal line is skipped by readers. If the offset was not saved, ingestion resumes after the last spool offset the journal holds ([[finding:B6]]).
+- **A lying live-session report.** [[internal/session.ParseLive]] rejects the whole report on anything unexpected; reconciliation then changes nothing.
+- **Late events.** After `session.end` further events are dropped; a fully ingested file of an ended session is removed.
 
 ## Decisions that are not obvious
 
-- **Files, with a hint on the side.** The spool works without a daemon and keeps what a box wrote while the daemon was not running; the hint only shortens the wait. The daemon still polls, so a lost hint costs at most two seconds.
-- **The box validates too.** [[internal/boxside.AppendEvents]] replaces an event the host would refuse by a note, so a mapping bug shows up in the journal instead of disappearing.
-- **The hook never fails.** Some harnesses add hook output to the model's context, and a failing hook must not disturb a session; [[internal/boxside.RunHook]] recovers from everything and prints only an answer to a question.
-- **Two clocks.** `ts` is the box's claim; `at` is when the host ingested the event, and `seq` is the host's order. Where the host compares sessions by time, as in resolving which project owns a session ID recorded before ownership records existed, it uses `at` ([[internal/session.Store.firstRecorder]]).
+- **Files, with a hint on the side.** The spool works without a daemon and keeps what a box wrote while none ran; the hint only shortens the wait, and a lost hint costs at most two seconds.
+- **Two clocks.** `ts` is the box's claim; `at` and `seq` are the host's, and comparisons that matter use them ([[internal/session.Store.firstRecorder]]).
+- **Observe under the lock, after ingesting.** A session whose start is in the journal by then started before the observation; one started later is still in the spool and untouched ([[finding:B7]]).
+- **Views from journals.** The CLI and the daemon derive the same view from the same file, so `devc ps` answers alike with and without a daemon.
 
 ## Where to start reading
 
-1. [[internal/boxside.RunHook]] and [[internal/boxside.mapClaude]]
-2. [[internal/boxside.AppendEvents]]
-3. [[internal/session.Store.ingestFile]]
-4. [[internal/proto.ParseSpoolLine]]
-5. [[internal/daemon.boxWorker.ingestLoop]]
+1. [[internal/session.Store.ingestFile]]
+2. [[internal/proto.ParseSpoolLine]]
+3. [[internal/session.Store.Claim]]
+4. [[internal/session.Store.refresh]]
+5. [[internal/proto.SessionView.Apply]]
 6. [[internal/daemon.hub.poll]]

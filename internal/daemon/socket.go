@@ -1,3 +1,7 @@
+// This file implements the daemon's checks on a box's agent socket: opening
+// it without following a symlink and verifying the process that listens on
+// it.
+
 package daemon
 
 import (

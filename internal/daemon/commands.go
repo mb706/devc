@@ -1,3 +1,7 @@
+// This file implements the daemon's commands: acceptance, a line per
+// session, delivery with its last checks, answers to waiting hooks, and
+// session start and stop.
+
 package daemon
 
 // Commands with receipts (work order C09 section 3): send, answer,
@@ -89,6 +93,9 @@ type commander struct {
 	changedCh chan struct{}
 }
 
+// line is one session's commands: now holds those that act at once,
+// queued the sends that wait for the session to be at rest. Each queue is
+// drained by a goroutine of its own; inject keeps their deliveries apart.
 type line struct {
 	key    sessionKey
 	inject sync.Mutex
@@ -96,12 +103,15 @@ type line struct {
 	queued fifo
 }
 
+// fifo is one queue of a line; running is set while its goroutine drains it.
 type fifo struct {
 	mu      sync.Mutex
 	items   []*cmdRecord
 	running bool
 }
 
+// questionWaiter is a hook in a box waiting for the answer to question;
+// ch receives it (and is closed when a newer waiter replaces this one).
 type questionWaiter struct {
 	ref      names.ProjectRef
 	question string
@@ -113,6 +123,8 @@ func newCommander(d *Daemon, p *paths.Paths) *commander {
 		questions: map[sessionKey]*questionWaiter{}, changedCh: make(chan struct{})}
 }
 
+// changed returns a channel that is closed at the next change of any
+// receipt (command.get waits on it).
 func (c *commander) changed() <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -226,6 +238,7 @@ func (c *commander) dispatch(r *cmdRecord) {
 	}
 }
 
+// line returns the line of a session, creating it.
 func (c *commander) line(k sessionKey) *line {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -237,6 +250,8 @@ func (c *commander) line(k sessionKey) *line {
 	return l
 }
 
+// enqueue appends a command to a queue and starts the queue's goroutine
+// unless it runs.
 func (c *commander) enqueue(l *line, f *fifo, r *cmdRecord) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -247,6 +262,9 @@ func (c *commander) enqueue(l *line, f *fifo, r *cmdRecord) {
 	}
 }
 
+// drain executes a queue's commands one after another until it is empty
+// or the daemon stops; what is left stays stored and is resumed at the
+// next start.
 func (c *commander) drain(l *line, f *fifo) {
 	for {
 		f.mu.Lock()
@@ -705,6 +723,8 @@ func (c *commander) waitState(ctx context.Context, k sessionKey, from int64, tim
 	})
 }
 
+// lastSeq is the session's last seq known to the views: a confirmation
+// must come after it.
 func (c *commander) lastSeq(k sessionKey) int64 {
 	v, _ := c.view(k)
 	return v.LastSeq
@@ -942,6 +962,10 @@ func (c *commander) newWorktree(ctx context.Context, env *env, ref names.Project
 	return ""
 }
 
+// startRefusal says why a session cannot be started, or "": the project
+// must exist, have no configuration problems, list the harness, run its box
+// (one the CLI started a moment ago is waited for up to ten seconds) and
+// have the harness's launch description.
 func (c *commander) startRefusal(env *env, ref names.ProjectRef, cmd proto.Command) string {
 	if _, ok := env.cfg.Project(ref); !ok {
 		return "no project " + ref.String()
@@ -977,6 +1001,9 @@ func (c *commander) startRefusal(env *env, ref names.ProjectRef, cmd proto.Comma
 
 // --- Helpers ---
 
+// refusedOrUnknown is the outcome of a failed box call made while
+// delivering: refused when the box says the session's pane is not there
+// (nothing was typed), unknown otherwise.
 func refusedOrUnknown(err error) (string, string) {
 	if proto.IsCode(err, proto.CodeNotFound) {
 		return proto.OutcomeRefused, boxErr(err)

@@ -37,7 +37,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | X2 Explorer: the app, shell and code views | done | ed0e2f5 |
 | X3 Explorer: the app, views of the model | done | 279209e |
 | X4 Explorer content: foundations, configuration, toolbox, harnesses, host setup | done | d228d59 |
-| X5 Explorer content: boxes | in progress | |
+| X5 Explorer content: boxes | done | f1105b1 |
+| X6 Explorer content: daemon, sessions, input, requests | in progress | |
 
 ## Resuming
 
@@ -1251,3 +1252,16 @@ The four confirmed findings of the closing check (`docs/dev/reviews/F1-review.md
 - `packages.toml`: roles of `internal/tmux` and `internal/boxside` corrected.
 
 **Comments** (36 Go files, comments only, `./dev explore comments-only` clean): package comments with file overviews for box, engine, boxside, ptywrap; the tmux package comment lists everything it builds; file comments for every file of the area; about 60 doc comments on unexported functions the pages point at. Corrected: `engine.BuildOptions.Args` (named BuildArgs), `boxside.Launch.Exe` (said `current`; it is the concrete version directory), `ptywrap.reporter` (said only the latest report waits; up to 16 do), `cli.lifecycleTimeout` (said builds have a longer limit; theirs is shorter), `engine.RunOptions.UserNS` (the rm helper does not use the box's mapping), `box.Spec.Hash`, `box.writeEtc`, `boxside.Init`, `boxside.Info`, `boxside.Launch`, `boxside.PrepareLaunch` (incomplete), the boxside package comment (history removed).
+
+### X6 Explorer content: the daemon, sessions, input, requests
+
+**Model written** (`explorer/model/`):
+
+- Concerns (order 30–35): `daemon` (diagram of the goroutines and what they hand each other; tables of the goroutines and of the `internal/proto` families with who writes and who checks them), `box-channel` (state machine of the channel), `sessions-and-events` (rewritten: ingestion, ownership, host events, reconciliation, the derived view; state machine of a session's view, diagram of the event path), `input-and-receipts` (state machine of a receipt), `requests-and-approval` (table of kinds, risk and execution; state machine of a request), `watching-sessions`. Each 950–1,150 words; 40 invariants with their code and tests. Every non-test file of the area belongs to a concern; `internal/cli/inbox.go` and `inboxgit.go` were added to `command-line` (they hold the hidden `devc box` group that concern describes).
+- Flows: `daemon-start`, `channel-connect`, `event-ingestion`, `question-answer`, `request-approve`, `attach`, and `send-prompt` (verified, extended with the input gate and the last check before typing, moved to `input-and-receipts`, tmux folded into the agent's step so six actors fit). All connected by the tool; `unchecked` only for hand-overs through a queue or channel (the session's line, the executor, the ingester's wake channel, a subscriber's queue, a hook's waiter), the agent's accept loop, a spool file the host reads, and a notification handler that is a function literal. Tour `box-channel` checked and updated (raw streams, budgets).
+- `glossary.toml`: 18 terms (ingestion, session owner, reconciliation, session view, turn, needs you, journal follower, cursor, box worker, control stream, frame inspector, command, at rest, input gate, input adapter, request, risk class, decision origin).
+- `system.toml`: the concerns of the daemon API, box channel, box streams, pane input and `podman exec` channels; the daemon's engine channel names its `podman exec` uses.
+- `layout.toml`: `daemon.lock`, `spool-offsets.json`, `ingest.lock`; the texts of `daemon.sock`, `local/receipts` and the request logs.
+- `packages.toml`: roles of `internal/daemon` and `internal/session` corrected.
+
+**Comments** (33 Go files, comments only, `./dev explore comments-only` clean; `./dev fmt` and `./dev vet` clean): package comments with file overviews for daemon, session, proto, requests; file comments for every file of the area (and `internal/daemon/hub.go`, which the journal follower lives in); about 75 doc comments on the handlers, the commander, the journal follower, the channel and the CLI commands the pages point at. Corrected: the daemon's package comment (receipts and request logs are state too), `proto` ("(later) the hub", files missing), `proto/views.go` and `proto/rpc.go` ("later" for the hub), `proto.ChannelNoAgent` (not only boxes from before C08), `daemon.maxBoxStreams` (relays have their own budget), `boxWorker.ingestLoop` (when 250 ms applies), `Daemon.housekeepingLoop` (it also prunes receipts and expires requests), `apiRequests` (named a function `apiDecide` that does not exist), the daemon's requests file comment (`net allow` and `pr` are carried out too), `cli.newBoxCmd` (history), `session.endedLongAgo` (host events after the end).

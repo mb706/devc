@@ -1,3 +1,5 @@
+// This file implements the store of command receipts in local/receipts.
+
 package daemon
 
 import (
@@ -37,6 +39,7 @@ type cmdRecord struct {
 	Phase string `json:"phase,omitempty"`
 }
 
+// receiptStore keeps one file per command ID in its directory.
 type receiptStore struct {
 	dir string
 	// failSave, when set, makes save fail for the records it refuses
@@ -103,6 +106,8 @@ func (s *receiptStore) load(id string) (*cmdRecord, error) {
 	return &r, nil
 }
 
+// writeTemp writes a record to a new temporary file in the store's
+// directory and syncs it, ready to be linked or renamed into place.
 func (s *receiptStore) writeTemp(r *cmdRecord) (string, error) {
 	if err := s.ensure(); err != nil {
 		return "", err

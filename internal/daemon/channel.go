@@ -1,3 +1,7 @@
+// This file implements a box worker and its channel: connecting to the
+// agent, the hello, the streams the box opens and the requests the daemon
+// makes.
+
 package daemon
 
 import (
@@ -20,8 +24,9 @@ import (
 
 // Channel limits.
 const (
-	// maxBoxStreams bounds the streams one box may have open towards the
-	// host at once; more are closed at once.
+	// maxBoxStreams bounds the streams of one box that are being served
+	// at once as requests (JSON-RPC, git, gate, GitHub); raw relays have
+	// their own budget (maxRelayStreams). A stream beyond is closed at once.
 	maxBoxStreams = 32
 	// boxStreamIdle closes a box stream on which nothing arrived for that
 	// long; longer than the longest question wait (30 minutes).
@@ -73,6 +78,9 @@ type boxWorker struct {
 	svcUnsupported bool
 }
 
+// startWorker starts the worker of a running box's container: the channel
+// loop and the spool ingester, each in a goroutine of its own. The caller
+// holds d.mu.
 func (d *Daemon) startWorker(ref names.ProjectRef, containerID string) *boxWorker {
 	ctx, cancel := context.WithCancel(d.ctx)
 	w := &boxWorker{d: d, ref: ref, containerID: containerID, cancel: cancel, done: make(chan struct{}),
@@ -87,6 +95,8 @@ func (d *Daemon) startWorker(ref names.ProjectRef, containerID string) *boxWorke
 	return w
 }
 
+// stop ends the worker: its context, and with it both goroutines, and the
+// channel, so streams being served end too.
 func (w *boxWorker) stop() {
 	w.cancel()
 	w.mu.Lock()
@@ -96,6 +106,8 @@ func (w *boxWorker) stop() {
 	w.mu.Unlock()
 }
 
+// setState records the channel's state and why, as `devc daemon status`
+// shows them, and logs a change.
 func (w *boxWorker) setState(state, detail string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -118,6 +130,7 @@ func (w *boxWorker) view(v *proto.BoxView) {
 	v.Channel, v.ChannelDetail, v.ChannelSince, v.HelperVersion = w.state, w.detail, &since, w.helper
 }
 
+// connected reports whether the channel is up and its control stream open.
 func (w *boxWorker) connected() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -132,6 +145,11 @@ func (w *boxWorker) wake() {
 	}
 }
 
+// channelLoop connects to the box's agent until the worker stops, recording
+// why an attempt failed. The pause between attempts doubles from one
+// second up to MaxBackoff, and stays at most noAgentBackoff while the box
+// has no socket; a channel that was established and ended normally is
+// tried again after the shortest pause.
 func (w *boxWorker) channelLoop(ctx context.Context) {
 	first := min(time.Second, w.d.o.MaxBackoff)
 	backoff := first
@@ -166,6 +184,8 @@ func (w *boxWorker) channelLoop(ctx context.Context) {
 	}
 }
 
+// errRefused marks an attempt that reached something which failed a check
+// (the peer, the hello, the frame inspector): the channel state refused.
 var errRefused = errors.New("refused")
 
 // connect opens the box's agent socket, checks the peer, says hello and
@@ -368,6 +388,8 @@ func (w *boxWorker) call(ctx context.Context, method string, params, result any)
 	return nil
 }
 
+// validWindow accepts a tmux window ID as the agent reports it ("@" and
+// digits); the box chooses it, and it is passed back into tmux commands.
 func validWindow(s string) bool {
 	if len(s) < 2 || len(s) > 10 || s[0] != '@' {
 		return false

@@ -10,6 +10,9 @@
 // never executes anything by itself. MayDecide is the only place that says
 // which origin may decide which risk class: high-risk requests are decided
 // only through the local socket.
+//
+// requests.go holds the validation, the risk and decision rules and the
+// request IDs; store.go the request log.
 package requests
 
 import (

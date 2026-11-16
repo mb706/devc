@@ -1,0 +1,161 @@
+id = "request-approve"
+kind = "flow"
+title = "A box asks, the user approves"
+summary = "An agent asks for a system package with `devc request` in its box; the daemon validates the request, attributes it to the box by its channel and stores it as pending; the user approves it on the host, and the daemon carries it out with `devc root` as a child process and records the outcome, which the box can wait for."
+concern = "requests-and-approval"
+trigger = "devc request package apt jq (in a box), then devc requests approve <id> (on the host)"
+actors = ["user", "cli", "daemon", "state-dir", "box-tools", "harness"]
+
+[[step]]
+section = "The box asks"
+
+[[step]]
+from = "harness"
+to = "box-tools"
+via = "cmd:devc request package"
+label = "devc request package apt jq"
+external = true
+text = "The agent runs the command in its box; the sandbox description tells it which kinds exist and which are approved without asking."
+
+[[step]]
+at = "box-tools"
+ref = "internal/requests.Validate"
+checks = ["internal/requests.Validate"]
+text = "The command ([[internal/cli.newRequestCmd]]) runs only in a box (`DEVC_BOX=1` and `/etc/devc/box.json`), adds the session from `DEVC_SESSION` when it is valid, and validates the request as the host will, so a mistake is reported at once."
+
+[[step]]
+from = "box-tools"
+to = "daemon"
+via = "rpc:host.request"
+label = "host.request {kind, manager, packages, session}"
+ref = "internal/boxside.AgentCall"
+text = "The request goes to the agent's abstract socket, which relays it unparsed on a new stream of the box channel. Without a connected host the agent answers \"host unavailable\" at once and the command tells the agent to ask the user directly."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.create"
+checks = ["internal/proto.DecodeParams", "internal/requests.Validate", "internal/daemon.resolvedOf"]
+text = "The handler gets the project of the channel the stream arrived on; nothing in the request selects one. The parameters are decoded strictly and validated: only the fields of the kind, a known package manager, 1 to 32 package names matching a strict pattern, no duplicates. The project's configuration must be free of problems."
+detail = "A seal path is resolved against the project's data root ([[internal/data.Normalize]]). A refused request is stored nowhere: the box gets the error."
+
+[[step]]
+at = "daemon"
+ref = "internal/requests.Store.Size"
+text = "Under the request service's lock: a project whose log is still above 16 MiB after compaction takes no new requests, and at most 100 may be outstanding (pending or approved) and 20 made in the last minute."
+
+[[step]]
+from = "daemon"
+to = "state-dir"
+via = "file"
+label = "durable/realms/<realm>/requests/<project>.jsonl"
+ref = "internal/requests.Store.Put"
+text = "The request is stored as pending with a new time-ordered ID (`r` and 20 characters) and its risk class, high for a package; the line is synced. The parameters are the validated ones."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.event"
+text = "When the request names a session that has a journal in this project, a host-only `request` event goes into it, so the session's history shows the request and every change of its status."
+
+[[step]]
+from = "daemon"
+to = "box-tools"
+via = "reply"
+label = "{id, status: pending, risk: high}"
+ref = "internal/daemon.requestService.create"
+text = "The command prints the ID and, for a pending request, that the user must decide it and how to wait for the outcome. A kind the project's `[requests] auto` lists (low-risk only) would have been approved at once; a package request waits for the user."
+
+[[step]]
+section = "The user decides"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc requests approve"
+label = "devc requests approve <id> --wait"
+external = true
+text = "`devc requests` lists what boxes asked for; an ID or a unique prefix of at least four characters names one."
+
+[[step]]
+from = "cli"
+to = "daemon"
+via = "rpc:requests.decide"
+label = "requests.decide {id, approve: true}"
+ref = "internal/cli.app.decideRequest"
+text = "Deciding needs the daemon: it alone writes the request logs."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.decide"
+checks = ["internal/requests.EffectiveOrigin", "internal/requests.CheckReason"]
+text = "A decision on the daemon's socket has origin `local`; a client may declare the weaker origin `hub`, never a stronger one. The request is looked up among the configured projects' logs; a log that cannot be read is skipped."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.decideLocked"
+checks = ["internal/requests.MayDecide"]
+text = "Only a pending request can be decided, and only an origin allowed for its risk class: high-risk ones only locally. An approval first needs a place in the executor; without one it is refused as busy and the request stays pending ([[finding:C1-11]])."
+
+[[step]]
+from = "daemon"
+to = "state-dir"
+via = "file"
+label = "status approved, decided by local"
+ref = "internal/requests.Store.Put"
+text = "The approval is stored, with a `request` event in the session's journal, and the job goes to the workers."
+
+[[step]]
+section = "Carrying it out"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.execute"
+unchecked = "one of the two request workers takes the job from the executor's queue"
+text = "A request worker runs the request's commands one after another and stops at the first that fails."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestCommands"
+text = "A package request becomes `devc root <project> -- env DEBIAN_FRONTEND=noninteractive apt-get update` and then `… apt-get install -y --no-install-recommends jq`: argument vectors, box-chosen values after `--`."
+
+[[step]]
+from = "daemon"
+to = "cli"
+via = "cmd:devc root"
+label = "devc --config-dir … root <project> -- apt-get …"
+ref = "internal/daemon.Daemon.runChild"
+text = "Each command runs as a child process of the same binary with the daemon's directories, from `/`, with 30 minutes and 64 KiB of output; the box lock, the configuration checks and the root log apply as when the user runs it."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.Root"
+text = "The command runs in the box as root with every capability (`podman exec --user 0 --privileged`)."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.transitionLocked"
+text = "The outcome (done or failed, with the last 2,000 characters of the output) replaces the request's state only while that state is still the approval this run carried out ([[finding:C1-18]])."
+detail = "With `--wait`, the CLI that approved polls `requests.list` every 300 ms until the request is final, prints the outcome and exits with status 1 when it failed."
+
+[[step]]
+section = "The box learns the outcome"
+
+[[step]]
+from = "box-tools"
+to = "daemon"
+via = "rpc:host.request.status"
+label = "host.request.status {id, wait: 600}"
+ref = "internal/boxside.AgentCall"
+text = "`devc request status <id> --wait` asks again until the request is final."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.status"
+text = "Only requests of the channel's own project are visible. The answer waits up to the given time for a change; a pending request past its seven days is expired first, under the lock."
+
+[[step]]
+from = "daemon"
+to = "box-tools"
+via = "reply"
+label = "{id, status: done, result}"
+ref = "internal/daemon.requestService.status"
+text = "The command prints the status and the result, made printable; denied, failed and expired end with exit status 1."

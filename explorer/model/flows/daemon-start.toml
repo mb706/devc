@@ -1,0 +1,134 @@
+id = "daemon-start"
+kind = "flow"
+title = "Daemon start-up"
+summary = "From `devc daemon` to a running daemon: the lock and the socket, the configuration, what a previous daemon left (commands, requests), the loops, a worker for every running box, and the first reconciliation of sessions."
+concern = "daemon"
+trigger = "devc daemon (or the systemd user unit devc.service)"
+actors = ["user", "daemon", "state-dir", "podman", "box-agent"]
+
+[[step]]
+from = "user"
+to = "daemon"
+via = "cmd:devc daemon"
+label = "devc daemon [--log-level info]"
+external = true
+text = "The user runs the daemon in the foreground, or systemd starts it from the unit `devc service install` wrote. It logs with `log/slog` to standard error."
+detail = "The command ([[internal/cli.newDaemonCmd]]) resolves the directories, finds its own executable through symlinks and builds the global flags its child processes will get (`--config-dir`, and `--state-dir` when one was named). Then it changes to `/`: a long-running process must not keep a working directory that may lie in a project. SIGTERM and SIGINT cancel the daemon's context. Hidden flags (`--housekeeping-interval`, `--reconcile-interval`, the allowlist proxy's test settings) exist for the tests."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.New"
+checks = ["internal/daemon.New"]
+text = "The daemon refuses a socket path longer than the 107 bytes a Unix socket address holds, fills in the default intervals and creates its parts: the journal follower, the request service, the hub manager, the terminal manager, the turn banker and the service manager."
+
+[[step]]
+section = "One daemon per runtime directory"
+
+[[step]]
+from = "daemon"
+to = "state-dir"
+via = "file"
+label = "<runtime>/daemon.lock"
+ref = "internal/daemon.Daemon.Run"
+text = "The runtime directory is made 0700 and the daemon takes `daemon.lock` with a timeout of one millisecond: a second daemon for the same directory fails at once with a message naming `devc daemon status`."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.Run"
+text = "A socket left by a crashed daemon is removed, and the daemon listens on `<runtime>/daemon.sock`, created under umask 0177 and then set to 0600: only this user can connect."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.reload"
+text = "The configuration is loaded; problems are logged, not fatal. The fingerprint of the TOML files is kept, so the watch loop reloads only when a file changed. The journal follower starts following the configured projects and reads their journals."
+detail = "Journals of sessions that ended more than 30 days ago (last line `session.end`, file older than that) are registered but not read until someone asks for them ([[internal/daemon.hub.scanLocked]])."
+
+[[step]]
+section = "What a previous daemon left"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.resume"
+text = "Stored receipts are read in acceptance order. A command that had begun to type (`delivering`) ends as `unknown` and is never typed again; one still `accepted` is queued again; one waiting longer than seven days is refused; final receipts older than seven days are removed."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.recoverInterrupted"
+text = "A request found `approved` was being carried out when the daemon stopped. It may have taken effect, so it is not run again: it fails, and the box can ask again."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.expireAll"
+text = "Pending requests older than seven days expire. Then the two request workers, the router for local URLs, the services and the links to hubs start."
+
+[[step]]
+section = "The loops"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.serveAPI"
+text = "The API goroutine accepts clients on the socket, at most 64 at a time (one more is closed at once); each connection is served by a JSON-RPC connection of its own, one request at a time."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.watchLoop"
+text = "The watch loop runs now and every three seconds: reload the configuration if its files changed, list the boxes, keep the workers in step."
+
+[[step]]
+from = "daemon"
+to = "podman"
+via = "exec"
+label = "podman ps -a --filter label=devc.role=box"
+ref = "internal/daemon.Daemon.watchOnce"
+checks = ["internal/daemon.Daemon.watchOnce"]
+text = "Every container devc labelled as a box is listed. A container counts as a project's box only when it has the project's name and carries its realm and project labels; any other is never acted on."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.startWorker"
+text = "A running box gets a worker with two goroutines: the channel loop and the spool ingester. A worker belongs to one container ID; a box that was recreated gets a new worker after the old one is stopped, and a box that stopped loses its worker."
+detail = "A new worker wakes its ingester at once, so events a box spooled while no daemon ran are ingested."
+
+[[step]]
+from = "daemon"
+to = "box-agent"
+via = "stream"
+label = "connect <runtime>/<box-id>/agent.sock"
+ref = "internal/daemon.boxWorker.channelLoop"
+text = "The channel loop connects to the box's agent, checks it and says hello ([[flow:channel-connect]]); it reconnects with backoff whenever the channel ends."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.ingestLoop"
+text = "The ingester runs at once, then every two seconds, every 250 ms for five seconds after a run that brought events, and at once on a hint ([[flow:event-ingestion]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.journalLoop"
+text = "The journal follower looks at the journals every second, whoever wrote them, and publishes new lines to subscribers."
+
+[[step]]
+section = "Every 30 seconds"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.reconcileLoop"
+text = "Every project with a running box or sessions the journals show open is reconciled in turn, each with a limit of two minutes."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.refresh"
+text = "The box's state comes from the engine and, when its channel is connected, its live sessions from `box.sessions`; the tmux window of each live session is kept for the views."
+
+[[step]]
+at = "daemon"
+ref = "internal/session.Store.Refresh"
+text = "Under the box's ingestion lock the spool is ingested, the box observed, and open sessions the box no longer runs end with reason `lost` ([[concern:sessions-and-events]])."
+
+[[step]]
+section = "Every five minutes"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.housekeep"
+text = "Housekeeping removes old receipts, expires pending requests and runs `devc bank --all --quiet` and `devc context commit --all` as child processes of the same binary, from `/`, each with 30 minutes."

@@ -1,3 +1,7 @@
+// This file implements the host's session commands: ps, attach, stop,
+// ingest, the harness commands (`devc claude` …), context, and the session
+// hooks around down and rm.
+
 package cli
 
 import (
@@ -277,6 +281,8 @@ func dash(s string) string {
 	return s
 }
 
+// printSessions prints the table of `devc ps`; box-written text is made
+// printable and cut.
 func printSessions(w io.Writer, sums []session.Summary, now time.Time) error {
 	tw := table(w, "SESSION", "PROJECT", "WORKTREE", "HARNESS", "STATE", "AGE", "MESSAGE")
 	shown := shownIDs(sums)
@@ -368,6 +374,8 @@ func (a *app) findSession(e *boxEnv, ref *names.ProjectRef, prefix string) (name
 	return names.ProjectRef{}, "", fmt.Errorf("%q matches several sessions (%s): give more characters", prefix, strings.Join(ids, ", "))
 }
 
+// newSessionCmds returns ps, attach, stop, ingest, context, events and
+// daemon.
 func newSessionCmds(a *app) []*cobra.Command {
 	var psAll, psJSON, psWatch bool
 	ps := &cobra.Command{
@@ -505,6 +513,9 @@ func (a *app) attachTarget(e *boxEnv, args []string) (names.ProjectRef, string, 
 	return ref, "", err
 }
 
+// attach is `devc attach`: it refreshes the box, picks a live session's
+// window and runs a tmux client in the box on a grouped session of its
+// own. It needs a terminal, not the daemon.
 func (a *app) attach(cmd *cobra.Command, args []string) error {
 	e, err := a.boxEnv()
 	if err != nil {

@@ -1,0 +1,146 @@
+id = "channel-connect"
+kind = "flow"
+title = "The daemon reaches a box"
+summary = "A box worker connects to the agent's socket in the box's runtime directory, makes sure the listener is a process of that box's container, puts yamux behind a frame inspector, and says hello; only then are requests exchanged in both directions."
+concern = "box-channel"
+trigger = "the daemon's watch loop sees a running box that has no worker"
+actors = ["daemon", "podman", "box-agent"]
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.startWorker"
+text = "The watch loop started a worker for the box's container ID ([[flow:daemon-start]]); its channel goroutine runs the channel loop."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.channelLoop"
+text = "Each attempt is one call of `connect`; between attempts the loop waits, from one second doubling to 30, and at most four seconds while the box has no socket yet."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.connect"
+text = "The box's runtime directory is `<runtime>/<box-id>`, which the host created; the agent's socket in it is box-writable."
+
+[[step]]
+section = "Whom the daemon reaches"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.DialBoxSocket"
+checks = ["internal/daemon.DialBoxSocket"]
+text = "The directory is opened with `O_PATH|O_NOFOLLOW`, `agent.sock` beneath it the same way, and `fstat` must say socket. The daemon connects to `/proc/self/fd/<n>`, so the connection reaches the inode it checked: a symlink, a file or a rename is refused or cannot redirect it."
+detail = "Nothing at the path is `no-agent` (a box still starting, or one that removed its socket); something that is not a socket is `refused`."
+
+[[step]]
+from = "daemon"
+to = "box-agent"
+via = "stream"
+label = "connect(/proc/self/fd/<n>)"
+ref = "internal/daemon.DialBoxSocket"
+text = "The connection reaches whatever process listens on that socket."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.acceptHost"
+unchecked = "the agent's accept loop receives the connection on its listener"
+checks = ["internal/boxside.HostPeer"]
+text = "The agent accepts the connection as the host's only when `SO_PEERCRED` reports PID 0, a process outside the box's PID namespace; it then serves yamux on it ([[concern:box-init-and-agent]])."
+
+[[step]]
+from = "daemon"
+to = "podman"
+via = "exec"
+label = "podman inspect devc-<realm>-<project>"
+ref = "internal/box.Manager.Find"
+text = "The engine must still report the worker's container running with the same ID, and it gives the container's main PID."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.CheckPeer"
+checks = ["internal/daemon.PeerCred", "internal/daemon.CheckPeer"]
+text = "The listener's PID comes from `SO_PEERCRED`. Its `/proc/<pid>/cgroup` must name the container (`libpod-<id>` or `libpod-<id>.scope`; conmon's scope does not match) and, when both can be read, its PID namespace must be that of the container's main process."
+
+[[step]]
+section = "One connection, many streams"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.newMuxGuard"
+text = "The frame inspector wraps the connection before yamux sees it: it reads every frame header and closes the connection when the box opens too many streams, sends too many pings or holds too many streams open ([[finding:C1-03]], [[finding:C1-04]])."
+
+[[step]]
+from = "daemon"
+to = "box-agent"
+via = "rpc:box.hello"
+label = "box.hello {protocol, devc_version}"
+ref = "internal/daemon.boxWorker.connect"
+text = "The daemon is the yamux client. It opens the control stream and calls `box.hello`, with ten seconds to answer."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.handleHello"
+text = "The agent answers with its protocol version and, from `/etc/devc/box.json`, the devc version, realm, project and box name."
+
+[[step]]
+from = "box-agent"
+to = "daemon"
+via = "reply"
+label = "HelloReply {protocol, realm, project, box}"
+ref = "internal/boxside.Agent.handleHello"
+text = "The reply is the box's word: everything in it is checked."
+
+[[step]]
+at = "daemon"
+ref = "internal/proto.HelloReply.Validate"
+checks = ["internal/proto.DecodeResult", "internal/proto.HelloReply.Validate"]
+text = "The reply is decoded strictly (no unknown fields, nothing after it) and validated; it must carry the daemon's channel protocol version and this box's realm and project. Anything else refuses the channel."
+
+[[step]]
+section = "Connected"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.setState"
+text = "The channel is `connected`; the devc version the box reported is kept, made printable, for `devc daemon status`. The ingester is woken, since the box may have spooled events before."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.acceptStreams"
+text = "A goroutine accepts the streams the box opens, one per client in the box. Two more keep the agent's listeners for network exceptions and services in step with the host's records (other concerns)."
+detail = "Each accepted stream needs a place among at most 96 waiting for their first line; beyond that it is closed at once. [[internal/daemon.boxWorker.serveStream]] then dispatches it ([[concern:box-channel]])."
+
+[[step]]
+from = "daemon"
+to = "box-agent"
+via = "rpc:box.sessions"
+label = "box.sessions"
+ref = "internal/daemon.boxWorker.live"
+unchecked = "called later from the reconcile loop (Daemon.refresh passes it to session.Store.Refresh as the box's live-session source), not from the code that connected"
+text = "Reconciliation asks for the box's live sessions on the control stream, with 30 seconds to answer; every other request of the daemon gets a stream of its own ([[internal/daemon.boxWorker.call]])."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.handleSessions"
+text = "The agent lists the sessions alive in the box, as `devc box session ps --json` would."
+
+[[step]]
+from = "box-agent"
+to = "daemon"
+via = "reply"
+label = "LiveReply {sessions}"
+ref = "internal/boxside.Agent.handleSessions"
+text = "The list goes back as raw JSON."
+
+[[step]]
+at = "daemon"
+ref = "internal/session.ParseLive"
+checks = ["internal/session.ParseLive"]
+text = "The report is parsed strictly: valid session IDs, a known source, valid window and pane IDs, at most 10,000 entries. Anything unexpected rejects the whole report, and reconciliation then does nothing."
+
+[[step]]
+section = "When the channel ends"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.muxGuard.violation"
+text = "The channel ends when the box goes away, its control stream closes or the worker stops. If the frame inspector closed it, the attempt counts as refused and the loop backs off; a channel that ended normally is tried again after one second."

@@ -1,3 +1,6 @@
+// This file implements session ownership: which project a session ID belongs
+// to.
+
 package session
 
 // Session ownership (finding C1-01). Session IDs are chosen in the box, so
@@ -93,6 +96,8 @@ func (s *Store) Claim(ref names.ProjectRef, sid string) (owner names.ProjectRef,
 	return owner, true, nil
 }
 
+// readOwner reads an owner file without following a symlink; found is
+// false when there is none.
 func readOwner(file string) (names.ProjectRef, bool, error) {
 	f, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if errors.Is(err, fs.ErrNotExist) {

@@ -1,0 +1,147 @@
+id = "question-answer"
+kind = "flow"
+title = "A question answered from the host"
+summary = "Claude Code asks the user a question; nobody is at the session's terminal, so its hook records the question and waits on the daemon. The user answers with `devc answer`; the daemon checks that the question is still the pending one and hands the answer to the waiting hook, which gives it to the harness."
+concern = "input-and-receipts"
+trigger = "Claude Code calls its AskUserQuestion tool while nobody watches the session"
+actors = ["user", "cli", "daemon", "hook", "harness"]
+
+[[step]]
+section = "The harness asks"
+
+[[step]]
+from = "harness"
+to = "hook"
+via = "cmd:devc box hook"
+label = "devc box hook claude PreToolUse"
+external = true
+text = "The baseline's `PreToolUse` hook for `AskUserQuestion` runs the hook receiver with the tool call as JSON on standard input; its timeout is the manifest's `question_wait` plus 60 seconds."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.claudeQuestion"
+text = "The question, its options and the tool call's ID are taken from the input. Several questions in one call are only recorded: the dialog shows them."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.askQuestion"
+text = "The hook waits for a remote answer only when the launch description's `question_wait` is above 0 and no tmux client showed the window in the last 60 seconds; otherwise it records the question and the harness shows its own dialog."
+
+[[step]]
+from = "hook"
+to = "daemon"
+via = "rpc:host.question"
+label = "host.question {session, question, timeout}"
+ref = "internal/boxside.askQuestion"
+text = "The request goes through the agent on a stream of the box channel, started before the question is recorded."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.questionWait"
+checks = ["internal/daemon.commander.questionWait"]
+text = "The session must be a live session of the box whose channel the request came on (the box's spool is ingested once if it is not known yet); the question ID must be printable and short, the wait between 1 and 1,800 seconds. One waiter per session: a newer one replaces the older, which returns empty."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.recordQuestion"
+text = "Meanwhile the hook appends `question` (ID, text, up to 20 options) and `state blocked` to the spool; ingestion makes them the session's pending question ([[flow:event-ingestion]]). The hook gives up as soon as a client becomes active at the window."
+
+[[step]]
+section = "The user answers"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc answer"
+label = "devc answer <session> 2"
+external = true
+text = "A number chooses that option; anything else, or `--text`, is free text. `--question <id>` refuses the answer when another question is pending."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.resolveSession"
+text = "The session argument becomes a project and an ID."
+
+[[step]]
+from = "cli"
+to = "daemon"
+via = "rpc:session.answer"
+label = "session.answer {id, session, ref, choice}"
+ref = "internal/cli.app.callCommand"
+text = "The command goes with a new command ID to the daemon's socket."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.apiAnswer"
+checks = ["internal/proto.DecodeParams", "internal/daemon.checkCommandID", "internal/daemon.checkSession", "internal/proto.CheckInputText"]
+text = "The session must be live and have a pending question; a named question must be that one, and an option number must exist. The answer is bound to the ID of the question pending now ([[finding:C1-13]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.submit"
+text = "The receipt is stored as `accepted` and the command joins the session's line of commands that act now."
+
+[[step]]
+from = "daemon"
+to = "cli"
+via = "reply"
+label = "receipt: accepted"
+ref = "internal/daemon.commander.submit"
+text = "Without `--wait` the CLI prints the receipt and ends."
+
+[[step]]
+section = "Delivery"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.execute"
+unchecked = "submit queues the command in the session's line; the line's own goroutine (commander.drain) takes it from there"
+text = "The line's goroutine takes the command, waits until the session is known and checks that it is still live."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.answerByHook"
+text = "A hook waits for this session (the daemon waits up to two seconds for one while a question is pending). The answer's question must still be the pending one and the one the hook waits for; otherwise it is refused as stale and never typed. `delivering` is stored before the answer is handed over."
+detail = "Without a waiting hook the answer is typed into the dialog by the input adapter: the manifest's `answer_keys` with `{n}` for an option, or the text pasted and submitted, confirmed by a state change ([[concern:input-and-receipts]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.questionWait"
+unchecked = "answerByHook sends the reply on the waiter's channel; the host.question handler, blocked on that channel, returns it"
+text = "The waiting `host.question` handler receives the answer."
+
+[[step]]
+from = "daemon"
+to = "hook"
+via = "reply"
+label = "QuestionReply {choice: 2}"
+ref = "internal/daemon.commander.questionWait"
+text = "The answer goes back on the hook's stream."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.askQuestion"
+text = "The hook appends `state working`."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.claudeQuestion"
+text = "The reply becomes an option label (or the text) and is printed in Claude Code's form: `permissionDecision` `allow` with the answers in `updatedInput`."
+
+[[step]]
+from = "hook"
+to = "harness"
+via = "reply"
+label = "hook output on standard output"
+ref = "internal/boxside.claudeQuestion"
+text = "Claude Code runs the tool with the answer instead of showing its dialog."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.recordAnswer"
+text = "The daemon appends a host-only `answer` event (`via: hook`) to the session's journal, under the ingestion lock and after ingesting the spool, which clears the pending question in every view."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.finish"
+text = "The receipt becomes final: `delivered`, \"returned to the waiting hook\"; the answer's text is not kept."

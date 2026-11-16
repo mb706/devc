@@ -214,7 +214,7 @@ role = "Everything the devc binary does inside a box, reached through the hidden
 [package."internal/session"]
 layer = "area"
 group = "session"
-role = "The host side of sessions: ingests the spool files a box writes into journals no box can reach, reconciles them with the sessions a box reports alive, and derives what `devc ps` and `devc ls` show."
+role = "The host side of sessions: ingests the spool files a box writes into journals no box can reach, records which project owns each session ID, reconciles the journals with the sessions a box reports alive, and derives what `devc ps` and `devc ls` show."
 
 [package."internal/gitx"]
 layer = "area"
@@ -293,7 +293,7 @@ role = "The machine side of the archive of durable state: the client of a hub's 
 [package."internal/daemon"]
 layer = "service"
 group = "machine"
-role = "The machine daemon: one user service per machine that keeps a channel to every running box, ingests session events, reconciles lost sessions, runs housekeeping, and serves a local JSON-RPC API on <runtime>/daemon.sock."
+role = "The machine daemon, one per runtime directory: a channel to every running box, continuous ingestion and the session views it streams to subscribers, commands with receipts, requests from boxes, the boxes' git, SSH, network and service streams, links to hubs, housekeeping, and a local JSON-RPC API on <runtime>/daemon.sock."
 
 [package."internal/hub"]
 layer = "service"

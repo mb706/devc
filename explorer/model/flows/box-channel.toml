@@ -2,7 +2,7 @@ id = "box-channel"
 kind = "tour"
 title = "Reading the box channel"
 summary = "The connection between the daemon and a box's agent, in reading order: how each side makes sure of the other, how the daemon bounds what the box can make it hold, and how requests travel in both directions."
-concern = "sessions-and-events"
+concern = "box-channel"
 actors = ["box-agent", "daemon"]
 
 [[step]]
@@ -11,7 +11,7 @@ section = "The box listens"
 [[step]]
 at = "box-agent"
 ref = "internal/boxside.RunAgent"
-text = "Box init starts the agent once the box is ready. The agent never returns an error and never panics: failures are logged to `/run/devc/agent.log` and retried, so nothing it does can end box init."
+text = "Box init starts the agent once the box is ready. The agent's goroutines recover from panics and its failures are logged to `/run/devc/agent.log` and retried, so nothing it does can end box init."
 
 [[step]]
 at = "box-agent"
@@ -24,8 +24,8 @@ section = "The host connects"
 
 [[step]]
 at = "daemon"
-ref = "internal/daemon.boxWorker.connect"
-text = "For every running box the daemon connects, checks, says hello and serves the channel until it closes; then it reconnects with backoff."
+ref = "internal/daemon.boxWorker.channelLoop"
+text = "Every running box has a worker whose channel loop connects, serves the channel until it closes, and tries again with backoff; it also records the channel's state for `devc daemon status`."
 
 [[step]]
 at = "daemon"
@@ -40,7 +40,7 @@ text = "The process that listens must belong to the box's container (its cgroup 
 [[step]]
 at = "daemon"
 ref = "internal/daemon.muxGuard"
-text = "Between the socket and yamux sits a guard that reads every frame header: it counts the streams the box opens and the control frames it sends per time window, and closes the whole connection when a budget is exceeded ([[finding:C1-03]], [[finding:C1-04]])."
+text = "Between the socket and yamux sits a guard that reads every frame header: it counts the streams the box opens and the control frames it sends per time window, tracks the streams that are open or half-closed, and closes the whole connection when a budget is exceeded ([[finding:C1-03]], [[finding:C1-04]])."
 
 [[step]]
 at = "daemon"
@@ -48,17 +48,20 @@ ref = "internal/proto.HelloReply.Validate"
 text = "On the control stream the daemon calls `box.hello`. The reply is decoded strictly and validated, and must name this box's realm and project and the daemon's channel protocol version; otherwise the channel is refused."
 
 [[step]]
-section = "Requests"
+section = "The daemon asks"
 
 [[step]]
 at = "daemon"
 ref = "internal/daemon.boxWorker.call"
-text = "Every other request of the daemon gets a stream of its own, so a slow operation never holds up the control stream; the result is decoded strictly."
+text = "Every request of the daemon but `box.sessions` gets a stream of its own, so a slow operation never holds up the control stream; the result is decoded strictly."
 
 [[step]]
 at = "box-agent"
 ref = "internal/boxside.Agent.serveHost"
 text = "The agent serves the streams the host opens with its table of handlers ([[surface:box-agent]])."
+
+[[step]]
+section = "The box asks"
 
 [[step]]
 at = "box-agent"
@@ -68,9 +71,14 @@ text = "A program in the box connects to `@devc-agent`. The agent reads its firs
 [[step]]
 at = "daemon"
 ref = "internal/daemon.boxWorker.acceptStreams"
-text = "The daemon accepts the box's streams up to a bound and serves each with the handlers of [[surface:host-api]]. A request is attributed to the box by the channel it arrives on; nothing in it selects a project."
+text = "The daemon accepts the box's streams; at most 96 may wait for their first line at once, and one more is closed at once. The handlers of [[surface:host-api]] are bound to the worker's project: a request is attributed to the box by the channel it arrives on, and nothing in it selects a project."
 
 [[step]]
 at = "daemon"
 ref = "internal/daemon.boxWorker.serveStream"
-text = "A `host.git` request takes the stream over for the relay service and a `host.gate` request for the SSH gate; anything else is JSON-RPC, decoded strictly."
+text = "The first line must arrive within 30 seconds. `host.proxy`, `host.dial` and `host.service` become raw relays of a TCP connection, at most 64 at once. The rest share 32 places: `host.git`, `host.gate` and `host.github` take the stream over, and anything else is JSON-RPC, decoded strictly, on a stream closed after 31 minutes without input."
+
+[[step]]
+at = "daemon"
+ref = "internal/proto.Conn.serve"
+text = "Each request is answered from the method table; an unknown method gets an error, and a handler's error becomes \"internal error\" unless it chose a JSON-RPC error itself, so no host detail reaches the box."

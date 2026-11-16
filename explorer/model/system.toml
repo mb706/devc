@@ -301,8 +301,8 @@ to = "daemon"
 title = "Daemon API"
 transport = "The Unix socket `<runtime>/daemon.sock` (mode 0600), JSON-RPC 2.0, one object per line."
 carries = "Views of boxes and sessions, event streams, commands with receipts, decisions on requests ([[surface:daemon-api]])."
-checks = ["internal/proto.DecodeParams"]
-concerns = ["sessions-and-events"]
+checks = ["internal/proto.DecodeParams", "internal/daemon.Client.Serves"]
+concerns = ["daemon", "input-and-receipts", "requests-and-approval", "watching-sessions"]
 
 [[channel]]
 id = "box-channel"
@@ -312,8 +312,8 @@ title = "Box channel"
 transport = "The daemon connects to the agent's socket (`<runtime>/<box-id>/agent.sock`, `/run/devc/agent.sock` in the box), checks that the peer is a process of that box, and runs yamux over the connection: JSON-RPC on streams, each request on a stream of its own."
 carries = "The daemon's requests to the box ([[surface:box-agent]]): hello, live sessions, input to panes, listeners for exceptions and services."
 boundary = true
-checks = ["internal/daemon.CheckPeer", "internal/proto.HelloReply.Validate", "internal/proto.DecodeResult"]
-concerns = ["sessions-and-events", "box-init-and-agent"]
+checks = ["internal/daemon.DialBoxSocket", "internal/daemon.CheckPeer", "internal/proto.HelloReply.Validate", "internal/proto.DecodeResult", "internal/session.ParseLive"]
+concerns = ["box-channel", "box-init-and-agent", "input-and-receipts"]
 
 [[channel]]
 id = "agent-local"
@@ -332,8 +332,8 @@ title = "Streams from the box"
 transport = "A new yamux stream of the box channel per in-box client; the agent relays its bytes without parsing them."
 carries = "The box's requests to the host ([[surface:host-api]]). The daemon attributes each to the box by the channel it arrives on; nothing the box says selects a project."
 boundary = true
-checks = ["internal/proto.ParseMessage", "internal/proto.DecodeParams", "internal/requests.Validate"]
-concerns = ["sessions-and-events", "box-init-and-agent"]
+checks = ["internal/daemon.muxGuard", "internal/proto.ParseMessage", "internal/proto.DecodeParams", "internal/requests.Validate"]
+concerns = ["box-channel", "box-init-and-agent", "requests-and-approval", "sessions-and-events"]
 
 [[channel]]
 id = "spool-write"
@@ -370,7 +370,8 @@ from = "daemon"
 to = "podman"
 title = "Engine commands (daemon)"
 transport = "The podman binary, run with argument vectors from `/`; JSON output parsed."
-carries = "Which boxes run, the main PID of a box for the peer check, throwaway containers."
+carries = "Which boxes run, the main PID of a box for the peer check, `podman exec` of in-box session start and stop and of the web terminal's tmux client, throwaway containers."
+concerns = ["daemon", "box-channel"]
 
 [[channel]]
 id = "podman-exec"
@@ -381,7 +382,7 @@ transport = "`podman exec` as the box user with an argument vector."
 carries = "In-box commands the host runs (session start, stop and listing, snapshots, worktrees, the repository report); their output comes back to the host."
 boundary = true
 checks = ["internal/session.ParseLive"]
-concerns = ["box-lifecycle", "launching-a-harness"]
+concerns = ["box-lifecycle", "launching-a-harness", "watching-sessions"]
 
 [[channel]]
 id = "podman-box"
@@ -435,7 +436,7 @@ to = "tmux"
 title = "Pane input"
 transport = "tmux command lines with argument vectors; pasted text on tmux's standard input, never as an argument."
 carries = "The daemon's input: a bracketed paste and the submit key, named keys, the list of clients watching a window."
-concerns = ["sessions-and-events", "launching-a-harness"]
+concerns = ["input-and-receipts", "launching-a-harness"]
 
 [[channel]]
 id = "tools-tmux"

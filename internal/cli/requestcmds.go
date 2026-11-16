@@ -1,3 +1,6 @@
+// This file implements `devc request` in a box, `devc requests` on the host,
+// and `devc box secret`.
+
 package cli
 
 import (
@@ -251,6 +254,7 @@ func requestArgs(n int, usage string) cobra.PositionalArgs {
 
 // --- on the host: devc requests ---
 
+// newRequestsCmd is `devc requests` with approve and deny, on the host.
 func newRequestsCmd(a *app) *cobra.Command {
 	var all, asJSON bool
 	cmd := &cobra.Command{
@@ -291,6 +295,8 @@ func newRequestsCmd(a *app) *cobra.Command {
 	return cmd
 }
 
+// listRequests lists requests through the daemon, which expires old ones
+// first, or without it straight from the logs.
 func (a *app) listRequests(cmd *cobra.Command, all, asJSON bool) error {
 	c, probs, err := a.load()
 	if err != nil {
@@ -344,6 +350,9 @@ func (a *app) listRequests(cmd *cobra.Command, all, asJSON bool) error {
 	return tw.Flush()
 }
 
+// decideRequest approves or denies a request through the daemon, the only
+// writer of the logs; with wait it polls requests.list until the request
+// is final.
 func (a *app) decideRequest(cmd *cobra.Command, id string, approve bool, reason string, wait bool) error {
 	c, probs, err := a.load()
 	if err != nil {

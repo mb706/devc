@@ -1,3 +1,6 @@
+// This file implements `devc daemon` with status and stop, `devc ps
+// --watch`, `devc events`, and the CLI's connection to the daemon.
+
 package cli
 
 import (
@@ -69,6 +72,8 @@ func parseLevel(s string) (slog.Level, error) {
 	return l, nil
 }
 
+// newDaemonCmd is `devc daemon` with its status and stop subcommands. The
+// daemon runs in this process, in the foreground, from /.
 func newDaemonCmd(a *app) *cobra.Command {
 	var level string
 	var housekeeping, reconcile, archiveInterval, archiveScan time.Duration
@@ -437,6 +442,8 @@ func (a *app) psWatch(cmd *cobra.Command, e *boxEnv, refs []names.ProjectRef, al
 	return nil
 }
 
+// drawWatch redraws the list of `devc ps --watch`, clearing the screen
+// when standard output is a terminal.
 func (a *app) drawWatch(mu *sync.Mutex, views map[string]*session.Summary, since time.Time) {
 	mu.Lock()
 	var sums []session.Summary
@@ -505,6 +512,9 @@ func (a *app) findAnySession(c *config.Config, prefix string) (names.ProjectRef,
 	return names.ProjectRef{}, "", fmt.Errorf("%q matches %d sessions: give more characters", prefix, len(hits))
 }
 
+// newEventsCmd is `devc events`: a session's journal events, from the
+// daemon or the journal, and with --follow the new ones through a
+// subscription.
 func newEventsCmd(a *app) *cobra.Command {
 	var follow, asJSON bool
 	cmd := &cobra.Command{

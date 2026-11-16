@@ -1,3 +1,6 @@
+// This file defines the box's GitHub methods: reads through the host's
+// facade and the project's token.
+
 package proto
 
 // GitHub (work order C15). host.github is the read-only facade: the box

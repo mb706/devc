@@ -1,3 +1,6 @@
+// This file implements the daemon's side of requests: creation from a box,
+// decisions, the executor and the outcome.
+
 package daemon
 
 // Requests (work order C10a section 2). A box sends host.request; the
@@ -7,7 +10,8 @@ package daemon
 // project approves automatically, approves it at once. Nothing runs before
 // an approval. Approved requests are carried out through the existing
 // commands as child processes of the same binary (`devc seal`, `devc save`,
-// `devc root`), so their locks, fail-closed checks and root log apply.
+// `devc root`, `devc net allow`, `devc pr`), so their locks, fail-closed
+// checks and root log apply.
 // Who may decide what is requests.MayDecide's alone to say.
 
 import (
@@ -70,6 +74,7 @@ type requestService struct {
 	jobs  chan requestJob
 }
 
+// requestJob is an approved request waiting for a worker.
 type requestJob struct {
 	ref names.ProjectRef
 	req proto.Request
@@ -101,6 +106,8 @@ func (rs *requestService) start() {
 // taken only under rs.mu, so a place seen free there stays free.
 func (rs *requestService) full() bool { return len(rs.slots) == cap(rs.slots) }
 
+// changed returns a channel that is closed at the next change of any
+// request (host.request.status waits on it).
 func (rs *requestService) changed() <-chan struct{} {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -564,8 +571,7 @@ func (d *Daemon) runChild(ctx context.Context, args []string, timeout time.Durat
 	return d.o.Runner.Run(ctx, execx.Cmd{Name: d.o.Executable, Args: full, Env: d.o.HousekeepingEnv, Dir: "/", Timeout: timeout, MaxOutput: 64 << 10})
 }
 
-// apiRequests and apiDecide serve requests.list and requests.decide on the
-// local socket: its origin is local.
+// apiRequests serves requests.list on the daemon's socket.
 func (d *Daemon) apiRequests(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.RequestsListParams
 	if err := proto.DecodeParams(params, &p); err != nil {
@@ -575,6 +581,9 @@ func (d *Daemon) apiRequests(ctx context.Context, _ *proto.Conn, params json.Raw
 	return d.requests.list(ctx, p)
 }
 
+// decideHandler serves requests.decide with the origin of the connection
+// it is registered for: local on the daemon's socket, hub on a hub link
+// (hubHandlers).
 func (d *Daemon) decideHandler(origin string) proto.Handler {
 	return func(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 		var p proto.DecideParams

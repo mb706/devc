@@ -1,9 +1,12 @@
+// This file implements the JSON-RPC 2.0 codec of every devc connection.
+
 package proto
 
 // The JSON-RPC 2.0 codec (plan 3.11): one JSON object per line, used on
-// the daemon's Unix socket, on every box channel stream and, later, inside
-// WebSocket frames to the hub. A Conn is symmetric: either side may serve
-// requests from a method table and make calls of its own.
+// the daemon's Unix socket, on every box channel stream and, through
+// internal/wsconn, inside the WebSocket frames of a hub link. A Conn is
+// symmetric: either side may serve requests from a method table and make
+// calls of its own.
 //
 // Security rules: the peer may be hostile (a box on its channel streams).
 // Lines above MaxMessage are refused and end the connection; every message
@@ -312,6 +315,8 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// closeWith closes the connection once, recording why, and fails every
+// pending call.
 func (c *Conn) closeWith(err error) {
 	c.mu.Lock()
 	if c.closed {
@@ -424,6 +429,8 @@ func (c *Conn) serveLoop() {
 	}
 }
 
+// worker serves queued requests one at a time and writes each answer; a
+// failed write closes the connection.
 func (c *Conn) worker() {
 	for {
 		select {
@@ -442,6 +449,10 @@ func (c *Conn) worker() {
 	}
 }
 
+// serve answers one request from the method table. A panic, a result that
+// cannot be encoded or is too large, and an error that is not an *Error
+// (unless ExposeErrors) become generic errors, so nothing of the host's
+// internals reaches the peer.
 func (c *Conn) serve(m *RPCMessage) (resp *RPCMessage) {
 	resp = &RPCMessage{JSONRPC: "2.0", ID: m.ID}
 	defer func() {

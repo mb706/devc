@@ -1,0 +1,119 @@
+id = "attach"
+kind = "flow"
+title = "devc attach"
+summary = "From `devc attach` to the harness's own screen: the CLI finds the project and session, brings the journals up to date and asks the box which sessions are alive, then runs a tmux client in the box through `podman exec -it` on a grouped session of its own, which ends when the user detaches."
+concern = "watching-sessions"
+trigger = "devc attach demo/hello"
+actors = ["user", "cli", "podman", "box-tools", "tmux", "harness"]
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc attach"
+label = "devc attach [<realm>/<project>] [session]"
+external = true
+text = "One argument is a project when it names one, otherwise a session ID or prefix searched in every project; with none, the project containing the current directory. Over ssh: `ssh -t <machine> devc attach <ref>`."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.attach"
+text = "Attach needs a terminal on standard input; it does not use the daemon."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.attachTarget"
+text = "A session prefix is looked up among the open sessions of the configured projects ([[internal/cli.app.findSession]]); it must match exactly one."
+
+[[step]]
+section = "Which sessions are alive"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.refresh"
+text = "The box's spool is ingested and its sessions reconciled, as `devc ps` does without a daemon ([[concern:sessions-and-events]])."
+
+[[step]]
+at = "cli"
+ref = "internal/session.Store.Refresh"
+text = "Under the box's ingestion lock: ingest, observe the box through the engine, and, for a ready box, ask it for its live sessions."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman exec … devc box session ps --json"
+ref = "internal/session.QueryLive"
+text = "The box is asked from `/`, with 30 seconds."
+
+[[step]]
+from = "podman"
+to = "box-tools"
+via = "cmd:devc box session ps"
+label = "devc box session ps --json"
+external = true
+text = "Podman runs the command in the box as its user."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.LiveSessions"
+text = "The box lists the tmux panes tagged with a session that are still alive, and processes whose initial environment names a session."
+
+[[step]]
+from = "box-tools"
+to = "cli"
+via = "reply"
+label = "[{session, source, window, pane, pid}]"
+ref = "internal/boxside.LiveSessions"
+text = "The list is box output: up to 1 MiB, parsed strictly."
+
+[[step]]
+at = "cli"
+ref = "internal/session.ParseLive"
+checks = ["internal/session.ParseLive"]
+text = "Every entry must have a valid session ID, a known source and valid window, pane and PID; anything unexpected rejects the whole report and reconciliation changes nothing. Open sessions the box no longer runs end as `lost`."
+
+[[step]]
+section = "The window"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.chooseSession"
+text = "Of the live sessions with a tmux window (matching the prefix, if one was given), one is used directly; several are listed on standard error with their state and last message, made printable, and the user picks one (the default is the most recent)."
+
+[[step]]
+at = "cli"
+ref = "internal/tmux.Attach"
+checks = ["internal/tmux.ValidClientName", "internal/tmux.ValidWindowID"]
+text = "The tmux command line creates a grouped session of its own (`devc-<12 hex>`) on the box's tmux session `devc`, marks it to be destroyed when unattached, and selects the session's window, so two clients can watch different windows."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman exec -it … tmux new-session -t =devc …"
+ref = "internal/engine.Podman.ExecInteractive"
+text = "The client runs in the box through an interactive `podman exec` with the terminal's `TERM` and `COLORTERM`, from `/`."
+
+[[step]]
+from = "podman"
+to = "tmux"
+via = "exec"
+label = "tmux client in the box"
+external = true
+text = "The tmux client attaches to the box's server, which uses devc's configuration and then the user's `~/.tmux.conf`."
+
+[[step]]
+from = "tmux"
+to = "harness"
+via = "stream"
+label = "the session's pane"
+external = true
+text = "The user now types into the harness's pane directly, as at any tmux session. Commands the daemon delivers meanwhile wait while this client is active ([[concern:input-and-receipts]])."
+
+[[step]]
+from = "tmux"
+to = "user"
+via = "reply"
+label = "detach: prefix d"
+external = true
+text = "Detaching destroys the grouped session; the session's window and the harness keep running. The CLI exits with the client's status."

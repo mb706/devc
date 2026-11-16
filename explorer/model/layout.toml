@@ -154,7 +154,7 @@ ref = "internal/paths.Paths.SecretsDir"
 
 [[tree.entry]]
 path = "durable/realms/<realm>/requests/<project>.jsonl"
-text = "The project's request log."
+text = "The project's request log: one line per change of a request, compacted past 4 MiB; only the daemon writes it."
 writer = "host"
 ref = "internal/paths.Paths.RequestsFile"
 
@@ -280,9 +280,21 @@ ref = "internal/paths.Paths.BoxNetExceptionsFile"
 
 [[tree.entry]]
 path = "local/receipts"
-text = "The daemon's command receipts."
+text = "The daemon's command receipts (directory 0700): one file per command ID, created exclusively before the command acts, kept seven days after it is final."
 writer = "host"
 ref = "internal/paths.Paths.ReceiptsDir"
+
+[[tree.entry]]
+path = "local/boxes/<realm>/<project>/spool-offsets.json"
+text = "How far ingestion got in each of the box's spool files, and the files refused because their session belongs to another project."
+writer = "host"
+ref = "internal/session.Store.offsetsFile"
+
+[[tree.entry]]
+path = "local/boxes/<realm>/<project>/ingest.lock"
+text = "Serialises ingestion of one box between the daemon and CLI commands, so seq numbers are never assigned twice; separate from the box lock, which `up` can hold for minutes."
+writer = "host"
+ref = "internal/session.Store.Lock"
 
 [[tree.entry]]
 path = "local/archive"
@@ -484,9 +496,15 @@ summary = "Sockets and spools, on the runtime tmpfs. `DEVC_RUNTIME_DIR` moves it
 
 [[tree.entry]]
 path = "daemon.sock"
-text = "The daemon's API socket (mode 0600)."
+text = "The daemon's API socket (mode 0600, in the 0700 runtime directory)."
 writer = "host"
 ref = "internal/daemon.SocketPath"
+
+[[tree.entry]]
+path = "daemon.lock"
+text = "Held by the running daemon; a second daemon for the same runtime directory fails at once."
+writer = "host"
+ref = "internal/daemon.LockName"
 
 [[tree.entry]]
 path = "<box-id>"

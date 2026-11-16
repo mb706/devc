@@ -1,0 +1,165 @@
+id = "event-ingestion"
+kind = "flow"
+title = "From a spool line to a subscriber"
+summary = "A subscriber asks the daemon for events; a box appends to a spool file and hints; the box's ingester reads the file through safefs, checks that the session is this project's, validates each line, appends the events to the journal with the host's seq and time, and the journal follower folds them into the session's view and sends them to the subscriber."
+concern = "sessions-and-events"
+trigger = "devc events --follow <session>, then the harness reports something"
+actors = ["user", "cli", "daemon", "state-dir", "spool", "hook"]
+
+[[step]]
+section = "A subscriber"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc events"
+label = "devc events <session> --follow"
+external = true
+text = "The user names a session by `<realm>/<project>/<id>`, a full ID or a unique prefix."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.findAnySession"
+text = "The session is found in the journals of the configured projects, live or ended; an exact ID in two projects is an error that asks for the project."
+
+[[step]]
+from = "cli"
+to = "daemon"
+via = "rpc:events.read"
+label = "events.read {ref, session, from}"
+ref = "internal/daemon.Client.EventsOf"
+text = "The history comes from the daemon in pages of at most 1,000 events or 512 KiB (without a daemon, from the journal itself)."
+
+[[step]]
+from = "cli"
+to = "daemon"
+via = "rpc:events.subscribe"
+label = "events.subscribe {cursor: {key: seq}, sessions: [key]}"
+ref = "internal/proto.Conn.Call"
+text = "The CLI subscribes with a cursor: the session's key and the last seq it printed."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hub.subscribe"
+checks = ["internal/proto.Cursor.Validate", "internal/proto.ParseSessionKey"]
+text = "Registration and a snapshot of what each session holds happen under the follower's lock, so no event falls between the replay and the live stream. A connection may hold one subscription."
+detail = "Sessions the client names in its cursor are replayed from there; sessions it does not know are replayed whole when they were active within the window (30 days unless the client asks for another); `from_now` replays nothing."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.subscriber.replayOne"
+text = "The subscriber's goroutine sends the journal's events after the cursor, then `caught_up`, then heartbeats every 15 seconds while it waits for live batches."
+detail = "A journal that ends before the cursor, is missing or cannot be read to its end gets `missed`: the client must read the session again rather than take the replay as complete ([[finding:C1-17]])."
+
+[[step]]
+section = "The box writes"
+
+[[step]]
+from = "hook"
+to = "spool"
+via = "file"
+label = "append to /run/devc/spool/<session>.jsonl"
+ref = "internal/boxside.AppendEvents"
+text = "A hook, the launcher, the status wrapper or tmux's end hook appends events in one write, without `seq` ([[flow:hook-to-spool]])."
+
+[[step]]
+from = "hook"
+to = "daemon"
+via = "rpc:host.hint"
+label = "host.hint (relayed by the agent)"
+ref = "internal/boxside.SendHintTo"
+text = "A notification, relayed by the box agent on a new stream of the box channel, says only: look now."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.wake"
+text = "The hint wakes the box's ingester through a channel of one place; more hints while it is full are dropped. Nothing in the hint is used."
+
+[[step]]
+section = "Ingestion"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.ingestLoop"
+unchecked = "the ingester goroutine waits on the channel wake writes to"
+text = "Woken by the hint, or after two seconds (250 ms while busy), the ingester compares a snapshot of the spool's file names and sizes with the last one and skips the run when nothing changed. After a run it pauses 50 ms, so a box that floods hints still costs one run per interval."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.ingest"
+text = "The run holds the box's ingestion lock, shared with every CLI that ingests the same box; the daemon waits at most two seconds for it and otherwise tries at its next run."
+
+[[step]]
+at = "daemon"
+ref = "internal/session.Store.Ingest"
+checks = ["internal/safefs.OpenRoot", "internal/safefs.Root.List"]
+text = "The box's runtime directory is opened as a safefs root and `spool` listed beneath it, without following symlinks and at most 10,000 entries. Only regular files named `<session ID>.jsonl` are read, each from the offset in `spool-offsets.json`."
+
+[[step]]
+at = "daemon"
+ref = "internal/session.Store.Claim"
+checks = ["internal/session.Store.Claim"]
+text = "The session must be this project's: the first project to record an ID owns it, in `durable/session-owners/<id>`. A spool file of another project's session is refused whole and reported once ([[finding:C1-01]])."
+
+[[step]]
+from = "spool"
+to = "daemon"
+via = "file"
+label = "complete lines from the offset"
+ref = "internal/safefs.Root.ReadFrom"
+unchecked = "the spool is a file the box wrote; the host reads it here, called from Store.ingestFile"
+text = "Up to 8 MiB and 20,000 events per file and run are read, complete lines only; a file that shrank below the offset is noted in the journal and read on from its end."
+
+[[step]]
+at = "daemon"
+ref = "internal/proto.ParseSpoolLine"
+unchecked = "ingestFile reads the box's bytes and passes each line here"
+checks = ["internal/proto.ParseSpoolLine", "internal/proto.ValidateData"]
+text = "Each line is decoded strictly and validated field by field; host-only types, another session's ID and lines over 64 KiB are refused and counted, never stored. A valid event is re-encoded, gets the next `seq` of its session, the host's time `at` and its spool offset."
+
+[[step]]
+from = "daemon"
+to = "state-dir"
+via = "file"
+label = "durable/realms/<realm>/journal/<project>/<session>.jsonl"
+ref = "internal/session.appendJournal"
+text = "The batch is appended in one write and synced before the spool offset is saved, so an event reaches the journal at most once ([[finding:B6]])."
+detail = "A write that fails part-way is cut off again; a torn line left behind is skipped by readers, and the next append starts on a new line. After `session.end`, further events of the session are dropped, and a spool file whose session has ended and that holds nothing more is removed."
+
+[[step]]
+section = "To the subscriber"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hub.poll"
+text = "A run that appended events polls the follower for this project at once (otherwise the one-second loop finds them). The follower reads the journal's new complete lines."
+
+[[step]]
+at = "daemon"
+ref = "internal/proto.SessionView.Apply"
+text = "Each event is folded into the session's view; every waiting command is signalled, and a turn that went from working to done or idle schedules a bank of the box."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hub.enqueueLocked"
+text = "The batch is queued for every subscriber that wants the session. One with 4,096 batches or 32 MiB waiting, or that would take the daemon-wide total over 256 MiB, is disconnected and resumes from its cursor ([[finding:C1-08]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.subscriber.send"
+unchecked = "the subscriber's goroutine reads the batch from its queue"
+text = "Each event is sent at most once and in order: the subscriber skips seqs it already sent, so the replay and the live stream never repeat each other."
+
+[[step]]
+from = "daemon"
+to = "cli"
+via = "stream"
+label = "event {ref, event}"
+ref = "internal/daemon.subscriber.send"
+text = "The event goes out as a JSON-RPC notification on the subscriber's connection."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.eventLine"
+unchecked = "the CLI's notification handler, a function literal, receives the event on the connection's reader"
+text = "The CLI prints one line per event, box-written text made printable and cut; `--json` escapes control characters. It stops after the session's `session.end`."

@@ -1,3 +1,6 @@
+// This file implements the daemon's local API: the method table of
+// daemon.sock and the handlers of views, events and commands.
+
 package daemon
 
 import (
@@ -23,6 +26,8 @@ const (
 	syncTimeout   = 2 * time.Minute
 )
 
+// handlers is the method table of the daemon's socket. A hub link gets an
+// allowlisted copy of it (hubHandlers).
 func (d *Daemon) handlers() map[string]proto.Handler {
 	return map[string]proto.Handler{
 		proto.MethodDaemonInfo:      d.apiInfo,
@@ -153,6 +158,10 @@ func (d *Daemon) matchRefs(realm, project string) ([]names.ProjectRef, error) {
 	return out, nil
 }
 
+// apiSessions serves sessions.list: the views of the matching projects'
+// sessions, ordered by ID and then project, in pages. With sync it first
+// ingests and reconciles those projects, as the CLI does without a daemon,
+// so both give the same answer.
 func (d *Daemon) apiSessions(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.SessionsListParams
 	if err := proto.DecodeParams(params, &p); err != nil {
@@ -315,6 +324,8 @@ func (d *Daemon) apiEvents(_ context.Context, _ *proto.Conn, params json.RawMess
 	return res, nil
 }
 
+// apiSubscribe serves events.subscribe: one subscription per connection;
+// the events follow as notifications on it.
 func (d *Daemon) apiSubscribe(_ context.Context, c *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.SubscribeParams
 	if err := proto.DecodeParams(params, &p); err != nil {
@@ -331,6 +342,7 @@ func (d *Daemon) apiSubscribe(_ context.Context, c *proto.Conn, params json.RawM
 
 // --- Commands (work order C09) ---
 
+// checkCommandID refuses a command ID that could not name a receipt file.
 func checkCommandID(id string) error {
 	if !proto.ValidCommandID(id) {
 		return proto.Errorf(proto.CodeInvalidParams, "invalid command id: use a session-ID-like or UUID string")
@@ -338,6 +350,7 @@ func checkCommandID(id string) error {
 	return nil
 }
 
+// checkSession refuses a session parameter that is not a session ID.
 func checkSession(sid string) error {
 	if !names.ValidSessionID(sid) {
 		return proto.Errorf(proto.CodeInvalidParams, "invalid session")
@@ -367,6 +380,10 @@ func (d *Daemon) commandTarget(ctx context.Context, refStr string, cmd *proto.Co
 	return v, "", nil
 }
 
+// apiSend serves session.send. Errors are for malformed parameters; a
+// session that cannot take the text (unknown, ended, text that must not be
+// typed) gets a stored refused receipt instead, so a retry with the same ID
+// sees the same answer.
 func (d *Daemon) apiSend(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.SendParams
 	if err := proto.DecodeParams(params, &p); err != nil {
@@ -396,6 +413,8 @@ func (d *Daemon) apiSend(ctx context.Context, _ *proto.Conn, params json.RawMess
 	return d.cmd.submit(cmd, refusal)
 }
 
+// apiAnswer serves session.answer: an option number or a text for the
+// session's pending question, bound to that question's ID.
 func (d *Daemon) apiAnswer(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.AnswerParams
 	if err := proto.DecodeParams(params, &p); err != nil {
@@ -441,6 +460,7 @@ func (d *Daemon) apiAnswer(ctx context.Context, _ *proto.Conn, params json.RawMe
 	return d.cmd.submit(cmd, refusal)
 }
 
+// apiSessionCommand serves session.interrupt and session.stop.
 func (d *Daemon) apiSessionCommand(kind string) proto.Handler {
 	return func(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 		var p proto.SessionCommandParams
@@ -462,6 +482,7 @@ func (d *Daemon) apiSessionCommand(kind string) proto.Handler {
 	}
 }
 
+// apiKeys serves session.keys: one to 32 keys from proto.NamedKeys.
 func (d *Daemon) apiKeys(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.KeysParams
 	if err := proto.DecodeParams(params, &p); err != nil {
@@ -495,6 +516,9 @@ func (d *Daemon) apiKeys(ctx context.Context, _ *proto.Conn, params json.RawMess
 	return d.cmd.submit(cmd, refusal)
 }
 
+// apiStart serves session.start: a detached session of a harness the
+// project lists, in a box that runs, with an optional first prompt. The
+// checks that need the box run when the command executes (runStart).
 func (d *Daemon) apiStart(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.StartParams
 	if err := proto.DecodeParams(params, &p); err != nil {
@@ -534,6 +558,9 @@ func (d *Daemon) apiStart(_ context.Context, _ *proto.Conn, params json.RawMessa
 	return d.cmd.submit(cmd, refusal)
 }
 
+// apiSeen serves session.seen at once, without a line: it records a host
+// seen event up to a turn the session has had. The receipt is stored only
+// when the client gave an ID.
 func (d *Daemon) apiSeen(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.SeenParams
 	if err := proto.DecodeParams(params, &p); err != nil {
@@ -593,6 +620,8 @@ func (d *Daemon) apiSeen(ctx context.Context, _ *proto.Conn, params json.RawMess
 	return stored.Receipt, nil
 }
 
+// apiCommandGet serves command.get: a stored receipt, waiting up to 600
+// seconds for it to become final.
 func (d *Daemon) apiCommandGet(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.CommandGetParams
 	if err := proto.DecodeParams(params, &p); err != nil {

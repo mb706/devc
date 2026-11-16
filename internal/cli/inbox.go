@@ -1,3 +1,6 @@
+// This file implements the hidden `devc box` commands that run inside a box
+// (init, launch, hook, session, …) and in helper and context containers.
+
 package cli
 
 import (
@@ -34,8 +37,10 @@ func requireBox(getenv func(string) string) error {
 }
 
 // newBoxCmd is the hidden group for subcommands that run inside a box
-// (plan 3.3). Later chunks add launch, hook, session, snapshot, dial and the
-// helper-container workers.
+// (plan 3.3) and in the helper and context containers. They are entry
+// points of processes the host, tmux or a harness starts, not commands for
+// people. Those meant for a box refuse to run anywhere else (requireBox);
+// the workers run in the throwaway containers the host starts for them.
 func newBoxCmd(a *app) *cobra.Command {
 	initCmd := &cobra.Command{
 		Use:   "init",

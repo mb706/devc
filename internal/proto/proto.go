@@ -1,9 +1,15 @@
-// Package proto defines what boxes, the host, the daemon and (later) the
-// hub exchange: session events (plan 3.6, this file), the JSON-RPC 2.0
-// codec used on the daemon's socket and on box channel streams (rpc.go),
-// and the views, cursors, commands, receipts and method parameters of the
-// daemon's API and the box channel (views.go). An event is one JSON object
-// per line:
+// Package proto defines what boxes, the host, the daemon and the hub
+// exchange: session events (plan 3.6, this file), the JSON-RPC 2.0 codec
+// used on the daemon's socket, on box channel streams and on hub links
+// (rpc.go), the views, cursors, commands, receipts and method parameters
+// of the daemon's API and the box channel (views.go), requests
+// (requests.go), the web app's methods (web.go), the machine link
+// (hub.go) and the box's GitHub methods (github.go). Who writes what
+// decides who must check it: a box writes spool events, replies on the
+// box channel, requests and its host.* calls, and the daemon validates all
+// of them; a hub calls only the daemon methods it is allowed; the CLI on
+// the daemon's socket is the same user. An event is one JSON object per
+// line:
 //
 //	{"v":1,"seq":N,"ts":"RFC3339Nano","at":"RFC3339Nano","session":"s…","type":"…","data":{…}}
 //

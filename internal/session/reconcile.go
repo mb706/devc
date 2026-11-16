@@ -1,3 +1,6 @@
+// This file implements reconciliation: the box's report of its live
+// sessions, and the end of the sessions it no longer runs.
+
 package session
 
 import (
@@ -180,6 +183,8 @@ func (s *Store) RefreshStopped(ctx context.Context, ref names.ProjectRef, reason
 	return s.refresh(ctx, ref, stopped, nil, reason)
 }
 
+// refresh is Refresh and RefreshStopped: ingest, observe the box, and end
+// the sessions it does not run with reason, all under the ingestion lock.
 func (s *Store) refresh(ctx context.Context, ref names.ProjectRef, observe Observe, eng engine.Engine, reason string) (RefreshResult, error) {
 	var res RefreshResult
 	// A box devc started always has its runtime directory.

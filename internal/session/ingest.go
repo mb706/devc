@@ -1,3 +1,6 @@
+// This file implements ingestion: a box's spool files into the journals,
+// with offsets and per-run limits, and the events the host writes itself.
+
 package session
 
 import (
@@ -77,6 +80,8 @@ type spoolPos struct {
 	Refused string `json:"refused,omitempty"`
 }
 
+// loadOffsets reads how far ingestion got in each of a box's spool files.
+// The file is the host's (local/boxes, out of every box's reach).
 func (s *Store) loadOffsets(ref names.ProjectRef) (map[string]spoolPos, error) {
 	m := map[string]spoolPos{}
 	b, err := os.ReadFile(s.offsetsFile(ref))
@@ -92,6 +97,8 @@ func (s *Store) loadOffsets(ref names.ProjectRef) (map[string]spoolPos, error) {
 	return m, nil
 }
 
+// saveOffsets replaces the offsets file whole (a synced temporary file,
+// renamed), so a crash leaves the old or the new one.
 func (s *Store) saveOffsets(ref names.ProjectRef, m map[string]spoolPos) error {
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -439,6 +446,7 @@ func (s *Store) AppendHost(ref names.ProjectRef, sid string, ps ...hostEvent) er
 	return appendJournal(s.Paths, ref, sid, evs)
 }
 
+// hostEvent is an event the host appends itself: its type and data.
 type hostEvent struct {
 	typ  string
 	data any

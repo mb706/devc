@@ -298,3 +298,136 @@ title = "Pane-died hook"
 text = "The tmux hook devc sets on every session window: when the harness's process ends, the window stays (`remain-on-exit`) and tmux runs `devc box session ended`, which writes `session.end` with the exit status or signal unless the spool has one, and removes the pane."
 refs = ["internal/tmux.PaneDiedHook", "internal/boxside.SessionEnded"]
 see = ["session"]
+
+[[term]]
+id = "ingestion"
+title = "Ingestion"
+aka = ["ingest"]
+text = "Copying new events from a box's spool into the journals: read through safefs from the offset reached last time, each line validated, given the session's next `seq` and the host's time, appended and synced. The daemon ingests every running box continuously; the CLI ingests when it shows or acts on sessions. Both hold the box's ingestion lock (`local/boxes/<realm>/<project>/ingest.lock`)."
+refs = ["internal/session.Store.Ingest", "internal/daemon.boxWorker.ingestLoop"]
+see = ["spool", "journal", "reconciliation"]
+
+[[term]]
+id = "session-owner"
+title = "Session owner"
+aka = ["session ownership"]
+text = "The project a session ID belongs to: the first project whose journal recorded it, written once to `durable/session-owners/<id>`. A box's spool file for a session another project owns is refused, so a box cannot add events to, or receive commands for, another project's session."
+refs = ["internal/session.Store.Claim", "internal/paths.Paths.SessionOwnersDir"]
+see = ["session", "ingestion"]
+
+[[term]]
+id = "reconciliation"
+title = "Reconciliation"
+text = "Ending the sessions a journal shows open but the box no longer runs, with reason `lost` (or `box-down` after `devc down`). The box is observed under the ingestion lock after its spool was ingested, so a session started meanwhile is never ended by mistake. The daemon reconciles every 30 seconds; the CLI whenever it refreshes a box."
+refs = ["internal/session.Store.Refresh", "internal/daemon.Daemon.reconcileLoop"]
+see = ["ingestion", "session"]
+
+[[term]]
+id = "session-view"
+title = "Session view"
+aka = ["view", "summary"]
+text = "What devc derives from a session's journal: harness, worktree, state, pending question, last message, turns, start and end in host time. The CLI and the daemon derive it the same way; the daemon adds the machine, the box's state and the tmux window."
+refs = ["internal/proto.SessionView", "internal/proto.SessionView.Apply"]
+see = ["journal", "needs-you", "turn"]
+
+[[term]]
+id = "turn"
+title = "Turn"
+text = "One prompt and what the harness does with it. A session view counts the prompt events (`turn`), remembers the last turn that reached done (`done_turn`) and the last one a user marked seen (`seen_turn`)."
+refs = ["internal/proto.SessionView"]
+see = ["needs-you", "session-view"]
+
+[[term]]
+id = "needs-you"
+title = "Needs you"
+text = "A live session that is blocked (a permission prompt or a question), or done with a turn nobody has marked seen. `devc ls` counts such sessions; `devc seen` marks a turn seen on every device that follows the journals."
+refs = ["internal/proto.SessionView.NeedsYou", "internal/daemon.Daemon.apiSeen"]
+see = ["turn", "session-view"]
+
+[[term]]
+id = "journal-follower"
+title = "Journal follower"
+aka = ["the daemon's hub"]
+text = "The part of the daemon (type `hub` in `internal/daemon`, not the hub server) that follows every configured project's journals, whoever appends to them, keeps a view per session, wakes commands waiting for a change, and streams events to subscribers."
+refs = ["internal/daemon.hub", "internal/daemon.hub.poll"]
+see = ["session-view", "cursor"]
+
+[[term]]
+id = "cursor"
+title = "Cursor"
+text = "What a subscriber of `events.subscribe` already has: for each session, by `<realm>/<project>/<id>` (or a bare ID from older clients), the last seq it received. The daemon replays from there, so a client that reconnects misses nothing; a journal that cannot serve the cursor gets a `missed` notification."
+refs = ["internal/proto.Cursor", "internal/daemon.hub.subscribe"]
+see = ["journal-follower"]
+
+[[term]]
+id = "box-worker"
+title = "Box worker"
+text = "What the daemon keeps for one running box's container: a goroutine that holds the box channel and reconnects it, and one that ingests the spool. It is started when the box watch sees the container running and stopped when the box stops or is recreated."
+refs = ["internal/daemon.boxWorker", "internal/daemon.Daemon.startWorker"]
+see = ["box-channel", "ingestion"]
+
+[[term]]
+id = "control-stream"
+title = "Control stream"
+text = "The first yamux stream the daemon opens on a box channel: it carries `box.hello` and `box.sessions`. Every other request of the daemon, and every request from the box, gets a stream of its own."
+refs = ["internal/daemon.boxWorker.connect", "internal/daemon.boxWorker.live"]
+see = ["box-channel"]
+
+[[term]]
+id = "frame-inspector"
+title = "Frame inspector"
+aka = ["mux guard", "transport guard"]
+text = "The layer between a box's socket and yamux on the daemon's side that reads every frame header and closes the channel when the box opens too many streams, sends too many pings or holds too many streams open. It bounds what yamux keeps for a box, which the application's own limits cannot."
+refs = ["internal/daemon.muxGuard"]
+see = ["box-channel"]
+
+[[term]]
+id = "command"
+title = "Command"
+aka = ["input command"]
+text = "Something a client asks the daemon to do to a session: send, answer, interrupt, keys, start, stop or seen. It carries an ID the client chose, so a retry with the same ID never acts twice, and its outcome is recorded in a receipt."
+refs = ["internal/proto.Command", "internal/daemon.commander"]
+see = ["receipt", "at-rest", "input-gate"]
+
+[[term]]
+id = "at-rest"
+title = "At rest"
+text = "When a queued send may be typed into a session: idle, done or error, with a state reported after the last prompt and no question pending; a session that never reported a state counts as at rest a minute after it started."
+refs = ["internal/daemon.atRest"]
+see = ["command"]
+
+[[term]]
+id = "input-gate"
+title = "Input gate"
+text = "The daemon's wait before it types: while a tmux client showing the session's window was active in the last three seconds, at most a minute, so nothing is typed while a person types there."
+refs = ["internal/daemon.target.gate", "internal/daemon.gateDecision"]
+see = ["command"]
+
+[[term]]
+id = "input-adapter"
+title = "Input adapter"
+text = "How the daemon delivers a command to a harness, chosen by the manifest's `input.adapter`: `paste` (a bracketed paste and the submit key, confirmed by the prompt hook), `extension` (a message handed to devc's extension in the harness), and `mod` and `app-server`, which are not built and fall back to paste."
+refs = ["internal/daemon.Adapter", "internal/daemon.adapterFor"]
+see = ["command"]
+
+[[term]]
+id = "request"
+title = "Request"
+text = "Something a box asks the user for with `devc request`: seal, savepoint, note, package, net, grant, pr or comment. It is validated, stored in the project's request log, and carried out only after an approval, with the commands the user would run."
+refs = ["internal/proto.Request", "internal/daemon.requestService.create"]
+see = ["risk-class", "decision-origin"]
+
+[[term]]
+id = "risk-class"
+title = "Risk class"
+text = "Low (seal, savepoint, note) or high (package, net, grant, pr, comment), fixed per request kind. Low-risk requests may be approved automatically or from a hub; high-risk ones only with the CLI on the machine."
+refs = ["internal/proto.RequestRisk", "internal/requests.MayDecide"]
+see = ["request", "decision-origin"]
+
+[[term]]
+id = "decision-origin"
+title = "Decision origin"
+aka = ["origin"]
+text = "Where a decision on a request came from: `local` (the daemon's socket), `auto` (the project's `[requests] auto` list) or `hub` (a hub link, or a local client that declares it). The connection decides the origin; a client can only declare a weaker one."
+refs = ["internal/requests.EffectiveOrigin", "internal/requests.MayDecide"]
+see = ["request", "risk-class"]

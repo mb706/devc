@@ -1,10 +1,10 @@
 id = "send-prompt"
 kind = "flow"
 title = "devc send"
-summary = "A prompt typed into a live session from the host: the daemon stores a receipt first, types the text into the session's tmux pane through the box agent, and calls it delivered only when the harness's own prompt hook reports the same text."
-concern = "sessions-and-events"
+summary = "A prompt typed into a live session from the host: the daemon stores a receipt first, waits until the session is at rest and nobody types at its terminal, types the text into the session's tmux pane through the box agent, and calls it delivered only when the harness's own prompt hook reports the same text."
+concern = "input-and-receipts"
 trigger = "devc send --wait demo/hello/<session> \"run the tests\""
-actors = ["user", "cli", "daemon", "box-agent", "tmux", "harness", "hook"]
+actors = ["user", "cli", "daemon", "box-agent", "harness", "hook"]
 
 [[step]]
 from = "user"
@@ -17,7 +17,7 @@ text = "The user names a live session (`<realm>/<project>/<id>`, a full ID, or a
 [[step]]
 at = "cli"
 ref = "internal/cli.app.resolveSession"
-text = "The session argument becomes a project and a session ID: named in full, or looked up in the journals, which must hold it for exactly one project."
+text = "The session argument becomes a project and a session ID: named in full as `<realm>/<project>/<id>`, or looked up in the journals, where an ID or prefix must belong to one project (a full ID no journal holds yet is left to the daemon)."
 
 [[step]]
 from = "cli"
@@ -32,7 +32,7 @@ detail = "Mode `queue` (the default) waits until the session is at rest; `--stee
 at = "daemon"
 ref = "internal/daemon.Daemon.apiSend"
 checks = ["internal/proto.DecodeParams", "internal/daemon.checkCommandID", "internal/daemon.checkSession", "internal/proto.CheckInputText"]
-text = "The parameters are decoded strictly and checked; the command is bound once to the session's project and ID, which a restart never resolves again."
+text = "The parameters are decoded strictly and checked; the command is bound once to the session's project and ID, which a restart never resolves again. An unknown, ambiguous or ended session, or text that must not be typed, gives a refused receipt rather than an error."
 
 [[step]]
 at = "daemon"
@@ -74,12 +74,15 @@ section = "Delivery, in the session's own line"
 [[step]]
 at = "daemon"
 ref = "internal/daemon.commander.execute"
-text = "Each session has one line of commands. A queued send waits until the session is at rest: idle, done or failed, with a state reported after the last prompt and no question pending. Then it takes the box's channel."
+unchecked = "submit queues the command in the session's line; the line's own goroutine (commander.drain) takes it from there"
+text = "Each session has a line of commands. A queued send waits, with no time limit while the daemon runs, until the session is at rest: idle, done or error, with a state reported after the last prompt and no question pending. Then it waits up to 60 seconds for the box's channel and takes the session's inject lock."
+detail = "A session that has reported no state at all counts as at rest 60 seconds after its start. A session that ends while the send waits refuses it. Sends with `--steer`, answers, interrupts, keys and stops go to the session's other line and do not wait for rest ([[internal/daemon.atRest]])."
 
 [[step]]
 at = "daemon"
 ref = "internal/daemon.paste.Send"
-text = "The manifest's input adapter delivers; every built-in manifest uses paste. It waits, for a bounded time, while someone is active in a terminal showing the session's window (`box.input.clients`), then stores `delivering`, so a restart never types the text twice."
+checks = ["internal/daemon.target.gate", "internal/daemon.target.begin"]
+text = "The manifest's input adapter delivers; every built-in manifest uses paste. The input gate waits, at most 60 seconds, while a tmux client showing the session's window was active in the last three seconds (`box.input.clients`). Just before the first key the session must still be live and at rest (otherwise the send goes back to waiting), and `delivering` is stored, so a restart never types the text twice."
 detail = "A manifest may name `mod` or `app-server`, which are not built yet and fall back to paste with a note in the receipt, or `extension` (pi, with a manifest of one's own), which hands the text to devc's extension in the harness while one is connected."
 
 [[step]]
@@ -99,19 +102,11 @@ detail = "The text never becomes an argument or shell syntax: it reaches tmux on
 
 [[step]]
 from = "box-agent"
-to = "tmux"
-via = "exec"
-label = "load-buffer -, paste-buffer, send-keys"
-ref = "internal/boxside.Input.Paste"
-text = "Each tmux command runs with an argument vector."
-
-[[step]]
-from = "tmux"
 to = "harness"
 via = "stream"
-label = "the text and the submit key"
-external = true
-text = "The pasted text and the submit key arrive in the harness's terminal."
+label = "load-buffer, paste-buffer, send-keys"
+ref = "internal/boxside.Input.Paste"
+text = "The commands go to the box's tmux server, which puts the pasted text and the submit key into the harness's terminal."
 
 [[step]]
 from = "harness"

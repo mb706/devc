@@ -1,3 +1,6 @@
+// This file implements the commands that type into live sessions through the
+// daemon.
+
 package cli
 
 // Commands that act on live sessions through the daemon (work order C09
@@ -109,6 +112,8 @@ func (a *app) runCommand(cmd *cobra.Command, f *commandFlags, method string, par
 	return a.callCommand(ctx, cl, f, method, params)
 }
 
+// callCommand sends a command on an open connection and, with --wait,
+// asks command.get (60 seconds at a time) until the receipt is final.
 func (a *app) callCommand(ctx context.Context, cl *daemon.Client, f *commandFlags, method string, params any) error {
 	var r proto.Receipt
 	if err := cl.Call(ctx, method, params, &r); err != nil {
@@ -133,6 +138,8 @@ func (a *app) callCommand(ctx context.Context, cl *daemon.Client, f *commandFlag
 	return nil
 }
 
+// printReceipt prints `<id> <outcome>[ session <sid>][: detail]`, the
+// detail made printable, or the receipt as JSON.
 func (a *app) printReceipt(r proto.Receipt, asJSON bool) error {
 	if asJSON {
 		return writeJSON(a.stdout, r)
@@ -165,6 +172,7 @@ func (a *app) readText() (string, error) {
 
 var choiceRE = regexp.MustCompile(`^[0-9]{1,2}$`)
 
+// newInputCmds returns send, answer, interrupt, keys and seen.
 func newInputCmds(a *app) []*cobra.Command {
 	var sendF commandFlags
 	var steer bool

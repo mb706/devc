@@ -3,8 +3,9 @@
 // events continuously, reconciles lost sessions, runs the housekeeping the
 // banking timer used to run, and serves a local JSON-RPC API with event
 // streams on <runtime>/daemon.sock. Phase 1 keeps working without it: the
-// daemon only adds, and holds nothing that cannot be rebuilt from the
-// journals, the engine and the configuration.
+// daemon only adds. What it must keep is in files (the journals, its
+// receipts and request logs); what it knows of boxes comes from the
+// engine and the configuration.
 //
 // Security rules: everything a box sends is hostile input (README rule 2).
 // The agent socket lies in a box-writable directory: it is opened without
@@ -26,6 +27,18 @@
 // Services (services.go, internal/svclogin) hold credentials that never
 // enter a box: a box's request is checked on its raw bytes and against the
 // service's rules before the daemon forwards it with the credential added.
+//
+// Files: daemon.go holds start-up, the configuration, the box watch, the
+// ingestion, reconciliation and housekeeping loops; api.go the local API
+// and client.go its client; hub.go the journal follower and subscriptions;
+// channel.go, socket.go and muxguard.go the box channel; commands.go,
+// receipts.go and adapter.go commands into sessions; requests.go requests
+// from boxes; turns.go banks after turns; terminal.go and web.go the web
+// app's methods; relay.go the relay service and the dispatch of box
+// streams; gate.go the SSH gate; secrets.go secrets on demand; github.go
+// the GitHub facade and tokens; netproxy.go and router.go the network
+// services; services.go service logins; hublink.go the links to hubs and
+// archive.go the archive uploads.
 package daemon
 
 import (
@@ -323,6 +336,8 @@ func (d *Daemon) goSafe(what string, fn func()) {
 	}()
 }
 
+// current returns the configuration in use and what was built from it.
+// A reload replaces it whole; callers keep the one they took.
 func (d *Daemon) current() *env {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -486,6 +501,7 @@ func (d *Daemon) reload(force bool) error {
 	return nil
 }
 
+// every runs fn now and then every interval until the daemon stops.
 func (d *Daemon) every(interval time.Duration, fn func()) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -514,6 +530,9 @@ func (d *Daemon) watchLoop() {
 	})
 }
 
+// watchOnce lists the containers labelled as boxes and brings the box
+// table and the workers in step with them. Besides the watch loop, a
+// start command calls it to see a box the CLI has just started.
 func (d *Daemon) watchOnce(ctx context.Context) error {
 	e := d.current()
 	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -591,6 +610,7 @@ func (d *Daemon) forgetRoute(ref names.ProjectRef) {
 	}
 }
 
+// worker returns the worker of ref's box, nil when the box does not run.
 func (d *Daemon) worker(ref names.ProjectRef) *boxWorker {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -600,6 +620,8 @@ func (d *Daemon) worker(ref names.ProjectRef) *boxWorker {
 	return nil
 }
 
+// boxState is what the last box-watch pass saw of ref's box: running,
+// stopped, absent, or "" for a project it has not seen.
 func (d *Daemon) boxState(ref names.ProjectRef) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -615,9 +637,10 @@ func (d *Daemon) journalLoop() {
 	d.every(d.o.JournalPoll, func() { d.hub.poll(nil) })
 }
 
-// ingestLoop polls a box's spool: every 250 ms while events arrive, every
-// 2 s when idle, and at once when the box sends a hint. A run is skipped
-// when no spool file changed since the last one.
+// ingestLoop polls a box's spool: every 250 ms for five seconds after a
+// run that brought events and while a run left more, every 2 s otherwise,
+// and at once when the box sends a hint. A run is skipped when no spool
+// file changed since the last one.
 func (w *boxWorker) ingestLoop(ctx context.Context) {
 	var last map[string]int64
 	more := false
@@ -660,6 +683,8 @@ func (w *boxWorker) ingestLoop(ctx context.Context) {
 	}
 }
 
+// sameSnapshot reports whether two spool snapshots (names and sizes) are
+// equal; a missing previous one is never equal.
 func sameSnapshot(a, b map[string]int64) bool {
 	if b == nil || len(a) != len(b) {
 		return false
@@ -725,6 +750,9 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
+// noteInvalid keeps a project's ingestion problems (invalid spool lines, a
+// warning text) for the next client that lists its sessions, which prints
+// them as the CLI does without a daemon.
 func (d *Daemon) noteInvalid(ref names.ProjectRef, invalid int, text string) {
 	if invalid == 0 && text == "" {
 		return
@@ -835,9 +863,8 @@ func (d *Daemon) reconcileLoop() {
 	}
 }
 
-// housekeepingLoop runs the banking timer's work every interval: bank every
-// running box and commit every realm's context (work order C08 job 4), as
-// separate devc processes so that a failure there cannot touch the daemon.
+// housekeepingLoop runs housekeep every interval, the first time one
+// interval after the start.
 func (d *Daemon) housekeepingLoop() {
 	t := time.NewTicker(d.o.HousekeepingInterval)
 	defer t.Stop()
@@ -851,6 +878,10 @@ func (d *Daemon) housekeepingLoop() {
 	}
 }
 
+// housekeep removes old receipts, expires pending requests and runs the
+// banking timer's work (work order C08 job 4): bank every running box and
+// commit every realm's context, as separate devc processes, one after
+// another, so that a failure or a hang there cannot touch the daemon.
 func (d *Daemon) housekeep(ctx context.Context) {
 	if d.cmd != nil {
 		d.cmd.prune()
@@ -870,7 +901,10 @@ func (d *Daemon) housekeep(ctx context.Context) {
 	}
 }
 
-// serveAPI accepts clients on the daemon socket.
+// serveAPI accepts clients on the daemon socket, at most maxAPIConns at
+// once (one more is closed at once). Each connection serves its requests
+// one at a time, in order, with handler errors sent in full: the socket's
+// mode makes the daemon's own user the only client.
 func (d *Daemon) serveAPI(ln *net.UnixListener) {
 	sem := make(chan struct{}, maxAPIConns)
 	handlers := d.handlers()

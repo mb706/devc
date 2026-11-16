@@ -1,3 +1,6 @@
+// This file implements the terminal streams the daemon serves to the web
+// app.
+
 package daemon
 
 // Terminal streams (work order C12 section 3): terminal.open runs the
@@ -56,12 +59,15 @@ const (
 // xterm-256color with 24-bit colour.
 var termEnv = []string{"TERM=xterm-256color", "COLORTERM=truecolor", "TERMINFO_DIRS=" + tmux.TerminfoDirs}
 
+// termManager holds the open terminal streams by ID.
 type termManager struct {
 	d       *Daemon
 	mu      sync.Mutex
 	streams map[string]*termStream
 }
 
+// termStream is one terminal: the tmux client running in the box on the
+// daemon's pseudo-terminal ptmx, and the connection that opened it.
 type termStream struct {
 	m       *termManager
 	id      string
@@ -86,6 +92,8 @@ func newTermManager(d *Daemon) *termManager {
 	return &termManager{d: d, streams: map[string]*termStream{}}
 }
 
+// get returns the stream with the ID when connection c opened it: another
+// connection cannot act on it.
 func (m *termManager) get(id string, c *proto.Conn) *termStream {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -108,6 +116,9 @@ func (m *termManager) count(c *proto.Conn) (mine, all int) {
 	return mine, len(m.streams)
 }
 
+// open serves terminal.open: a live session's window in a running box,
+// observed or (when config.toml allows) controlled, within the stream
+// limits.
 func (m *termManager) open(ctx context.Context, c *proto.Conn, params json.RawMessage) (any, error) {
 	d := m.d
 	var p proto.TerminalOpenParams
@@ -317,6 +328,8 @@ func (st *termStream) end(reason string) {
 	})
 }
 
+// input serves terminal.input: bytes for a control-mode stream of this
+// connection, written to its pseudo-terminal.
 func (m *termManager) input(_ context.Context, c *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.TerminalInputParams
 	if err := proto.DecodeParams(params, &p); err != nil {
@@ -340,6 +353,7 @@ func (m *termManager) input(_ context.Context, c *proto.Conn, params json.RawMes
 	return struct{}{}, nil
 }
 
+// close serves terminal.close for a stream of this connection.
 func (m *termManager) close(_ context.Context, c *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.TerminalStreamParams
 	if err := proto.DecodeParams(params, &p); err != nil {

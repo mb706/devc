@@ -4,7 +4,7 @@ title = "The command line"
 summary = "How the single binary decides what it is (the CLI, git's remote helper, a relay hook or a harness shim), how the command tree is assembled, and the conventions every command follows for arguments, output, errors and exit statuses."
 order = 14
 packages = ["cmd/devc", "internal/version"]
-files = ["internal/cli/root.go", "internal/cli/commands.go"]
+files = ["internal/cli/root.go", "internal/cli/commands.go", "internal/cli/inbox.go", "internal/cli/inboxgit.go"]
 key = [
   "cmd/devc.route",
   "cmd/devc.dispatch",

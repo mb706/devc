@@ -1,3 +1,6 @@
+// This file implements the journal follower (type hub, not the hub server):
+// the session views kept from the journals, and event subscriptions.
+
 package daemon
 
 import (
@@ -59,6 +62,8 @@ func (k sessionKey) String() string { return proto.SessionKey(k.ref.String(), k.
 
 func keyOf(ref names.ProjectRef, id string) sessionKey { return sessionKey{ref: ref, id: id} }
 
+// sessionEntry is the follower's state of one journal: the view folded from
+// its first offset bytes.
 type sessionEntry struct {
 	ref    names.ProjectRef
 	file   string
@@ -68,11 +73,17 @@ type sessionEntry struct {
 	ended  bool
 }
 
+// dirState is when a project's journal directory last changed and was
+// last listed.
 type dirState struct {
 	mtime  time.Time
 	listed time.Time
 }
 
+// hub is the journal follower (not the hub server). mu guards everything
+// but the byte counter and is held while journals are read and their
+// events queued, so a subscription registered under it misses no event
+// and gets none twice.
 type hub struct {
 	mu       sync.Mutex
 	p        *paths.Paths
@@ -110,6 +121,7 @@ func (h *hub) changed() <-chan struct{} {
 	return h.changedCh
 }
 
+// signalLocked wakes everyone waiting on changed. The caller holds h.mu.
 func (h *hub) signalLocked() {
 	close(h.changedCh)
 	h.changedCh = make(chan struct{})
@@ -495,6 +507,9 @@ type replayItem struct {
 	cursor bool
 }
 
+// subscriber is one events.subscribe: its filter, its queue of batches,
+// and for each session the last seq it sent (sent), which keeps the
+// replay and the live stream from repeating each other.
 type subscriber struct {
 	h    *hub
 	conn *proto.Conn
@@ -511,6 +526,7 @@ type subscriber struct {
 	p      *paths.Paths
 }
 
+// wants reports whether a session passes the subscription's filter.
 func (s *subscriber) wants(k sessionKey) bool {
 	if !s.f.match(k.ref) {
 		return false
@@ -545,6 +561,8 @@ func (h *hub) enqueueLocked(ref names.ProjectRef, id string, evs []proto.Event, 
 	}
 }
 
+// dropLocked disconnects a subscriber; the client resumes from its cursor.
+// The caller holds h.mu.
 func (h *hub) dropLocked(s *subscriber, why string) {
 	h.log.Info("disconnecting a subscriber that fell behind", "why", why)
 	delete(h.subs, s)
@@ -678,6 +696,8 @@ func (s *subscriber) done(b batch) {
 	s.h.queued.Add(-b.size)
 }
 
+// run is the subscriber's goroutine: the replay, caught_up, then live
+// batches and heartbeats until the connection closes.
 func (s *subscriber) run() {
 	defer s.h.unsubscribe(s)
 	defer func() {
@@ -713,6 +733,8 @@ func (s *subscriber) run() {
 	}
 }
 
+// send writes a batch: the events of a session not sent yet, in order, or
+// a missed notification.
 func (s *subscriber) send(b batch) error {
 	if b.missed {
 		s.sent[b.key] = 0

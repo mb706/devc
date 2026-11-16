@@ -12,7 +12,15 @@
 // bytes and events so a box cannot make the host spin. The report of live
 // sessions is parsed strictly and validated before it changes anything.
 // Ingestion holds a per-box lock, so concurrent devc commands never assign
-// a sequence number twice.
+// a sequence number twice. Session IDs are chosen in the box, so the first
+// project to record one owns it, and a spool file of another project's
+// session is refused.
+//
+// Files: ingest.go copies the spool into the journals (Store, Ingest, the
+// host's own events); owner.go records which project owns a session ID;
+// reconcile.go parses the box's report of live sessions and ends the ones
+// it no longer runs; journal.go reads and appends journals and derives a
+// session's view.
 package session
 
 import (
@@ -76,6 +84,8 @@ type journalState struct {
 	mark    int64
 }
 
+// loadJournalState reads a whole journal for what ingestion needs: the
+// last seq, whether the session ended, and the last spool offset recorded.
 func loadJournalState(file string) (journalState, error) {
 	st := journalState{mark: -1}
 	if _, err := os.Stat(file); err == nil {
@@ -307,7 +317,9 @@ func ReadSummary(p *paths.Paths, ref names.ProjectRef, session string) (Summary,
 
 // endedLongAgo reports cheaply whether a journal belongs to a session that
 // ended before cutoff: its file was last written before cutoff and its last
-// line is session.end. Ingestion never appends after an end.
+// line is session.end. Ingestion never appends after an end; a host event
+// that follows it (seen) makes the journal count as recent, which costs a
+// read, never a wrong answer.
 func endedLongAgo(file string, cutoff time.Time) bool {
 	f, err := os.Open(file)
 	if err != nil {

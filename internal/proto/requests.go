@@ -1,3 +1,6 @@
+// This file defines requests: kinds, risk classes, statuses, decision
+// origins and the parameters of the request methods.
+
 package proto
 
 // Requests (work order C10a section 2): small structured messages from a

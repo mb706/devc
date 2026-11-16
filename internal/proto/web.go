@@ -1,3 +1,6 @@
+// This file defines the methods the web app needs from a machine: projects,
+// changes and terminal streams.
+
 package proto
 
 // Methods the web app needs beyond C11a's API (work order C12 section 3):

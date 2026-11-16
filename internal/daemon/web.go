@@ -1,3 +1,6 @@
+// This file implements projects.list and changes.get, the read-only methods
+// of the web app.
+
 package daemon
 
 // projects.list and changes.get (work order C12 section 3), on the hub's
@@ -105,6 +108,9 @@ func (d *Daemon) readWorktrees(ctx context.Context, e *env, ref names.ProjectRef
 	return gs.WorktreeList(ctx, gs.Project(r, true))
 }
 
+// apiProjects serves projects.list: every matching configured project with
+// its box state, harnesses, session counts and worktrees; at most
+// projectWorkers boxes are asked for their worktrees at once.
 func (d *Daemon) apiProjects(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.ProjectsListParams
 	if err := proto.DecodeParams(params, &p); err != nil {
@@ -201,6 +207,8 @@ func (d *Daemon) projectView(ctx context.Context, e *env, ref names.ProjectRef) 
 	return v
 }
 
+// apiChanges serves changes.get: the changes of a session's worktree,
+// computed on the relay with host git, never in the project directory.
 func (d *Daemon) apiChanges(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.ChangesParams
 	if err := proto.DecodeParams(params, &p); err != nil {

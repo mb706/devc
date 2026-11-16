@@ -1,3 +1,5 @@
+// This file implements the frame inspector between a box's socket and yamux.
+
 package daemon
 
 // The transport guard of the box channel (findings C1-03 and C1-04). yamux
@@ -90,6 +92,7 @@ type muxGuard struct {
 	err     error
 }
 
+// newMuxGuard wraps the connection to a box's agent.
 func newMuxGuard(conn io.ReadWriteCloser) *muxGuard {
 	return &muxGuard{conn: conn, now: time.Now, streams: map[uint32]*muxStream{}}
 }
@@ -101,6 +104,8 @@ func (g *muxGuard) violation() error {
 	return g.err
 }
 
+// Read passes what the box sent to yamux after inspecting it; a violation
+// closes the connection and fails the read.
 func (g *muxGuard) Read(b []byte) (int, error) {
 	n, err := g.conn.Read(b)
 	if n > 0 {
@@ -112,6 +117,8 @@ func (g *muxGuard) Read(b []byte) (int, error) {
 	return n, err
 }
 
+// Write inspects what the daemon sends (to follow streams it opens and
+// closes) before passing it on.
 func (g *muxGuard) Write(b []byte) (int, error) {
 	if verr := g.inspect(&g.out, b, false); verr != nil {
 		_ = g.conn.Close()

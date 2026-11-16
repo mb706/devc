@@ -1,3 +1,6 @@
+// This file implements the in-box git commands the host runs through podman
+// exec: snapshot, worktree, repo-state and data-links.
+
 package cli
 
 import (

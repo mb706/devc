@@ -1,8 +1,15 @@
+// This file defines the methods and types of the box channel and the
+// daemon's API: hello, live sessions, input to panes, session and box views,
+// cursors, commands and receipts.
+
 package proto
 
-// Types exchanged by the daemon, its clients, the box channel and (later)
-// the hub: session and box views, cursors, commands and receipts, and the
-// parameters and results of the methods of work order C08.
+// Types exchanged by the daemon, its clients, the box channel and the
+// hub: session and box views, cursors, commands and receipts, and the
+// parameters and results of the methods (work orders C08 and C09). The
+// box writes the replies to box.* and the parameters of host.*; the daemon
+// decodes them strictly and validates them before use (HelloReply.Validate,
+// session.ParseLive, the daemon's range check of BoxClients).
 
 import (
 	"encoding/json"
@@ -277,7 +284,7 @@ const (
 	ChannelNone       = "none"       // the box does not run
 	ChannelConnecting = "connecting" // trying to connect
 	ChannelConnected  = "connected"
-	ChannelNoAgent    = "no-agent" // the box has no agent socket (started before C08)
+	ChannelNoAgent    = "no-agent" // no agent socket: the box is starting, removed it, or is older than the agent
 	ChannelRefused    = "refused"  // the endpoint or the helper failed a check
 	ChannelError      = "error"
 )

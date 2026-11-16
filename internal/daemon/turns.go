@@ -1,3 +1,5 @@
+// This file implements banking after turns.
+
 package daemon
 
 // Banking after turns (work order C10a section 1): when a session goes
@@ -20,6 +22,7 @@ import (
 // box.
 const DefaultTurnBank = 30 * time.Second
 
+// turnBanker schedules the banks after turns, per box.
 type turnBanker struct {
 	d     *Daemon
 	every time.Duration
@@ -27,6 +30,8 @@ type turnBanker struct {
 	boxes map[names.ProjectRef]*turnState
 }
 
+// turnState is one box's bank schedule: when the last bank started, the
+// timer of the next, whether one runs, and whether a turn ended meanwhile.
 type turnState struct {
 	last    time.Time
 	timer   *time.Timer
@@ -57,6 +62,8 @@ func (b *turnBanker) turnEnded(ref names.ProjectRef) {
 	}
 }
 
+// scheduleLocked starts the timer of the next bank, an interval after the
+// last one (at once if that has passed). The caller holds b.mu.
 func (b *turnBanker) scheduleLocked(ref names.ProjectRef, st *turnState) {
 	wait := time.Until(st.last.Add(b.every))
 	if wait < 0 {
@@ -65,6 +72,8 @@ func (b *turnBanker) scheduleLocked(ref names.ProjectRef, st *turnState) {
 	st.timer = time.AfterFunc(wait, func() { b.run(ref) })
 }
 
+// run banks ref's box with `devc bank <ref> --quiet` when it runs and has
+// a relay, and schedules one more bank if a turn ended meanwhile.
 func (b *turnBanker) run(ref names.ProjectRef) {
 	b.mu.Lock()
 	st := b.boxes[ref]
