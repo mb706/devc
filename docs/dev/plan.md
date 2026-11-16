@@ -40,6 +40,8 @@ internal/
   archive/           archive names, hub wire types, sealed secrets, credential-file exclusion (C17)
   fleet/             machine side of the archive: uploads, restore, export, secrets between machines (C17)
   svclogin/          service logins: request checks, rules, credential-adding reverse proxy, cookie jars, login container (C18)
+  gui/               desktop sidecar: image, arguments, cookie and password, start, stop, status (C19)
+  display/           X11 and VNC wire formats: Xauthority files, connection setup, VNC password (C19)
   daemon/            machine daemon: API, box channels, relay service, gate, forwards   (phase 2)
   hub/               hub server: listeners, projections, inbox, ntfy, web app           (phase 2)
   selinux/ apparmor/ host integration helpers

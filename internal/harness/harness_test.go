@@ -713,3 +713,20 @@ func TestServicesInDescription(t *testing.T) {
 		t.Error("services described without any")
 	}
 }
+
+// TestGUIInDescription: how to let the user watch a browser, and the
+// desktop's display (work order C19).
+func TestGUIInDescription(t *testing.T) {
+	e := setup(t, nil)
+	r := e.resolved(t, "demo/hello")
+	text, err := Instructions(e.cfg, r, e.manifest(t, "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"--remote-debugging-port=9222 --remote-debugging-address=127.0.0.1", "--no-sandbox", "devc browser",
+		"/etc/devc/display.env", "`DISPLAY`"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the description lacks %q:\n%s", want, text)
+		}
+	}
+}

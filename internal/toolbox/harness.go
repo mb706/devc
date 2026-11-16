@@ -243,9 +243,50 @@ func (t *Toolbox) AuxSecurityOpts(selinuxDisable bool) []string {
 // EnsureInstallerImage builds localhost/devc-aux/installer from the
 // embedded Containerfile when it is missing or was built from another one.
 func EnsureInstallerImage(ctx context.Context, eng engine.Engine, contextDir string, out io.Writer) error {
-	sum := sha256.Sum256(assets.InstallerContainerfile)
-	hash := hex.EncodeToString(sum[:])
-	if ii, err := eng.ImageInspect(ctx, InstallerImage); err == nil && ii.Labels[labelAuxHash] == hash {
+	return EnsureAuxImage(ctx, eng, AuxImage{Ref: InstallerImage, Name: "installer",
+		Files: map[string][]byte{"Containerfile": assets.InstallerContainerfile}}, contextDir, false, out)
+}
+
+// AuxImage is an auxiliary image built from files embedded in devc.
+type AuxImage struct {
+	// Ref is the image reference (localhost/devc-aux/<name>:latest), Name
+	// the value of its devc.aux label.
+	Ref, Name string
+	// Files are the build context; "Containerfile" must be among them.
+	Files map[string][]byte
+}
+
+// Hash identifies the build files: the SHA-256 of the Containerfile alone
+// when it is the only file (as images built before C19 were labelled),
+// otherwise of every file's name, length and content in name order.
+func (a AuxImage) Hash() string {
+	if len(a.Files) == 1 {
+		sum := sha256.Sum256(a.Files["Containerfile"])
+		return hex.EncodeToString(sum[:])
+	}
+	h := sha256.New()
+	names := make([]string, 0, len(a.Files))
+	for n := range a.Files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		fmt.Fprintf(h, "%s\x00%d\x00", n, len(a.Files[n]))
+		h.Write(a.Files[n])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// EnsureAuxImage builds img when it is missing or was built from other
+// files. With rebuild it always builds, without the layer cache and with a
+// fresh base image (to pick up security updates). The context directory is
+// devc's own cache; it holds exactly the embedded files.
+func EnsureAuxImage(ctx context.Context, eng engine.Engine, img AuxImage, contextDir string, rebuild bool, out io.Writer) error {
+	if _, ok := img.Files["Containerfile"]; !ok {
+		return fmt.Errorf("auxiliary image %s has no Containerfile", img.Ref)
+	}
+	hash := img.Hash()
+	if ii, err := eng.ImageInspect(ctx, img.Ref); err == nil && ii.Labels[labelAuxHash] == hash && !rebuild {
 		return nil
 	} else if err != nil && !errors.Is(err, engine.ErrNoSuchImage) {
 		return err
@@ -253,16 +294,21 @@ func EnsureInstallerImage(ctx context.Context, eng engine.Engine, contextDir str
 	if err := os.MkdirAll(contextDir, 0o700); err != nil {
 		return err
 	}
-	file := filepath.Join(contextDir, "Containerfile")
-	if err := writeAtomic(file, assets.InstallerContainerfile, 0o644); err != nil {
-		return err
+	for name, data := range img.Files {
+		if name != filepath.Base(name) || strings.HasPrefix(name, ".") {
+			return fmt.Errorf("auxiliary image %s: bad file name %q", img.Ref, name)
+		}
+		if err := writeAtomic(filepath.Join(contextDir, name), data, 0o644); err != nil {
+			return err
+		}
 	}
 	if out != nil {
-		fmt.Fprintf(out, "devc: building the auxiliary image %s\n", InstallerImage)
+		fmt.Fprintf(out, "devc: building the auxiliary image %s\n", img.Ref)
 	}
 	return eng.Build(ctx, engine.BuildOptions{
-		ContextDir: contextDir, File: file, Tag: InstallerImage,
-		Labels: map[string]string{LabelRole: RoleAux, labelAux: "installer", labelAuxHash: hash},
+		ContextDir: contextDir, File: filepath.Join(contextDir, "Containerfile"), Tag: img.Ref,
+		Labels:  map[string]string{LabelRole: RoleAux, labelAux: img.Name, labelAuxHash: hash},
+		NoCache: rebuild, Pull: rebuild,
 	}, out)
 }
 

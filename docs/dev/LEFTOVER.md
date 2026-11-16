@@ -435,3 +435,17 @@ Other checks and deferred work:
 | **SELinux**: the login container bind-mounts a scratch directory below `local/tmp` like the harness logins (no relabel; `label=disable` only in mode `disable`); not run on an SELinux host | a run on Fedora |
 | **Existing boxes**: a box started before C18 has no services in its capability record and an agent without `box.services` | a restart per box that gets a service |
 | **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/svclogin/ ./internal/daemon/ ./internal/boxside/` in the toolchain image with cgo |
+
+### From C19
+
+| Item | Needs |
+|---|---|
+| **Android emulator** (work order C19, out of scope): the emulator needs `/dev/kvm`, which this host (a KVM guest without nested virtualisation) does not have | a host with KVM; a separate work order |
+| **No real browser was watched.** The tests drive the display with devc's own X handshake (`devc box xcheck`), xdpyinfo, xclock and xeyes (by hand), and `devc browser` with a fake DevTools endpoint; Chromium in a box (headed on the display, and `chrome://inspect` on the host against it) was not tried, nor noVNC in a real browser | Chromium in a test image; a look at the viewer in a browser and on a phone |
+| **SELinux**: the sidecar repeats the box's `label=` options (`level:` or `disable`) and joins its namespaces; whether an SELinux host lets a second container with the same MCS level join the box's network and user namespaces was not run | a run on Fedora |
+| **pasta networking**: the sidecar joins whatever namespace the box has; tested with slirp4netns only | a run on a pasta host |
+| **The image is large** (about 470 MB): Debian's TigerVNC server pulls in Mesa and LLVM through libgl1, websockify needs NumPy, and the server's scripts need Perl | a slimmer base or a statically built X server, if it matters |
+| **Stale sidecars** of a box stopped outside devc keep running (in the old, now unconnected network namespace) until `devc gui down`, `devc down`, `devc rm` or the next start of the box removes them; `devc gui status` reports them as stale | nothing (documented), or a daemon sweep |
+| **`devc run` does not get `DISPLAY`** (only agent sessions through `devc box launch` and the login shell of `devc sh` read `/etc/devc/display.env`); scripts can source the file | nothing, or host-side `--env` for `devc run` while a desktop runs |
+| **Clipboard**: the viewer's clipboard reaches programs in the box and back (TigerVNC's defaults); documented as visible to the box, not switched off | `-SendCutText=0 -AcceptCutText=0` if it should be |
+| **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/gui/ ./internal/boxside/` in the toolchain image with cgo |

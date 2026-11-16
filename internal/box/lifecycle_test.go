@@ -1045,6 +1045,125 @@ func TestStopRefused(t *testing.T) {
 	}
 }
 
+// depRecorder is a Dependent that notes, per call, whether the box ran.
+type depRecorder struct {
+	calls []string
+	eng   *engine.Fake
+	err   error
+}
+
+func (d *depRecorder) RemoveDependent(ctx context.Context, ref names.ProjectRef) error {
+	ci, err := d.eng.Inspect(ctx, names.BoxName(ref))
+	state := "absent"
+	if err == nil {
+		state = ci.State.Status
+	}
+	d.calls = append(d.calls, state)
+	return d.err
+}
+
+// TestDependents: a container that joined the box's namespaces (the
+// desktop sidecar, work order C19) is removed before the box stops, is
+// removed, is recreated or starts; a failure stops the operation.
+func TestDependents(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	d := &depRecorder{eng: r.eng}
+	r.m.Dependents = []Dependent{d}
+	steps := []struct {
+		name string
+		op   func() error
+		want []string
+	}{
+		{"create", func() error { return r.m.Up(ctx, hello, UpOptions{}) }, []string{"absent"}},
+		{"up running", func() error { return r.m.Up(ctx, hello, UpOptions{}) }, nil},
+		{"down", func() error { return r.m.Down(ctx, hello) }, []string{"running"}},
+		{"down stopped", func() error { return r.m.Down(ctx, hello) }, []string{"exited"}},
+		{"start", func() error { return r.m.Up(ctx, hello, UpOptions{}) }, []string{"exited"}},
+		{"recreate", func() error { return r.m.Up(ctx, hello, UpOptions{Recreate: true}) }, []string{"running", "absent"}},
+		{"rm", func() error { return r.m.Remove(ctx, hello, false) }, []string{"running"}},
+		{"rm absent", func() error { return r.m.Remove(ctx, hello, false) }, []string{"absent"}},
+	}
+	for _, s := range steps {
+		d.calls = nil
+		if err := s.op(); err != nil {
+			t.Fatalf("%s: %v\n%s", s.name, err, r.out)
+		}
+		if !slices.Equal(d.calls, s.want) {
+			t.Errorf("%s: dependent removed while the box was %q, want %q", s.name, d.calls, s.want)
+		}
+	}
+	// A box stopped outside devc: rm removes the dependent before the box.
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.eng.Stop(ctx, "devc-demo-hello", 0)
+	d.calls, r.eng.Log = nil, nil
+	if err := r.m.Remove(ctx, hello, false); err != nil || !slices.Equal(d.calls, []string{"exited"}) || !slices.Equal(r.eng.Log, []string{"rm devc-demo-hello"}) {
+		t.Errorf("rm of a stopped box: %v %q %v", err, d.calls, r.eng.Log)
+	}
+	// A failure keeps the box as it is.
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	d.err = errors.New("sidecar stuck")
+	for name, op := range map[string]func() error{
+		"down":     func() error { return r.m.Down(ctx, hello) },
+		"rm":       func() error { return r.m.Remove(ctx, hello, false) },
+		"recreate": func() error { return r.m.Up(ctx, hello, UpOptions{Recreate: true}) },
+	} {
+		r.eng.Log = nil
+		if err := op(); err == nil || !strings.Contains(err.Error(), "sidecar stuck") || len(r.eng.Log) != 0 {
+			t.Errorf("%s: %v, engine calls %v", name, err, r.eng.Log)
+		}
+	}
+	if ci := r.eng.Containers["devc-demo-hello"]; !ci.State.Running {
+		t.Error("the box stopped")
+	}
+}
+
+// TestWithRunningBoxAndCheckStart: the callback runs with the box lock held
+// on a running, ready box; CheckStart notices a restart, a lost readiness
+// marker and missing rules.
+func TestWithRunningBoxAndCheckStart(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	err := r.m.WithRunningBox(ctx, hello, func(ci *engine.ContainerInfo) error {
+		if !ci.State.Running || !r.m.isReady(hello) {
+			t.Errorf("box %+v", ci.State)
+		}
+		// The lock is held.
+		lctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		defer cancel()
+		if _, err := LockBox(lctx, r.m.Config.Paths, hello, 100*time.Millisecond, nil); err == nil {
+			t.Error("lock not held")
+		}
+		if err := r.m.CheckStart(ctx, hello, ci); err != nil {
+			t.Errorf("CheckStart: %v", err)
+		}
+		other := *ci
+		other.State.Pid++
+		if err := r.m.CheckStart(ctx, hello, &other); err == nil || !strings.Contains(err.Error(), "restarted") {
+			t.Errorf("restart: %v", err)
+		}
+		saved := r.rules
+		r.rules = ""
+		if err := r.m.CheckStart(ctx, hello, ci); err == nil {
+			t.Error("missing rules not noticed")
+		}
+		r.rules = saved
+		rt, _ := r.m.Config.Paths.BoxRuntimeDir(names.BoxID(hello))
+		_ = os.Remove(filepath.Join(rt, "ready"))
+		if err := r.m.CheckStart(ctx, hello, ci); err == nil || !strings.Contains(err.Error(), "ready") {
+			t.Errorf("readiness: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("%v\n%s", err, r.out)
+	}
+}
+
 // TestInternetLevel: the start sequence of level internet (spec 11):
 // create, init, rules installed from the host into the namespace the
 // engine reports, verification, start; then the canary. Every failure

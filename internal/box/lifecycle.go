@@ -76,6 +76,8 @@ type Manager struct {
 	StopHooks []StopHook
 	// StartHooks run once a box this command started is ready (data links).
 	StartHooks []StartHook
+	// Dependents are removed before the box stops, is removed or starts.
+	Dependents []Dependent
 	// Now is the clock for the root log.
 	Now func() time.Time
 	// Net installs and verifies the rules of level internet; nil uses
@@ -283,6 +285,9 @@ func (m *Manager) up(ctx context.Context, ref names.ProjectRef, o UpOptions) err
 				return err
 			}
 		}
+		if err := m.removeDependents(ctx, ref); err != nil {
+			return err
+		}
 		m.printf("devc: recreating %s\n", name)
 		if err := m.Engine.Remove(ctx, name); err != nil {
 			return err
@@ -302,6 +307,9 @@ func (m *Manager) up(ctx context.Context, ref names.ProjectRef, o UpOptions) err
 		// Not the start devc bound its rules to, or its namespace lacks
 		// them: stop it and start it properly.
 		m.printf("devc: %s is running without devc's network rules in force (%v); stopping it\n", name, netErr)
+		if err := m.removeDependents(ctx, ref); err != nil {
+			return err
+		}
 		if err := m.Engine.Stop(ctx, name, 10*time.Second); err != nil {
 			return fmt.Errorf("stopping %s: %w", name, err)
 		}
@@ -478,6 +486,10 @@ func (m *Manager) checkNetwork(ctx context.Context, pl *plan) error {
 // mount sources and mount points. It runs only when the box is about to
 // be created or started.
 func (m *Manager) publish(ctx context.Context, pl *plan) error {
+	// A sidecar of an earlier start would keep that start's namespace.
+	if err := m.removeDependents(ctx, pl.spec.Ref); err != nil {
+		return err
+	}
 	if err := writeEtc(m.Config.Paths, pl.resolved, m.Version, pl.spec.HomeMountPoints()); err != nil {
 		return fmt.Errorf("rendering %s: %w", paths.InBoxEtc, err)
 	}
@@ -704,14 +716,24 @@ func (m *Manager) Down(ctx context.Context, ref names.ProjectRef) error {
 	switch {
 	case ci == nil:
 		m.printf("devc: %s does not exist\n", name)
+		if err := m.removeDependents(ctx, ref); err != nil {
+			return err
+		}
 		m.afterStop(ctx, ref, false)
 		return m.cleanup(ctx, ref)
 	case !ci.State.Running:
 		m.printf("devc: %s is not running\n", name)
+		if err := m.removeDependents(ctx, ref); err != nil {
+			return err
+		}
 		m.afterStop(ctx, ref, false)
 		return m.cleanup(ctx, ref)
 	}
 	if err := m.beforeStop(ctx, ref, name); err != nil {
+		return err
+	}
+	// The sidecar goes first (work order C19).
+	if err := m.removeDependents(ctx, ref); err != nil {
 		return err
 	}
 	m.printf("devc: stopping %s\n", name)
@@ -720,6 +742,18 @@ func (m *Manager) Down(ctx context.Context, ref names.ProjectRef) error {
 	}
 	m.afterStop(ctx, ref, true)
 	return m.cleanup(ctx, ref)
+}
+
+// removeDependents removes the containers that joined the box's
+// namespaces; all are tried, and any failure stops the caller.
+func (m *Manager) removeDependents(ctx context.Context, ref names.ProjectRef) error {
+	var errs []error
+	for _, d := range m.Dependents {
+		if err := d.RemoveDependent(ctx, ref); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // beforeStop and afterStop run the stop hooks; failures are warnings,
@@ -786,11 +820,19 @@ func (m *Manager) Remove(ctx context.Context, ref names.ProjectRef, home bool) e
 	name := names.BoxName(ref)
 	if ci == nil {
 		m.printf("devc: %s does not exist\n", name)
+		if err := m.removeDependents(ctx, ref); err != nil {
+			return err
+		}
 	} else {
 		if ci.State.Running {
 			if err := m.beforeStop(ctx, ref, name); err != nil {
 				return err
 			}
+		}
+		// The sidecar goes first; the engine refuses to remove a box that
+		// another container depends on.
+		if err := m.removeDependents(ctx, ref); err != nil {
+			return err
 		}
 		m.printf("devc: removing %s\n", name)
 		if err := m.Engine.Remove(ctx, name); err != nil {

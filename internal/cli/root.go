@@ -193,6 +193,8 @@ func newRoot(a *app) *cobra.Command {
 		newSecretCmd(a),
 		newLoginCmd(a),
 		newForwardCmd(a),
+		newBrowserCmd(a),
+		newGUICmd(a),
 		newNetCmd(a),
 		newInitCmd(a),
 		newEditorCmd(a, "cursor", "Cursor"),

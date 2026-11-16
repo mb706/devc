@@ -80,6 +80,9 @@ func (a *app) boxEnv() (*boxEnv, error) {
 	// down and rm bank before they stop a box (work order C05 section 4).
 	e.bank = &bankHook{a: a, e: e}
 	m.StopHooks = append(m.StopHooks, &sessionHooks{a: a, e: e, repo: repo}, e.bank)
+	// The desktop sidecar shares the box's network namespace: it goes
+	// before the box stops, is removed or starts (work order C19).
+	m.Dependents = append(m.Dependents, a.guiManager(e))
 	return e, nil
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mb706/devc/internal/boxside"
+	x11 "github.com/mb706/devc/internal/display"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/proto"
@@ -120,8 +121,9 @@ func newBoxCmd(a *app) *cobra.Command {
 				configured = info.Shell
 			}
 			sh := boxside.ChooseShell("/", configured)
-			// A leading "-" in argv[0] makes it a login shell.
-			err := syscall.Exec(sh, []string{"-" + filepath.Base(sh)}, os.Environ())
+			// A leading "-" in argv[0] makes it a login shell; it gets the
+			// desktop's display while a sidecar runs (work order C19).
+			err := syscall.Exec(sh, []string{"-" + filepath.Base(sh)}, boxside.WithDisplay("/", os.Environ()))
 			return fmt.Errorf("starting %s: %w", sh, err)
 		},
 	}
@@ -347,8 +349,34 @@ func newBoxCmd(a *app) *cobra.Command {
 		},
 	}
 
+	var xNoAuth bool
+	xcheck := &cobra.Command{
+		Use:   "xcheck [--no-auth]",
+		Short: "Open the desktop's X display (DISPLAY, XAUTHORITY or /etc/devc/display.env) and say whether it accepts",
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := requireBox(a.getenv); err != nil {
+				return err
+			}
+			res, err := boxside.XCheck("/", os.Environ(), xNoAuth, 10*time.Second)
+			var refused *x11.RefusedError
+			switch {
+			case errors.As(err, &refused):
+				fmt.Fprintf(a.stdout, "refused: %s\n", refused.Reason)
+				return exitCode(1)
+			case err != nil:
+				return err
+			}
+			fmt.Fprintf(a.stdout, "accepted: display %s is %s release %d, screen %dx%d\n", res.Display, res.Setup.Vendor, res.Setup.Release,
+				res.Setup.Width, res.Setup.Height)
+			return nil
+		},
+	}
+	xcheck.Flags().BoolVar(&xNoAuth, "no-auth", false, "connect without the cookie")
+
 	subs := []*cobra.Command{initCmd, fixIdentity, shell, selftest, probe, launch, hook, pty, agentStatus, newBoxSecretCmd(a), newBoxGitCredentialCmd(a),
-		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker, dataWorker, archiveWorker, newBoxDialCmd(a), newBoxCanaryCmd(a), newStatxWorkerCmd(a), newBoxGateConnectCmd(a)}
+		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker, dataWorker, archiveWorker, newBoxDialCmd(a), newBoxCanaryCmd(a), newStatxWorkerCmd(a), newBoxGateConnectCmd(a),
+		xcheck}
 	return group("box", "Commands that run inside a box (internal)", true, append(subs, newBoxGitCmds(a)...)...)
 }
 

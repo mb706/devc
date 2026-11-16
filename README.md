@@ -90,7 +90,7 @@ runs them itself.
 
 | Document | Contents |
 |---|---|
-| [docs/guide.md](docs/guide.md) | Concepts, daily use, git workflow, data, network, logins and secrets, editors, and what is protected and what is not. |
+| [docs/guide.md](docs/guide.md) | Concepts, daily use, git workflow, data, network, watching a browser or desktop, logins and secrets, editors, and what is protected and what is not. |
 | [docs/host-setup.md](docs/host-setup.md) | Host requirements, the root commands for each, and known host problems. |
 | [examples/config/](examples/config/) | A complete example configuration with comments; `devc init --example` writes it. |
 | `devc <command> --help` | The reference for every command. |

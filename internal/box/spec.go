@@ -166,6 +166,15 @@ type StopHook interface {
 	AfterStop(ctx context.Context, ref names.ProjectRef, stopped bool) error
 }
 
+// Dependent is a container that joins a box's namespaces: the desktop
+// sidecar of work order C19. RemoveDependent is called with the box lock
+// held before devc stops, removes or starts the box. A dependent must never
+// outlive the start whose network namespace it joined, and the engine
+// refuses to remove a box that still has one. An error stops the operation.
+type Dependent interface {
+	RemoveDependent(ctx context.Context, ref names.ProjectRef) error
+}
+
 // StartHook runs after a box this command created or started has become
 // ready (with the box lock held). Its errors are reported as warnings.
 type StartHook interface {

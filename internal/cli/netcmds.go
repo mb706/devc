@@ -73,7 +73,7 @@ func newForwardCmd(a *app) *cobra.Command {
 			if hostPort < 0 || hostPort > 65535 {
 				return usageErrorf("--host-port must be between 1 and 65535")
 			}
-			return a.forward(cmd, args[1:], port, hostPort, bind, detach)
+			return a.forward(cmd, args[1:], port, hostPort, bind, detach, nil)
 		},
 	}
 	cmd.Flags().IntVar(&hostPort, "host-port", 0, "port on the host (default: the same as in the box, or a free one)")
@@ -83,7 +83,9 @@ func newForwardCmd(a *app) *cobra.Command {
 	return cmd
 }
 
-func (a *app) forward(cmd *cobra.Command, refArgs []string, port, hostPort int, bind string, detach bool) error {
+// forward runs `devc forward` (and `devc browser`); after, when set, is
+// called with the host address once the forward runs.
+func (a *app) forward(cmd *cobra.Command, refArgs []string, port, hostPort int, bind string, detach bool, after func(addr string)) error {
 	e, err := a.boxEnv()
 	if err != nil {
 		return err
@@ -123,7 +125,13 @@ func (a *app) forward(cmd *cobra.Command, refArgs []string, port, hostPort int, 
 	}
 	defer fwd.Box.Close()
 	if detach {
-		return a.detachForward(e, ref, name, ln.(*net.TCPListener), port, bind, addr.Port)
+		if err := a.detachForward(e, ref, name, ln.(*net.TCPListener), port, bind, addr.Port); err != nil {
+			return err
+		}
+		if after != nil {
+			after(net.JoinHostPort(urlHost(bind), strconv.Itoa(addr.Port)))
+		}
+		return nil
 	}
 	// A record, so that 'devc forward ls' shows the forward and the
 	// daemon's router serves the port while it runs.
@@ -139,6 +147,10 @@ func (a *app) forward(cmd *cobra.Command, refArgs []string, port, hostPort int, 
 	}
 	fmt.Fprintf(a.stdout, "forwarding %s to port %d in %s; press Ctrl-C to stop\n", addr, port, name)
 	a.printLocalURL(cmd.Context(), e, ref, port)
+	if after != nil {
+		// The forward must be serving for what after does (a probe).
+		go after(net.JoinHostPort(urlHost(bind), strconv.Itoa(addr.Port)))
+	}
 	sctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := fwd.Serve(sctx, ln); errors.Is(err, netpolicy.ErrBoxGone) {
@@ -177,29 +189,42 @@ func (a *app) forwarder(ctx context.Context, e *boxEnv, ref names.ProjectRef, po
 }
 
 // detachForward hands the listener to a background devc process (`devc
-// forward serve`, file descriptor 3) and records it.
+// forward serve`, file descriptor 3), records it and says so.
 func (a *app) detachForward(e *boxEnv, ref names.ProjectRef, name string, ln *net.TCPListener, port int, bind string, hostPort int) error {
+	rec, err := a.spawnForward(e, ref, name, ln, port, bind, hostPort)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.stdout, "forwarding %s to port %d in %s in the background (forward %s; stop it with 'devc forward stop %s')\n",
+		net.JoinHostPort(bind, strconv.Itoa(hostPort)), port, name, rec.ID, rec.ID)
+	a.printLocalURL(context.Background(), e, ref, port)
+	return nil
+}
+
+// spawnForward starts the background forward on ln (which it closes in
+// this process) and saves its record.
+func (a *app) spawnForward(e *boxEnv, ref names.ProjectRef, name string, ln *net.TCPListener, port int, bind string, hostPort int) (netpolicy.Record, error) {
 	defer ln.Close()
 	reg, err := a.forwardRegistry(e)
 	if err != nil {
-		return err
+		return netpolicy.Record{}, err
 	}
 	if err := os.MkdirAll(reg.Dir, 0o700); err != nil {
-		return err
+		return netpolicy.Record{}, err
 	}
 	exe, err := a.hostExecutable()
 	if err != nil {
-		return err
+		return netpolicy.Record{}, err
 	}
 	lf, err := ln.File()
 	if err != nil {
-		return err
+		return netpolicy.Record{}, err
 	}
 	defer lf.Close()
 	id := netpolicy.NewForwardID()
 	log, err := os.OpenFile(reg.LogFile(id), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return err
+		return netpolicy.Record{}, err
 	}
 	defer log.Close()
 	var args []string
@@ -218,20 +243,41 @@ func (a *app) detachForward(e *boxEnv, ref names.ProjectRef, name string, ln *ne
 	c.Stdout, c.Stderr = log, log
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := c.Start(); err != nil {
-		return fmt.Errorf("starting the background forward: %w", err)
+		return netpolicy.Record{}, fmt.Errorf("starting the background forward: %w", err)
 	}
 	rec := netpolicy.Record{ID: id, Ref: ref.String(), Container: name, BoxPort: port, Bind: bind, HostPort: hostPort,
 		PID: c.Process.Pid, Started: time.Now().UTC().Truncate(time.Second)}
 	if err := reg.Save(rec); err != nil {
 		_ = c.Process.Kill()
 		_, _ = c.Process.Wait()
-		return err
+		return netpolicy.Record{}, err
 	}
 	_ = c.Process.Release()
-	fmt.Fprintf(a.stdout, "forwarding %s to port %d in %s in the background (forward %s; stop it with 'devc forward stop %s')\n",
-		net.JoinHostPort(bind, strconv.Itoa(hostPort)), port, name, id, id)
-	a.printLocalURL(context.Background(), e, ref, port)
-	return nil
+	return rec, nil
+}
+
+// stopForward ends a detached forward (SIGTERM, SIGKILL after 5 s) and
+// removes its record.
+func stopForward(reg *netpolicy.Registry, rec netpolicy.Record) error {
+	if err := syscall.Kill(rec.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("stopping forward %s (pid %d): %w", rec.ID, rec.PID, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for netpolicy.ProcessAlive(rec) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if netpolicy.ProcessAlive(rec) {
+		_ = syscall.Kill(rec.PID, syscall.SIGKILL)
+	}
+	return reg.Remove(rec.ID, rec.PID)
+}
+
+// urlHost is the host part of a URL for a listener on bind.
+func urlHost(bind string) string {
+	if ip := net.ParseIP(bind); ip != nil && ip.IsUnspecified() {
+		return "127.0.0.1"
+	}
+	return bind
 }
 
 // LocalURL is the router's URL of a box port, or "" when the router is
@@ -372,17 +418,7 @@ func newForwardStopCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := syscall.Kill(rec.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-				return fmt.Errorf("stopping forward %s (pid %d): %w", rec.ID, rec.PID, err)
-			}
-			deadline := time.Now().Add(5 * time.Second)
-			for netpolicy.ProcessAlive(rec) && time.Now().Before(deadline) {
-				time.Sleep(50 * time.Millisecond)
-			}
-			if netpolicy.ProcessAlive(rec) {
-				_ = syscall.Kill(rec.PID, syscall.SIGKILL)
-			}
-			if err := reg.Remove(rec.ID, rec.PID); err != nil {
+			if err := stopForward(reg, rec); err != nil {
 				return err
 			}
 			fmt.Fprintf(a.stdout, "stopped forward %s (%s port %d)\n", rec.ID, rec.Ref, rec.BoxPort)

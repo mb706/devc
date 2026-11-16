@@ -255,17 +255,24 @@ func renameForTests(dir string) error {
 }
 
 // RemoveTestContainers force-removes the containers this run created:
-// exactly those labelled with its nonce.
+// exactly those labelled with its nonce. Auxiliary containers go first: the
+// engine refuses to remove a box that a desktop sidecar depends on.
 func RemoveTestContainers(t *testing.T) {
 	t.Helper()
-	out, err := exec.Command(Engine(), "ps", "-a", "--filter", "label="+LabelRun+"="+Nonce, "--format", "{{.ID}}").Output()
-	if err != nil {
-		t.Logf("listing test containers: %v", err)
-		return
-	}
-	for _, id := range strings.Fields(string(out)) {
-		if out, err := exec.Command(Engine(), "rm", "--force", "--time", "2", id).CombinedOutput(); err != nil {
-			t.Logf("removing container %s: %v: %s", id, err, out)
+	for _, filter := range []string{"label=devc.role=aux", ""} {
+		args := []string{"ps", "-a", "--filter", "label=" + LabelRun + "=" + Nonce, "--format", "{{.ID}}"}
+		if filter != "" {
+			args = append(args, "--filter", filter)
+		}
+		out, err := exec.Command(Engine(), args...).Output()
+		if err != nil {
+			t.Logf("listing test containers: %v", err)
+			return
+		}
+		for _, id := range strings.Fields(string(out)) {
+			if out, err := exec.Command(Engine(), "rm", "--force", "--time", "2", id).CombinedOutput(); err != nil {
+				t.Logf("removing container %s: %v: %s", id, err, out)
+			}
 		}
 	}
 }
@@ -310,11 +317,11 @@ func EnsureBaseImage(t *testing.T, e *Env) {
 }
 
 // Images. Every image devc builds in this run carries the run's label and
-// is removed at the end, except the installer image, which is a cache
-// shared with real use (as is the tmux build in DEVC_ITEST_CACHE). Pulled
+// is removed at the end, except the installer and desktop images, which are
+// caches shared with real use (as is the tmux build in DEVC_ITEST_CACHE). Pulled
 // images are removed only if they were absent when the run started.
 var (
-	KeptImages   = []string{"localhost/devc-aux/installer:latest"}
+	KeptImages   = []string{"localhost/devc-aux/installer:latest", "localhost/devc-aux/desktop:latest"}
 	PulledImages = []string{"docker.io/library/debian:bookworm-slim", "docker.io/library/debian:trixie-slim", "docker.io/library/alpine:3.24.4"}
 )
 

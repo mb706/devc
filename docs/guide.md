@@ -946,6 +946,104 @@ says how to allow them. The router listens on `router.listen` in
 name (a page that points its own name at 127.0.0.1 reaches nothing), and
 reaches the box the way a forward does.
 
+## Watching a browser or a desktop
+
+Sometimes you want to see a graphical program running in a box, usually a
+browser an agent drives. There are two ways, the cheaper first.
+
+**A browser's debugging port.** Chromium (and Chrome) can be watched and
+driven from another Chromium through its debugging port. Start it in the box
+with
+
+```sh
+chromium --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --no-sandbox
+```
+
+(`--headless` works too; `--no-sandbox` is needed because Chromium's own
+sandbox uses nested user namespaces, which a box blocks; the box is the
+sandbox). The sandbox description tells agents this. On the host:
+
+```sh
+devc browser demo/hello                 # forwards 127.0.0.1:9222; Ctrl-C ends it
+devc browser demo/hello --detach        # in the background (devc forward ls / stop)
+devc browser --port 9333 --host-port 19333
+```
+
+It forwards the port like `devc forward` and prints the DevTools endpoint
+(`http://127.0.0.1:9222/json/version`). In Chrome or Chromium on the host,
+open `chrome://inspect`, choose *Configure…* next to *Discover network
+targets*, add the printed address, and the box's pages appear under *Remote
+Target*, each with *inspect* for a live, interactive view. If no browser
+answers yet, devc says what to start. Whoever can connect to the forwarded
+port controls that browser completely; like every forward it listens on the
+host's loopback interface.
+
+**A desktop.** For a headed browser, or any other X program, devc runs a
+desktop next to the box:
+
+```sh
+devc gui up demo/hello                  # starts the box too; prints the viewer's address
+devc gui status demo/hello              # absent, running, stopped or stale
+devc gui down demo/hello
+devc gui up demo/hello --restart        # new cookie and password
+devc gui build [--rebuild]              # the image; built on first use anyway
+```
+
+`devc gui up` starts a second container, the *sidecar*, from the image
+`localhost/devc-aux/desktop` (Debian with TigerVNC's server, the
+matchbox window manager, noVNC and websockify; no browser, which runs in
+the box). The image is built on first use, which needs the network once.
+The sidecar joins the box's network namespace (and, so that the engine can
+set it up there, the box's user namespace) and nothing else: no mounts but
+a tmpfs, a read-only root, no capabilities, no new privileges and the box's
+seccomp profile. Nothing is added to the project's image. It runs:
+
+- an X display, `DISPLAY=127.0.0.1:1` (X on `127.0.0.1:6001`), which accepts
+  only clients with its cookie;
+- a VNC server on `127.0.0.1:5901`, which accepts only the password;
+- the noVNC web viewer on `127.0.0.1:6080`.
+
+All three listen on the loopback interface of the box's namespace only;
+devc forwards the viewer to the host (port 6080 on `127.0.0.1`, or a free
+port, `--host-port` and `--bind` as for `devc forward`) and prints its
+address with the password, for example
+`http://127.0.0.1:6080/vnc.html#autoconnect=1&resize=remote&password=Ab3dEf9h`.
+The password is after `#`, which the browser does not send anywhere; it is
+new at every start. `devc gui up` on a running desktop prints the same
+address again (and forwards the viewer again if that forward has ended). A
+VNC client works too: `devc forward 5901` and the same password.
+
+Programs in the box draw on the display: the cookie is in
+`/run/devc/display.xauth`, and while the desktop runs
+`/etc/devc/display.env` holds `DISPLAY` and `XAUTHORITY`. Agent sessions and
+`devc sh` started after `devc gui up` have both set; elsewhere use
+`set -a; . /etc/devc/display.env; set +a`. Windows open full-size.
+`/opt/devc/bin/devc box xcheck` in the box says whether the display
+accepts.
+
+**The cookie is readable in the box on purpose: anything in the box can
+drive and read the display**, watch what you type into the viewer and take
+what you paste into it. Do not type secrets into programs in the viewer that
+you would not give the box.
+
+The desktop shares the box's network namespace, so it shares the box's
+level: at `none` and `allowlist` it has no network either, at `internet` the
+box's rules apply to it. Joining leaves the box's start, its readiness and
+its rules alone; devc checks that after the sidecar has started and stops
+the sidecar otherwise. `devc down`, `devc rm`, a recreation and every start
+of the box remove the sidecar first (a sidecar must not outlive the box
+start whose namespace it joined); `devc gui status` calls a sidecar of an
+earlier start *stale*. The desktop fails to start if a process in the box
+already listens on port 6001, 5901 or 6080.
+
+**From a phone**, the viewer is reached like any forwarded port. Exposing it
+beyond the loopback interface needs the same care as the hub
+(see [docs/hub-deployment.md](hub-deployment.md)): the VNC password has
+only eight characters, and noVNC over plain HTTP is readable by anyone on
+the network. Put it behind an authenticating TLS proxy, or a private
+network such as `tailscale serve`, rather than using `--bind` with a LAN
+address.
+
 ## Logins and secrets
 
 **Harness logins** are stored per realm, so every box of a realm uses the same
@@ -1446,6 +1544,11 @@ everything that matters outside it, but it is not a virtual machine.
   on the host. Pages served at local URLs of different projects share the
   parent name `localhost`, so a box's page could set cookies for another
   box's local URL.
+- **The desktop** (`devc gui up`) is the box's: anything in the box can drive
+  and read its display and see what you type or paste into the viewer, and
+  the viewer's page comes from a container that shares the box's network, so
+  treat it like any page a box serves. A browser's debugging port (`devc browser`) gives whoever
+  connects to it full control of that browser.
 - **Services** act with your account for every request their rules allow,
   and an upstream endpoint that reflects request headers in its body can
   show the credential to the box: keep rules narrow (see

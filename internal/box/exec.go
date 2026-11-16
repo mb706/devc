@@ -34,19 +34,79 @@ func (m *Manager) EnsureRunning(ctx context.Context, ref names.ProjectRef) (stri
 		return "", err
 	}
 	defer unlock()
+	if _, err := m.ensureRunning(ctx, ref); err != nil {
+		return "", err
+	}
+	return names.BoxName(ref), nil
+}
+
+// ensureRunning is EnsureRunning with the box lock held; it returns the
+// running box's container.
+func (m *Manager) ensureRunning(ctx context.Context, ref names.ProjectRef) (*engine.ContainerInfo, error) {
 	ci, err := m.Find(ctx, ref)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	// For level internet the readiness marker is not enough: the host checks
 	// the binding and the rules (finding B1) and up restarts a box that
 	// fails.
 	if ci == nil || !ci.State.Running || !m.isReady(ref) || (m.needsRules(ref) && m.verifyRunning(ctx, ref, ci) != nil) {
 		if err := m.up(ctx, ref, UpOptions{}); err != nil {
-			return "", err
+			return nil, err
+		}
+		if ci, err = m.Find(ctx, ref); err != nil {
+			return nil, err
 		}
 	}
-	return names.BoxName(ref), nil
+	if ci == nil || !ci.State.Running {
+		return nil, fmt.Errorf("%s is not running", names.BoxName(ref))
+	}
+	return ci, nil
+}
+
+// WithRunningBox makes sure the box runs and is ready, as EnsureRunning
+// does, and calls fn with the box's container while the box lock is still
+// held, so no other devc command stops or restarts the box meanwhile (the
+// desktop sidecar, work order C19).
+func (m *Manager) WithRunningBox(ctx context.Context, ref names.ProjectRef, fn func(ci *engine.ContainerInfo) error) error {
+	if err := m.checkProblems(ref); err != nil {
+		return err
+	}
+	unlock, err := m.lockBox(ctx, ref)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	ci, err := m.ensureRunning(ctx, ref)
+	if err != nil {
+		return err
+	}
+	return fn(ci)
+}
+
+// CheckStart verifies, with the box lock held, that the box is still the
+// start before describes: the same container and main process, running,
+// ready, and for level internet still bound to its namespace with devc's
+// rules in it. The desktop sidecar uses it after joining the box's network
+// namespace, which must disturb neither (work order C19).
+func (m *Manager) CheckStart(ctx context.Context, ref names.ProjectRef, before *engine.ContainerInfo) error {
+	ci, err := m.Find(ctx, ref)
+	switch {
+	case err != nil:
+		return err
+	case ci == nil || !ci.State.Running:
+		return fmt.Errorf("%s is no longer running", names.BoxName(ref))
+	case ci.ID != before.ID || ci.State.Pid != before.State.Pid || !ci.State.Started.Equal(before.State.Started):
+		return fmt.Errorf("%s was restarted meanwhile", names.BoxName(ref))
+	case !m.isReady(ref):
+		return fmt.Errorf("%s is no longer ready", names.BoxName(ref))
+	}
+	if m.needsRules(ref) {
+		if err := m.verifyRunning(ctx, ref, ci); err != nil {
+			return fmt.Errorf("%s: %w", names.BoxName(ref), err)
+		}
+	}
+	return nil
 }
 
 // needsRules reports whether the project's box gets the rules of level

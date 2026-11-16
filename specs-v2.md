@@ -507,7 +507,7 @@ Checked by `devc doctor`; `--fix` prints or applies the root commands.
 4. **Later.**
    - *Second hub.*
    - *Service logins* (built in C18): for services that offer only a password login, or a token the agent should not hold, the machine daemon holds the credential and exposes an authenticated, filtered reverse proxy to granted boxes on a loopback port in the box, relayed over the box channel; cookie logins run in a throwaway container. See `docs/guide.md`, "Service logins".
-   - GUI sidecar.
+   - *GUI sidecar* (built in C19): `devc gui up` runs a desktop (Xvnc, noVNC) in a second container that joins only the box's network namespace, with the viewer forwarded to the host; `devc browser` forwards a browser's debugging port. See `docs/guide.md`, "Watching a browser or a desktop".
    - Not planned for now: VM-backed realms (waiting for a machine with KVM), and remote approval of high-risk requests (undecided; see `docs/dev/plan.md` section 5).
 
 ## 18. Repository and build

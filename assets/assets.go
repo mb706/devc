@@ -1,6 +1,6 @@
 // Package assets embeds the files shipped inside the devc binary: built-in
 // harness manifests and their templates, built-in skills, the base seccomp profile and the
-// Containerfile of the auxiliary installer image. It carries no security
+// build files of the auxiliary installer and desktop images. It carries no security
 // rules itself; the embedded files are trusted because they are part of the
 // binary.
 package assets
@@ -37,3 +37,13 @@ var SeccompBase []byte
 //
 //go:embed installer/Containerfile
 var InstallerContainerfile []byte
+
+// DesktopContainerfile and DesktopEntry build localhost/devc-aux/desktop,
+// the image of the desktop sidecar (work order C19); DesktopEntry is the
+// container's program, copied into the image as devc-desktop.
+//
+//go:embed desktop/Containerfile
+var DesktopContainerfile []byte
+
+//go:embed desktop/devc-desktop
+var DesktopEntry []byte

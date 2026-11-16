@@ -1,0 +1,29 @@
+# The auxiliary desktop image (work order C19): a virtual display with a
+# web viewer, run as a sidecar that shares one box's network namespace.
+# No browser inside; programs in the box draw on the display.
+#
+# Debian bookworm rather than trixie: trixie's apt verifies signatures with
+# sqv, which asks statx() for the birth time, and that hangs in some
+# fuse-overlayfs versions (see docs/dev/LEFTOVER.md).
+#
+# TigerVNC's standalone server is the X server and the VNC server in one
+# process; websockify serves noVNC and relays its WebSocket to the VNC
+# port; socat offers the X display on 127.0.0.1:6001 (Xvnc can only listen
+# for X on every address or none); matchbox-window-manager shows each
+# window full-size, which suits watching one browser. noVNC's web files are
+# taken from Debian's package without its dependencies (Node.js and the
+# OpenStack console proxy, which nothing here uses).
+FROM docker.io/library/debian:bookworm-slim
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      tigervnc-standalone-server websockify socat matchbox-window-manager \
+ && cd /tmp \
+ && apt-get download novnc \
+ && dpkg-deb --fsys-tarfile novnc_*.deb | tar -x -C / ./usr/share/novnc ./usr/share/doc/novnc \
+ && rm -f /tmp/novnc_*.deb \
+ && ln -s vnc.html /usr/share/novnc/index.html \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY devc-desktop /usr/local/bin/devc-desktop
+RUN chmod 0755 /usr/local/bin/devc-desktop

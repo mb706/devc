@@ -322,6 +322,15 @@ func PrepareLaunch(l *Launch, userArgs []string, e LaunchEnv) (*Prepared, error)
 		session = e.NewSession()
 	}
 
+	// The display of the desktop sidecar while one runs (work order C19).
+	if vars, err := ReadDisplayEnv(e.Root); err == nil {
+		for _, kv := range vars {
+			k, v, _ := strings.Cut(kv, "=")
+			env.set(k, v)
+		}
+	} else if e.Stderr != nil {
+		fmt.Fprintf(e.Stderr, "devc: ignoring the desktop's display: %v\n", err)
+	}
 	for k, v := range l.Env {
 		env.set(k, v)
 	}
