@@ -31,6 +31,7 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | C18 Service logins | done | 9311818 |
 | C19 GUI | done | 42a0d5f |
 | Review D + C19r | done | f1b7e15 |
+| Review E (verification of the last fixes) + C19r3 | in progress | |
 
 ## Resuming
 
