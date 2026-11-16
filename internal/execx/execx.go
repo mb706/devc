@@ -19,8 +19,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -78,17 +80,42 @@ type Cmd struct {
 	// what is left of the group is killed and waited for before Run or
 	// Interactive returns, so nothing it started outlives it (finding
 	// E1-16: git receive-pack's index-pack kept writing into a quarantine
-	// that was being removed). Not for a command that must stay in the
+	// that was being removed). The command (the group's leader) is reaped
+	// last: its ID, which is the group's, stays reserved while it is not,
+	// so nothing is ever signalled under an ID someone else may have
+	// taken (finding F1-U1). A group that outlives the wait is reported
+	// with a *GroupLeftError. Not for a command that must stay in the
 	// terminal's foreground group (prompts).
 	KillGroup bool
 }
 
-// ErrGroupLeft is returned (wrapped) when processes of a KillGroup
-// command's group were still there after they were killed and waited for.
+// ErrGroupLeft is returned (wrapped, and joined with whatever else
+// failed) when processes of a KillGroup command's group still ran after
+// they were killed and waited for. The error holds a *GroupLeftError.
 var ErrGroupLeft = errors.New("processes the command started did not end")
+
+// GroupLeftError says that a KillGroup command's process group outlived
+// the wait (finding F1-01). Its leader is not reaped yet, so the group's
+// ID stays reserved: a watcher goes on killing the group, reaps the leader
+// once no member runs any more, and then closes Gone. Gone is never
+// closed when the leader could not be waited for without reaping it (it
+// may have been reaped elsewhere, so the group cannot be watched).
+type GroupLeftError struct {
+	PGID int
+	Gone <-chan struct{}
+}
+
+func (e *GroupLeftError) Error() string {
+	return fmt.Sprintf("process group %d: %s", e.PGID, ErrGroupLeft)
+}
+
+func (e *GroupLeftError) Unwrap() error { return ErrGroupLeft }
 
 // groupWait bounds the wait for a killed process group to be gone.
 var groupWait = 30 * time.Second
+
+// signalGroup sends sig to the process group pgid. Tests replace it.
+var signalGroup = func(pgid int, sig syscall.Signal) error { return syscall.Kill(-pgid, sig) }
 
 // String renders the command for messages, with redaction applied.
 func (c Cmd) String() string {
@@ -227,7 +254,9 @@ func (c Cmd) WorkDir() string {
 	return c.Dir
 }
 
-func (Real) command(ctx context.Context, c Cmd) *exec.Cmd {
+// command builds the process for c; with KillGroup it also returns the
+// group that holds it.
+func (Real) command(ctx context.Context, c Cmd) (*exec.Cmd, *group) {
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.Dir = c.WorkDir()
 	cmd.ExtraFiles = c.ExtraFiles
@@ -242,6 +271,7 @@ func (Real) command(ctx context.Context, c Cmd) *exec.Cmd {
 	}
 	// Ask politely first; WaitDelay escalates to SIGKILL.
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	var g *group
 	if c.KillGroup {
 		if cmd.SysProcAttr == nil {
 			cmd.SysProcAttr = &syscall.SysProcAttr{}
@@ -249,65 +279,198 @@ func (Real) command(ctx context.Context, c Cmd) *exec.Cmd {
 		if !cmd.SysProcAttr.Setsid {
 			cmd.SysProcAttr.Setpgid = true
 		}
-		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
+		g = &group{cmd: cmd}
+		cmd.Cancel = func() error { return g.signal(syscall.SIGTERM) }
 	}
 	cmd.WaitDelay = waitDelay
-	return cmd
+	return cmd, g
 }
 
-// run starts cmd and waits for it. With KillGroup, the group is killed as
-// soon as its leader has exited and before the leader is reaped (so its
-// number cannot be taken by another process meanwhile), and waited for
-// after.
-func run(cmd *exec.Cmd, killGroup bool) error {
-	if err := cmd.Start(); err != nil {
-		return err
+// group is a KillGroup command's process group. The command is its
+// leader, and the group's ID is the leader's process ID.
+type group struct {
+	cmd    *exec.Cmd
+	mu     sync.Mutex
+	reaped bool
+}
+
+// signal sends sig to the group, but only while its leader is not
+// reaped: until then the ID cannot be anyone else's (finding F1-U1).
+func (g *group) signal(sig syscall.Signal) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.reaped {
+		return os.ErrProcessDone
 	}
-	if !killGroup {
-		return cmd.Wait()
+	return signalGroup(g.cmd.Process.Pid, sig)
+}
+
+// reap waits for the leader and for the copying of its output. No signal
+// goes to the group from the moment it starts.
+func (g *group) reap() error {
+	g.mu.Lock()
+	g.reaped = true
+	g.mu.Unlock()
+	return g.cmd.Wait()
+}
+
+// outcome is how a command ended: what Wait reported (or, for a leader
+// that is not reaped yet, how it ended), its exit code (-1 when it did not
+// exit normally), and whether its group outlived the wait.
+type outcome struct {
+	err  error
+	code int
+	left *GroupLeftError
+}
+
+// run starts cmd and waits for it. With a group (KillGroup), it learns
+// that the leader has ended without reaping it, kills the group, waits
+// until no member runs, and reaps the leader only then. A group that
+// outlives groupWait is left to a watcher that finishes the same way.
+func run(cmd *exec.Cmd, g *group) outcome {
+	if err := cmd.Start(); err != nil {
+		return outcome{err: err, code: -1}
+	}
+	if g == nil {
+		err := cmd.Wait()
+		return outcome{err: err, code: exitCode(cmd)}
 	}
 	pid := cmd.Process.Pid
-	for {
-		// Wait for the leader to exit without reaping it.
-		var info unix.Siginfo
-		err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
-		if err != unix.EINTR {
-			break
-		}
+	info, werr := waitEnded(cmd.Process)
+	if werr != nil {
+		// The leader may have been reaped behind devc's back, and its
+		// ID taken: nothing is signalled, and the group cannot be watched.
+		err := g.reap()
+		return outcome{err: errors.Join(err, fmt.Errorf("waiting for process %d without reaping it: %w", pid, werr)), code: exitCode(cmd),
+			left: &GroupLeftError{PGID: pid, Gone: make(chan struct{})}}
 	}
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
-	err := cmd.Wait()
-	if gerr := awaitGroup(pid); gerr != nil && err == nil {
-		err = gerr
+	_ = g.signal(syscall.SIGKILL)
+	if awaitGroup(g, time.Now().Add(groupWait)) {
+		err := g.reap()
+		return outcome{err: err, code: exitCode(cmd)}
 	}
-	return err
+	gone := make(chan struct{})
+	go func() {
+		awaitGroup(g, time.Time{})
+		_ = g.reap()
+		close(gone)
+	}()
+	code, err := info.ended()
+	return outcome{err: err, code: code, left: &GroupLeftError{PGID: pid, Gone: gone}}
 }
 
-// awaitGroup waits until no process of the group pgid runs any more.
-// Killed processes are reaped by their new parent; one that has not been
-// yet (a zombie: no memory, no open files) no longer counts, since a
-// parent that does not reap orphans (an init-less container) would keep
-// it for ever.
-func awaitGroup(pgid int) error {
-	deadline := time.Now().Add(groupWait)
+func exitCode(cmd *exec.Cmd) int {
+	if cmd.ProcessState == nil {
+		return -1
+	}
+	return cmd.ProcessState.ExitCode()
+}
+
+// siginfoChild is siginfo_t as waitid fills it for a child (Linux; the
+// common part is padded to 8 bytes on 64-bit hosts).
+type siginfoChild struct {
+	Signo  int32
+	Errno  int32
+	Code   int32
+	_      [is64bit]int32
+	Pid    int32
+	Uid    uint32
+	Status int32
+	_      [128 - (6+is64bit)*4]byte
+}
+
+const is64bit = ^uint(0) >> 63
+
+// Both are siginfo_t: the conversion in waitEnded relies on it.
+var _ [unsafe.Sizeof(siginfoChild{}) - unsafe.Sizeof(unix.Siginfo{})]byte
+var _ [unsafe.Sizeof(unix.Siginfo{}) - unsafe.Sizeof(siginfoChild{})]byte
+
+// si_code values for a child that ended.
+const (
+	cldExited = 1
+	cldKilled = 2
+	cldDumped = 3
+)
+
+// leaderEnded is how a leader that is not reaped yet ended, as Wait
+// would report it.
+type leaderEnded struct {
+	code int
+	sig  syscall.Signal
+}
+
+func (e *leaderEnded) Error() string {
+	if e.sig != 0 {
+		return "signal: " + e.sig.String()
+	}
+	return "exit status " + strconv.Itoa(e.code)
+}
+
+// ended returns the exit code (-1 for a signal) and, unless it is 0, the
+// error Wait would have returned.
+func (si *siginfoChild) ended() (int, error) {
+	switch si.Code {
+	case cldExited:
+		if si.Status == 0 {
+			return 0, nil
+		}
+		return int(si.Status), &leaderEnded{code: int(si.Status)}
+	case cldKilled, cldDumped:
+		return -1, &leaderEnded{code: -1, sig: syscall.Signal(si.Status)}
+	}
+	return -1, fmt.Errorf("unexpected child status %d", si.Code)
+}
+
+// waitEnded blocks until p has ended, without reaping it (WNOWAIT), and
+// returns how it ended. It waits on the process's pidfd where Go has one
+// (os.Process.WithHandle), else on its ID, which is the child's for as long
+// as it is not reaped. Nothing else reaps it: os/exec does only in Wait,
+// which run calls after this (reap).
+func waitEnded(p *os.Process) (*siginfoChild, error) {
+	info := new(siginfoChild)
+	wait := func(idtype, id int) error {
+		for {
+			err := unix.Waitid(idtype, id, (*unix.Siginfo)(unsafe.Pointer(info)), unix.WEXITED|unix.WNOWAIT, nil)
+			if err != unix.EINTR {
+				return err
+			}
+		}
+	}
+	var err error
+	if herr := p.WithHandle(func(h uintptr) { err = wait(unix.P_PIDFD, int(h)) }); herr != nil {
+		err = wait(unix.P_PID, p.Pid)
+	}
+	return info, err
+}
+
+// awaitGroup kills the group of g, whose leader has ended and is held,
+// until no member runs any more, or until deadline (zero: without one),
+// and reports whether it is empty. Killed members are reaped by their new
+// parent; one that has not been yet (a zombie: no memory, no open files)
+// no longer counts, nor does the held leader, since a parent that does
+// not reap orphans (an init-less container) would keep it for ever.
+func awaitGroup(g *group, deadline time.Time) bool {
+	pgid := g.cmd.Process.Pid
+	pause := 10 * time.Millisecond
 	for {
 		if !groupRuns(pgid) {
-			return nil
+			return true
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("process group %d: %w", pgid, ErrGroupLeft)
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return false
 		}
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		time.Sleep(10 * time.Millisecond)
+		_ = g.signal(syscall.SIGKILL)
+		time.Sleep(pause)
+		if deadline.IsZero() {
+			pause = min(2*pause, time.Second)
+		}
 	}
 }
 
 // groupRuns reports whether a process of group pgid runs (is not a
-// zombie). Without /proc it counts zombies too.
+// zombie). The held leader keeps the group in existence, so only /proc can
+// tell; without it the group counts as running (fail closed).
 func groupRuns(pgid int) bool {
-	if syscall.Kill(-pgid, 0) == syscall.ESRCH {
-		return false
-	}
 	des, err := os.ReadDir("/proc")
 	if err != nil {
 		return true
@@ -352,20 +515,18 @@ func (r Real) Run(ctx context.Context, c Cmd) (Result, error) {
 	}
 	stdout := &capped{max: limit}
 	stderr := &capped{max: limit}
-	cmd := r.command(ctx, c)
+	cmd, g := r.command(ctx, c)
 	cmd.Stdin = c.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
 	slog.Debug("exec", "cmd", c.String(), "dir", c.WorkDir())
 	start := time.Now()
-	err := run(cmd, c.KillGroup)
-	res := Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Truncated: stdout.truncated || stderr.truncated, ExitCode: -1}
-	if cmd.ProcessState != nil {
-		res.ExitCode = cmd.ProcessState.ExitCode()
-	}
+	o := run(cmd, g)
+	// With a group left, what its members still write is not waited for.
+	res := Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Truncated: stdout.isTruncated() || stderr.isTruncated(), ExitCode: o.code}
 	slog.Debug("exec done", "cmd", c.Name, "exit", res.ExitCode, "elapsed", time.Since(start))
-	return res, classify(ctx, c, res, err, timeout)
+	return res, classify(ctx, c, res, o, timeout)
 }
 
 // Interactive implements Runner.
@@ -375,7 +536,7 @@ func (r Real) Interactive(ctx context.Context, c Cmd) (int, error) {
 		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
 		defer cancel()
 	}
-	cmd := r.command(ctx, c)
+	cmd, g := r.command(ctx, c)
 	cmd.Stdin = os.Stdin
 	if c.Stdin != nil {
 		cmd.Stdin = c.Stdin
@@ -389,25 +550,32 @@ func (r Real) Interactive(ctx context.Context, c Cmd) (int, error) {
 		cmd.Stderr = c.Stderr
 	}
 	slog.Debug("exec interactive", "cmd", c.String(), "dir", c.WorkDir())
-	err := run(cmd, c.KillGroup)
-	code := -1
-	if cmd.ProcessState != nil {
-		code = cmd.ProcessState.ExitCode()
+	o := run(cmd, g)
+	err := classify(ctx, c, Result{ExitCode: o.code}, o, c.Timeout)
+	if o.left != nil {
+		// Never dropped, whatever else the error holds (finding F1-01).
+		return o.code, err
 	}
-	err = classify(ctx, c, Result{ExitCode: code}, err, c.Timeout)
 	var ee *ExitError
 	if errors.As(err, &ee) {
 		return ee.Result.ExitCode, nil
 	}
-	return code, err
+	return o.code, err
 }
 
-func classify(ctx context.Context, c Cmd, res Result, err error, timeout time.Duration) error {
+// classify turns an outcome into the error Run and Interactive return. A
+// group that outlived the wait is joined to whatever else failed.
+func classify(ctx context.Context, c Cmd, res Result, o outcome, timeout time.Duration) error {
+	err := classifyEnd(ctx, c, res, o.err, timeout)
+	if o.left == nil {
+		return err
+	}
+	return errors.Join(err, fmt.Errorf("%s: %w", c.String(), o.left))
+}
+
+func classifyEnd(ctx context.Context, c Cmd, res Result, err error, timeout time.Duration) error {
 	if err == nil {
 		return nil
-	}
-	if errors.Is(err, ErrGroupLeft) {
-		return fmt.Errorf("%s: %w", c.String(), err)
 	}
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) && timeout > 0 {
@@ -416,7 +584,8 @@ func classify(ctx context.Context, c Cmd, res Result, err error, timeout time.Du
 		return fmt.Errorf("%s: %w", c.String(), ctx.Err())
 	}
 	var xe *exec.ExitError
-	if errors.As(err, &xe) && res.ExitCode >= 0 {
+	var le *leaderEnded
+	if (errors.As(err, &xe) || errors.As(err, &le)) && res.ExitCode >= 0 {
 		return newExitError(c, res)
 	}
 	if errors.Is(err, exec.ErrNotFound) {
@@ -428,14 +597,18 @@ func classify(ctx context.Context, c Cmd, res Result, err error, timeout time.Du
 // capped keeps at most max bytes and discards the rest, so a runaway child
 // cannot exhaust memory and is never blocked. The buffer is a named field,
 // not embedded: an embedded bytes.Buffer would promote ReadFrom, which
-// io.Copy prefers over Write, bypassing the cap.
+// io.Copy prefers over Write, bypassing the cap. It is locked: members of
+// a group that outlived its wait may still write while Run returns.
 type capped struct {
+	mu        sync.Mutex
 	buf       bytes.Buffer
 	max       int
 	truncated bool
 }
 
 func (w *capped) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	n := len(p)
 	if room := w.max - w.buf.Len(); room < len(p) {
 		w.truncated = true
@@ -448,4 +621,14 @@ func (w *capped) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (w *capped) Bytes() []byte { return w.buf.Bytes() }
+func (w *capped) Bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return bytes.Clone(w.buf.Bytes())
+}
+
+func (w *capped) isTruncated() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.truncated
+}

@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -299,5 +301,158 @@ func TestKillGroup(t *testing.T) {
 			syscall.Kill(k, syscall.SIGKILL)
 			t.Errorf("Interactive: child %d survived", k)
 		}
+	}
+}
+
+// TestKillGroupLeft: a member of a KillGroup command's group that does
+// not end when it is killed and outlives its leader, while the command
+// fails for another reason (an exit status; the context). The group's
+// error is reported with the other failure, also by Interactive (finding
+// F1-01); the leader is held (not reaped) for as long as a member runs
+// and nothing is ever signalled under its ID once it is reaped (F1-U1);
+// when the member has ended, the watcher reaps the leader and closes
+// Gone. SIGKILL cannot be ignored, so the test has the runner send
+// SIGTERM instead: a member that ignores it plays one in uninterruptible
+// I/O. The control: the same command with a member that does not ignore
+// it is reported with its exit status alone and is gone, with the leader
+// reaped, when Run returns.
+func TestKillGroupLeft(t *testing.T) {
+	oldWait, oldSignal := groupWait, signalGroup
+	t.Cleanup(func() { groupWait, signalGroup = oldWait, oldSignal })
+	groupWait = 500 * time.Millisecond
+	var mu sync.Mutex
+	var late []string
+	signalGroup = func(pgid int, sig syscall.Signal) error {
+		// The group's ID is the leader's: it must still be there,
+		// running or a zombie, whenever the group is signalled.
+		if _, err := os.Stat(fmt.Sprintf("/proc/%d", pgid)); err != nil {
+			mu.Lock()
+			late = append(late, fmt.Sprintf("%v to %d", sig, pgid))
+			mu.Unlock()
+			return nil
+		}
+		if sig == syscall.SIGKILL {
+			sig = syscall.SIGTERM
+		}
+		return syscall.Kill(-pgid, sig)
+	}
+	state := func(pid int) string {
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return "reaped"
+		}
+		f := strings.Fields(string(b[bytes.LastIndexByte(b, ')')+1:]))
+		return f[0]
+	}
+	// The leader writes its own ID; the member, which keeps standard
+	// output open, writes its own once it ignores the signal, and the
+	// leader goes on only then.
+	const leave = `echo $$ >>"$1"; sh -c 'trap "" TERM; echo $$ >>"$1"; exec sleep 60' sh "$1" & ` +
+		`while [ "$(wc -l <"$1")" -lt 2 ]; do sleep 0.01; done; `
+	for _, tc := range []struct {
+		name        string
+		script      string
+		interactive bool
+		cancel      bool
+		left        bool
+	}{
+		{"exit status", leave + `exit 3`, false, false, true},
+		{"exit status, Interactive", leave + `exit 3`, true, false, true},
+		{"ended by the context", leave + `exec sleep 60`, false, true, true},
+		{"ended by the context, Interactive", leave + `exec sleep 60`, true, true, true},
+		{"control: the member ends", `echo $$ >>"$1"; sleep 60 & echo $! >>"$1"; exit 3`, false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			late = nil
+			mu.Unlock()
+			pids := filepath.Join(t.TempDir(), "pids")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				go func() {
+					for i := 0; i < 500 && len(childPIDs(t, pids)) < 2; i++ {
+						time.Sleep(10 * time.Millisecond)
+					}
+					cancel()
+				}()
+			}
+			c := Cmd{Name: "sh", Args: []string{"-c", tc.script, "sh", pids}, KillGroup: true, Timeout: time.Minute}
+			start := time.Now()
+			var err error
+			code := -2
+			if tc.interactive {
+				c.Stdin, c.Stdout, c.Stderr = strings.NewReader(""), io.Discard, io.Discard
+				code, err = Real{}.Interactive(ctx, c)
+			} else {
+				var res Result
+				res, err = Real{}.Run(ctx, c)
+				code = res.ExitCode
+			}
+			took := time.Since(start)
+			ids := childPIDs(t, pids)
+			if len(ids) != 2 {
+				t.Fatalf("pids %v", ids)
+			}
+			leader, member := ids[0], ids[1]
+			defer syscall.Kill(member, syscall.SIGKILL)
+			if took > 10*time.Second {
+				t.Errorf("returned after %s", took)
+			}
+			// The other failure is reported.
+			wantCode := 3
+			if tc.cancel {
+				wantCode = -1
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("the cancellation is not reported: %v", err)
+				}
+			} else if !tc.interactive {
+				var ee *ExitError
+				if !errors.As(err, &ee) || ee.Result.ExitCode != 3 {
+					t.Errorf("the exit status is not reported: %v", err)
+				}
+			}
+			if code != wantCode {
+				t.Errorf("exit code %d, want %d", code, wantCode)
+			}
+			var gl *GroupLeftError
+			if !tc.left {
+				if errors.Is(err, ErrGroupLeft) || errors.As(err, &gl) {
+					t.Errorf("control: %v", err)
+				}
+				if running(member) || state(leader) != "reaped" {
+					t.Errorf("control: member %s, leader %s", state(member), state(leader))
+				}
+				return
+			}
+			if !errors.Is(err, ErrGroupLeft) || !errors.As(err, &gl) || gl.PGID != leader {
+				t.Fatalf("the group is not reported: %v", err)
+			}
+			// Held while the member runs, and watched.
+			time.Sleep(300 * time.Millisecond)
+			select {
+			case <-gl.Gone:
+				t.Fatal("Gone closed while a member runs")
+			default:
+			}
+			if !running(member) || state(leader) != "Z" {
+				t.Fatalf("member %s, leader %s (want running and a zombie)", state(member), state(leader))
+			}
+			syscall.Kill(member, syscall.SIGKILL)
+			select {
+			case <-gl.Gone:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Gone not closed after the member ended")
+			}
+			if s := state(leader); s != "reaped" {
+				t.Errorf("leader after Gone: %s", s)
+			}
+			time.Sleep(100 * time.Millisecond)
+			mu.Lock()
+			defer mu.Unlock()
+			if len(late) > 0 {
+				t.Errorf("signalled after the leader was reaped: %q", late)
+			}
+		})
 	}
 }

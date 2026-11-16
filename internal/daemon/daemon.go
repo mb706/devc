@@ -200,6 +200,11 @@ type Daemon struct {
 	// (statfs; tests replace it).
 	freeSpace func(path string) (int64, error)
 
+	// heldRelays are the relays whose last push left git processes that
+	// did not end, with the time they were left (relay.go, holdRelay).
+	heldMu     sync.Mutex
+	heldRelays map[string]time.Time
+
 	// GitHub (github.go): installation tokens and the per-project budget of
 	// facade reads.
 	minter   *github.Minter

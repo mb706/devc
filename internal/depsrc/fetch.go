@@ -18,7 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,11 +97,44 @@ type Result struct {
 // hex). A candidate without a checksum is downloaded only when unchecked
 // says that the registry publishes none for it (CRAN's archived versions,
 // GitHub's tarballs); everywhere else a missing or unusable checksum is
-// an error (finding D2-13).
+// an error (finding D2-13). Nothing checks what an unchecked download
+// brings, so it must end where it was asked for: redirect says where a
+// redirect may lead (finding F2-01); without it, none is followed.
 type candidate struct {
 	url       string
 	algo, sum string
 	unchecked bool
+	redirect  func(u *url.URL) bool
+}
+
+// samePath allows a redirect only to the path of raw (on another host
+// or scheme): CRAN's archive location of one package and version.
+func samePath(raw string) func(*url.URL) bool {
+	want, err := url.Parse(raw)
+	return func(u *url.URL) bool {
+		return err == nil && u.EscapedPath() == want.EscapedPath()
+	}
+}
+
+// sameTarball allows a redirect only to a tarball of the same owner,
+// repository and commit: GitHub sends the API's tarball endpoint on to
+// codeload (".../<owner>/<repo>/legacy.tar.gz/<sha>"). Names compare
+// without case, as GitHub's do; a renamed repository is refused.
+func sameTarball(name, sha string) func(*url.URL) bool {
+	owner, repo, _ := strings.Cut(name, "/")
+	return func(u *url.URL) bool {
+		seg := strings.Split(u.Path, "/")
+		if len(seg) < 4 {
+			return false
+		}
+		seg = seg[len(seg)-4:]
+		switch seg[2] {
+		case "tarball", "tar.gz", "legacy.tar.gz":
+		default:
+			return false
+		}
+		return strings.EqualFold(seg[0], owner) && strings.EqualFold(seg[1], repo) && seg[3] == sha
+	}
 }
 
 // Fetch puts the source of s into the cache and returns where it is.
@@ -223,8 +256,8 @@ func Fetch(ctx context.Context, s Spec, e Env, o Options) (*Result, error) {
 // concrete reports whether v names one version for good, which the cache
 // may answer without the registry: for GitHub only a commit (a branch or
 // tag moves), for npm only an exact version (a dist-tag such as latest, or
-// a range, moves; finding E2-06), for PyPI and CRAN any version (they have
-// neither tags nor ranges, and a release keeps its version).
+// a range, moves; findings E2-06, F2-02), for PyPI and CRAN any version
+// (they have neither tags nor ranges, and a release keeps its version).
 func concrete(eco, v string) bool {
 	if v == "" || CheckVersion(v) != nil {
 		return false
@@ -233,16 +266,78 @@ func concrete(eco, v string) bool {
 	case EcoGitHub:
 		return shaRE.MatchString(v)
 	case EcoNPM:
-		return npmExactRE.MatchString(v)
+		return npmExact(v)
 	}
 	return true
 }
 
-// npmExactRE is an exact npm version: semver, with the leading "v" the
-// registry normalises away. npm refuses dist-tags that parse as versions
-// or ranges, so no tag matches.
-var npmExactRE = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)` +
-	`(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
+// npmMaxNumber is the largest number npm accepts in a version
+// (Number.MAX_SAFE_INTEGER); npmMaxVersion its longest version.
+const (
+	npmMaxNumber  = 9007199254740991
+	npmMaxVersion = 256
+)
+
+// npmExact reports whether v is an exact npm version in a form npm accepts
+// as a version, so that it can never be a dist-tag (npm refuses tags that
+// parse as versions or ranges): MAJOR.MINOR.PATCH[-prerelease][+build],
+// numbers without leading zeros and at most npmMaxNumber (also those of
+// the prerelease), identifiers of [0-9A-Za-z-], at most npmMaxVersion
+// characters (finding F2-02). Anything else, also the forms npm normalises
+// ("v1.2.3", "=1.2.3"), is asked of the registry every time.
+func npmExact(v string) bool {
+	if len(v) > npmMaxVersion {
+		return false
+	}
+	rest, build, hasBuild := strings.Cut(v, "+")
+	core, pre, hasPre := strings.Cut(rest, "-")
+	nums := strings.Split(core, ".")
+	if len(nums) != 3 {
+		return false
+	}
+	for _, n := range nums {
+		if !npmNumber(n) {
+			return false
+		}
+	}
+	if hasPre {
+		for _, id := range strings.Split(pre, ".") {
+			if !npmIdentifier(id) || (strings.Trim(id, "0123456789") == "" && !npmNumber(id)) {
+				return false
+			}
+		}
+	}
+	if hasBuild {
+		for _, id := range strings.Split(build, ".") {
+			if !npmIdentifier(id) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// npmNumber: digits without a leading zero, at most npmMaxNumber.
+func npmNumber(s string) bool {
+	if s == "" || strings.Trim(s, "0123456789") != "" || (len(s) > 1 && s[0] == '0') {
+		return false
+	}
+	n, err := strconv.ParseUint(s, 10, 64)
+	return err == nil && n <= npmMaxNumber
+}
+
+// npmIdentifier: one or more of [0-9A-Za-z-].
+func npmIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
 
 // aliasPrefix names the files that map a version as asked to the
 // registry's canonical form, kept beside the version directories.
@@ -310,8 +405,9 @@ func (o Options) hint(eco string, err error) error {
 }
 
 // client returns the HTTP client, refusing redirects to plain http except
-// to the configured base's own host (a local test server).
-func (o Options) client(eco string) *http.Client {
+// to the configured base's own host (a local test server), and, with
+// follow set, every redirect it does not allow.
+func (o Options) client(eco string, follow func(*url.URL) bool) *http.Client {
 	c := o.Client
 	if c == nil {
 		c = &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, TLSHandshakeTimeout: 30 * time.Second,
@@ -324,6 +420,9 @@ func (o Options) client(eco string) *http.Client {
 		}
 		if !o.allowedURL(eco, r.URL) {
 			return fmt.Errorf("refusing a redirect to %s", r.URL.Redacted())
+		}
+		if follow != nil && !follow(r.URL) {
+			return fmt.Errorf("refusing a redirect to %s: it is not the archive asked for, and nothing could check what it holds", r.URL.Redacted())
 		}
 		return nil
 	}
@@ -345,6 +444,12 @@ func (o Options) allowedURL(eco string, u *url.URL) bool {
 
 // get fetches u into w (at most max bytes). A 404 is ErrNotFound.
 func (o Options) get(ctx context.Context, eco, rawURL string, header http.Header, w io.Writer, max int64) error {
+	return o.getFollowing(ctx, eco, rawURL, header, w, max, nil)
+}
+
+// getFollowing is get with redirects limited to those follow allows (nil:
+// any that client allows).
+func (o Options) getFollowing(ctx context.Context, eco, rawURL string, header http.Header, w io.Writer, max int64, follow func(*url.URL) bool) error {
 	u, err := url.Parse(rawURL)
 	if err != nil || !o.allowedURL(eco, u) {
 		return fmt.Errorf("refusing to download %q: only https URLs are fetched", rawURL)
@@ -359,7 +464,7 @@ func (o Options) get(ctx context.Context, eco, rawURL string, header http.Header
 		req.Header[k] = vs
 	}
 	req.Header.Set("User-Agent", "devc-src")
-	resp, err := o.client(eco).Do(req)
+	resp, err := o.client(eco, follow).Do(req)
 	if err != nil {
 		return err
 	}
@@ -421,10 +526,13 @@ func (o Options) download(ctx context.Context, eco string, c candidate, file str
 		return fmt.Errorf("the registry's %s checksum for %s is not usable: refusing to download it unchecked", c.algo, c.url)
 	}
 	var w io.Writer = f
+	var follow func(*url.URL) bool
 	if h != nil {
 		w = io.MultiWriter(f, h)
+	} else if follow = c.redirect; follow == nil {
+		follow = func(*url.URL) bool { return false }
 	}
-	err = o.get(ctx, eco, c.url, o.headers(eco), w, maxArchive)
+	err = o.getFollowing(ctx, eco, c.url, o.headers(eco), w, maxArchive, follow)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -541,9 +649,9 @@ func (o Options) cran(ctx context.Context, s Spec) (string, []candidate, error) 
 	}
 	// Any other version must be in the archive, for which CRAN publishes
 	// no checksum; a version that is neither current nor archived is not
-	// fetched from anywhere else.
-	archive := candidate{url: base + "/src/contrib/Archive/" + url.PathEscape(s.Name) + "/" + file, unchecked: true}
-	return v, []candidate{archive}, nil
+	// fetched from anywhere else, also not through a redirect.
+	u := base + "/src/contrib/Archive/" + url.PathEscape(s.Name) + "/" + file
+	return v, []candidate{{url: u, unchecked: true, redirect: samePath(u)}}, nil
 }
 
 // cranCurrent parses the whole of PACKAGES and returns a package's current
@@ -681,8 +789,9 @@ func (o Options) github(ctx context.Context, s Spec) (string, []candidate, error
 		}
 		o.notef("%s is commit %s", s, sha)
 	}
-	// GitHub publishes no checksum for tarballs; the commit names the tree.
-	return sha, []candidate{{url: base + "/repos/" + s.Name + "/tarball/" + sha, unchecked: true}}, nil
+	// GitHub publishes no checksum for tarballs; the commit names the tree,
+	// so a redirect must keep to it.
+	return sha, []candidate{{url: base + "/repos/" + s.Name + "/tarball/" + sha, unchecked: true, redirect: sameTarball(s.Name, sha)}}, nil
 }
 
 func proto64(s string) string {

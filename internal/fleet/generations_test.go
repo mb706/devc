@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -350,5 +351,82 @@ func TestRestoreAsOf(t *testing.T) {
 	m5, _ := restore(time.Time{})
 	if got := m5.read(db); got != "wednesday" {
 		t.Errorf("the newest database: %q", got)
+	}
+}
+
+// TestRestoreAsOfUntimed: generations without a recorded time (completed
+// on a hub from before C19r3) count as older than every timed one
+// (finding F1-02). The reviewer's scenario: a database's generation 0 has
+// no time, generation 1 was completed on Tuesday; as of Monday, generation
+// 0 is restored and listed as restored from a generation without a
+// recorded time, not left out as newer. Also: a generation without any
+// record is such a generation; an incomplete untimed generation of a
+// mutable file is not restored (reported as incomplete), of an
+// append-only one as far as it goes. Controls: a timed generation at or
+// before the time wins over untimed ones; a file whose generations are
+// all timed and newer is left out as newer.
+func TestRestoreAsOfUntimed(t *testing.T) {
+	monday := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	tuesday := monday.AddDate(0, 0, 1)
+	sunday := monday.AddDate(0, 0, -1)
+	n := func(v int64) *int64 { return &v }
+	at := func(t time.Time) *time.Time { return &t }
+	mut, app := archive.ClassMutable, archive.ClassAppend
+	gens := map[string]map[int]archive.Entry{
+		"harness/codex/home/state.db": {
+			0: {Path: "g0", Length: 8, Committed: n(5), Class: mut},
+			1: {Path: "g1", Length: 9, Committed: n(9), Class: mut, Completed: at(tuesday)},
+		},
+		"harness/a/db": {
+			0: {Path: "a0", Length: 4}, // no record at all
+			1: {Path: "a1", Length: 6, Committed: n(6), Class: mut, Completed: at(tuesday)},
+		},
+		"harness/b/db": {
+			0: {Path: "b0", Length: 3, Class: mut}, // a record, never completed
+			1: {Path: "b1", Length: 6, Committed: n(6), Class: mut, Completed: at(tuesday)},
+		},
+		"journal/p/s.jsonl": {
+			0: {Path: "j0", Length: 7, Class: app},
+			1: {Path: "j1", Length: 2, Committed: n(2), Class: app, Completed: at(tuesday)},
+		},
+		// Controls.
+		"harness/c/db": {
+			0: {Path: "c0", Length: 2, Committed: n(2), Class: mut},
+			1: {Path: "c1", Length: 3, Committed: n(3), Class: mut, Completed: at(sunday)},
+			2: {Path: "c2", Length: 4, Committed: n(4), Class: mut, Completed: at(tuesday)},
+		},
+		"harness/d/db": {
+			0: {Path: "d0", Length: 2, Committed: n(2), Class: mut, Completed: at(tuesday)},
+		},
+	}
+	rep := &RestoreReport{}
+	files := chooseGenerations(gens, rep, monday)
+	want := map[string]string{"harness/codex/home/state.db": "g0:5", "harness/a/db": "a0:4", "journal/p/s.jsonl": "j0:7", "harness/c/db": "c1:3"}
+	for rel, e := range files {
+		if got := e.Path + ":" + strconv.FormatInt(e.Length, 10); got != want[rel] {
+			t.Errorf("%s: restored %s, want %q", rel, got, want[rel])
+		}
+	}
+	if len(files) != len(want) {
+		t.Errorf("restored %d files, want %d: %v", len(files), len(want), files)
+	}
+	if got := strings.Join(rep.AsOfUntimed, ","); got != "harness/a/db,harness/codex/home/state.db,journal/p/s.jsonl" {
+		t.Errorf("untimed: %q", got)
+	}
+	if got := strings.Join(rep.AsOfLater, ","); got != "harness/d/db" {
+		t.Errorf("left out as newer: %q", got)
+	}
+	if got := strings.Join(rep.IncompleteFiles, "|"); !strings.Contains(got, "harness/b/db: no complete generation; not restored") ||
+		!strings.Contains(got, "journal/p/s.jsonl: no complete generation; restored the incomplete generation 0") {
+		t.Errorf("incomplete: %q", got)
+	}
+	if len(rep.AsOfCurrent) != 0 || rep.AsOfGrown != 0 {
+		t.Errorf("report: %+v", rep)
+	}
+	// As of Tuesday the timed generations are used.
+	rep = &RestoreReport{}
+	files = chooseGenerations(gens, rep, tuesday)
+	if files["harness/codex/home/state.db"].Path != "g1" || len(rep.AsOfUntimed) != 0 || len(rep.AsOfLater) != 0 {
+		t.Errorf("as of Tuesday: %v %+v", files, rep)
 	}
 }

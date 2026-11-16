@@ -11,11 +11,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/gitx"
+	"github.com/mb706/devc/internal/names"
 )
 
 // slowReader hands out r at about rate bytes per second.
@@ -158,12 +160,13 @@ func TestPushEndedDuringIndexPack(t *testing.T) {
 			if tc.rate > 0 {
 				in = &slowReader{r: f, rate: tc.rate}
 			}
-			_, _, why, err := d.runPush(context.Background(), gs, call, io.Discard, in, 0, relay, used, used+4<<20)
+			released := 0
+			_, _, why, err := d.runPush(context.Background(), gs, call, io.Discard, in, 0, relay, used, used+4<<20, func() { released++ })
 			if !strings.Contains(why, "git.relay_quota") {
 				t.Fatalf("the push was not ended by the watchdog: %q %v", why, err)
 			}
-			if errors.Is(err, execx.ErrGroupLeft) {
-				t.Errorf("runPush: %v", err)
+			if errors.Is(err, execx.ErrGroupLeft) || released != 1 {
+				t.Errorf("runPush: %v, released %d times", err, released)
 			}
 			if ps := processesIn(relay); len(ps) > 0 {
 				t.Errorf("git processes still run: %q", ps)
@@ -191,7 +194,7 @@ func TestPushEndedDuringIndexPack(t *testing.T) {
 			git(dir, "--git-dir="+relay, "fsck", "--no-progress")
 			// The next push (without a budget) succeeds.
 			f.Seek(0, io.SeekStart)
-			code, stderr, why, err := d.runPush(context.Background(), gs, call, io.Discard, f, 0, relay, 0, 0)
+			code, stderr, why, err := d.runPush(context.Background(), gs, call, io.Discard, f, 0, relay, 0, 0, nil)
 			if code != 0 || why != "" || err != nil {
 				t.Fatalf("the next push: %d %q %q %v", code, stderr, why, err)
 			}
@@ -199,6 +202,85 @@ func TestPushEndedDuringIndexPack(t *testing.T) {
 				t.Errorf("main in the relay: %s, want %s", got, tc.want)
 			}
 			git(dir, "--git-dir="+relay, "fsck", "--no-progress")
+		})
+	}
+}
+
+// TestPushGroupLeft: git processes of a push that do not end (the runner
+// reports their group left, together with the push's own failure) keep
+// the relay as the push left it: the error is returned, the quarantine
+// stays, the lock is not given back and pushes to the relay are refused
+// with a message saying why. Once the processes are gone, the quarantine
+// is removed, the lock given back and pushes taken again, without a
+// restart (finding F1-01). The control: the same push without processes
+// left removes the quarantine and gives the lock back before runPush
+// returns, and nothing is refused. The runner's side (real processes) is
+// execx.TestKillGroupLeft.
+func TestPushGroupLeft(t *testing.T) {
+	dir := t.TempDir()
+	relay := filepath.Join(dir, "relay.git")
+	hooks := filepath.Join(dir, "hooks")
+	for _, p := range []string{filepath.Join(relay, "objects"), hooks} {
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quarantine := filepath.Join(relay, "objects", gitx.QuarantinePrefix+"x1")
+	ref := names.ProjectRef{Realm: "r", Project: "p"}
+	for _, tc := range []struct {
+		name string
+		left bool
+	}{{"processes left", true}, {"control: none left", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			gone := make(chan struct{})
+			failure := &execx.ExitError{Cmd: "git receive-pack", Result: execx.Result{ExitCode: 1}}
+			var runErr error = failure
+			if tc.left {
+				runErr = errors.Join(failure, &execx.GroupLeftError{PGID: 4242, Gone: gone})
+			}
+			f := execx.NewFake()
+			f.On("git").Do(func(execx.Cmd) {
+				// receive-pack has written into a quarantine.
+				os.MkdirAll(filepath.Join(quarantine, "pack"), 0o700)
+				os.WriteFile(filepath.Join(quarantine, "pack", "tmp_pack_1"), []byte("pack"), 0o600)
+			}).Err(runErr)
+			gs := &gitx.Service{Host: &gitx.Host{Runner: f, HooksDir: hooks, Background: true}}
+			d := &Daemon{freeSpace: func(string) (int64, error) { return 100 << 30, nil }, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			call, err := gitx.ServeCall(relay, gitx.ServiceReceivePack, hooks, nil, nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var released atomic.Int32
+			_, _, _, err = d.runPush(context.Background(), gs, call, io.Discard, strings.NewReader(""), 0, relay, 0, 0, func() { released.Add(1) })
+			if !errors.As(err, new(*execx.ExitError)) || errors.Is(err, execx.ErrGroupLeft) != tc.left {
+				t.Fatalf("runPush: %v", err)
+			}
+			_, qerr := os.Stat(quarantine)
+			if !tc.left {
+				if qerr == nil || released.Load() != 1 || d.heldRefusal(ref, relay) != "" {
+					t.Errorf("control: quarantine %v, released %d, refusal %q", qerr, released.Load(), d.heldRefusal(ref, relay))
+				}
+				return
+			}
+			// While the processes run: nothing removed, nothing given
+			// back, pushes refused; other relays are not affected.
+			time.Sleep(200 * time.Millisecond)
+			if qerr != nil || released.Load() != 0 {
+				t.Errorf("while the processes run: quarantine %v, released %d", qerr, released.Load())
+			}
+			if msg := d.heldRefusal(ref, relay); !strings.Contains(msg, "git processes of an earlier push to r/p have not ended") {
+				t.Errorf("refusal: %q", msg)
+			}
+			if msg := d.heldRefusal(ref, filepath.Join(dir, "other.git")); msg != "" {
+				t.Errorf("another relay is refused: %q", msg)
+			}
+			close(gone)
+			for i := 0; i < 500 && released.Load() == 0; i++ {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if _, err := os.Stat(quarantine); !errors.Is(err, os.ErrNotExist) || released.Load() != 1 || d.heldRefusal(ref, relay) != "" {
+				t.Errorf("after the processes ended: quarantine %v, released %d, refusal %q", err, released.Load(), d.heldRefusal(ref, relay))
+			}
 		})
 	}
 }

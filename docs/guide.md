@@ -357,8 +357,12 @@ name (also by `devc state import`): its journals and logs name it inside. Sessio
 
 With `--as-of <time>` (RFC 3339, or a date: the start of that day in UTC)
 each file is restored as the hub held it then: the newest version it
-completed at or before that time, by the hub's clock; a file whose first
-version is newer is left out. Use it to get back a database a box broke:
+completed at or before that time, by the hub's clock. A version completed
+on a hub that did not yet record times counts as older than every version
+with a time: when every timed version is newer, the newest version without
+a time is restored, and the command lists such files ("restored from a
+generation without a recorded time"; it may be newer than the time asked
+for). A file whose versions are all newer is left out. Use it to get back a database a box broke:
 the start of every one of the last 7 days and 4 weeks is kept. Journals and
 logs come from the version in use then, with what was appended to it since
 (they only grow). What has no versions is taken as it is now, and the
@@ -518,7 +522,11 @@ only with at least 1 GiB free on the state file system, and it ends a push
 while git writes it once the relay would exceed its budget or less than
 512 MiB would stay free (the daemon's log says why). Ending a push ends
 every git process it started (index-pack, hooks) before the daemon removes
-what the push left and lets the next one in. Before serving a fetch, the daemon fetches the upstream into the
+what the push left and lets the next one in. If one of them cannot be
+ended (stuck in the kernel, for example on a hung file system), the daemon
+logs it, leaves the relay as the push left it and refuses further pushes to
+it with a message saying why; once the last of those processes has ended,
+it removes what the push left and takes pushes again, without a restart. Before serving a fetch, the daemon fetches the upstream into the
 relay (at most once a minute, 20 seconds at most, without prompts; turn it off
 with `git.fetch_through = false`), so `git fetch origin` brings new upstream
 commits as `origin/*` and `github/*` without `devc pull`. Without the daemon,
@@ -1511,13 +1519,20 @@ download; if any of it cannot be parsed, nothing is downloaded. A CRAN
 version that is not the list's current one is taken only from CRAN's
 archive of old versions, which (like GitHub's tarballs) has no published
 checksum and is downloaded unchecked; a version that is in neither is an
-error. A GitHub tarball is named by its commit. Archives are unpacked with
+error. A GitHub tarball is named by its commit. Because nothing checks an
+unchecked download, it must come from where it was asked for: a redirect
+from CRAN's archive is followed only to the same path, one from GitHub's
+tarball only to a tarball of the same owner, repository and commit (a
+renamed repository is refused); anything else stops the download. Archives are unpacked with
 the same safe extractor as shares and are never built, installed or run.
 An exact version that is already in the cache (a CRAN or PyPI version, an
-exact npm version such as `1.2.3` or `v1.2.3`, or a GitHub commit) is
-answered without any network access. Anything that can move is resolved
+exact npm version such as `1.2.3` or `1.2.3-rc.1`, or a GitHub commit) is
+answered without any network access. An npm version counts as exact only
+in the plain form that npm itself takes for a version (no leading `v`,
+numbers up to 9007199254740991, at most 256 characters), since only such
+names can never be dist-tags. Anything that can move is resolved
 with the registry every time: "the current release", an npm dist-tag such
-as `latest` or a range, a GitHub branch or tag. (A GitHub branch or tag is
+as `latest` or a range, `v1.2.3`, a GitHub branch or tag. (A GitHub branch or tag is
 never cached under its own name: devc asks GitHub for its commit on every
 request and caches the tree under the commit, so a branch that moved is
 followed.)

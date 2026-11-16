@@ -209,9 +209,12 @@ type Restorer struct {
 	Progress io.Writer
 	// AsOf, when set, restores the state at that time: for every file with
 	// generations, the newest generation completed (by the hub's clock) at
-	// or before it; a file whose first generation is newer is left out.
-	// What has no generations (repositories, files without completion
-	// times) is taken as it is now, and the report says so.
+	// or before it. A generation without a completion time (completed on
+	// an older hub) counts as older than every timed one: it is restored
+	// when every timed generation is newer, and reported. A file with
+	// neither is left out. What has no generations (repositories, files
+	// without any completion time) is taken as it is now, and the report
+	// says so.
 	AsOf time.Time
 }
 
@@ -232,12 +235,15 @@ type RestoreReport struct {
 	IncompleteFiles []string `json:"incomplete_files,omitempty"`
 	// AsOf is the time of a restore as of a time; AsOfCurrent the parts
 	// taken as they are now (no generations to choose from), AsOfLater the
-	// files left out (their first generation is newer), AsOfGrown the
+	// files left out (every generation is newer and none lacks a time),
+	// AsOfUntimed the files restored from a generation without a recorded
+	// time because every timed one is newer (finding F1-02), AsOfGrown the
 	// append-only files restored from the generation in use then, with
 	// what was appended to it since.
 	AsOf        *time.Time `json:"as_of,omitempty"`
 	AsOfCurrent []string   `json:"as_of_current,omitempty"`
 	AsOfLater   []string   `json:"as_of_later,omitempty"`
+	AsOfUntimed []string   `json:"as_of_untimed,omitempty"`
 	AsOfGrown   int        `json:"as_of_grown,omitempty"`
 }
 
@@ -387,9 +393,11 @@ func (r *Restorer) Restore(ctx context.Context, realm string, src Source, merge 
 //
 // With asOf set, a file whose generations carry completion times gets the
 // newest generation completed at or before asOf (at its completion
-// length), or is left out when its first generation is newer; a file
-// without completion times is chosen as above and reported as taken as it
-// is now.
+// length). Generations without a completion time count as older than
+// every timed one (finding F1-02): when every timed generation is newer,
+// the file is chosen among those as above and reported (AsOfUntimed); a
+// file with neither is left out (AsOfLater). A file without any
+// completion time is chosen as above and reported as taken as it is now.
 func chooseGenerations(fileGens map[string]map[int]archive.Entry, rep *RestoreReport, asOf time.Time) map[string]archive.Entry {
 	files := map[string]archive.Entry{}
 	rels := make([]string, 0, len(fileGens))
@@ -406,65 +414,88 @@ func chooseGenerations(fileGens map[string]map[int]archive.Entry, rep *RestoreRe
 		}
 		sort.Sort(sort.Reverse(sort.IntSlice(nums)))
 		rep.OlderVersions += len(nums) - 1
+		untimedOnly := false
 		if !asOf.IsZero() {
-			timed := false
+			var timed, untimed []int
 			for _, g := range nums {
-				timed = timed || gens[g].Completed != nil
+				if gens[g].Completed != nil {
+					timed = append(timed, g)
+				} else {
+					untimed = append(untimed, g)
+				}
 			}
-			if timed {
+			if len(timed) > 0 {
 				chosen := -1
-				for _, g := range nums {
+				for _, g := range timed {
 					e := gens[g]
-					if e.Completed != nil && e.Committed != nil && !e.Completed.After(asOf) {
+					if e.Committed != nil && !e.Completed.After(asOf) {
 						chosen = g
 						break
 					}
 				}
-				if chosen < 0 {
+				if chosen >= 0 {
+					e := gens[chosen]
+					e.Length = *e.Committed
+					files[rel] = e
+					if e.Class != archive.ClassMutable {
+						rep.AsOfGrown++
+					}
+					continue
+				}
+				if len(untimed) == 0 {
 					rep.AsOfLater = append(rep.AsOfLater, rel)
 					continue
 				}
-				e := gens[chosen]
-				e.Length = *e.Committed
-				files[rel] = e
-				if e.Class != archive.ClassMutable {
-					rep.AsOfGrown++
-				}
-				continue
+				// Every timed generation is newer; the untimed ones
+				// are older than all of them.
+				nums, untimedOnly = untimed, true
+			} else {
+				current++
 			}
-			current++
 		}
-		var skipped []int
-		chosen := -1
-		for _, g := range nums {
-			e := gens[g]
-			if e.Committed != nil || e.Class == "" {
-				chosen = g
-				break
-			}
-			skipped = append(skipped, g)
-		}
-		switch {
-		case chosen >= 0:
-			e := gens[chosen]
-			if e.Committed != nil {
-				e.Length = *e.Committed
-			}
-			files[rel] = e
-			if len(skipped) > 0 {
-				rep.IncompleteFiles = append(rep.IncompleteFiles, fmt.Sprintf("%s: generation %d is incomplete; restored generation %d", rel, skipped[0], chosen))
-			}
-		case gens[nums[0]].Class == archive.ClassMutable:
-			rep.IncompleteFiles = append(rep.IncompleteFiles, fmt.Sprintf("%s: no complete generation; not restored", rel))
-		default:
-			files[rel] = gens[nums[0]]
-			rep.IncompleteFiles = append(rep.IncompleteFiles, fmt.Sprintf("%s: no complete generation; restored the incomplete generation %d as far as it goes", rel, nums[0]))
+		if chooseUsable(rel, gens, nums, files, rep) && untimedOnly {
+			rep.AsOfUntimed = append(rep.AsOfUntimed, rel)
 		}
 	}
 	if current > 0 {
 		rep.AsOfCurrent = append(rep.AsOfCurrent, fmt.Sprintf("%d files without completion times (archived before the hub recorded them)", current))
 	}
 	return files
+}
+
+// chooseUsable picks among a file's generations nums (newest first) the
+// newest candidate, as chooseGenerations describes, enters it in files and
+// reports whether it chose one.
+func chooseUsable(rel string, gens map[int]archive.Entry, nums []int, files map[string]archive.Entry, rep *RestoreReport) bool {
+	var skipped []int
+	chosen := -1
+	for _, g := range nums {
+		e := gens[g]
+		if e.Committed != nil || e.Class == "" {
+			chosen = g
+			break
+		}
+		skipped = append(skipped, g)
+	}
+	switch {
+	case chosen >= 0:
+		e := gens[chosen]
+		if e.Committed != nil {
+			e.Length = *e.Committed
+		}
+		files[rel] = e
+		if len(skipped) > 0 {
+			rep.IncompleteFiles = append(rep.IncompleteFiles, fmt.Sprintf("%s: generation %d is incomplete; restored generation %d", rel, skipped[0], chosen))
+		}
+		return true
+	case gens[nums[0]].Class == archive.ClassMutable:
+		rep.IncompleteFiles = append(rep.IncompleteFiles, fmt.Sprintf("%s: no complete generation; not restored", rel))
+		return false
+	default:
+		files[rel] = gens[nums[0]]
+		rep.IncompleteFiles = append(rep.IncompleteFiles, fmt.Sprintf("%s: no complete generation; restored the incomplete generation %d as far as it goes", rel, nums[0]))
+		return true
+	}
 }
 
 // restoreMode is the permission bits a restored file gets: the archived

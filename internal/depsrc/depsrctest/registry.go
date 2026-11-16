@@ -49,7 +49,17 @@ type Registry struct {
 	// NPMLatest is the version the dist-tag latest of plain names (1.0.0
 	// when empty); plain 1.0.0 and 1.1.0 exist.
 	NPMLatest string
-	requests  int
+	// NPMTags are further dist-tags of plain: name → version.
+	NPMTags map[string]string
+	// CRANArchiveRedirect, when set, is where the archive of mypkg 1.1.0
+	// redirects to (a path below the server; asked with a query, the
+	// archive answers itself).
+	CRANArchiveRedirect string
+	// GitHubRedirect, when set, is where the tarball of Commit redirects
+	// to (a path below the server; everything below /codeload/ serves the
+	// tarball).
+	GitHubRedirect string
+	requests       int
 }
 
 // Requests counts every request the registry answered.
@@ -131,6 +141,7 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	r.requests++
 	pyDigests, npmDist, noMD5, cranIndex, npmLatest := r.PyPIDigests, r.NPMDist, r.CRANNoMD5, r.CRANIndex, r.NPMLatest
+	npmTags, cranRedirect, ghRedirect := r.NPMTags, r.CRANArchiveRedirect, r.GitHubRedirect
 	r.mu.Unlock()
 	if npmLatest == "" {
 		npmLatest = "1.0.0"
@@ -154,6 +165,8 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case p == "/cran/src/contrib/mypkg_1.2.0.tar.gz":
 		r.count("cran")
 		w.Write(r.archive("cran", "1.2.0"))
+	case p == "/cran/src/contrib/Archive/mypkg/mypkg_1.1.0.tar.gz" && cranRedirect != "" && req.URL.RawQuery == "":
+		http.Redirect(w, req, base+cranRedirect, http.StatusFound)
 	case p == "/cran/src/contrib/Archive/mypkg/mypkg_1.1.0.tar.gz":
 		r.count("cran")
 		w.Write(r.archive("cran", "1.1.0"))
@@ -183,18 +196,23 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case p == "/pypi/files/my_lib-2.0.0.tar.gz":
 		r.count("pypi")
 		w.Write(r.archive("pypi", "2.0.0"))
-	case p == "/npm/@scope%2Fthing/latest" || p == "/npm/@scope%2Fthing/3.1.4", p == "/npm/plain/1.0.0", p == "/npm/plain/v1.0.0",
-		p == "/npm/plain/latest", p == "/npm/plain/1.1.0":
-		// "v1.0.0" is normalised to 1.0.0, as registries do; the dist-tag
-		// latest moves with NPMLatest.
+	case p == "/npm/@scope%2Fthing/latest" || p == "/npm/@scope%2Fthing/3.1.4", p == "/npm/plain/1.0.0", p == "/npm/plain/v1.0.0", p == "/npm/plain/1.0.0+build.5",
+		p == "/npm/plain/latest", p == "/npm/plain/1.1.0", strings.HasPrefix(p, "/npm/plain/") && npmTags[strings.TrimPrefix(p, "/npm/plain/")] != "":
+		// "v1.0.0" and "1.0.0+build.5" are normalised to 1.0.0, as
+		// registries do; the dist-tag latest moves with NPMLatest, the
+		// others with NPMTags.
 		name, v := "@scope/thing", "3.1.4"
 		switch p {
 		case "/npm/plain/latest":
 			name, v = "plain", npmLatest
 		case "/npm/plain/1.1.0":
 			name, v = "plain", "1.1.0"
-		case "/npm/plain/1.0.0", "/npm/plain/v1.0.0":
+		case "/npm/plain/1.0.0", "/npm/plain/v1.0.0", "/npm/plain/1.0.0+build.5":
 			name, v = "plain", "1.0.0"
+		default:
+			if t := npmTags[strings.TrimPrefix(p, "/npm/plain/")]; t != "" {
+				name, v = "plain", t
+			}
 		}
 		a := r.archive("npm", v)
 		sum := sha512.Sum512(a)
@@ -221,8 +239,12 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		fmt.Fprint(w, Commit)
 	case p == "/github/repos/owner/repo/tarball/"+Commit:
 		// GitHub redirects to codeload.
-		http.Redirect(w, req, base+"/codeload/owner/repo/tar.gz/"+Commit, http.StatusFound)
-	case p == "/codeload/owner/repo/tar.gz/"+Commit:
+		to := "/codeload/owner/repo/tar.gz/" + Commit
+		if ghRedirect != "" {
+			to = ghRedirect
+		}
+		http.Redirect(w, req, base+to, http.StatusFound)
+	case strings.HasPrefix(p, "/codeload/"):
 		r.count("github")
 		w.Write(r.archive("github", Commit))
 	case p == "/github/repos/owner/repo/tarball/"+EvilCommit:

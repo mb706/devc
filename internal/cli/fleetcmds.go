@@ -464,6 +464,13 @@ func (a *app) printRestore(rep *fleet.RestoreReport) {
 		if n := len(rep.AsOfLater); n > 0 {
 			fmt.Fprintf(a.stderr, "devc: left out %d files whose first archived generation is newer (for example %s)\n", n, rep.AsOfLater[0])
 		}
+		for i, f := range rep.AsOfUntimed {
+			if i == 10 {
+				fmt.Fprintf(a.stderr, "devc: … and %d more files restored from a generation without a recorded time\n", len(rep.AsOfUntimed)-i)
+				break
+			}
+			fmt.Fprintf(a.stderr, "devc: %s: restored from a generation without a recorded time (every later one is newer than that time; this one may be too)\n", f)
+		}
 		if rep.AsOfGrown > 0 {
 			fmt.Fprintf(a.stderr, "devc: %d append-only files (journals, logs, transcripts) restored from the generation in use then, with what was appended to it since\n", rep.AsOfGrown)
 		}

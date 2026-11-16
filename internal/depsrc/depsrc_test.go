@@ -356,14 +356,14 @@ func TestFetchCachedOffline(t *testing.T) {
 		return Fetch(context.Background(), s, none, Options{Root: root, Getenv: func(k string) string { return vars[k] }})
 	}
 	specs := []string{"r:mypkg@1.2.0", "r:mypkg@1.1.0", "pypi:my-lib@2.0.0", "npm:plain@1.0.0", "github:owner/repo@" + depsrctest.Commit}
-	for _, s := range append(specs, "npm:plain@v1.0.0") {
+	for _, s := range append(specs, "npm:plain@1.0.0+build.5", "npm:plain@v1.0.0") {
 		if _, err := fetch(s); err != nil {
 			t.Fatalf("%s: %v", s, err)
 		}
 	}
 	// The registry is still up, but nothing asks it.
 	n := reg.Requests()
-	for _, s := range append(specs, "npm:plain@v1.0.0") {
+	for _, s := range append(specs, "npm:plain@1.0.0+build.5") {
 		if res, err := fetch(s); err != nil || !res.Cached {
 			t.Errorf("%s from the cache: %+v %v", s, res, err)
 		}
@@ -379,12 +379,13 @@ func TestFetchCachedOffline(t *testing.T) {
 		}
 	}
 	// The alias the registry's normalisation left answers too.
-	if res, err := fetch("npm:plain@v1.0.0"); err != nil || !res.Cached || res.Spec.Version != "1.0.0" || res.Path != filepath.Join(root, "npm", "plain", "1.0.0") {
+	if res, err := fetch("npm:plain@1.0.0+build.5"); err != nil || !res.Cached || res.Spec.Version != "1.0.0" || res.Path != filepath.Join(root, "npm", "plain", "1.0.0") {
 		t.Errorf("normalised version: %+v %v", res, err)
 	}
 	// Control: what needs the registry (a branch, the latest release, a
-	// version not cached, a dist-tag) fails without it.
-	for _, s := range []string{"github:owner/repo@main", "npm:plain", "pypi:my-lib@1.0.0", "npm:plain@latest"} {
+	// version not cached, a dist-tag, a form npm only normalises to a
+	// version) fails without it.
+	for _, s := range []string{"github:owner/repo@main", "npm:plain", "pypi:my-lib@1.0.0", "npm:plain@latest", "npm:plain@v1.0.0"} {
 		if _, err := fetch(s); err == nil {
 			t.Errorf("%s answered without the registry", s)
 		}
@@ -434,12 +435,11 @@ func TestFetchMovingNames(t *testing.T) {
 	if res, err := fetch("npm:plain@latest"); err != nil || !res.Cached || res.Spec.Version != "1.1.0" || reg.Requests() == n {
 		t.Errorf("latest again: %+v %v (%d requests)", res, err, reg.Requests()-n)
 	}
-	// Exact versions are answered from the cache without the registry.
-	if _, err := fetch("npm:plain@v1.0.0"); err != nil {
-		t.Fatal(err)
-	}
+	// Exact versions are answered from the cache without the registry; a
+	// form npm only normalises to one ("v1.0.0") is asked of the registry
+	// every time (finding F2-02), and its tree comes from the cache.
 	n = reg.Requests()
-	for _, s := range []string{"npm:plain@1.0.0", "npm:plain@v1.0.0", "npm:plain@1.1.0"} {
+	for _, s := range []string{"npm:plain@1.0.0", "npm:plain@1.1.0"} {
 		if res, err := fetch(s); err != nil || !res.Cached {
 			t.Errorf("%s: %+v %v", s, res, err)
 		}
@@ -447,18 +447,60 @@ func TestFetchMovingNames(t *testing.T) {
 	if reg.Requests() != n {
 		t.Errorf("%d requests for exact cached versions", reg.Requests()-n)
 	}
+	for i := 0; i < 2; i++ {
+		n = reg.Requests()
+		if res, err := fetch("npm:plain@v1.0.0"); err != nil || !res.Cached || res.Spec.Version != "1.0.0" || reg.Requests() == n {
+			t.Errorf("v1.0.0: %+v %v (%d requests)", res, err, reg.Requests()-n)
+		}
+	}
+	// A tag named like a version that npm does not take for one (a
+	// number above 2^53-1) moves like any tag (finding F2-02): it is
+	// resolved online every time, stored under no alias, and an alias an
+	// older devc stored for it is ignored.
+	big := "9007199254740992.0.0"
+	reg.NPMTags = map[string]string{big: "1.0.0"}
+	if res, err := fetch("npm:plain@" + big); err != nil || res.Spec.Version != "1.0.0" {
+		t.Fatalf("%s: %+v %v", big, res, err)
+	}
+	for _, a := range []string{big, "v1.0.0"} {
+		if _, err := os.Lstat(filepath.Join(root, "npm", "plain", ".alias-"+a)); err == nil {
+			t.Errorf("%s was stored as an alias", a)
+		}
+	}
+	reg.NPMTags = map[string]string{big: "1.1.0"}
+	n = reg.Requests()
+	if res, err := fetch("npm:plain@" + big); err != nil || res.Spec.Version != "1.1.0" || reg.Requests() == n {
+		t.Errorf("%s after the tag moved: %+v %v (%d requests)", big, res, err, reg.Requests()-n)
+	}
+	if err := os.WriteFile(filepath.Join(root, "npm", "plain", ".alias-"+big), []byte("1.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := fetch("npm:plain@" + big); err != nil || res.Spec.Version != "1.1.0" {
+		t.Errorf("%s with a stored alias: %+v %v", big, res, err)
+	}
 	// An alias left by an older devc for a tag is not used.
 	if err := os.WriteFile(filepath.Join(root, "npm", "plain", ".alias-next"), []byte("1.0.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	srv.Close()
-	if res, err := fetch("npm:plain@next"); err == nil {
-		t.Errorf("a stored alias answered for a dist-tag: %+v", res)
+	for _, tag := range []string{"next", big} {
+		if res, err := fetch("npm:plain@" + tag); err == nil {
+			t.Errorf("a stored alias answered for the dist-tag %s: %+v", tag, res)
+		}
 	}
-	for v, exact := range map[string]bool{"1.0.0": true, "v1.2.3": true, "1.0.0-rc.1": true, "1.0.0+build.5": true, "2.0.0-alpha-1": true,
-		"latest": false, "next": false, "1.0": false, "1": false, "1.x": false, "01.0.0": false, "1.0.0.0": false, "v": false} {
-		if concrete(EcoNPM, v) != exact {
+	long := "1.0.0-" + strings.Repeat("a", 250) // 256 characters
+	for v, exact := range map[string]bool{"1.0.0": true, "1.0.0-rc.1": true, "1.0.0+build.5": true, "2.0.0-alpha-1": true,
+		"9007199254740991.9007199254740991.9007199254740991": true, "1.0.0-0": true, "1.0.0-0a": true, "1.0.0-00a": true, "1.0.0+001": true,
+		"1.0.0-9007199254740991": true, long: true,
+		"latest": false, "next": false, "1.0": false, "1": false, "1.x": false, "01.0.0": false, "1.0.0.0": false, "v": false,
+		"v1.2.3": false, "=1.2.3": false, "9007199254740992.0.0": false, "1.9007199254740992.0": false, "1.0.99999999999999999999": false,
+		"1.0.0-01": false, "1.0.0-9007199254740992": false, "1.0.0-": false, "1.0.0+": false, "1.0.0-a..b": false, "1.0.0+a..b": false,
+		"1.0.0-a_b": false, "1.0.0+a~b": false, long + "a": false} {
+		if concrete(EcoNPM, v) != exact && (len(v) <= 128 || !exact) {
 			t.Errorf("concrete(npm, %q) = %v", v, !exact)
+		}
+		if npmExact(v) != exact {
+			t.Errorf("npmExact(%q) = %v", v, !exact)
 		}
 	}
 }
@@ -575,6 +617,85 @@ func TestFetchCRANIndex(t *testing.T) {
 			t.Errorf("%s: %v, want …%s…", c.name, err, c.want)
 		case c.want != "" && c.want != "refusing it" && reg.Downloads("cran") != before:
 			t.Errorf("%s: downloaded although the index was refused", c.name)
+		}
+	}
+}
+
+// TestFetchRedirects: a download without a checksum ends where it was
+// asked for (finding F2-01). CRAN's archive is followed only to the same
+// path: the reviewer's redirect into the current-release directory is
+// refused before anything is downloaded, and nothing is cached. A GitHub
+// tarball is followed only to the same owner, repository and commit.
+// Controls: a redirect to the same archive path, GitHub's own redirect to
+// codeload (also with other letter case and the legacy name).
+func TestFetchRedirects(t *testing.T) {
+	reg := depsrctest.New()
+	srv := httptest.NewServer(reg)
+	defer srv.Close()
+	vars := map[string]string{}
+	for _, kv := range depsrctest.Env(srv.URL) {
+		k, v, _ := strings.Cut(kv, "=")
+		vars[k] = v
+	}
+	none := Env{Getenv: func(string) string { return "" }, DefaultRLibs: []string{}}
+	fetch := func(spec, root string) (*Result, error) {
+		t.Helper()
+		s, err := ParseSpec(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Fetch(context.Background(), s, none, Options{Root: root, Getenv: func(k string) string { return vars[k] }})
+	}
+	for _, c := range []struct {
+		eco, spec, to string
+		ok            bool
+	}{
+		{"cran", "r:mypkg@1.1.0", "/cran/src/contrib/mypkg_1.2.0.tar.gz", false},
+		{"cran", "r:mypkg@1.1.0", "/cran/src/contrib/Archive/mypkg/mypkg_1.2.0.tar.gz", false},
+		{"cran", "r:mypkg@1.1.0", "/cran/src/contrib/Archive/mypkg/mypkg_1.1.0.tar.gz?mirror=1", true},
+		{"github", "github:owner/repo@" + depsrctest.Commit, "/codeload/owner/other/tar.gz/" + depsrctest.Commit, false},
+		{"github", "github:owner/repo@" + depsrctest.Commit, "/codeload/other/repo/tar.gz/" + depsrctest.Commit, false},
+		{"github", "github:owner/repo@" + depsrctest.Commit, "/codeload/owner/repo/tar.gz/" + depsrctest.EvilCommit, false},
+		{"github", "github:owner/repo@" + depsrctest.Commit, "/codeload/owner/repo/zip/" + depsrctest.Commit, false},
+		{"github", "github:owner/repo@" + depsrctest.Commit, "/codeload/owner/repo/tar.gz/" + depsrctest.Commit + "/x", false},
+		{"github", "github:owner/repo@" + depsrctest.Commit, "", true},
+		{"github", "github:owner/repo@" + depsrctest.Commit, "/codeload/Owner/Repo/legacy.tar.gz/" + depsrctest.Commit, true},
+	} {
+		reg.CRANArchiveRedirect, reg.GitHubRedirect = "", ""
+		if c.eco == "cran" {
+			reg.CRANArchiveRedirect = c.to
+		} else {
+			reg.GitHubRedirect = c.to
+		}
+		root := t.TempDir()
+		before := reg.Downloads(c.eco)
+		res, err := fetch(c.spec, root)
+		if c.ok {
+			if err != nil || reg.Downloads(c.eco) != before+1 {
+				t.Errorf("%s via %q: %+v %v", c.spec, c.to, res, err)
+			}
+			if c.eco == "cran" {
+				if b, _ := os.ReadFile(filepath.Join(res.Path, "DESCRIPTION")); !strings.Contains(string(b), "Version: 1.1.0") {
+					t.Errorf("%s via %q: DESCRIPTION %q", c.spec, c.to, b)
+				}
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), "refusing a redirect") || !strings.Contains(err.Error(), "not the archive asked for") {
+			t.Errorf("%s via %q: %+v %v", c.spec, c.to, res, err)
+		}
+		if reg.Downloads(c.eco) != before {
+			t.Errorf("%s via %q: the redirect was followed", c.spec, c.to)
+		}
+		var left []string
+		filepath.WalkDir(root, func(p string, de os.DirEntry, err error) error {
+			if err == nil && !de.IsDir() {
+				left = append(left, p)
+			}
+			return nil
+		})
+		if len(left) > 0 {
+			t.Errorf("%s via %q: cached %q", c.spec, c.to, left)
 		}
 	}
 }

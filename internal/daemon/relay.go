@@ -334,6 +334,14 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 	var env []string
 	var report string
 	var maxInput, feed, relayUsed int64
+	// release gives back what a push holds (the box lock, the report
+	// files). runPush takes it over: git's processes may outlive it.
+	var release func()
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
 	switch p.Service {
 	case gitx.ServiceUploadPack:
 		if r.Upstream != "" && r.Git.FetchThrough && d.fetchLimit.allow(ref) {
@@ -346,23 +354,32 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 			fail(proto.CodeInternal, "the host could not set up the relay hooks; see the daemon's log")
 			return
 		}
+		if msg := d.heldRefusal(ref, relay); msg != "" {
+			fail(proto.CodeBusy, "%s", msg)
+			return
+		}
 		unlock, err := box.LockBox(ctx, e.cfg.Paths, ref, pushLockTimeout, nil)
 		if err != nil {
+			if msg := d.heldRefusal(ref, relay); msg != "" {
+				fail(proto.CodeBusy, "%s", msg)
+				return
+			}
 			fail(proto.CodeBusy, "devc is busy with %s; try again shortly", ref)
 			return
 		}
-		defer unlock()
+		release = unlock
 		report, err = newReportFile(e.cfg.Paths)
 		if err != nil {
 			d.log.Error("creating a relay report file", "err", err)
 			fail(proto.CodeInternal, "the host could not prepare the push; see the daemon's log")
 			return
 		}
-		defer func() {
+		release = func() {
 			os.Remove(report)
 			os.Remove(gitx.HeadsFile(report))
 			os.Remove(gitx.RecordsFile(report))
-		}()
+			unlock()
+		}
 		env = hookEnv(e.cfg.Paths, ref, report)
 		maxInput, feed = r.Git.MaxPushSize, r.Git.MaxPushSize+pushSlack
 		// Storage is checked before git writes anything (finding D1-05):
@@ -401,7 +418,14 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 	var stderr string
 	if p.Service == gitx.ServiceReceivePack {
 		var why string
-		code, stderr, why, err = d.runPush(ctx, gs, call, raw, br, feed, relay, relayUsed, r.Git.RelayQuota)
+		held := release
+		release = nil
+		code, stderr, why, err = d.runPush(ctx, gs, call, raw, br, feed, relay, relayUsed, r.Git.RelayQuota, func() {
+			// git is gone: end both copies before the box lock is released.
+			end()
+			d.pushed(ctx, e, ref, p.Session, report)
+			held()
+		})
 		if why != "" {
 			d.log.Warn("a push was ended", "box", names.BoxName(ref), "reason", why)
 			stderr = "devc ended the push: " + why + "; " + stderr
@@ -409,23 +433,19 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 	} else {
 		code, stderr, err = serveGitProcess(ctx, gs, call, raw, br, feed)
 	}
-	// git is gone: end both copies before the box lock is released.
 	end()
 	d.log.Info("relay service", "box", names.BoxName(ref), "service", p.Service, "exit", code, "err", err, "stderr", proto.Printable(proto.Truncate(stderr, 300)))
-	if report != "" {
-		d.pushed(ctx, e, ref, p.Session, report)
-	}
 }
 
 // runPush runs receive-pack under the push watchdog: a push that would
 // take the relay beyond its budget or the file system below its reserve
 // is ended. git runs in a process group that is killed and gone, with
 // index-pack and every hook, before runPush removes what an ended push
-// left in the relay and before the caller releases the relay's lock
-// (findings D1-05, E1-16). A group that could not be ended is logged and
-// its quarantine left: removing it under a writer would only unlink
-// files that still take space.
-func (d *Daemon) runPush(ctx context.Context, gs *gitx.Service, call gitx.Call, st io.Writer, br io.Reader, feed int64, relay string, used, quota int64) (int, string, string, error) {
+// left in the relay and calls release, which gives back the relay's lock
+// (findings D1-05, E1-16). A group that outlives its wait (a process
+// stuck in the kernel) leaves the relay as it is (finding F1-01): see
+// holdRelay.
+func (d *Daemon) runPush(ctx context.Context, gs *gitx.Service, call gitx.Call, st io.Writer, br io.Reader, feed int64, relay string, used, quota int64, release func()) (int, string, string, error) {
 	gctx, killGit := context.WithCancel(ctx)
 	defer killGit()
 	watched := make(chan string, 1)
@@ -439,13 +459,58 @@ func (d *Daemon) runPush(ctx context.Context, gs *gitx.Service, call gitx.Call, 
 	code, stderr, err := serveGitProcess(gctx, gs, call, st, br, feed)
 	killGit()
 	why := <-watched
-	if errors.Is(err, execx.ErrGroupLeft) {
-		d.log.Error("git processes of a push did not end; its quarantine is left in the relay", "relay", relay, "err", err)
+	var left *execx.GroupLeftError
+	if errors.As(err, &left) {
+		d.holdRelay(relay, left.Gone, release, err)
 		return code, stderr, why, err
 	}
 	// A push that was ended may leave its quarantine behind.
 	gitx.RemoveQuarantines(relay)
+	if release != nil {
+		release()
+	}
 	return code, stderr, why, err
+}
+
+// holdRelay keeps a relay as a push whose git processes outlived it left
+// it, until gone is closed (finding F1-01): its quarantine stays (removing
+// it under a writer would only unlink files that still take space),
+// release (the relay's lock) is not called, and pushes to the relay are
+// refused with a message saying why. Once the last process has ended, the
+// quarantine is removed, the relay takes pushes again and release is
+// called, without a restart of the daemon.
+func (d *Daemon) holdRelay(relay string, gone <-chan struct{}, release func(), err error) {
+	d.heldMu.Lock()
+	if d.heldRelays == nil {
+		d.heldRelays = map[string]time.Time{}
+	}
+	d.heldRelays[relay] = time.Now()
+	d.heldMu.Unlock()
+	d.log.Error("git processes of a push did not end; the relay keeps its quarantine and lock and refuses pushes until they have", "relay", relay, "err", err)
+	go func() {
+		<-gone
+		gitx.RemoveQuarantines(relay)
+		d.heldMu.Lock()
+		delete(d.heldRelays, relay)
+		d.heldMu.Unlock()
+		if release != nil {
+			release()
+		}
+		d.log.Info("the git processes of an earlier push have ended; its quarantine is removed and the relay takes pushes again", "relay", relay)
+	}()
+}
+
+// heldRefusal is the message a push to a held relay is refused with, or
+// "" when the relay is not held.
+func (d *Daemon) heldRefusal(ref names.ProjectRef, relay string) string {
+	d.heldMu.Lock()
+	since, held := d.heldRelays[relay]
+	d.heldMu.Unlock()
+	if !held {
+		return ""
+	}
+	return fmt.Sprintf("git processes of an earlier push to %s have not ended (since %s, by the host's clock); devc keeps the relay as that push left it "+
+		"and refuses pushes until they have: try again later, or ask the user to look at the daemon's log on the host", ref, since.Format(time.TimeOnly))
 }
 
 // serveGitProcess runs git with the stream as its standard input and
