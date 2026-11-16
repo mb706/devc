@@ -339,6 +339,14 @@ After upgrading to C19r4: a desktop that runs from before is refused by `devc gu
 - The command tree is built with an empty configuration directory, so the harness commands are those of the built-in manifests.
 - Files excluded by build constraints (other architectures) are shown without links or symbols.
 - The placeholder app was checked in headless Chrome only; the app of X2 and X3 brings its own check, Firefox included.
+
+### Explorer (X2)
+
+- The app was checked in headless Chrome only: no Firefox is installed here. It uses nothing newer than what current Firefox has (`color-mix`, `oklch`, container queries, `:has`, RegExp lookbehind and the `d` flag), but it was not seen there.
+- The connector layer does not separate parallel connectors between the same two boxes or draw self-loops; the package map needs neither, X3's diagrams do.
+- On the package map with "all imports" the connectors run behind the tiles; they show density, not routes. The edges of one package in focus run over the faded tiles.
+- Group colours are muted hues spaced around the wheel; with twelve groups two neighbours can look alike, which the printed group name and the legend's hover highlighting make up for.
+- Middle click on a source identifier opens a new tab through `window.open` (the identifiers carry no `href` to keep large files light).
 - The first `./dev explore` compiles the tool, which links most of devc (through `internal/cli`); only the cached build time (about 5 s) was measured.
 
 ## 6. Deferred work

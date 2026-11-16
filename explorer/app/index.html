@@ -1,42 +1,106 @@
 <!doctype html>
-<!-- Placeholder of the explorer app (work order X1): it proves that the data
-     loads from disk. X2 replaces it. Data files are classic scripts that call
-     explorerRegister; nothing is fetched. -->
+<!-- The code explorer: a static app opened from disk (file://). Data files
+     are classic scripts that call explorerRegister (explorer/tool/schema.go);
+     nothing is fetched and no module system is used. The scripts below load
+     in order: shared parts first, then the views, then the shell (main.js). -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>devc explorer</title>
-<style>
-  :root { color-scheme: light dark; --muted: #777; --kw: #a626a4; --str: #50a14f; --com: #8a8a8a; --num: #986801; --link: #2a6fdb; }
-  @media (prefers-color-scheme: dark) { :root { --kw: #c678dd; --str: #98c379; --com: #7f848e; --num: #d19a66; --link: #61afef; } }
-  body { font: 14px/1.45 system-ui, sans-serif; margin: 0; display: grid; grid-template-columns: 26rem 1fr; height: 100vh; }
-  nav { overflow: auto; border-right: 1px solid #8884; padding: 0.5rem 1rem; }
-  main { overflow: auto; padding: 0.5rem 1rem; }
-  h1 { font-size: 1.1rem; } .muted { color: var(--muted); font-size: 12px; }
-  .pkg { margin: 0.4rem 0; } .pkg code { font-weight: 600; } .pkg div { color: var(--muted); font-size: 12px; }
-  pre { font: 13px/1.5 ui-monospace, monospace; margin: 0; counter-reset: l; }
-  pre .ln { display: inline-block; width: 4em; color: var(--muted); text-align: right; margin-right: 1em; user-select: none; text-decoration: none; }
-  pre .hl { background: #fd03; }
-  .k1 { color: var(--kw); } .k2 { color: var(--str); } .k3 { color: var(--com); font-style: italic; } .k4 { color: var(--num); }
-  a.ref { color: inherit; text-decoration: underline dotted var(--link); } a.ref:hover { color: var(--link); }
-</style>
+<title>Explorer</title>
+<script>
+  // The theme is applied before anything paints. Storage may be unavailable.
+  (function () {
+    var t = "system";
+    try { t = JSON.parse(localStorage.getItem("explorer.theme") || '"system"'); } catch (e) {}
+    var dark = t === "dark" || (t !== "light" && window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  })();
+  // The registration function every data file calls.
+  window.EXPLORER = { core: null, chunks: {}, docs: {}, waiting: {} };
+  window.explorerRegister = function (kind, key, value) {
+    if (kind === "core") { EXPLORER.core = value; return; }
+    var store = kind === "chunk" ? EXPLORER.chunks : EXPLORER.docs;
+    store[key] = value;
+    var w = EXPLORER.waiting[kind + ":" + key] || [];
+    delete EXPLORER.waiting[kind + ":" + key];
+    w.forEach(function (f) { f(value); });
+  };
+</script>
+<link rel="stylesheet" href="css/theme.css">
+<link rel="stylesheet" href="css/shell.css">
+<link rel="stylesheet" href="css/parts.css">
+<link rel="stylesheet" href="css/source.css">
+<link rel="stylesheet" href="css/views.css">
 </head>
 <body>
-<nav id="nav">Loading…</nav>
-<main id="main"></main>
-<script>
-// The registration function every data file calls.
-window.EXPLORER = { core: null, chunks: {}, docs: {}, waiting: {} };
-window.explorerRegister = function (kind, key, value) {
-  if (kind === "core") { EXPLORER.core = value; return; }
-  var store = kind === "chunk" ? EXPLORER.chunks : EXPLORER.docs;
-  store[key] = value;
-  (EXPLORER.waiting[kind + ":" + key] || []).forEach(function (f) { f(value); });
-  delete EXPLORER.waiting[kind + ":" + key];
-};
-</script>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-package" viewBox="0 0 16 16"><path d="M2.5 5 8 2.2 13.5 5v6L8 13.8 2.5 11z"/><path d="M2.5 5 8 7.8 13.5 5M8 7.8v6"/></symbol>
+    <symbol id="i-file" viewBox="0 0 16 16"><path d="M4 1.8h5.2L12.5 5v9.2H4z"/><path d="M9 1.8V5.3h3.5"/></symbol>
+    <symbol id="i-dir" viewBox="0 0 16 16"><path d="M1.8 4.2h4.4l1.4 1.5h6.6v7.6H1.8z"/></symbol>
+    <symbol id="i-command" viewBox="0 0 16 16"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.5"/><path d="m4.5 6.5 2 1.6-2 1.6M8 10h3.4"/></symbol>
+    <symbol id="i-rpc" viewBox="0 0 16 16"><path d="M2.5 5.5h10M10 3l2.5 2.5L10 8M13.5 10.5h-10M6 8l-2.5 2.5L6 13"/></symbol>
+    <symbol id="i-route" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.8"/><path d="M2.2 8h11.6M8 2.2c-2.2 2.6-2.2 9 0 11.6M8 2.2c2.2 2.6 2.2 9 0 11.6"/></symbol>
+    <symbol id="i-event" viewBox="0 0 16 16"><path d="M9 1.8 3.8 9h4l-1 5.2L12.2 7h-4z"/></symbol>
+    <symbol id="i-config" viewBox="0 0 16 16"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/><circle cx="5.5" cy="4.5" r="1.4" style="fill:var(--raised)"/><circle cx="10.5" cy="8" r="1.4" style="fill:var(--raised)"/><circle cx="7" cy="11.5" r="1.4" style="fill:var(--raised)"/></symbol>
+    <symbol id="i-env" viewBox="0 0 16 16"><path d="M5 3.5c-1.6 0-1.6 1-1.6 2.3S2.8 8 2 8c.8 0 1.4.9 1.4 2.2s0 2.3 1.6 2.3M11 3.5c1.6 0 1.6 1 1.6 2.3S13.2 8 14 8c-.8 0-1.4.9-1.4 2.2s0 2.3-1.6 2.3"/><path d="M6.2 8h3.6"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 16 16"><path d="M3.5 1.8h9v12.4h-9z"/><path d="M5.8 5h4.4M5.8 7.6h4.4M5.8 10.2h2.8"/></symbol>
+    <symbol id="i-finding" viewBox="0 0 16 16"><path d="M3.5 14.2V2M3.5 2.6h8.3l-1.8 2.9 1.8 2.9H3.5"/></symbol>
+    <symbol id="i-chunk" viewBox="0 0 16 16"><rect x="3" y="2.6" width="10" height="11.6" rx="1"/><path d="M6 2.6V1.8h4v.8M5.6 6.5h4.8M5.6 9h4.8M5.6 11.5h3"/></symbol>
+    <symbol id="i-concern" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.4"/><path d="m10.2 10.2 3.6 3.6"/></symbol>
+    <symbol id="i-flow" viewBox="0 0 16 16"><circle cx="3.5" cy="4" r="1.6"/><circle cx="12.5" cy="12" r="1.6"/><path d="M5.1 4h4.4a2.5 2.5 0 0 1 0 5h-3a2.5 2.5 0 0 0 0 5h4.4"/></symbol>
+    <symbol id="i-term" viewBox="0 0 16 16"><path d="M2.5 3c2.2-.6 4-.4 5.5 1 1.5-1.4 3.3-1.6 5.5-1v10c-2.2-.6-4-.4-5.5 1-1.5-1.4-3.3-1.6-5.5-1zM8 4v10"/></symbol>
+    <symbol id="i-actor" viewBox="0 0 16 16"><rect x="2.2" y="3.5" width="11.6" height="9" rx="2"/><path d="M5 8h6"/></symbol>
+    <symbol id="i-zone" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="1.5" stroke-dasharray="2.2 1.6"/></symbol>
+    <symbol id="i-channel" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.8"/><circle cx="12.5" cy="8" r="1.8"/><path d="M5.3 8h5.4"/></symbol>
+    <symbol id="i-diagram" viewBox="0 0 16 16"><rect x="1.8" y="2.2" width="5" height="3.6" rx=".8"/><rect x="9.2" y="10.2" width="5" height="3.6" rx=".8"/><path d="M4.3 5.8V12h4.9"/></symbol>
+    <symbol id="i-surface" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="11" rx="1"/><path d="M2 6h12M6.5 6v7.5"/></symbol>
+    <symbol id="i-layer" viewBox="0 0 16 16"><path d="M8 2 14 5 8 8 2 5zM2 8l6 3 6-3M2 11l6 3 6-3"/></symbol>
+    <symbol id="i-group" viewBox="0 0 16 16"><path d="M2.5 2.5h5l6 6-5 5-6-6z"/><circle cx="5.3" cy="5.3" r=".9"/></symbol>
+    <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.6"/><path d="m10.4 10.4 3.4 3.4"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 16 16"><path d="M6.9 1.8h2.2l.4 1.7 1.2.7 1.7-.5 1.1 1.9-1.3 1.2v1.4l1.3 1.2-1.1 1.9-1.7-.5-1.2.7-.4 1.7H6.9l-.4-1.7-1.2-.7-1.7.5-1.1-1.9 1.3-1.2V7.3L2.5 6.1l1.1-1.9 1.7.5 1.2-.7z"/><circle cx="8" cy="8" r="1.9"/></symbol>
+    <symbol id="i-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+    <symbol id="i-back" viewBox="0 0 16 16"><path d="M10 3 5 8l5 5"/></symbol>
+    <symbol id="i-fwd" viewBox="0 0 16 16"><path d="m6 3 5 5-5 5"/></symbol>
+    <symbol id="i-down" viewBox="0 0 16 16"><path d="m3.5 6 4.5 4.5L12.5 6"/></symbol>
+    <symbol id="i-full" viewBox="0 0 16 16"><path d="M9 2.5h4.5V7M13.5 2.5 8 8M7 3.5H3v9.5h9.5V9"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5.2" y="5.2" width="8.3" height="8.3" rx="1"/><path d="M10.8 5.2V2.5H2.5v8.3h2.7"/></symbol>
+    <symbol id="i-editor" viewBox="0 0 16 16"><path d="M5.5 4 1.8 8l3.7 4M10.5 4l3.7 4-3.7 4"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.8"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 16 16"><path d="M12.8 10A5.5 5.5 0 0 1 6 3.2 5.5 5.5 0 1 0 12.8 10z"/></symbol>
+    <symbol id="i-panel" viewBox="0 0 16 16"><rect x="1.8" y="2.5" width="12.4" height="11" rx="1"/><path d="M6 2.5v11"/></symbol>
+    <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 7.2V11M8 5v.1"/></symbol>
+    <symbol id="i-text" viewBox="0 0 16 16"><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></symbol>
+  </defs>
+</svg>
+<div id="app">
+  <header id="topbar"></header>
+  <div id="body">
+    <main id="main"><div class="loading"><span class="spinner"></span>Loading the data…</div></main>
+    <aside id="inspector" class="hidden"></aside>
+  </div>
+</div>
+<div id="layer-popups"></div>
 <script src="data/core.js"></script>
-<script src="app.js"></script>
+<script src="js/util.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/data.js"></script>
+<script src="js/refs.js"></script>
+<script src="js/doc.js"></script>
+<script src="js/router.js"></script>
+<script src="js/hovercard.js"></script>
+<script src="js/inspector.js"></script>
+<script src="js/connectors.js"></script>
+<script src="js/table.js"></script>
+<script src="js/source.js"></script>
+<script src="js/symbol.js"></script>
+<script src="js/search.js"></script>
+<script src="js/views/placeholder.js"></script>
+<script src="js/views/code.js"></script>
+<script src="js/views/packages.js"></script>
+<script src="js/views/package.js"></script>
+<script src="js/views/interfaces.js"></script>
+<script src="js/main.js"></script>
 </body>
 </html>

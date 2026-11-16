@@ -10,6 +10,7 @@ xdg-open explorer/dist/index.html
 ./dev explore --model <dir> --out <dir>   # another model, another output directory (both below the repository)
 ./dev explore query help # questions about the code for people writing the model
 ./dev explore comments-only [commit]      # did the Go code change only in its comments since HEAD?
+explorer/check.sh [--no-build] [dir]      # build, then check the app in headless Chrome (screenshots in dir)
 ```
 
 `explorer/dist/` is generated and ignored by git. It is a static site without a server and without network access: open `index.html` from disk. The explorer does not describe itself: the packages below `explorer/` are left out.

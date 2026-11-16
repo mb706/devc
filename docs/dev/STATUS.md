@@ -33,7 +33,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | Review D + C19r | done | f1b7e15 |
 | Review E (verification of the last fixes) + C19r3, C19r4 | done | c336d39 |
 | Closing check F + C19r5 | done | 0e79147 |
-| X1 Explorer: the tool (extraction, model, checks) | in progress | |
+| X1 Explorer: the tool (extraction, model, checks) | done | 5680f03 |
+| X2 Explorer: the app, shell and code views | in progress | |
 
 ## Resuming
 
@@ -1140,3 +1141,48 @@ The four confirmed findings of the closing check (`docs/dev/reviews/F1-review.md
 **Tests.** Unit tests beside the tool with a synthetic module in `testdata/mod`: symbols and implementations, the classification of RPC uses (map keys and index assignments, factories, cases, struct fields, arguments, allowlists), paths (static, dynamic, through dispatch variables, to fields, never through test doubles), flow connections (paths, earlier steps, RPC with sender check, unchecked, unfollowable messages), references (every kind, near misses), strict model loading and front matter, document patterns (and that their expressions are portable to JavaScript), headings, findings and responses. `internal/cli.TestCommandTree`.
 
 **Test results.** `./dev test ./explorer/tool/ ./internal/cli/` pass; `./dev vet` and gofmt are clean. The site was opened from `file://` in headless Chrome: no console errors; a source file renders with highlighting, every link's text matches its target (checked over four files, including ones with non-ASCII comments), and following a link shows the definition. The integration suite was not run (nothing it covers changed).
+
+### X2 Explorer: the app, part 1 (shell and the views of extracted facts)
+
+**What exists.** `explorer/app/` (about 5,200 lines of plain HTML, CSS and JavaScript; classic scripts, no library, nothing fetched; the tool copies the directory as it is). Everything hangs off one global `X`; each file adds one member and starts with a comment saying what it is.
+
+| File | What it is |
+|---|---|
+| `index.html` | The page: theme set before the first paint, `explorerRegister`, the SVG icon sprite (`#i-<name>`), the scripts in load order. |
+| `css/theme.css` | Tokens for both themes, the zone colours (`--z-<trust>`, classes `.z-<trust>` set `--z`), base elements. |
+| `css/shell.css`, `parts.css`, `source.css`, `views.css` | Shell and popups; shared parts; the source view; the views of this chunk. |
+| `js/util.js` | `X.util`: `esc`, `h` (build elements), `icon`, `load`/`save` (storage that never throws), `firstSentence`, `fmt`, `copy`, `toast`, `debounce`. |
+| `js/settings.js` | `X.settings`: theme, tests shown, inspector width, editor link (presets VS Code and Cursor), `editorURL(file, line)`. |
+| `js/data.js` | `X.data`: the Core indexed (`sym`, `pkg`, `file`, `cmd`, `rpc`, `route`, `event`, `config`, `env`, `document`, `finding`, `workOrder`, every model object), `children`, `symbolsOfFile`, `implementationsOf`, `zonesOfActors`; loaders returning promises: `chunk`, `chunkOfPackage`, `source(path)`, `doc(path)`, `allChunks(progress)`. |
+| `js/refs.js` | `X.refs`: reference syntax, `resolve`, `chip`, `href` (full view), `card` (hover card), `define(kind, spec)`, `badge`, `zoneMark`, `actorList`; the shared click behaviour. |
+| `js/doc.js` | `X.doc`: Go doc comments (`render`), inline text (`inline`), the build's patterns (`findRefs`, `linkify`), `highlightGo`, `plain`. |
+| `js/router.js` | `X.router`: `#/<view>/<rest>?k=v`, `register`, `href`, `hrefKeep` (keeps the inspector), `go`, `replace`, `setParams`, `onChange`, `remount`. |
+| `js/hovercard.js`, `js/inspector.js`, `js/connectors.js`, `js/table.js`, `js/source.js` | The shared parts below. |
+| `js/symbol.js` | `X.symbolPanel.render(el, ref, {excerpt})`: signature, doc, where it may run, members, implementations, used by, calls; the inspector's symbol view. |
+| `js/search.js` | `X.search`: names and text in code. |
+| `js/views/placeholder.js` | "Not built yet" pages for overview, runtime, concerns, flows, state, glossary, docs; the page for an unknown route. |
+| `js/views/code.js` | Code view (`#/code/<path>?sym=&line=`), tree, outline; the inspector's file view. |
+| `js/views/packages.js` | Package map (`#/packages`, `#/packages/size`, `?color=group|zone|tests&all=1`); `X.pkgTiles`. |
+| `js/views/package.js` | Package page (`#/pkg/<path>`); the inspector's package summary. |
+| `js/views/interfaces.js` | `#/interfaces/<surface>?q=&sel=`; the inspector's views of commands, RPC methods, routes, events, configuration keys, environment variables. |
+| `js/main.js` | The top bar, settings popover, start. |
+| `explorer/check.sh` | The check (below). |
+
+**Shared parts and how X3 uses them.**
+
+- **References.** Write `X.refs.chip(ref)` (HTML string) for any reference; options `label`, `cls` (`inline` in prose, `flat`, `small`), `plain` (no icon), `act: "full"`, `noZone`. Any element with `data-ref` gets the hover card, click to inspect, Ctrl/Cmd+click to open in full; a container that handles a click itself calls `preventDefault()`. Model kinds (actor, zone, channel, concern, flow, term, diagram, surface, layer, group) resolve, label and colour already, with a simple card; X3 calls `X.refs.define(kind, {card, href, label})` to give them their real card and full-view URL (the current `href`s point at the X3 routes: `#/runtime?sel=actor:x`, `#/concerns/<id>`, `#/flows/<id>`, `#/glossary?sel=<id>`, `#/docs/<path>?h=<anchor>`, `#/docs/findings?sel=<id>`; change them freely).
+- **Hover cards** need nothing: `data-ref` is enough; `data-nocard` suppresses one.
+- **Inspector.** `X.inspector.register(kind, function (info, body, ctx) { …; return cleanup; })` for actor, term, finding, concern, flow, channel, zone; `X.inspector.open(ref)`; its target is the URL parameter `i`. `body.classList.add("fill")` makes the body a flex column for a renderer with its own scroller (see the file view in `code.js`). The `.insp-pad` class gives the usual padding.
+- **Source view.** `X.source.view(scroller, {path, from, to, range, line, scroll, wrap, onIdent, onLine})` → `{ready, setLine, setRange, scrollTo, firstVisibleLine, expandAll}`; `X.source.header(path)`; `X.source.declStart(sf, sym)`. For the flow player, show the step's code with `X.symbolPanel.render(el, ref, {excerpt: true})` or open it in the inspector. Margin marks: `X.source.addMarks(function (path) { return [{line, ref, cls, title}]; })`, called whenever a file is rendered (style `.mkx.<cls>`).
+- **Connector layer.** `var L = X.connectors.create(host, {above})`; `L.set([{from, to, cls, arrow, curve, label, sides: "auto"|"v"|"h"}])`; it redraws on resize; `L.destroy()` on unmount. Endpoints on one side of a box are spread; classes `imp`, `by`, `hl`, `dim`, `all`, `faint` exist in `parts.css`; add your own as `.cx.<cls> .cx-edge`. The host must be positioned and should be the scrolling element or inside it. Self-loops and parallel edges between the same pair are not separated yet (X3's diagram renderer must offset them, for example with per-edge `sides` or by adding a curve offset to `connectors.js`).
+- **Doc renderer.** `X.doc.render(text, {pkg})` for Go doc comments; `X.doc.inline(text, ctx)` for one paragraph: patterns, `[[ref]]`/`[[ref|text]]`, `` `code` `` resolving to one symbol, package or file, Go `[Name]` doc links, package and file paths, URLs. X3's Markdown renderer should reuse `inline` for its text runs.
+- **Table.** `X.table.create(container, {columns: [{id, title, html, sort, width, cls}], rows, key, text, query, onQuery, sort, tree: {depth, parent}, selected, onSelect})`; a cell link with `data-row` selects its row instead of inspecting by itself; columns with `cls: "opt"` hide below 860 px.
+- **Search.** `X.search.addSource({kind, title, order, items: () => [{ref, name, keys, detail, exported, weight}]})` adds concerns, flows, terms and headings.
+- **Views.** `X.router.register(name, {nav, title, render(el, route), update(route, prev), unmount})`; a later registration replaces the placeholder of the same name, so X3's files load after `placeholder.js` and before `main.js`.
+- **Colours.** Zone colours only through `.z-<trust>`/`var(--z-<trust>)`; `X.refs.zoneDot(zone)`, `zoneMark(zones)`, `actorList(ids)`.
+
+**Design choices.** Zone colours were validated as a categorical palette with the dataviz validator (six colours, all pairs, both themes: worst normal-vision ΔE 16.8, worst colour-blind ΔE 9.3; external is a deliberate neutral); one accent (blue) for interaction; syntax colours restrained. Group colours are evenly spaced muted hues (12 groups exceed what hue alone can separate), so every tile also prints its group and the legend highlights a group on hover. The source view renders whole files (2,042 lines in under 0.1 s), so the browser's find works and no find-in-file was needed; line numbers are generated content (not found, not copied). Back and forward restore the source's scroll position. Ligatures are off in code.
+
+**Deviations.** None from the work order. No change to the tool or `schema.go` was needed: every view works from the data X1 emits. `explorer/README.md` gained one line (`explorer/check.sh`). The X1 placeholder `app.js` is gone.
+
+**How to check.** `explorer/check.sh [--no-build] [dir]` builds the site, opens it from `file://` in headless Chrome, visits 40 routes (every view of this chunk, inspector views of each kind, every surface, extremes chosen from the data: the largest file, the package with most files, the most used symbol, an interface, a file that is not Go) in light and dark at 1280 pixels and a set at 1920, saves 94 screenshots plus the search and hover card, fails on any console error or exception, and asserts: search finds the most used symbol through the dialog and opens it; text search finds lines; a link in the source lands on the definition with its symbol panel, and back returns; a hover card appears; the inspector's back button returns and the URL follows; the largest package page lists all its files; 291 references (every model reference plus one of each kind and three that do not exist) render as chips, cards and inspector views; the app starts within 1.5 s and the largest file opens within 1.5 s. Result: all pass; start 135 ms (first contentful paint about 50 ms), the largest file 80–150 ms, text search over all code 8 ms once loaded.
