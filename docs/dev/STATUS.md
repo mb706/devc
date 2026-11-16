@@ -30,7 +30,7 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | C17 Fleet | done | 0f1f438 |
 | C18 Service logins | done | 9311818 |
 | C19 GUI | done | 42a0d5f |
-| Review D + C19r | in progress | |
+| Review D + C19r | done | f1b7e15 |
 
 ## Resuming
 
