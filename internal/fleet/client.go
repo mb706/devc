@@ -142,13 +142,28 @@ func (c *Client) do(req *http.Request, v any) error {
 	return nil
 }
 
-// Put appends data at offset to the archive path p of realm; final makes a
-// bundle complete. An offset that is not the stored length gives a
-// *HubError whose Conflict reports the length.
-func (c *Client) Put(ctx context.Context, realm, p string, offset int64, data []byte, final bool) (archive.PutReply, error) {
+// PutOptions are an upload's parameters besides its offset: Final makes a
+// bundle complete or marks a file generation complete at its length; Class
+// and Mode are recorded with a file generation when it is created.
+type PutOptions struct {
+	Final bool
+	Class string
+	Mode  uint32
+}
+
+// Put appends data at offset to the archive path p of realm. An offset
+// that is not the stored length gives a *HubError whose Conflict reports
+// the length.
+func (c *Client) Put(ctx context.Context, realm, p string, offset int64, data []byte, o PutOptions) (archive.PutReply, error) {
 	q := "?offset=" + strconv.FormatInt(offset, 10)
-	if final {
+	if o.Final {
 		q += "&final=1"
+	}
+	if o.Class != "" {
+		q += "&class=" + url.QueryEscape(o.Class)
+	}
+	if o.Mode != 0 {
+		q += "&mode=" + strconv.FormatUint(uint64(o.Mode&0o777), 8)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.URL+archive.UploadPrefix+realm+"/"+escapePath(p)+q, bytes.NewReader(data))
 	if err != nil {
@@ -179,26 +194,49 @@ func (c *Client) List(ctx context.Context) ([]archive.Summary, error) {
 	return r.Archives, nil
 }
 
-// Index returns one machine's archive of a realm; entries with invalid
-// paths are refused.
+// Index returns one machine's archive of a realm, reading its pages in
+// turn (at most archive.MaxIndexEntries entries); entries with invalid
+// paths or lengths are refused.
 func (c *Client) Index(ctx context.Context, machine, realm string) (*archive.Index, error) {
 	if !names.Valid(machine) || !names.ValidRealm(realm) {
 		return nil, errors.New("invalid machine or realm name")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.URL+archive.IndexPath+"/"+machine+"/"+realm, nil)
-	if err != nil {
-		return nil, err
-	}
-	var idx archive.Index
-	if err := c.do(req, &idx); err != nil {
-		return nil, err
-	}
-	for _, e := range idx.Entries {
-		if _, err := archive.ParsePath(e.Path); err != nil || e.Length < 0 {
-			return nil, fmt.Errorf("the hub's index holds an invalid entry: %w", err)
+	all := &archive.Index{Machine: machine, Realm: realm, Entries: []archive.Entry{}}
+	after := ""
+	for {
+		u := c.URL + archive.IndexPath + "/" + machine + "/" + realm
+		if after != "" {
+			u += "?after=" + url.QueryEscape(after)
 		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		var idx archive.Index
+		if err := c.do(req, &idx); err != nil {
+			return nil, err
+		}
+		if len(idx.Entries) > archive.IndexPage || len(all.Entries)+len(idx.Entries) > archive.MaxIndexEntries {
+			return nil, errors.New("the hub's index is larger than this machine reads")
+		}
+		for _, e := range idx.Entries {
+			if _, err := archive.ParsePath(e.Path); err != nil || e.Length < 0 || (e.Committed != nil && (*e.Committed < 0 || *e.Committed > e.Length)) {
+				return nil, fmt.Errorf("the hub's index holds an invalid entry: %w", err)
+			}
+			if e.Committed == nil && e.Complete && strings.HasPrefix(e.Path, archive.FilesDir+"/") {
+				e.Complete = false
+			}
+			all.Entries = append(all.Entries, e)
+		}
+		if !idx.More {
+			return all, nil
+		}
+		// Each page must move on: a hub cannot keep a client reading.
+		if idx.Next == "" || idx.Next == after || len(idx.Entries) == 0 {
+			return nil, errors.New("the hub's index pages do not advance")
+		}
+		after = idx.Next
 	}
-	return &idx, nil
 }
 
 // Fetch copies a stored file (from offset on) to w, at most max bytes; it

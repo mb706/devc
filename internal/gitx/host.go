@@ -144,13 +144,20 @@ func (h *Host) Cmd(c Call) (execx.Cmd, error) {
 	if bin == "" {
 		bin = "git"
 	}
+	// Replacement objects are never interpreted (finding D1-07): a
+	// refs/replace/ ref would change how existing history reads. git
+	// passes the option on to the git processes it starts.
 	args := []string{
 		"--git-dir=" + c.Relay,
 		"-c", "core.hooksPath=" + hooks,
 		"-c", "core.fsmonitor=false",
+		"--no-replace-objects",
 	}
 	if c.Box {
-		args = append(args, "-c", "protocol.allow=never", "-c", "protocol.ext.allow=always")
+		// What a box sends stays in its pack (finding D1-05), also for
+		// relays configured before that setting existed.
+		args = append(args, "-c", "protocol.allow=never", "-c", "protocol.ext.allow=always",
+			"-c", "fetch.unpackLimit=1", "-c", "transfer.unpackLimit=1")
 	}
 	for _, kv := range c.Config {
 		if k, _, ok := strings.Cut(kv, "="); !ok || k == "" || strings.HasPrefix(kv, "-") || strings.ContainsAny(kv, "\x00\n") {
@@ -192,6 +199,7 @@ func (h *Host) Cmd(c Call) (execx.Cmd, error) {
 		}
 	}
 	cmd.Env = append(cmd.Env, c.Env...)
+	cmd.Env = append(cmd.Env, "GIT_NO_REPLACE_OBJECTS=1")
 	return cmd, nil
 }
 

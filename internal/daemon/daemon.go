@@ -196,6 +196,10 @@ type Daemon struct {
 	hostAddrs hostAddrCache
 	router    *router
 
+	// freeSpace reports the bytes available on the file system of a path
+	// (statfs; tests replace it).
+	freeSpace func(path string) (int64, error)
+
 	// GitHub (github.go): installation tokens and the per-project budget of
 	// facade reads.
 	minter   *github.Minter

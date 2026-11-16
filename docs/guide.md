@@ -317,7 +317,13 @@ hub lacks:
   files. It is box-writable, so the daemon reads it with the same care as
   everything else a box writes: links, FIFOs and other special files, names
   outside a plain character set and files above `[sync] max_file_size`
-  (realm, default 256 MiB) are left out and counted.
+  (realm, default 256 MiB) are left out and counted. Transcripts (the
+  harness manifest's transcript globs) are uploaded as they grow, and every
+  version of one is kept. Any other file there gets a new version for any
+  change, at most one per `[sync] mutable_interval` (`config.toml`, default
+  6 hours), copied first so a version is one state of the file; the hub
+  keeps the newest three. Permission bits travel (an executable hook stays
+  executable; set-ID bits never do).
 
 Secrets never travel in the archive. A hub only ever adds: a machine can
 append to its own archive and read every machine's, never change or delete
@@ -333,10 +339,12 @@ devc state pull work --from https://hub.example.org [--machine old-laptop] [--me
 `devc state pull` restores one machine's archive of a realm (by default this
 machine's own, by the name the hub knows it by) into the local durable
 state: journals and logs, relays and the context repository rebuilt from
-their bundles, the shared harness state. It refuses a realm that has
-durable state already, unless `--merge`, which adds only the files and refs
-that are missing (a ref that exists with another value is reported and
-kept). Sessions restored this way appear among this machine's sessions. A
+their bundles, the shared harness state. Each file comes from its newest
+complete version; a newer one whose upload did not finish is reported. It
+refuses a realm that has durable state already, unless `--merge`, which
+adds only the files and refs that are missing (a ref that exists with
+another value is reported and kept). A realm is restored only under its own
+name (also by `devc state import`): its journals and logs name it inside. Sessions restored this way appear among this machine's sessions. A
 hub that reports a full quota says so in `devc sync status` and
 `devc hub status`; uploads to it pause for ten minutes at a time until it
 has room.
@@ -484,7 +492,11 @@ relay accepts it (an update whose bank ref cannot be written is refused), and
 branches matching `git.forward` are pushed on to the upstream (the push prints
 the result). A push may update at most 1000 refs (push in parts), its pack may
 be at most `git.max_push_size` (default `2g`), and it is refused as a whole
-when the relay would grow beyond `git.relay_quota` (default `20g`). Before serving a fetch, the daemon fetches the upstream into the
+when the relay would grow beyond `git.relay_quota` (default `20g`). The relay
+keeps a push's objects in the pack they came in, the daemon starts a push
+only with at least 1 GiB free on the state file system, and it ends a push
+while git writes it once the relay would exceed its budget or less than
+512 MiB would stay free (the daemon's log says why). Before serving a fetch, the daemon fetches the upstream into the
 relay (at most once a minute, 20 seconds at most, without prompts; turn it off
 with `git.fetch_through = false`), so `git fetch origin` brings new upstream
 commits as `origin/*` and `github/*` without `devc pull`. Without the daemon,
@@ -897,7 +909,9 @@ devc net revoke x1a2b3c
 ```
 
 - At level `internet`, a host and port, or `lan` (10/8, 172.16/12,
-  192.168/16 and 100.64/10, but never the host's own addresses or link-local),
+  192.168/16 and 100.64/10, but never the host's own addresses, the
+  engine's aliases for the host such as `host.containers.internal` and
+  slirp4netns's gateway, or link-local),
   become elements of nftables sets in the box's namespace with a timeout:
   they expire in the kernel without any process. They vanish when the box
   stops; `devc up` puts back those still valid, after its checks.
@@ -907,7 +921,9 @@ devc net revoke x1a2b3c
   while the exception is in force; revoking or expiry also ends open
   connections. It needs the daemon.
 - At level `allowlist`, a name and port is added to that box's allowlist for
-  the duration; addresses and `lan` are refused there.
+  the duration; addresses and `lan` are refused there. Connections through
+  the proxy end when what allowed them goes: an exception that expires or
+  is revoked, or an allowlist entry that is removed.
 
 An agent can ask for an exception with `devc request net <target> [--for 1h]`
 in the box; it is a high-risk request, approved only on this machine
@@ -944,7 +960,14 @@ the project's `box.ports` and every port with a running `devc forward`
 says how to allow them. The router listens on `router.listen` in
 `config.toml` (a loopback address, or `"off"`), routes only by that host
 name (a page that points its own name at 127.0.0.1 reaches nothing), and
-reaches the box the way a forward does.
+reaches the box the way a forward does. Each local URL is its own origin:
+the router refuses a WebSocket or a form submission (any method but GET and
+HEAD) from a page of another origin, and any request a browser marks as
+cross-site except following a link, so a page of one box cannot use
+another box's service through your browser. A frontend on one port that
+calls an API on another port of the same box is cross-origin too; serve
+both from one port. Programs that are not browsers (curl) are not
+affected.
 
 ## Watching a browser or a desktop
 

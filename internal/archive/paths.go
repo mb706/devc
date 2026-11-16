@@ -246,3 +246,44 @@ func Excluded(patterns []string, rel string) bool {
 	}
 	return false
 }
+
+// MatchGlob reports whether rel matches pattern component by component
+// (path.Match within a component), where a component "**" matches any
+// number of components, none included. Patterns come from harness
+// manifests (transcript globs mapped to the state directory).
+func MatchGlob(pattern, rel string) bool {
+	return matchParts(strings.Split(pattern, "/"), strings.Split(rel, "/"))
+}
+
+func matchParts(ps, cs []string) bool {
+	for len(ps) > 0 {
+		if ps[0] == "**" {
+			for i := 0; i <= len(cs); i++ {
+				if matchParts(ps[1:], cs[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(cs) == 0 {
+			return false
+		}
+		if ok, err := path.Match(ps[0], cs[0]); err != nil || !ok {
+			return false
+		}
+		ps, cs = ps[1:], cs[1:]
+	}
+	return len(cs) == 0
+}
+
+// ClassOf is the class of a file below a harness's state directory: append
+// when it matches one of the harness's transcript patterns
+// (config.Harness.TranscriptStatePatterns), mutable otherwise.
+func ClassOf(transcripts []string, within string) string {
+	for _, p := range transcripts {
+		if MatchGlob(p, within) {
+			return ClassAppend
+		}
+	}
+	return ClassMutable
+}

@@ -27,6 +27,13 @@ package netpolicy
 // unchanged, so a server that answers for several names (domain fronting)
 // cannot be told apart; that is a known limit of a proxy without TLS
 // interception.
+//
+// A connection stays open only while what allowed it is in force: every
+// tunnel and every upstream connection serving a request is watched
+// (guard), and closed when its exception expires or is revoked, or the
+// allowlist no longer names its destination (finding D1-06). An upstream's
+// response head is bounded in size and time like the client's request
+// head (finding D1-02).
 
 import (
 	"bufio"
@@ -53,6 +60,21 @@ type ProxyPolicy struct {
 	Allow EntryList
 	// Exceptions are the names that exceptions in force add.
 	Exceptions EntryList
+	// Ends is the earliest end of an exception in force (zero: none
+	// ends); open connections are checked again then.
+	Ends time.Time
+}
+
+// Allows reports whether the policy allows host (normalised) and port, and
+// why ("allowlist" or "exception").
+func (pol ProxyPolicy) Allows(host string, port int) (string, bool) {
+	switch {
+	case pol.Allow.Allows(host, port):
+		return "allowlist", true
+	case pol.Exceptions.Allows(host, port):
+		return "exception", true
+	}
+	return "", false
 }
 
 // ClientConn is the box side of one proxy connection. CloseWrite ends the
@@ -84,11 +106,19 @@ type Proxy struct {
 	Log func(LogEntry)
 	// Hint is appended to a refusal: how to ask for more.
 	Hint string
-	// Timeouts (zero: the defaults below).
-	HeaderTimeout time.Duration
-	KeepAlive     time.Duration
-	IdleTimeout   time.Duration
-	DialTimeout   time.Duration
+	// Tunnels, when set, registers the open connections so their owner
+	// can have them checked at once (Tunnels.Recheck), for example when an
+	// exception is revoked. Without it they are checked every
+	// RecheckEvery and when an exception ends.
+	Tunnels *Tunnels
+	// Timeouts (zero: the defaults below). ResponseTimeout bounds the
+	// wait for an upstream's response head, from the end of the request.
+	HeaderTimeout   time.Duration
+	ResponseTimeout time.Duration
+	KeepAlive       time.Duration
+	IdleTimeout     time.Duration
+	DialTimeout     time.Duration
+	RecheckEvery    time.Duration
 }
 
 // Proxy defaults.
@@ -103,6 +133,12 @@ const (
 	proxyResolveTime  = 10 * time.Second
 	maxProxyHeader    = 64 << 10
 	maxProxyAddrs     = 8
+	// proxyResponseTimeout bounds the wait for a response head once the
+	// request has been sent; the head itself is at most maxProxyHeader.
+	proxyResponseTimeout = 5 * time.Minute
+	// proxyRecheckEvery is how often an open connection's destination is
+	// checked against the policy again.
+	proxyRecheckEvery = 5 * time.Second
 	// maxInterim bounds the 1xx answers an upstream may send before its
 	// answer.
 	maxInterim = 8
@@ -193,14 +229,11 @@ func (p *Proxy) check(ctx context.Context, method, rawHost string, port int) (ne
 	if err != nil {
 		return nil, e, refuse(http.StatusForbidden, "%s", err.Error())
 	}
-	switch {
-	case pol.Allow.Allows(host, port):
-		e.Reason = "allowlist"
-	case pol.Exceptions.Allows(host, port):
-		e.Reason = "exception"
-	default:
+	reason, allowed := pol.Allows(host, port)
+	if !allowed {
 		return nil, e, refuse(http.StatusForbidden, "%s:%d is not on this box's allowlist%s", host, port, p.Hint)
 	}
+	e.Reason = reason
 	addrs, err := p.resolve(ctx, host)
 	if err != nil {
 		return nil, e, refuse(http.StatusBadGateway, "cannot resolve %s", host)
@@ -286,12 +319,31 @@ type idleConn struct {
 	net.Conn
 	mu   sync.Mutex
 	idle time.Duration
+	// until, when set, is a fixed read deadline (a response head).
+	until time.Time
 }
 
 func (c *idleConn) timeout() time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.idle
+}
+
+// readDeadline is the fixed deadline if one is set, else the idle one.
+func (c *idleConn) readDeadline() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.until.IsZero() {
+		return c.until
+	}
+	return time.Now().Add(c.idle)
+}
+
+// setFixed sets (or with a zero time, lifts) a fixed read deadline.
+func (c *idleConn) setFixed(t time.Time) {
+	c.mu.Lock()
+	c.until = t
+	c.mu.Unlock()
 }
 
 func (c *idleConn) setIdle(d time.Duration) {
@@ -302,7 +354,7 @@ func (c *idleConn) setIdle(d time.Duration) {
 }
 
 func (c *idleConn) Read(b []byte) (int, error) {
-	_ = c.SetReadDeadline(time.Now().Add(c.timeout()))
+	_ = c.SetReadDeadline(c.readDeadline())
 	return c.Conn.Read(b)
 }
 
@@ -323,8 +375,13 @@ func (c *idleConn) closeWrite() {
 // to the same host and port.
 type upstream struct {
 	key  string
+	host string
+	port int
 	conn *idleConn
-	br   *bufio.Reader
+	// lr bounds what a response head may read (maxProxyHeader); it is
+	// lifted for the body.
+	lr *io.LimitedReader
+	br *bufio.Reader
 }
 
 // Serve speaks the proxy protocol on c until the client is done, the
@@ -404,6 +461,8 @@ func (p *Proxy) connect(ctx context.Context, c ClientConn, cr *clientReader, br 
 	defer up.Close()
 	stop := context.AfterFunc(ctx, func() { _ = up.Close() })
 	defer stop()
+	unguard := p.guard(ctx, "CONNECT", e.Host, port, func() { _ = up.Close(); _ = c.Close() })
+	defer unguard()
 	if _, err := io.WriteString(cw, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 		return
 	}
@@ -472,26 +531,31 @@ func (p *Proxy) plain(ctx context.Context, c ClientConn, br *bufio.Reader, cw cl
 		}
 		p.log(e)
 		ic := &idleConn{Conn: conn, idle: pick(p.IdleTimeout, proxyIdleTimeout)}
-		up = &upstream{key: key, conn: ic, br: bufio.NewReaderSize(ic, 16<<10)}
+		lr := &io.LimitedReader{R: ic, N: math.MaxInt64}
+		up = &upstream{key: key, host: e.Host, port: port, conn: ic, lr: lr, br: bufio.NewReaderSize(lr, 16<<10)}
 	} else {
 		// The connection is reused, but the request is decided again: an
 		// exception may have expired since.
-		host, _ := NormalizeHost(u.Hostname())
 		pol, err := p.policy()
-		e := LogEntry{Method: req.Method, Host: host, Port: port}
-		switch {
-		case err != nil:
+		e := LogEntry{Method: req.Method, Host: up.host, Port: port}
+		if err != nil {
 			p.writeRefusal(c, e, refuse(http.StatusForbidden, "%s", err.Error()))
 			up.conn.Close()
 			return false, nil
-		case !pol.Allow.Allows(host, port) && !pol.Exceptions.Allows(host, port):
-			p.writeRefusal(c, e, refuse(http.StatusForbidden, "%s:%d is not on this box's allowlist%s", host, port, p.Hint))
+		}
+		if _, ok := pol.Allows(up.host, port); !ok {
+			p.writeRefusal(c, e, refuse(http.StatusForbidden, "%s:%d is not on this box's allowlist%s", up.host, port, p.Hint))
 			up.conn.Close()
 			return false, nil
 		}
 		e.Allowed, e.Addr, e.Reason = true, up.conn.RemoteAddr().String(), "reused connection"
 		p.log(e)
 	}
+	// The upstream connection is closed if the destination stops being
+	// allowed while this request is served (a long download, say).
+	conn := up.conn
+	unguard := p.guard(ctx, req.Method, up.host, port, func() { _ = conn.Close() })
+	defer unguard()
 	clientClose := req.Close
 	removeHop(req.Header)
 	expect := strings.EqualFold(req.Header.Get("Expect"), "100-continue")
@@ -510,9 +574,14 @@ func (p *Proxy) plain(ctx context.Context, c ClientConn, br *bufio.Reader, cw cl
 		p.writeRefusal(c, LogEntry{Method: req.Method, Host: key}, refuse(http.StatusBadGateway, "sending the request to %s failed", key))
 		return false, nil
 	}
+	// The response head (with its interim answers) must arrive within a
+	// fixed time, each head at most maxProxyHeader bytes: an upstream
+	// that keeps sending one endless header line is cut off.
+	up.conn.setFixed(time.Now().Add(pick(p.ResponseTimeout, proxyResponseTimeout)))
 	var resp *http.Response
 	for interim := 0; ; interim++ {
 		var err error
+		up.lr.N = maxProxyHeader
 		resp, err = http.ReadResponse(up.br, req)
 		if err == nil && interim >= maxInterim && resp.StatusCode < 200 {
 			resp.Body.Close()
@@ -520,7 +589,14 @@ func (p *Proxy) plain(ctx context.Context, c ClientConn, br *bufio.Reader, cw cl
 		}
 		if err != nil {
 			up.conn.Close()
-			p.writeRefusal(c, LogEntry{Method: req.Method, Host: key}, refuse(http.StatusBadGateway, "no valid answer from %s", key))
+			msg := "no valid answer from %s"
+			switch {
+			case up.lr.N <= 0:
+				msg = "the answer's header from %s is too large"
+			case isTimeout(err):
+				msg = "no answer from %s in time"
+			}
+			p.writeRefusal(c, LogEntry{Method: req.Method, Host: key}, refuse(http.StatusBadGateway, msg, key))
 			return false, nil
 		}
 		// Interim answers are dropped (the proxy answered Expect itself);
@@ -531,6 +607,8 @@ func (p *Proxy) plain(ctx context.Context, c ClientConn, br *bufio.Reader, cw cl
 		}
 		break
 	}
+	up.lr.N = math.MaxInt64
+	up.conn.setFixed(time.Time{})
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		up.conn.Close()
@@ -565,4 +643,112 @@ func bodyAllowed(req *http.Request, resp *http.Response) bool {
 		return false
 	}
 	return resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotModified
+}
+
+// Tunnels is the set of a box's open proxy connections (CONNECT tunnels
+// and upstream connections serving a request), each with the destination
+// that allowed it.
+type Tunnels struct {
+	mu   sync.Mutex
+	open map[*tunnel]struct{}
+}
+
+type tunnel struct {
+	kick chan struct{}
+}
+
+func (t *Tunnels) add(tn *tunnel) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.open == nil {
+		t.open = map[*tunnel]struct{}{}
+	}
+	t.open[tn] = struct{}{}
+}
+
+func (t *Tunnels) remove(tn *tunnel) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.open, tn)
+}
+
+// Len is the number of open connections.
+func (t *Tunnels) Len() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.open)
+}
+
+// Recheck has every open connection checked against the policy now; those
+// no longer allowed are closed (asynchronously, within moments).
+func (t *Tunnels) Recheck() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for tn := range t.open {
+		select {
+		case tn.kick <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// guard watches a connection to host (normalised) and port while it is
+// open: it checks the policy every RecheckEvery, when an exception in
+// force ends, and when Tunnels.Recheck asks, and calls closeFn once the
+// destination is no longer allowed (or the policy cannot be read: fail
+// closed). The returned function ends the watch.
+func (p *Proxy) guard(ctx context.Context, method, host string, port int, closeFn func()) func() {
+	tn := &tunnel{kick: make(chan struct{}, 1)}
+	if p.Tunnels != nil {
+		p.Tunnels.add(tn)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	every := pick(p.RecheckEvery, proxyRecheckEvery)
+	go func() {
+		defer close(done)
+		var ends time.Time
+		for first := true; ; first = false {
+			// The first check comes at once: it learns when an exception
+			// in force ends.
+			wait := every
+			switch {
+			case first:
+				wait = 0
+			case !ends.IsZero():
+				if d := time.Until(ends) + 10*time.Millisecond; d < wait {
+					wait = max(d, 10*time.Millisecond)
+				}
+			}
+			t := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-tn.kick:
+				t.Stop()
+			case <-t.C:
+			}
+			pol, err := p.policy()
+			why := ""
+			if err != nil {
+				why = err.Error()
+			} else if _, ok := pol.Allows(host, port); !ok {
+				why = fmt.Sprintf("%s:%d is no longer allowed (its exception ended or the allowlist changed)", host, port)
+			}
+			if why != "" {
+				p.log(LogEntry{Method: method, Host: host, Port: port, Reason: "connection closed: " + why})
+				closeFn()
+				return
+			}
+			ends = pol.Ends
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+		if p.Tunnels != nil {
+			p.Tunnels.remove(tn)
+		}
+	}
 }

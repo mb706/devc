@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -617,8 +619,39 @@ func TestReceiptStore(t *testing.T) {
 	if fi, err := os.Stat(s.dir); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Errorf("receipts directory: %v %v", fi, err)
 	}
+	// The directory is synced after the link and after the rename, and a
+	// failed sync fails the step (finding D1-11).
+	var synced []string
+	observe := func(dir string) error {
+		b, _ := os.ReadFile(s.path(id))
+		synced = append(synced, dir+" "+strings.TrimSpace(string(b)))
+		return nil
+	}
+	s.syncDir.Store(&observe)
+	r.Receipt.Outcome = proto.OutcomeRefused
+	if err := s.save(r); err != nil || len(synced) != 1 || !strings.HasPrefix(synced[0], s.dir+" ") || !strings.Contains(synced[0], `"refused"`) {
+		t.Errorf("save: %v, synced %q", err, synced)
+	}
+	id3 := newID()
+	if _, created, err := s.create(&cmdRecord{V: 1, Command: proto.Command{ID: id3}, Receipt: proto.Receipt{Command: id3}}); err != nil || !created || len(synced) != 2 {
+		t.Errorf("create: %v %v, synced %q", created, err, synced)
+	}
+	fail := func(string) error { return errors.New("input/output error") }
+	s.syncDir.Store(&fail)
+	r.Receipt.Outcome = proto.OutcomeDelivering
+	if err := s.save(r); err == nil || !strings.Contains(err.Error(), "durable") {
+		t.Errorf("save with a failing directory sync: %v", err)
+	}
+	id4 := newID()
+	if _, _, err := s.create(&cmdRecord{V: 1, Command: proto.Command{ID: id4}, Receipt: proto.Receipt{Command: id4}}); err == nil {
+		t.Error("create with a failing directory sync")
+	}
+	if _, err := s.load(id4); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a create that was not durable left its record: %v", err)
+	}
+	s.syncDir.Store(nil)
 	all, _ := s.list()
-	if len(all) != 2 {
+	if len(all) != 3 {
 		t.Errorf("list: %d records", len(all))
 	}
 }
@@ -732,6 +765,29 @@ func TestDeliveryChecks(t *testing.T) {
 		t.Errorf("pastes %q", f.pastes)
 	}
 
+	// The rename to "delivering" happened but cannot be made durable
+	// (finding D1-11): that is a failed transition, and nothing is typed.
+	id = newID()
+	syncFails := func(string) error {
+		if b, _ := os.ReadFile(r.d.cmd.store.path(id)); strings.Contains(string(b), proto.OutcomeDelivering) {
+			return syscallErr("input/output error")
+		}
+		return nil
+	}
+	r.d.cmd.store.syncDir.Store(&syncFails)
+	call(t, c, proto.MethodSessionSend, proto.SendParams{ID: id, Session: sid, Text: "not durable", Mode: proto.ModeSteer})
+	time.Sleep(time.Second)
+	if p, _ := f.counts(); p != 1 {
+		t.Fatalf("typed although delivering was not durable: %q", f.pastes)
+	}
+	r.d.cmd.store.syncDir.Store(nil)
+	if rec := waitFinal(t, c, id); rec.Outcome != proto.OutcomeDelivered {
+		t.Errorf("after the directory sync works again: %+v", rec)
+	}
+	if p, _ := f.counts(); p != 2 {
+		t.Errorf("pastes %q", f.pastes)
+	}
+
 	// A queued send waits in the gate while a person types; the person
 	// submits a turn meanwhile.
 	f.set(func(f *fakeBox) { f.clients, f.activity, f.hold = 1, time.Now().Unix(), true })
@@ -746,7 +802,7 @@ func TestDeliveryChecks(t *testing.T) {
 	}
 	f.set(func(f *fakeBox) { f.activity = time.Now().Unix() - 30 })
 	time.Sleep(time.Second)
-	if p, _ := f.counts(); p != 1 {
+	if p, _ := f.counts(); p != 2 {
 		t.Fatalf("a queued send was typed into a busy session: %q", f.pastes)
 	}
 	f.set(func(f *fakeBox) { f.clients, f.hold = 0, false })

@@ -155,7 +155,8 @@ func (d *Daemon) proxyPolicy(ref names.ProjectRef, containerID string) (netpolic
 		d.log.Error("reading network exceptions", "ref", ref.String(), "err", err)
 		list = nil
 	}
-	return netpolicy.ProxyPolicy{Allow: allow, Exceptions: netpolicy.NameEntries(list, time.Now())}, nil
+	now := time.Now()
+	return netpolicy.ProxyPolicy{Allow: allow, Exceptions: netpolicy.NameEntries(list, now), Ends: netpolicy.NameEntriesEnd(list, now)}, nil
 }
 
 // serveProxy serves a host.proxy stream with the allowlist proxy.
@@ -174,6 +175,7 @@ func (w *boxWorker) serveProxy(ctx context.Context, st *yamux.Stream, br *bufio.
 		Forbidden: d.hostAddrs.contains,
 		Exempt:    d.o.ProxyExempt,
 		Hint:      proxyHint,
+		Tunnels:   &w.tunnels,
 		Log: func(e netpolicy.LogEntry) {
 			if err := log.Append(e); err != nil {
 				d.log.Warn("writing the proxy log", "ref", ref.String(), "err", err)
@@ -272,6 +274,9 @@ func (w *boxWorker) syncNet(ctx context.Context, force bool) proto.NetSyncResult
 	if ports == nil {
 		ports = []int{}
 	}
+	// Proxy connections whose destination is no longer allowed are
+	// closed (finding D1-06); each also checks itself every few seconds.
+	w.tunnels.Recheck()
 	w.mu.Lock()
 	for rel := range w.dials {
 		if !slices.Contains(ports, rel.port) {

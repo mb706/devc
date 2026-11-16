@@ -27,7 +27,7 @@ func TestHostCmd(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"--git-dir=/state/relay/p.git", "-c", "core.hooksPath=/state/local/git/no-hooks", "-c", "core.fsmonitor=false",
-		"log", "--no-ext-diff", "--no-textconv", "--oneline"}
+		"--no-replace-objects", "log", "--no-ext-diff", "--no-textconv", "--oneline"}
 	if cmd.Name != "git" || !slices.Equal(cmd.Args, want) || cmd.Dir != "/" {
 		t.Errorf("internal log: %s %q in %q", cmd.Name, cmd.Args, cmd.Dir)
 	}
@@ -37,11 +37,18 @@ func TestHostCmd(t *testing.T) {
 	}
 
 	cmd, _ = h.Cmd(Call{Relay: "/state/relay/p.git", Args: []string{"fetch", "ext::podman exec x %S /w/r/p/.repo"}, Box: true})
-	if !slices.Equal(cmd.Args[5:9], []string{"-c", "protocol.allow=never", "-c", "protocol.ext.allow=always"}) || cmd.Args[9] != "fetch" {
+	if !slices.Equal(cmd.Args[6:14], []string{"-c", "protocol.allow=never", "-c", "protocol.ext.allow=always", "-c", "fetch.unpackLimit=1", "-c", "transfer.unpackLimit=1"}) || cmd.Args[14] != "fetch" {
 		t.Errorf("box fetch: %q", cmd.Args)
 	}
 	if cmd.Timeout != transferTimeout {
 		t.Errorf("box fetch timeout %s", cmd.Timeout)
+	}
+	// Every mode runs without replacement objects (finding D1-07).
+	for _, m := range []Mode{Internal, Display, Upstream} {
+		cmd, _ := h.Cmd(Call{Relay: "/state/relay/p.git", Args: []string{"log"}, Mode: m})
+		if !slices.Contains(cmd.Args, "--no-replace-objects") || !slices.Contains(cmd.Env, "GIT_NO_REPLACE_OBJECTS=1") {
+			t.Errorf("mode %v: %q %q", m, cmd.Args, cmd.Env)
+		}
 	}
 	// Only the box transport gets ext.
 	cmd, _ = h.Cmd(Call{Relay: "/state/relay/p.git", Args: []string{"fetch", "github"}, Mode: Upstream})

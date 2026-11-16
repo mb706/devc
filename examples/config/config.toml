@@ -32,6 +32,8 @@ listen = "127.0.0.1:7480"      # local URLs http://<port>.<project>.<realm>.loca
 
 [sync]
 upload_rate = "4m"             # bytes per second the daemon sends to each hub's archive
+mutable_interval = "6h"        # least time between two archived generations of a changing file
+                               # of shared harness state (transcripts are archived as they grow)
 
 # Hubs this machine reports to, in order of preference (the first connected
 # one sends notifications). None by default; 'devc join' adds an entry and

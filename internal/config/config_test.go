@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
@@ -354,6 +355,15 @@ func TestBrokenConfigurations(t *testing.T) {
 	pre := func(rel, content string) func(*testing.T, string) {
 		return func(t *testing.T, dir string) { prependTo(t, dir, rel, content) }
 	}
+	replaceIn := func(rel, old, new string) func(*testing.T, string) {
+		return func(t *testing.T, dir string) {
+			b, err := os.ReadFile(filepath.Join(dir, rel))
+			if err != nil || !strings.Contains(string(b), old) {
+				t.Fatalf("%s lacks %q", rel, old)
+			}
+			write(t, dir, rel, strings.Replace(string(b), old, new, 1))
+		}
+	}
 	cases := []brokenCase{
 		{"unknown global key", pre("config.toml", "bogus = 1"), "config.toml", "bogus", "unknown key"},
 		// Work order C17: credential files and the archive's sizes.
@@ -362,6 +372,7 @@ func TestBrokenConfigurations(t *testing.T) {
 		{"secret file absolute", set("harness/pi.toml", minimalManifest("pi")+"strategy = \"shared\"\nsecret_files = [\"/etc/shadow\"]\n"), "harness/pi.toml", "home.secret_files[0]", "relative"},
 		{"secret file twice", set("harness/pi.toml", minimalManifest("pi")+"strategy = \"shared\"\nsecret_files = [\".pi/a\", \".pi/a\"]\n"), "harness/pi.toml", "home.secret_files[1]", "listed twice"},
 		{"archive file size", add("realms/other/realm.toml", "\n[sync]\nmax_file_size = \"lots\"\n"), "realms/other/realm.toml", "sync.max_file_size", "size"},
+		{"mutable interval", replaceIn("config.toml", "mutable_interval = \"6h\"", "mutable_interval = \"10s\""), "config.toml", "sync.mutable_interval", "duration"},
 		// Work order C16: shares and the new manifest keys.
 		{"share built in", pre(tools, "shares = [\"dep-source\"]"), tools, "shares[0]", "built in"},
 		{"share name", pre(tools, "shares = [\"Bad Name\"]"), tools, "shares[0]", "share"},
@@ -609,5 +620,18 @@ func TestSecretStatePatterns(t *testing.T) {
 		if !ok || !slices.Contains(m.SecretStatePatterns(), want) {
 			t.Errorf("built-in %s: %v", id, m.SecretStatePatterns())
 		}
+	}
+	// Transcript globs map the same way (finding D1-14).
+	for id, want := range map[string][]string{
+		"codex":  {"home/sessions/**/rollout-*.jsonl*"},
+		"claude": {"projects/*/*.jsonl"},
+	} {
+		m, ok := c.Harness(id)
+		if !ok || !slices.Equal(m.TranscriptStatePatterns(), want) {
+			t.Errorf("transcripts of %s: %q", id, m.TranscriptStatePatterns())
+		}
+	}
+	if c.Global.MutableInterval() != 6*time.Hour {
+		t.Errorf("mutable interval %s", c.Global.MutableInterval())
 	}
 }

@@ -31,14 +31,21 @@ async function request(method, path, body) {
     throw new ApiError(0, 'the hub cannot be reached');
   }
   let data = null;
+  let unreadable = false;
   try {
     data = await res.json();
   } catch (e) {
     data = null;
+    unreadable = true;
   }
   if (!res.ok) {
     const msg = (data && data.error) || res.statusText || 'request failed';
     throw new ApiError(res.status, msg, data);
+  }
+  if (unreadable) {
+    // The hub said yes, but the answer broke off or is not JSON: what it
+    // did is not known (finding D1-10).
+    throw new ApiError(res.status, "the hub's answer could not be read", { uncertain: true });
   }
   return data;
 }
@@ -66,7 +73,13 @@ export async function command(machine, type, params, wait = 0, id = newID()) {
   let last;
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      return await post('/api/commands', { machine, type, id, params, wait });
+      const rec = await post('/api/commands', { machine, type, id, params, wait });
+      // A receipt must name its outcome; anything else is an answer that
+      // could not be read, and the command's outcome is not known.
+      if (!rec || typeof rec !== 'object' || typeof rec.outcome !== 'string' || (rec.command !== undefined && rec.command !== id)) {
+        throw new ApiError(200, "the hub's answer is not a receipt", { uncertain: true });
+      }
+      return rec;
     } catch (e) {
       last = e;
       if (!e.uncertain) throw e;

@@ -72,8 +72,13 @@ type exportWriter struct {
 	rep *ExportReport
 }
 
-func (x *exportWriter) add(name string, size int64, r io.Reader) error {
-	if err := x.tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: name, Size: size, Mode: 0o600, ModTime: x.now, Format: tar.FormatPAX}); err != nil {
+// add writes a regular entry with the permission bits mode (only the
+// ordinary ones; 0 is 0600).
+func (x *exportWriter) add(name string, size int64, mode uint32, r io.Reader) error {
+	if mode == 0 {
+		mode = 0o600
+	}
+	if err := x.tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: name, Size: size, Mode: int64(mode & 0o777), ModTime: x.now, Format: tar.FormatPAX}); err != nil {
 		return err
 	}
 	n, err := io.Copy(x.tw, io.LimitReader(r, size))
@@ -91,7 +96,7 @@ func (x *exportWriter) add(name string, size int64, r io.Reader) error {
 }
 
 func (x *exportWriter) addBytes(name string, b []byte) error {
-	return x.add(name, int64(len(b)), bytes.NewReader(b))
+	return x.add(name, int64(len(b)), 0o600, bytes.NewReader(b))
 }
 
 // Export writes realm's durable state to w.
@@ -135,7 +140,7 @@ func (e *Exporter) hostFiles(x *exportWriter, dir string) error {
 		}
 		fi, err := f.Stat()
 		if err == nil {
-			err = x.add(archive.FilePath(c.rel, 0), fi.Size(), f)
+			err = x.add(archive.FilePath(c.rel, 0), fi.Size(), uint32(fi.Mode().Perm()), f)
 			x.rep.Files++
 			x.rep.Bytes += fi.Size()
 		}
@@ -204,7 +209,7 @@ func (e *Exporter) copyHarness(x *exportWriter, tr *tar.Reader, req *boxside.Arc
 			x.rep.Skipped = append(x.rep.Skipped, proto.Printable(proto.Truncate(h.Name, 200))+": refused by the host")
 			continue
 		}
-		if err := x.add(archive.FilePath(rel, 0), h.Size, tr); err != nil {
+		if err := x.add(archive.FilePath(rel, 0), h.Size, uint32(h.Mode)&0o777, tr); err != nil {
 			return err
 		}
 		x.rep.Files++
@@ -233,7 +238,7 @@ func (e *Exporter) repos(ctx context.Context, x *exportWriter, realm string) err
 			}
 			fi, err := f.Stat()
 			if err == nil {
-				err = x.add(archive.BundlePath(repo, 0, randomID()), fi.Size(), f)
+				err = x.add(archive.BundlePath(repo, 0, randomID()), fi.Size(), 0o600, f)
 			}
 			f.Close()
 			if err != nil {

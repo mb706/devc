@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"github.com/mb706/devc/internal/boxside"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/execx"
+	"github.com/mb706/devc/internal/gitx"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/requests"
@@ -595,6 +597,21 @@ func TestRelayStreams(t *testing.T) {
 	readAdvertisement(t, conn)
 	conn.Close()
 
+	// Too little free space on the state file system: refused before git
+	// starts (finding D1-05).
+	d.freeSpace = func(string) (int64, error) { return pushMinFree - 1, nil }
+	if _, err := dial.Open("receive-pack", ""); !proto.IsCode(err, proto.CodeRefused) || !strings.Contains(err.Error(), "free") {
+		t.Errorf("a push without the free-space reserve: %v", err)
+	}
+	d.freeSpace = func(string) (int64, error) { return 0, errors.New("statfs failed") }
+	if _, err := dial.Open("receive-pack", ""); err == nil {
+		t.Error("a push whose free space could not be checked")
+	}
+	d.freeSpace = nil
+	if !lockFree(2 * time.Second) {
+		t.Error("the box lock is still held after a refused push")
+	}
+
 	// A box that asks receive-pack for a large advertisement and never
 	// reads it loses the stream after the stall limit, and the box lock is
 	// released (finding C1-09).
@@ -796,5 +813,68 @@ func (r *rig) recordStart() {
 	}
 	if err := box.WriteCapabilities(r.p, hello, box.CapabilitiesOf(res, r.cid, time.Now())); err != nil {
 		r.t.Fatal(err)
+	}
+}
+
+// TestPushWatchdog: the watchdog ends a push whose quarantine would take
+// the relay above its budget, or the file system below half the reserve,
+// and leaves an ordinary push alone (finding D1-05).
+func TestPushWatchdog(t *testing.T) {
+	old := pushWatchEvery
+	pushWatchEvery = 20 * time.Millisecond
+	t.Cleanup(func() { pushWatchEvery = old })
+	d := &Daemon{freeSpace: func(string) (int64, error) { return 100 << 30, nil }}
+	relay := filepath.Join(t.TempDir(), "p.git")
+	q := filepath.Join(relay, "objects", gitx.QuarantinePrefix+"abc123", "pack")
+	if err := os.MkdirAll(q, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pack, err := os.Create(filepath.Join(q, "tmp_pack_x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pack.Close()
+	watch := func(used, quota int64) chan string {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		ch := make(chan string, 1)
+		go func() { ch <- d.watchPush(ctx, relay, used, quota) }()
+		return ch
+	}
+	// Within the budget: nothing happens.
+	pack.Write(make([]byte, 1<<20))
+	ch := watch(1<<20, 4<<20)
+	select {
+	case why := <-ch:
+		t.Fatalf("a push within its budget was ended: %s", why)
+	case <-time.After(300 * time.Millisecond):
+	}
+	// The pack grows past the budget while git writes it.
+	pack.Write(make([]byte, 3<<20))
+	select {
+	case why := <-ch:
+		if !strings.Contains(why, "git.relay_quota") {
+			t.Errorf("reason %q", why)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watchdog did not end a push beyond the budget")
+	}
+	// Without a quota only the free space counts.
+	free := int64(pushMinFree)
+	d.freeSpace = func(string) (int64, error) { return free, nil }
+	ch = watch(0, 0)
+	time.Sleep(100 * time.Millisecond)
+	free = pushMinFree/2 - 1
+	select {
+	case why := <-ch:
+		if !strings.Contains(why, "free") {
+			t.Errorf("reason %q", why)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watchdog did not end a push that fills the disk")
+	}
+	gitx.RemoveQuarantines(relay)
+	if _, err := os.Stat(filepath.Dir(q)); !os.IsNotExist(err) {
+		t.Errorf("the quarantine is still there: %v", err)
 	}
 }

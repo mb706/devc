@@ -46,6 +46,14 @@ func newProxyFixture(t *testing.T) *proxyFixture {
 			http.Redirect(w, r, "http://private.test:"+strconv.Itoa(f.port)+"/", http.StatusFound)
 		case "/redirect-other":
 			http.Redirect(w, r, "http://other.test:"+strconv.Itoa(f.port)+"/", http.StatusFound)
+		case "/slow":
+			// A long download: a line every 50 ms for 20 s.
+			fl, _ := w.(http.Flusher)
+			for i := 0; i < 400 && r.Context().Err() == nil; i++ {
+				fmt.Fprintf(w, "line %d\n", i)
+				fl.Flush()
+				time.Sleep(50 * time.Millisecond)
+			}
 		case "/echo":
 			b, _ := io.ReadAll(r.Body)
 			fmt.Fprintf(w, "got %d bytes: %s", len(b), b)
@@ -318,5 +326,274 @@ func TestProxyDialChecksAddress(t *testing.T) {
 	}
 	if err := p.CheckAddr(netip.MustParseAddrPort("93.184.215.14:443")); err != nil {
 		t.Errorf("a public address was refused: %v", err)
+	}
+}
+
+// rawUpstream is a TCP server on loopback that answers every connection
+// with answer(conn); the proxy reaches it as raw.test.
+func rawUpstream(t *testing.T, answer func(net.Conn)) (*Proxy, netip.AddrPort) {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = bufio.NewReader(c).Peek(1) // the request has arrived
+				answer(c)
+			}()
+		}
+	}()
+	ap := netip.MustParseAddrPort(ln.Addr().String())
+	allow, err := Expand([]string{"raw.test:" + strconv.Itoa(int(ap.Port()))}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Proxy{
+		Policy:  func() (ProxyPolicy, error) { return ProxyPolicy{Allow: allow}, nil },
+		Resolve: func(context.Context, string) ([]netip.Addr, error) { return []netip.Addr{ap.Addr()}, nil },
+		Exempt:  []netip.AddrPort{ap},
+	}
+	return p, ap
+}
+
+// serveOnce runs p for one client connection and returns the client end.
+func serveOnce(t *testing.T, p *Proxy) net.Conn {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			p.Serve(context.Background(), c.(*net.TCPConn))
+		}
+	}()
+	c, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+// TestProxyResponseHead: an upstream's response head is bounded in size
+// and in time, and the upstream is closed when either is exceeded
+// (finding D1-02).
+func TestProxyResponseHead(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer func(net.Conn, chan<- error)
+		want   string
+	}{
+		{"endless header line", func(c net.Conn, done chan<- error) {
+			_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nX-Long: ")
+			chunk := []byte(strings.Repeat("a", 32<<10))
+			var err error
+			for i := 0; i < 64<<10 && err == nil; i++ { // up to 2 GiB
+				_ = c.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				_, err = c.Write(chunk)
+			}
+			done <- err
+		}, "too large"},
+		{"endless headers", func(c net.Conn, done chan<- error) {
+			_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\n")
+			var err error
+			for i := 0; i < 1<<20 && err == nil; i++ {
+				_ = c.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				_, err = fmt.Fprintf(c, "X-%d: %s\r\n", i, strings.Repeat("b", 1000))
+			}
+			done <- err
+		}, "too large"},
+		{"head that trickles", func(c net.Conn, done chan<- error) {
+			_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\n")
+			var err error
+			for i := 0; i < 2000 && err == nil; i++ {
+				time.Sleep(10 * time.Millisecond)
+				_, err = fmt.Fprintf(c, "X-%d: y\r\n", i)
+			}
+			done <- err
+		}, "in time"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan error, 1)
+			p, ap := rawUpstream(t, func(c net.Conn) { tc.answer(c, done) })
+			p.ResponseTimeout = 500 * time.Millisecond
+			c := serveOnce(t, p)
+			_ = c.SetDeadline(time.Now().Add(20 * time.Second))
+			fmt.Fprintf(c, "GET http://raw.test:%d/ HTTP/1.1\r\nHost: raw.test\r\n\r\n", ap.Port())
+			resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != 502 || !strings.Contains(string(b), tc.want) {
+				t.Errorf("answer %d %q", resp.StatusCode, b)
+			}
+			// The upstream was closed: its writes fail long before the
+			// end of what it meant to send.
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Error("the upstream could send everything")
+				}
+			case <-time.After(15 * time.Second):
+				t.Error("the upstream connection stayed open")
+			}
+		})
+	}
+	// A head right below the limit, with interim answers, still works.
+	p, ap := rawUpstream(t, func(c net.Conn) {
+		_, _ = io.WriteString(c, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nX-Big: "+strings.Repeat("c", 60<<10)+"\r\nContent-Length: 2\r\n\r\nok")
+	})
+	c := serveOnce(t, p)
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	fmt.Fprintf(c, "GET http://raw.test:%d/ HTTP/1.1\r\nHost: raw.test\r\n\r\n", ap.Port())
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(b) != "ok" || len(resp.Header.Get("X-Big")) != 60<<10 {
+		t.Errorf("a large head: %d %q", resp.StatusCode, b)
+	}
+}
+
+// TestProxyTunnelsEnd: open connections end when what allowed them ends:
+// an exception's expiry, a revocation, an allowlist change (finding
+// D1-06).
+func TestProxyTunnelsEnd(t *testing.T) {
+	f := newProxyFixture(t)
+	port := strconv.Itoa(f.port)
+	exc, err := Expand([]string{"exc.test:" + port}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allow := f.policy.Allow
+	f.p.Tunnels = &Tunnels{}
+	f.p.RecheckEvery = time.Hour // only expiry and Recheck close here
+	tunnel := func(host string) (net.Conn, *bufio.Reader) {
+		t.Helper()
+		conn, br := f.rawProxy("CONNECT " + host + ":" + port + " HTTP/1.1\r\n\r\n")
+		resp, err := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("CONNECT %s: %v %v", host, resp, err)
+		}
+		// One request through the tunnel shows it works (keep-alive).
+		fmt.Fprintf(conn, "GET /t HTTP/1.1\r\nHost: %s\r\n\r\n", host)
+		resp, err = http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.ReadAll(resp.Body)
+		return conn, br
+	}
+	closed := func(conn net.Conn, br *bufio.Reader, within time.Duration) bool {
+		_ = conn.SetReadDeadline(time.Now().Add(within))
+		_, err := br.ReadByte()
+		return err != nil && !isTimeout(err)
+	}
+	set := func(pol ProxyPolicy) {
+		f.mu.Lock()
+		f.policy = pol
+		f.mu.Unlock()
+	}
+
+	// Expiry: the exception ends in 400 ms; the tunnel is closed then,
+	// although nothing asks for a check.
+	end := time.Now().Add(400 * time.Millisecond)
+	f.mu.Lock()
+	f.p.Policy = func() (ProxyPolicy, error) {
+		if time.Now().Before(end) {
+			return ProxyPolicy{Allow: allow, Exceptions: exc, Ends: end}, nil
+		}
+		return ProxyPolicy{Allow: allow}, nil
+	}
+	f.mu.Unlock()
+	conn, br := tunnel("exc.test")
+	if !closed(conn, br, 5*time.Second) {
+		t.Error("the tunnel survived its exception's expiry")
+	}
+	if time.Now().Before(end) {
+		t.Error("the tunnel was closed before the exception ended")
+	}
+	// Revocation: the record loses the exception and the owner asks for
+	// a check.
+	f.p.Policy = func() (ProxyPolicy, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.policy, f.pErr
+	}
+	set(ProxyPolicy{Allow: allow, Exceptions: exc})
+	conn, br = tunnel("exc.test")
+	conn2, br2 := tunnel("allowed.test")
+	if closed(conn, br, 300*time.Millisecond) || f.p.Tunnels.Len() != 2 {
+		t.Fatalf("tunnels before the revocation: %d", f.p.Tunnels.Len())
+	}
+	set(ProxyPolicy{Allow: allow})
+	f.p.Tunnels.Recheck()
+	if !closed(conn, br, 5*time.Second) {
+		t.Error("the tunnel survived the revocation")
+	}
+	if closed(conn2, br2, 300*time.Millisecond) {
+		t.Error("a tunnel to an allowed name was closed")
+	}
+	// An allowlist change closes the other one; so does a policy that
+	// cannot be read.
+	set(ProxyPolicy{})
+	f.p.Tunnels.Recheck()
+	if !closed(conn2, br2, 5*time.Second) {
+		t.Error("the tunnel survived the allowlist change")
+	}
+	set(ProxyPolicy{Allow: allow})
+	conn, br = tunnel("allowed.test")
+	f.mu.Lock()
+	f.pErr = errors.New("policy unreadable")
+	f.mu.Unlock()
+	f.p.Tunnels.Recheck()
+	if !closed(conn, br, 5*time.Second) {
+		t.Error("the tunnel survived an unreadable policy")
+	}
+	f.mu.Lock()
+	f.pErr = nil
+	f.mu.Unlock()
+	// A plain download through an exception stops when it is revoked.
+	set(ProxyPolicy{Allow: allow, Exceptions: exc})
+	conn, br = f.rawProxy("GET " + f.url("exc.test", "/slow") + " HTTP/1.1\r\nHost: exc.test\r\n\r\n")
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("download: %v %v", resp, err)
+	}
+	line, _ := bufio.NewReader(resp.Body).ReadString('\n')
+	if line != "line 0\n" {
+		t.Fatalf("download: %q", line)
+	}
+	set(ProxyPolicy{Allow: allow})
+	f.p.Tunnels.Recheck()
+	start := time.Now()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if time.Since(start) > 5*time.Second {
+		t.Error("the download went on after the revocation")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for f.p.Tunnels.Len() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := f.p.Tunnels.Len(); n != 0 {
+		t.Errorf("%d connections still registered", n)
+	}
+	if e := f.lastLog(); e.Allowed || !strings.Contains(e.Reason, "connection closed") {
+		t.Errorf("log %+v", e)
 	}
 }

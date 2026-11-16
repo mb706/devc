@@ -189,7 +189,7 @@ func TestInstall(t *testing.T) {
 		}
 		return execx.Result{Stdout: []byte(listed)}, nil
 	}
-	f := Facts{Namespace: "/run/user/1000/netns/netns-x", Resolvers: addrs("10.0.2.3")}
+	f := Facts{Namespace: "/run/user/1000/netns/netns-x", Resolvers: addrs("10.0.2.3"), HostAlias: addrs("10.0.2.2", "192.168.1.5")}
 	if err := in.Install(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
@@ -198,8 +198,15 @@ func TestInstall(t *testing.T) {
 		!slices.Equal(eng.Unshares[1], []string{"/usr/sbin/nsenter", "--net=/run/user/1000/netns/netns-x", "/usr/sbin/nft", "list", "table", "inet", "devc"}) {
 		t.Errorf("unshares: %q", eng.Unshares)
 	}
-	if eng.UnshareInputs[0] != Rules(f.Resolvers, addrs("192.168.1.5", "203.0.113.9")) {
+	if eng.UnshareInputs[0] != Rules(f.Resolvers, addrs("192.168.1.5", "203.0.113.9", "10.0.2.2")) {
 		t.Errorf("rules on stdin:\n%s", eng.UnshareInputs[0])
+	}
+	// The host alias is rejected before the LAN exception set (finding
+	// D1-21): a "lan" exception opens 10/8 but not slirp4netns's way to
+	// the host's loopback.
+	rules := eng.UnshareInputs[0]
+	if i, j := strings.Index(rules, "{ 10.0.2.2, 192.168.1.5, 203.0.113.9 } reject"), strings.Index(rules, "@lan4 accept"); i < 0 || i > j {
+		t.Errorf("the host alias is not rejected before the LAN set:\n%s", rules)
 	}
 	// Verification fails when the table lacks a part, and so does
 	// installation when nft fails.
@@ -237,6 +244,25 @@ func TestGather(t *testing.T) {
 		!slices.Equal(f.HostAlias, addrs("169.254.1.2")) {
 		t.Errorf("gather: %+v %v", f, err)
 	}
+	// The backend's ways to the host join the hosts file's alias (finding
+	// D1-21).
+	for mode, want := range map[string][]netip.Addr{
+		"slirp4netns":                            addrs("169.254.1.2", "10.0.2.2"),
+		"slirp4netns:allow_host_loopback=true":   addrs("169.254.1.2", "10.0.2.2"),
+		"slirp4netns:cidr=10.5.0.0/16,mtu=65520": addrs("169.254.1.2", "10.5.0.2"),
+		"pasta":                                  addrs("169.254.1.2"),
+	} {
+		ci.HostConfig.NetworkMode = mode
+		if f, err := Gather(ci, nil); err != nil || !slices.Equal(f.HostAlias, want) {
+			t.Errorf("%s: host alias %v %v", mode, f.HostAlias, err)
+		}
+	}
+	ci.HostConfig.NetworkMode = "bridge"
+	ci.NetworkSettings.Networks = map[string]engine.EndpointSettings{"podman": {Gateway: "10.88.0.1"}}
+	if f, err := Gather(ci, nil); err != nil || !slices.Equal(f.HostAlias, addrs("169.254.1.2", "10.88.0.1")) {
+		t.Errorf("bridge: host alias %v %v", f.HostAlias, err)
+	}
+	ci.NetworkSettings.Networks = nil
 	if f, err := Gather(ci, nil); err != nil || len(f.Resolvers) != 0 || len(f.Untrusted) != 2 {
 		t.Errorf("gather without trusted resolvers: %+v %v", f, err)
 	}

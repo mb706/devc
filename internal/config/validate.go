@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/netpolicy"
@@ -262,6 +263,9 @@ func validateGlobal(c *Config, ps *problems) {
 	}
 	if n, err := ParseSize(g.Sync.UploadRate); err != nil || n < 1024 {
 		k.bad("sync.upload_rate", "%q must be a size of at least 1k (bytes per second to each hub), for example 4m", g.Sync.UploadRate)
+	}
+	if d, err := time.ParseDuration(g.Sync.MutableInterval); err != nil || d < time.Minute || d > 30*24*time.Hour {
+		k.bad("sync.mutable_interval", "%q must be a duration between 1m and 720h (the least time between two archived generations of a changing file), for example 6h", g.Sync.MutableInterval)
 	}
 	if l := g.Router.Listen; l != RouterOff {
 		ap, err := netip.ParseAddrPort(l)

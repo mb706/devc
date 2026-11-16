@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 	"github.com/mb706/devc/internal/hub"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
+	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/secrets"
 )
 
@@ -68,8 +70,11 @@ func startHub(t *testing.T) *testHub {
 type proxyRT struct {
 	cert string
 	puts *atomic.Int64
-	// cancelAfter cancels after that many PUTs.
+	// cancelAfter cancels after that many PUTs (of paths containing
+	// cancelMatch, when set).
 	cancelAfter int64
+	cancelMatch string
+	matched     atomic.Int64
 	cancel      func()
 }
 
@@ -78,7 +83,14 @@ func (p *proxyRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.Host = "hub.test"
 	r.Header.Set(hub.ProxyHeader, p.cert)
 	if r.Method == http.MethodPut && p.puts != nil {
-		if n := p.puts.Add(1); p.cancelAfter > 0 && n > p.cancelAfter && p.cancel != nil {
+		n := p.puts.Add(1)
+		if p.cancelMatch != "" {
+			n = 0
+			if strings.Contains(r.URL.Path, p.cancelMatch) {
+				n = p.matched.Add(1)
+			}
+		}
+		if p.cancelAfter > 0 && n > p.cancelAfter && p.cancel != nil {
 			p.cancel()
 			return nil, context.Canceled
 		}
@@ -733,6 +745,18 @@ func TestContainerWorkers(t *testing.T) {
 	if _, err := w.ListHarness(context.Background(), realm, HarnessRequest(m.c, realm, "list")); err == nil {
 		t.Error("a hostile listing was accepted")
 	}
+	// A listing cut at the capture limit is an error, never a short
+	// listing; the capture matches the worker's limit (finding D1-16).
+	eng.RunFunc = func(o engine.RunOptions) (execx.Result, error) {
+		return execx.Result{Stdout: []byte(`{"v":1,"files":[{"path":"codex/home/a`), Truncated: true}, nil
+	}
+	eng.Runs = nil
+	if _, err := w.ListHarness(context.Background(), realm, HarnessRequest(m.c, realm, "list")); err == nil || !strings.Contains(err.Error(), "larger") {
+		t.Errorf("a cut listing: %v", err)
+	}
+	if len(eng.Runs) != 1 || eng.Runs[0].MaxOutput != boxside.MaxArchiveListing {
+		t.Errorf("the capture limit: %+v", eng.Runs)
+	}
 	// No harness state: no container.
 	eng.Runs = nil
 	if l, err := w.ListHarness(context.Background(), "other", HarnessRequest(m.c, "other", "list")); err != nil || len(l.Files) != 0 || len(eng.Runs) != 0 {
@@ -747,4 +771,407 @@ func slicesContains(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// TestRestoreRefusesReplaceRefs: an archive that names a replacement ref
+// for a banked commit, or any ref outside devc's namespaces, restores
+// none of them, and host git never reads history through a replacement
+// (finding D1-07).
+func TestRestoreRefusesReplaceRefs(t *testing.T) {
+	ctx := context.Background()
+	m := newMachine(t)
+	relay, work := m.relayWithCommits("proj")
+	c1 := gitIn(t, work, "rev-parse", "HEAD")
+	gitIn(t, work, "push", "-q", relay.Dir, "HEAD:refs/devc/bank/main/1")
+	// The attacker's commit, in a bundle of its own.
+	evilRepo := filepath.Join(t.TempDir(), "evil")
+	gitIn(t, "", "init", "-q", evilRepo)
+	gitIn(t, evilRepo, "commit", "-q", "--allow-empty", "-m", "evil")
+	evil := gitIn(t, evilRepo, "rev-parse", "HEAD")
+	src := t.TempDir()
+	bdir := filepath.Join(src, "bundles", "relay", "proj")
+	os.MkdirAll(bdir, 0o755)
+	gitIn(t, evilRepo, "bundle", "create", "-q", filepath.Join(bdir, "00000000-0123456789abcdef.bundle"), "refs/heads/main")
+	line, _ := json.Marshal(archive.RefLine{Bundles: 1, Set: map[string]string{
+		"refs/heads/main":    c1,
+		"refs/replace/" + c1: evil,
+		"refs/notes/commits": evil,
+		"refs/heads/evil":    evil,
+	}})
+	os.WriteFile(filepath.Join(bdir, "refs.jsonl"), append(line, '\n'), 0o644)
+	r := &Restorer{Config: m.c, Git: m.git, Workers: m.w}
+	rep, err := r.Restore(ctx, realm, &DirSource{Dir: src, Realm: realm}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := refsOf(t, relay)
+	if refs["refs/heads/evil"] != evil {
+		t.Errorf("an ordinary branch was not restored: %v", refs)
+	}
+	conflicts := strings.Join(rep.RefConflicts, "\n")
+	for _, bad := range []string{"refs/replace/" + c1, "refs/notes/commits"} {
+		if !strings.Contains(conflicts, bad+" (not a ref the archive restores)") {
+			t.Errorf("%s was not refused: %q", bad, conflicts)
+		}
+	}
+	all, err := relay.Refs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range all {
+		if strings.HasPrefix(ref.Name, "refs/replace/") || strings.HasPrefix(ref.Name, "refs/notes/") {
+			t.Errorf("the relay holds %s", ref.Name)
+		}
+	}
+	// Even a replacement ref planted in the relay by other means is never
+	// interpreted by host git, and never archived.
+	gitIn(t, "", "--git-dir="+relay.Dir, "update-ref", "refs/replace/"+c1, evil)
+	res, err := m.git.Run(ctx, gitx.Call{Relay: relay.Dir, Args: []string{"log", "-1", "--format=%s", c1}})
+	if err != nil || strings.TrimSpace(string(res.Stdout)) != "c1" {
+		t.Errorf("the banked commit reads as %q (%v)", res.Stdout, err)
+	}
+	if _, ok := refsOf(t, relay)["refs/replace/"+c1]; ok {
+		t.Error("a replacement ref would be archived")
+	}
+}
+
+// hubEntries is the index of m1's archive of the realm by path.
+func (h *testHub) entries(cl *Client) map[string]archive.Entry {
+	h.t.Helper()
+	idx, err := cl.Index(context.Background(), "m1", realm)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	out := map[string]archive.Entry{}
+	for _, e := range idx.Entries {
+		out[e.Path] = e
+	}
+	return out
+}
+
+// TestFileClasses: mutable files (shared state outside the transcript
+// globs) get a new generation for any change, also one inside the file
+// that keeps its size, head and tail, at most one per interval, uploaded
+// from a consistent snapshot; the hub keeps three complete ones.
+// Transcripts are append-only: a box that rewrites one again and again
+// gets new generations, and none of the earlier ones is ever removed
+// (finding D1-14).
+func TestFileClasses(t *testing.T) {
+	h := startHub(t)
+	m := newMachine(t)
+	cl, _ := h.client("m1")
+	u := m.uploader(h)
+	ctx := context.Background()
+	now := time.Now()
+	u.Now = func() time.Time { return now }
+	pass := func() {
+		t.Helper()
+		if err := u.Pass(ctx, m.c, cl, m.w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db := "harness/codex/home/state.db"
+	tr := "harness/codex/home/sessions/2026/rollout-1.jsonl"
+	page := func(fill byte) string {
+		return "HEADER" + strings.Repeat(string(fill), 64<<10) + "TRAILER"
+	}
+	m.write(db, page('a'))
+	m.write(tr, "line 1\n")
+	pass()
+	es := h.entries(cl)
+	if e := es[archive.FilePath(db, 0)]; e.Class != archive.ClassMutable || e.Committed == nil || *e.Committed != int64(len(page('a'))) {
+		t.Fatalf("the database's first generation: %+v", e)
+	}
+	if e := es[archive.FilePath(tr, 0)]; e.Class != archive.ClassAppend || e.Committed == nil || *e.Committed != 7 {
+		t.Fatalf("the transcript's first generation: %+v", e)
+	}
+	// A change in the middle: same size, same head and tail.
+	m.write(db, page('b'))
+	pass()
+	if got := h.stored("m1", realm, archive.FilePath(db, 1)); got != "<missing>" {
+		t.Error("a second generation within the interval")
+	}
+	if st := u.Status(); st.Realms[0].Waiting != 1 {
+		t.Errorf("status while the change waits: %+v", st.Realms[0])
+	}
+	now = now.Add(7 * time.Hour)
+	pass()
+	if got := h.stored("m1", realm, archive.FilePath(db, 1)); got != page('b') {
+		t.Errorf("the interior change was not archived: %d bytes", len(got))
+	}
+	pass()
+	if got := h.stored("m1", realm, archive.FilePath(db, 2)); got != "<missing>" {
+		t.Error("a generation without a change")
+	}
+	// More changes: the hub keeps the newest three complete generations.
+	for _, c := range []byte("cdef") {
+		m.write(db, page(c))
+		now = now.Add(7 * time.Hour)
+		pass()
+	}
+	es = h.entries(cl)
+	for g := 0; g <= 5; g++ {
+		_, kept := es[archive.FilePath(db, g)]
+		if want := g >= 3; kept != want {
+			t.Errorf("database generation %d: kept %v, want %v", g, kept, want)
+		}
+	}
+	if got := h.stored("m1", realm, archive.FilePath(db, 5)); got != page('f') {
+		t.Errorf("the newest generation: %d bytes", len(got))
+	}
+	// A box rewrites the transcript again and again: every generation
+	// stays, whatever happens to other files.
+	for i := 2; i <= 6; i++ {
+		m.write(tr, fmt.Sprintf("rewritten %d\n", i))
+		now = now.Add(2 * time.Hour)
+		pass()
+	}
+	es = h.entries(cl)
+	for g := 0; g <= 5; g++ {
+		e, ok := es[archive.FilePath(tr, g)]
+		if !ok || e.Class != archive.ClassAppend || e.Committed == nil {
+			t.Errorf("transcript generation %d: %+v (kept %v)", g, e, ok)
+		}
+	}
+	if got := h.stored("m1", realm, archive.FilePath(tr, 0)); got != "line 1\n" {
+		t.Errorf("the first transcript generation: %q", got)
+	}
+	// Appends to a transcript stay in its generation, marked complete
+	// each time the upload caught up.
+	m.appendTo(tr, "more\n")
+	pass()
+	if e := h.entries(cl)[archive.FilePath(tr, 5)]; e.Committed == nil || *e.Committed != int64(len("rewritten 6\nmore\n")) {
+		t.Errorf("after an append: %+v", e)
+	}
+	// The class comes from the manifest on this machine: a file the
+	// transcript globs do not name is mutable wherever it lies.
+	if c := archive.ClassOf(m.c.Harnesses()[0].TranscriptStatePatterns(), "x"); c != archive.ClassMutable {
+		t.Errorf("class of an unlisted file: %s", c)
+	}
+}
+
+// TestSnapshotConsistency: a mutable generation is one state of the file,
+// even when the file changes while the generation is uploaded.
+func TestSnapshotConsistency(t *testing.T) {
+	h := startHub(t)
+	m := newMachine(t)
+	cl, rt := h.client("m1")
+	u := m.uploader(h)
+	ctx := context.Background()
+	db := "harness/codex/home/state.db"
+	first := strings.Repeat("A", 300<<10)
+	m.write(db, first)
+	u.chunk = 64 << 10
+	cctx, cancel := context.WithCancel(ctx)
+	rt.cancel, rt.cancelAfter = cancel, rt.puts.Load()+2
+	if err := u.Pass(cctx, m.c, cl, m.w); err == nil {
+		t.Fatal("the interrupted pass succeeded")
+	}
+	rt.cancelAfter = 0
+	// The file changes while its generation is half uploaded.
+	m.write(db, strings.Repeat("B", 300<<10))
+	if err := u.Pass(ctx, m.c, cl, m.w); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.stored("m1", realm, archive.FilePath(db, 0)); got != first {
+		t.Errorf("generation 0 mixes states: %d bytes, first state %v", len(got), got == first)
+	}
+	if des, _ := os.ReadDir(filepath.Join(m.c.Paths.ArchiveHubDir("0123456789abcdef"), "snap")); len(des) != 0 {
+		t.Errorf("snapshots left: %d", len(des))
+	}
+}
+
+// TestCompleteGenerations: a restore uses the newest complete generation
+// at its completion length and reports newer incomplete ones; an empty
+// file and a file truncated to empty are archived and restored; ordinary
+// permission bits travel, set-ID bits do not (findings D1-15, D1-18,
+// D1-20).
+func TestCompleteGenerations(t *testing.T) {
+	h := startHub(t)
+	m := newMachine(t)
+	cl, rt := h.client("m1")
+	u := m.uploader(h)
+	ctx := context.Background()
+	hook := "harness/codex/home/hooks/pre-run"
+	marker := "harness/codex/home/.initialised"
+	m.write(journal, "e1\n")
+	m.write(hook, "#!/bin/sh\n")
+	os.Chmod(filepath.Join(m.c.Paths.DurableRealmDir(realm), hook), 0o4755)
+	m.write(marker, "")
+	m.write("requests/proj.jsonl", "r1\n")
+	if err := u.Pass(ctx, m.c, cl, m.w); err != nil {
+		t.Fatal(err)
+	}
+	es := h.entries(cl)
+	if e, ok := es[archive.FilePath(marker, 0)]; !ok || e.Committed == nil || *e.Committed != 0 {
+		t.Errorf("the empty file: %+v %v", e, ok)
+	}
+	if e := es[archive.FilePath(hook, 0)]; e.Mode != 0o755 {
+		t.Errorf("the hook's mode on the hub: %o", e.Mode)
+	}
+	// Truncated to empty: a generation of length zero.
+	m.write("requests/proj.jsonl", "")
+	if err := u.Pass(ctx, m.c, cl, m.w); err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := h.entries(cl)[archive.FilePath("requests/proj.jsonl", 1)]; !ok || e.Committed == nil || *e.Committed != 0 {
+		t.Errorf("the truncated file: %+v %v", e, ok)
+	}
+	// A rewritten journal whose new generation is cut off after its first
+	// chunk (the machine is lost).
+	big := strings.Repeat("x", 200<<10) + "\n"
+	m.write(journal, big)
+	u.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	u.chunk = 64 << 10
+	cctx, cancel := context.WithCancel(ctx)
+	rt.cancel, rt.cancelAfter = cancel, rt.puts.Load()+1
+	u.Pass(cctx, m.c, cl, m.w)
+	rt.cancelAfter = 0
+	if got := h.stored("m1", realm, archive.FilePath(journal, 1)); len(got) == 0 || len(got) >= len(big) {
+		t.Fatalf("the new generation holds %d bytes", len(got))
+	}
+	m2 := newMachine(t)
+	cl2, _ := h.client("m2")
+	r := &Restorer{Config: m2.c, Git: m2.git, Workers: m2.w}
+	rep, err := r.Restore(ctx, realm, &HubSource{Client: cl2, Machine: "m1", Realm: realm}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m2.read(journal); got != "e1\n" {
+		t.Errorf("the restore used an incomplete generation: %d bytes", len(got))
+	}
+	if !strings.Contains(strings.Join(rep.IncompleteFiles, "\n"), journal+": generation 1 is incomplete; restored generation 0") {
+		t.Errorf("report: %q", rep.IncompleteFiles)
+	}
+	if got := m2.read(marker); got != "" {
+		t.Errorf("the empty file: %q", got)
+	}
+	if got := m2.read("requests/proj.jsonl"); got != "" {
+		t.Errorf("the truncated file: %q", got)
+	}
+	fi, err := os.Stat(filepath.Join(m2.c.Paths.DurableRealmDir(realm), hook))
+	if err != nil || fi.Mode().Perm() != 0o755 || fi.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		t.Errorf("the restored hook: %v %v", fi.Mode(), err)
+	}
+	// An export carries the bits too.
+	x := &Exporter{Config: m.c, Git: m.git, Workers: m.w, Machine: "m1"}
+	file := filepath.Join(t.TempDir(), "export.tar")
+	f, _ := os.Create(file)
+	if _, err := x.Export(ctx, realm, f); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	m3 := newMachine(t)
+	staging, man, err := ReadExport(m3.c, file)
+	if staging != "" {
+		defer os.RemoveAll(staging)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	r3 := &Restorer{Config: m3.c, Git: m3.git, Workers: m3.w}
+	if _, err := r3.Restore(ctx, realm, &DirSource{Dir: ExportTree(staging), Realm: man.Realm}, false); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(m3.c.Paths.DurableRealmDir(realm), hook)); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("the imported hook: %v %v", fi, err)
+	}
+	if got := m3.read(marker); got != "" {
+		t.Errorf("the imported empty file: %q", got)
+	}
+	// A realm is restored only under its own name (finding D1-19).
+	m4 := newMachine(t)
+	r4 := &Restorer{Config: m4.c, Git: m4.git, Workers: m4.w}
+	if _, err := r4.Restore(ctx, "other", &DirSource{Dir: ExportTree(staging), Realm: realm}, false); err == nil || !strings.Contains(err.Error(), "only under its own name") {
+		t.Errorf("an import into another realm: %v", err)
+	}
+	if _, err := r4.Restore(ctx, "other", &HubSource{Client: cl2, Machine: "m1", Realm: realm}, false); err == nil {
+		t.Error("a pull into another realm")
+	}
+}
+
+// TestRefLogChunks: a ref log line larger than one upload goes in bounded
+// chunks; a line cut off by an interruption is ended and skipped, and the
+// repository restores (finding D1-17).
+func TestRefLogChunks(t *testing.T) {
+	h := startHub(t)
+	m := newMachine(t)
+	cl, rt := h.client("m1")
+	u := m.uploader(h)
+	u.chunk = 64 << 10
+	ctx := context.Background()
+	relay, work := m.relayWithCommits("proj")
+	var refs []string
+	for i := 0; i < 1300; i++ {
+		refs = append(refs, fmt.Sprintf("HEAD:refs/heads/branch-with-a-rather-long-name-to-fill-the-ref-log-%05d", i))
+	}
+	gitIn(t, work, append([]string{"push", "-q", relay.Dir}, refs...)...)
+	// Interrupted inside the line: after its first chunk.
+	cctx, cancel := context.WithCancel(ctx)
+	rt.cancel, rt.cancelAfter, rt.cancelMatch = cancel, 1, "refs.jsonl"
+	if err := u.Pass(cctx, m.c, cl, m.w); err == nil {
+		t.Fatal("the interrupted pass succeeded")
+	}
+	rt.cancelAfter, rt.cancelMatch = 0, ""
+	log := h.stored("m1", realm, archive.RefsPath("relay/proj"))
+	if len(log) == 0 || strings.HasSuffix(log, "\n") {
+		t.Fatalf("after the interruption the ref log holds %d bytes", len(log))
+	}
+	cut := len(log)
+	// Lost bookkeeping, a new uploader: the cut line is ended, a whole
+	// line follows.
+	os.RemoveAll(m.c.Paths.ArchiveDir())
+	u2 := m.uploader(h)
+	u2.chunk = 64 << 10
+	if err := u2.Pass(ctx, m.c, cl, m.w); err != nil {
+		t.Fatal(err)
+	}
+	log = h.stored("m1", realm, archive.RefsPath("relay/proj"))
+	lines := strings.Split(strings.TrimSuffix(log, "\n"), "\n")
+	if len(lines) != 2 || len(lines[1]) < 128<<10 || !strings.HasSuffix(log, "\n") {
+		t.Fatalf("ref log: %d lines, %d bytes (%d after the interruption)", len(lines), len(log), cut)
+	}
+	if got := ReplayRefs([]byte(log), 10); !sameRefs(got, refsOf(t, relay)) {
+		t.Errorf("the replayed refs differ: %d, want %d", len(got), len(refsOf(t, relay)))
+	}
+	// A reader never applies a line still being written.
+	if got := ReplayRefs([]byte(log+`{"bundles":1,"del":["refs/heads/main"]`), 10); got["refs/heads/main"] == "" {
+		t.Error("an unfinished line was applied")
+	}
+	m2 := newMachine(t)
+	cl2, _ := h.client("m2")
+	r := &Restorer{Config: m2.c, Git: m2.git, Workers: m2.w}
+	if _, err := r.Restore(ctx, realm, &HubSource{Client: cl2, Machine: "m1", Realm: realm}, false); err != nil {
+		t.Fatal(err)
+	}
+	restored := &gitx.Relay{Host: m2.git, Dir: m2.c.Paths.RelayRepo(names.ProjectRef{Realm: realm, Project: "proj"})}
+	if !sameRefs(refsOf(t, relay), refsOf(t, restored)) {
+		t.Error("the restored relay's refs differ")
+	}
+}
+
+// TestIncompletePass: a pass that cannot list the shared harness state
+// says so in its status (finding D1-16).
+func TestIncompletePass(t *testing.T) {
+	h := startHub(t)
+	m := newMachine(t)
+	cl, _ := h.client("m1")
+	u := m.uploader(h)
+	m.write(journal, "e1\n")
+	if err := u.Pass(context.Background(), m.c, cl, failingWorkers{m.w}); err != nil {
+		t.Fatal(err)
+	}
+	st := u.Status()
+	if st.State != proto.ArchiveIncomplete || len(st.Realms) != 1 || !strings.Contains(st.Realms[0].Incomplete, "could not be listed") {
+		t.Errorf("status: %+v", st)
+	}
+	if h.stored("m1", realm, archive.FilePath(journal, 0)) != "e1\n" {
+		t.Error("the host-written state was not uploaded")
+	}
+}
+
+type failingWorkers struct{ *localWorkers }
+
+func (failingWorkers) ListHarness(context.Context, string, *boxside.ArchiveRequest) (*boxside.ArchiveListing, error) {
+	return nil, errors.New("the archive worker's listing is larger than 67108864 bytes")
 }

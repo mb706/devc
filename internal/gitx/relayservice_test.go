@@ -96,7 +96,8 @@ func TestServeCall(t *testing.T) {
 	}
 	joined = strings.Join(cmd.Args, " ")
 	for _, want := range []string{"core.hooksPath=/s/local/git/relay-hooks", "receive.hideRefs=refs/devc", "receive.hideRefs=refs/remotes",
-		"receive.denyDeletes=true", "receive.autogc=false", "receive.fsckObjects=true", "receive.maxInputSize=2147483648", "receive-pack /s/relay/p.git"} {
+		"receive.denyDeletes=true", "receive.autogc=false", "receive.fsckObjects=true", "receive.maxInputSize=2147483648", "receive.unpackLimit=1",
+		"transfer.unpackLimit=1", "receive-pack /s/relay/p.git"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("receive-pack lacks %q: %q", want, cmd.Args)
 		}

@@ -4,8 +4,9 @@
 # machines, loopback only), opens every screen at 390x844 (touch) and
 # 1280x800 in light and dark, saves a screenshot and the rendered DOM of
 # each, tries a few actions (answer a question, send a prompt, open the
-# terminal, expand a tool run), and fails when a page logs an error, throws,
-# or violates the content security policy.
+# terminal, expand a tool run, page back through a long history), checks
+# logic of the app's modules in the page, and fails when a page logs an
+# error, throws, or violates the content security policy.
 #
 #   web/check.sh [output-directory]
 #   web/check.sh --url http://127.0.0.1:PORT --session MACHINE/SESSION [output-directory]
@@ -183,6 +184,7 @@ else:
     sessions = [s for sec in inbox["sections"] for s in sec["sessions"]]
     question = next(s for s in sessions if s.get("question"))
     working = next(s for s in sessions if s["machine"] == "desktop" and s["state"] == "working")
+    history = next(s for s in sessions if s["machine"] == "desktop" and s.get("worktree") == "history")
 
 req = urllib.request.Request(f"http://127.0.0.1:{cdp}/json/new?about:blank", method="PUT")
 target = json.loads(urllib.request.urlopen(req).read())
@@ -333,6 +335,84 @@ page.wait("[...document.querySelectorAll('.tl-prompt .bubble')].some(b => b.text
 page.events = [m for m in page.events if not (m.get("method") == "Log.entryAdded" and "/api/commands" in m.get("params", {}).get("entry", {}).get("url", ""))]
 collect("actions: unconfirmed")
 
+# A long history (findings D1-09, D1-13): tool runs stay bounded, "Load
+# earlier" moves the bounded window back to the session's start, and "Back
+# to the latest" returns to the live end.
+page.goto(f"{base}/{sid(history)}")
+page.wait("document.body.textContent.includes('Turn 12: the posts of 2024')", "the long session's latest turn", 20)
+store_k = f"{history['machine']}/{history['session']}"
+runs = page.js("[...document.querySelectorAll('.tr-n')].map(e => parseInt(e.textContent))")
+if not runs or max(runs) > 200:
+    raise SystemExit(f"tool runs of {runs} calls")
+page.js("[...document.querySelectorAll('.toolrun')].pop().click()")
+page.wait("document.querySelector('.toollist li')", "an expanded long tool run")
+if page.js("document.querySelectorAll('.toollist li').length") > 200:
+    raise SystemExit("an expanded tool run draws more than 200 rows")
+for _ in range(40):
+    if page.js("document.body.textContent.includes('Started claude in history')"):
+        break
+    page.wait("[...document.querySelectorAll('.tl-more button')].some(b => !b.disabled && /Load earlier|Show earlier/.test(b.textContent))", "a control for earlier events", 20)
+    page.js("[...document.querySelectorAll('.tl-more button')].find(b => !b.disabled && /Load earlier|Show earlier/.test(b.textContent)).click()")
+    time.sleep(0.3)
+else:
+    raise SystemExit("the window never reached the session's start")
+held = page.js(f"import('/app/store.js').then(m => m.state.details[{json.dumps(store_k)}].events.length)")
+if held > 1000:
+    raise SystemExit(f"the window holds {held} events")
+page.wait("[...document.querySelectorAll('.tl-latest button')].some(b => b.textContent.includes('Back to the latest'))", "the control back to the latest events")
+page.js("document.querySelector('.tl-top-marker').scrollIntoView()")
+time.sleep(0.3)
+open(os.path.join(out, "action-history.png"), "wb").write(base64.b64decode(page.send("Page.captureScreenshot", {"format": "png"})["data"]))
+page.js("[...document.querySelectorAll('.tl-latest button')].find(b => b.textContent.includes('Back to the latest')).click()")
+page.wait("!document.querySelector('.tl-latest') && document.body.textContent.includes('Turn 12: the posts of 2024')", "the latest events again", 20)
+collect("actions: history")
+
+# Logic the screens cannot show directly, in the page's own modules.
+checks = page.js("""(async () => {
+  const out = [];
+  const tl = await import('/app/timeline.js');
+  const api = await import('/app/api.js');
+  const store = await import('/app/store.js');
+  // A tool run that never ends stays bounded, also its first run after a
+  // trim (D1-09).
+  const d = tl.newDetail();
+  for (let i = 1; i <= 3000; i++) tl.append(d, { seq: i, type: 'tool', data: { name: 'Read', summary: 'f' + i } });
+  const sizes = d.items.map((it) => it.list.length);
+  if (d.events.length !== 1000 || Math.max(...sizes) > tl.TOOL_RUN_MAX || d.items[0].list[0].seq < d.events[0].seq) out.push('tool runs: ' + JSON.stringify(sizes));
+  // Paging back beyond the window moves it and leaves the live end (D1-13).
+  const older = []; for (let i = 1801; i <= 2000; i++) older.push({ seq: i, type: 'note', data: { text: 'n' } });
+  tl.prepend(d, older);
+  if (d.events.length !== 1000 || d.events[0].seq !== 1801 || d.live) out.push('prepend: ' + d.events.length + ' ' + d.events[0].seq + ' ' + d.live);
+  const realFetch = window.fetch;
+  try {
+    // A successful answer that breaks off is an uncertain outcome (D1-10).
+    window.fetch = async () => new Response('{"command":"x","outc', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    try { await api.get('/api/me'); out.push('a broken answer was read'); } catch (e) { if (!e.uncertain) out.push('a broken answer is not uncertain'); }
+    const ids = [];
+    window.fetch = async (url, opts) => { if (opts && opts.body) ids.push(JSON.parse(opts.body).id); return new Response('{"command":', { status: 200 }); };
+    const rec = await store.run('nomachine', 'interrupt', { session: 's0000000000000000000z' }, { quiet: true, id: 'check-id-1' });
+    const p = store.state.pending['check-id-1'];
+    if (!rec || rec.outcome !== 'unknown' || !p || p.id !== 'check-id-1' || ids.length < 2 || ids.some((i) => i !== 'check-id-1')) out.push('uncertain command: ' + JSON.stringify({ rec, p: !!p, ids }));
+    store.dismissPending('check-id-1');
+    // A detail read that began before a newer summary does not undo it (D1-12).
+    const k = 'nomachine/s0000000000000000000z';
+    store.applyChange('session', { machine: 'nomachine', session: 's0000000000000000000z', question: { id: 'q2' }, last_seq: 9 }, 1000000);
+    window.fetch = async () => new Response(JSON.stringify({ session: { machine: 'nomachine', session: 's0000000000000000000z', question: { id: 'q1' }, last_seq: 8 }, events: [], more: false, stream_id: 999999 }), { status: 200 });
+    await store.loadDetail('nomachine', 's0000000000000000000z');
+    if (!store.state.sessions[k] || store.state.sessions[k].question.id !== 'q2') out.push('an older summary replaced a newer one');
+    store.dropDetail('nomachine', 's0000000000000000000z');
+    store.applyChange('session.removed', { machine: 'nomachine', session: 's0000000000000000000z' });
+  } finally {
+    window.fetch = realFetch;
+  }
+  return out;
+})()""")
+if checks:
+    raise SystemExit("logic checks: " + "; ".join(checks))
+# The broken answers above are deliberate.
+page.events = [m for m in page.events if not (m.get("method") == "Log.entryAdded")]
+collect("logic checks")
+
 page.goto(f"{base}/{sid(working, 'terminal')}")
 page.wait("[...document.querySelectorAll('.term-btns button')].some(b => b.textContent === 'Take control')", "the take-control button")
 # The click asks confirm(), which blocks the page: click from a timer and
@@ -355,7 +435,7 @@ except SystemExit:
 open(os.path.join(out, "action-terminal.png"), "wb").write(base64.b64decode(page.send("Page.captureScreenshot", {"format": "png"})["data"]))
 collect("actions: terminal")
 
-print(f"{len(screens) * 4} screens and 3 action runs checked; screenshots and DOM in {out}")
+print(f"{len(screens) * 4} screens, 4 action runs and the logic checks done; screenshots and DOM in {out}")
 if problems:
     print("problems:")
     for p in problems:

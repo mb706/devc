@@ -1,11 +1,18 @@
 // The timeline of an open session (finding C2-07): a bounded window of its
-// most recent events and the entries the screen shows, kept up to date
-// event by event. A new event changes the last entry or adds one; it never
-// rebuilds the history. Live events beyond the window push the oldest out
-// (they can be paged in again); older pages are loaded on demand.
+// events and the entries the screen shows, kept up to date event by event.
+// A new event changes the last entry or adds one; it never rebuilds the
+// history. Live events beyond the window push the oldest out (they can be
+// paged in again); older pages are loaded on demand. Paging back beyond the
+// window's size moves the window: the newest events are dropped and the
+// window is no longer live until the screen returns to the latest events
+// (finding D1-13). A run of tool calls is bounded too (finding D1-09).
 
 // MAX_EVENTS is the most events an open session keeps.
 export const MAX_EVENTS = 1000;
+
+// TOOL_RUN_MAX is the most tool calls one folded run holds; a longer run
+// continues in a new one.
+export const TOOL_RUN_MAX = 200;
 
 // entry turns one event into a timeline entry; null for events the
 // timeline does not show (states, seen marks, harness details).
@@ -35,14 +42,15 @@ function entry(e) {
 }
 
 // addEvent adds one event to the entries. Consecutive tool calls fold into
-// one run (events the timeline does not show do not end a run); a run that
-// grows becomes a new object, so its row is drawn again and no other.
+// runs of at most TOOL_RUN_MAX (events the timeline does not show do not
+// end a run); a run that grows becomes a new object, so its row is drawn
+// again and no other.
 export function addEvent(items, e) {
   if (e.type === 'tool') {
     const d = e.data || {};
-    const t = { name: d.name, summary: d.summary || '', at: e.at || e.ts };
+    const t = { name: d.name, summary: d.summary || '', at: e.at || e.ts, seq: e.seq };
     const last = items[items.length - 1];
-    if (last && last.kind === 'tools') {
+    if (last && last.kind === 'tools' && last.list.length < TOOL_RUN_MAX) {
       items[items.length - 1] = { ...last, list: [...last.list, t], at: t.at, last: e.seq };
     } else {
       items.push({ kind: 'tools', seq: e.seq, last: e.seq, list: [t], at: t.at });
@@ -60,8 +68,10 @@ export function buildItems(events) {
 }
 
 // newDetail is an open session's timeline state.
+// live: the window ends at the session's newest event (false after paging
+// back beyond the window's size).
 export function newDetail() {
-  return { events: [], items: [], ver: 0, more: false, partial: false, loading: false, older: false, error: '', status: 0, req: 0, buffer: [], reload: false };
+  return { events: [], items: [], ver: 0, more: false, partial: false, loading: false, older: false, error: '', status: 0, req: 0, buffer: [], reload: false, live: true };
 }
 
 // lastSeq is the seq of the newest event held (0: none).
@@ -75,8 +85,9 @@ export function append(d, e) {
   d.ver++;
 }
 
-// trim drops the oldest events beyond MAX_EVENTS, and the entries that
-// lie entirely before the first event kept.
+// trim drops the oldest events beyond MAX_EVENTS, the entries that lie
+// entirely before the first event kept, and the calls of a tool run that
+// do.
 export function trim(d) {
   if (d.events.length <= MAX_EVENTS) return;
   d.events.splice(0, d.events.length - MAX_EVENTS);
@@ -84,6 +95,11 @@ export function trim(d) {
   let i = 0;
   while (i < d.items.length && d.items[i].last < first) i++;
   if (i) d.items.splice(0, i);
+  const head = d.items[0];
+  if (head && head.kind === 'tools' && head.seq < first) {
+    const list = head.list.filter((t) => t.seq >= first);
+    d.items[0] = { ...head, list, seq: list.length ? list[0].seq : first };
+  }
   d.more = true;
 }
 
@@ -105,17 +121,23 @@ export function replace(d, events) {
   d.buffer = [];
   if (d.events.length > MAX_EVENTS) d.events.splice(0, d.events.length - MAX_EVENTS);
   d.items = buildItems(d.events);
+  d.live = true;
   d.ver++;
   return ok;
 }
 
-// prepend adds an older page before the window, within MAX_EVENTS.
+// prepend adds an older page before the window. A window that would grow
+// beyond MAX_EVENTS moves back instead: its newest events are dropped and
+// it is no longer live (finding D1-13).
 export function prepend(d, events) {
   const first = d.events.length ? d.events[0].seq : Infinity;
-  let older = events.filter((e) => e.seq < first);
-  const room = Math.max(0, MAX_EVENTS - d.events.length);
-  if (older.length > room) older = older.slice(older.length - room);
-  d.events = [...older, ...d.events];
+  const older = events.filter((e) => e.seq < first);
+  let all = [...older, ...d.events];
+  if (all.length > MAX_EVENTS) {
+    all = all.slice(0, MAX_EVENTS);
+    d.live = false;
+  }
+  d.events = all;
   d.items = buildItems(d.events);
   d.ver++;
 }

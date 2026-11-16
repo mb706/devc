@@ -32,6 +32,12 @@ var relayConfig = [][2]string{
 	{"receive.fsckObjects", "true"},
 	{"transfer.fsckObjects", "true"},
 	{"fetch.recurseSubmodules", "false"},
+	// Incoming objects stay in the pack they came in (finding D1-05): a
+	// small pack of deltas cannot expand into loose objects many times
+	// its size. Bases a thin pack refers to are added once.
+	{"transfer.unpackLimit", "1"},
+	{"receive.unpackLimit", "1"},
+	{"fetch.unpackLimit", "1"},
 }
 
 func (r *Relay) run(ctx context.Context, args ...string) (execx.Result, error) {

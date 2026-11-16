@@ -140,9 +140,15 @@ func (w *ContainerWorkers) ListHarness(ctx context.Context, realm string, req *b
 	if err != nil || !ok {
 		return &boxside.ArchiveListing{V: boxside.ArchiveProtoVersion}, err
 	}
+	// The capture matches what the worker may print and the decoder
+	// accepts (finding D1-16); a cut report is an error, never a listing.
+	o.MaxOutput = boxside.MaxArchiveListing
 	res, err := w.Engine.Run(ctx, o)
 	if err != nil {
 		return nil, workerFailed(err, res.Stderr)
+	}
+	if res.Truncated {
+		return nil, fmt.Errorf("the archive worker's listing is larger than %d bytes", boxside.MaxArchiveListing)
 	}
 	return boxside.DecodeArchiveListing(res.Stdout)
 }

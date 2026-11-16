@@ -72,7 +72,7 @@ function open() {
       } catch (err) {
         return;
       }
-      applyChange(kind, data);
+      applyChange(kind, data, Number(e.lastEventId) || 0);
     });
   }
   src.onopen = () => {

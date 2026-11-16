@@ -9,7 +9,8 @@ package daemon
 // box.ports or currently forwarded (`devc forward`) are routed; anything
 // else is a 404 that says how to allow it. Routing strictly by a Host
 // under .localhost means a page that rebinds its own name to 127.0.0.1
-// reaches nothing. WebSocket upgrades pass through.
+// reaches nothing. WebSocket upgrades pass through. Browser requests
+// from another origin are refused (crossOrigin).
 
 import (
 	"context"
@@ -182,6 +183,10 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rt.fail(w, http.StatusNotFound, "%q is not a local URL of this machine: %s", r.Host, rt.usage())
 		return
 	}
+	if why := crossOrigin(r); why != "" {
+		rt.fail(w, http.StatusForbidden, "%s: the router serves %s only to its own pages (and to programs that are not browsers)", why, r.Host)
+		return
+	}
 	rt.d.fresh()
 	e := rt.d.current()
 	ref, ok := match(labels, e.refs)
@@ -237,6 +242,47 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type routeRefKey struct{}
+
+// crossOrigin explains why a browser request from another origin is
+// refused, or returns "" (finding D1-01). Every local URL is its own
+// origin, and the .localhost names do not keep a page of one box from
+// talking to another box's service: a WebSocket is not bound by the
+// same-origin policy, and a form POST needs no CORS. So a WebSocket
+// upgrade or a state-changing method must come from the page's own
+// origin, and anything Fetch Metadata marks as cross-site is refused
+// except a top-level navigation by GET (a link the user follows).
+// Programs that are not browsers send neither header and pass.
+func crossOrigin(r *http.Request) string {
+	upgrade := r.Header.Get("Upgrade") != "" || httpHeaderHas(r.Header, "Connection", "upgrade")
+	safe := r.Method == http.MethodGet || r.Method == http.MethodHead
+	if origins := r.Header.Values("Origin"); (upgrade || !safe) && len(origins) > 0 {
+		own := "http://" + strings.ToLower(strings.TrimSuffix(r.Host, "."))
+		if len(origins) != 1 || strings.ToLower(origins[0]) != own {
+			return fmt.Sprintf("a request from origin %q", strings.Join(origins, ", "))
+		}
+	}
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "same-site" && site != "none" {
+		// "cross-site", and any value this code does not know.
+		nav := r.Method == http.MethodGet && !upgrade && r.Header.Get("Sec-Fetch-Mode") == "navigate" &&
+			r.Header.Get("Sec-Fetch-Dest") == "document"
+		if !nav {
+			return fmt.Sprintf("a %s request from another site", strings.ToLower(r.Method))
+		}
+	}
+	return ""
+}
+
+// httpHeaderHas reports whether a comma-separated header lists token.
+func httpHeaderHas(h http.Header, name, token string) bool {
+	for _, v := range h.Values(name) {
+		for _, t := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(t), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // dial connects to a box port named by a route key
 // ("<container id prefix>-<port>.box.devc.invalid:80").

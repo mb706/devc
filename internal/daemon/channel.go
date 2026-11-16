@@ -13,6 +13,7 @@ import (
 
 	"github.com/mb706/devc/internal/boxside"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/netpolicy"
 	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/session"
 )
@@ -58,8 +59,11 @@ type boxWorker struct {
 	// relays bounds the raw relay streams (host.proxy, host.dial); dials
 	// are the host.dial connections, ended when their exception ends;
 	// netPorts the host-exception ports the agent last took.
-	relays    chan struct{}
-	dials     map[*dialRelay]bool
+	relays chan struct{}
+	dials  map[*dialRelay]bool
+	// tunnels are the open proxy connections, checked again when the
+	// exceptions change (netpolicy.Tunnels has its own lock).
+	tunnels   netpolicy.Tunnels
 	netPorts  []int
 	netSynced bool
 	// svcPorts are the services the agent last took (box.services);

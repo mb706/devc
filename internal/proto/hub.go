@@ -107,6 +107,9 @@ const (
 	ArchiveError     = "error"
 	ArchiveNoCreds   = "no-credentials"
 	ArchiveStarting  = "starting"
+	// ArchiveIncomplete: the last pass ended without an error but could
+	// not see all durable state (finding D1-16).
+	ArchiveIncomplete = "incomplete"
 )
 
 // ArchiveHubStatus is the archive of this machine on one hub: what is
@@ -136,6 +139,12 @@ type ArchiveRealmStatus struct {
 	Skipped       int      `json:"skipped"`
 	SkippedSample []string `json:"skipped_sample,omitempty"`
 	Excluded      int      `json:"excluded"`
+	// Waiting counts mutable files that changed since their last
+	// generation and wait for [sync] mutable_interval to pass.
+	Waiting int `json:"waiting,omitempty"`
+	// Incomplete says why the pass could not see all of the realm's
+	// durable state (the shared harness state could not be listed).
+	Incomplete string `json:"incomplete,omitempty"`
 }
 
 // ArchiveStatusResult is the result of archive.status, in the order of the

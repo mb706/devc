@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
+	"golang.org/x/sys/unix"
 
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
@@ -52,7 +53,63 @@ const (
 	// commands, capabilities): the daemon stops feeding receive-pack after
 	// git.max_push_size plus this (finding C1-07).
 	pushSlack = 64 << 20
+	// pushMinFree is the free space the state file system must have when
+	// a push starts; the watchdog ends a push that leaves less than half
+	// of it (finding D1-05).
+	pushMinFree = 1 << 30
 )
+
+// pushWatchEvery is how often the push watchdog measures the relay's
+// growth. git writes the incoming pack as it arrives (about what the box
+// sends; measured: a 300 MB push grew the quarantine by 304 MB, and 20
+// one-byte variants of a 50 MB object by 50 MB, the thin pack's base),
+// so a fifth of a second lets a push overshoot its budget by at most what
+// the disk writes in that time. Tests shorten it.
+var pushWatchEvery = 200 * time.Millisecond
+
+func statfsFree(path string) (int64, error) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return 0, err
+	}
+	return int64(st.Bavail) * int64(st.Bsize), nil
+}
+
+func (d *Daemon) free(path string) (int64, error) {
+	if d.freeSpace != nil {
+		return d.freeSpace(path)
+	}
+	return statfsFree(path)
+}
+
+// watchPush measures a running push until ctx ends and returns why it
+// must be ended: the relay would exceed git.relay_quota (quota, with used
+// bytes before the push), or the state file system runs short.
+func (d *Daemon) watchPush(ctx context.Context, relay string, used, quota int64) string {
+	t := time.NewTicker(pushWatchEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-t.C:
+		}
+		grown, err := gitx.QuarantineUsage(relay)
+		if err != nil {
+			return "the push's size could not be measured: " + err.Error()
+		}
+		if quota > 0 && used+grown > quota {
+			return fmt.Sprintf("the relay would hold more than its budget of %s (git.relay_quota)", gitx.SizeText(quota))
+		}
+		free, err := d.free(relay)
+		if err != nil {
+			return "the free space could not be measured: " + err.Error()
+		}
+		if free < pushMinFree/2 {
+			return fmt.Sprintf("the state file system has only %s free", gitx.SizeText(free))
+		}
+	}
+}
 
 // streamStall bounds one write to a raw box stream: a box that stops
 // reading for that long loses the stream (finding C1-09). Tests shorten it.
@@ -252,6 +309,9 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 		return
 	}
 	d := w.d
+	// The configuration as it is now: the relay hooks read it from disk,
+	// and the daemon's own limits (push size, relay budget) must agree.
+	d.fresh()
 	e := d.current()
 	ref := w.ref
 	if probs := e.cfg.ProblemsFor(ref); len(probs) > 0 {
@@ -272,7 +332,7 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 	proj := gs.Project(r, true)
 	var env []string
 	var report string
-	var maxInput, feed int64
+	var maxInput, feed, relayUsed int64
 	switch p.Service {
 	case gitx.ServiceUploadPack:
 		if r.Upstream != "" && r.Git.FetchThrough && d.fetchLimit.allow(ref) {
@@ -304,6 +364,29 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 		}()
 		env = hookEnv(e.cfg.Paths, ref, report)
 		maxInput, feed = r.Git.MaxPushSize, r.Git.MaxPushSize+pushSlack
+		// Storage is checked before git writes anything (finding D1-05):
+		// a free-space reserve now, the relay's growth while it runs.
+		free, err := d.free(relay)
+		if err != nil {
+			d.log.Error("checking the free space before a push", "relay", relay, "err", err)
+			fail(proto.CodeInternal, "the host could not check its free space; see the daemon's log")
+			return
+		}
+		if free < pushMinFree {
+			fail(proto.CodeRefused, "the host's state file system has only %s free and devc keeps %s free: ask the user to free space on the host",
+				gitx.SizeText(free), gitx.SizeText(pushMinFree))
+			return
+		}
+		if relayUsed, err = gitx.RelayUsage(relay); err != nil {
+			d.log.Error("measuring the relay before a push", "relay", relay, "err", err)
+			fail(proto.CodeInternal, "the host could not measure the relay; see the daemon's log")
+			return
+		}
+		if q := r.Git.RelayQuota; q > 0 && relayUsed > q {
+			fail(proto.CodeRefused, "the relay holds %s, its budget is %s (git.relay_quota): ask the user to raise the budget or to clean up the relay",
+				gitx.SizeText(relayUsed), gitx.SizeText(q))
+			return
+		}
 	}
 	call, err := gitx.ServeCall(relay, p.Service, e.cfg.Paths.RelayHooksDir(), env, nil, maxInput)
 	if err != nil {
@@ -313,7 +396,29 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 	if err := respond(st, m.ID, proto.GitReply{Service: p.Service}, nil); err != nil {
 		return
 	}
-	code, stderr, err := serveGitProcess(ctx, gs, call, raw, br, feed)
+	gctx, killGit := context.WithCancel(ctx)
+	defer killGit()
+	var watched chan string
+	if p.Service == gitx.ServiceReceivePack {
+		watched = make(chan string, 1)
+		go func() {
+			why := d.watchPush(gctx, relay, relayUsed, r.Git.RelayQuota)
+			if why != "" {
+				killGit()
+			}
+			watched <- why
+		}()
+	}
+	code, stderr, err := serveGitProcess(gctx, gs, call, raw, br, feed)
+	if watched != nil {
+		killGit()
+		if why := <-watched; why != "" {
+			d.log.Warn("a push was ended", "box", names.BoxName(ref), "reason", why)
+			stderr = "devc ended the push: " + why + "; " + stderr
+		}
+		// A push that was ended may leave its quarantine behind.
+		gitx.RemoveQuarantines(relay)
+	}
 	// git is gone: end both copies before the box lock is released.
 	end()
 	d.log.Info("relay service", "box", names.BoxName(ref), "service", p.Service, "exit", code, "err", err, "stderr", proto.Printable(proto.Truncate(stderr, 300)))

@@ -27,7 +27,14 @@ type Global struct {
 // each hub (a size such as "4m").
 type GlobalSync struct {
 	UploadRate string `toml:"upload_rate" json:"upload_rate"`
+	// MutableInterval is the least time between two archived generations
+	// of a mutable file of shared harness state (a duration such as
+	// "6h"); transcripts are archived as they grow.
+	MutableInterval string `toml:"mutable_interval" json:"mutable_interval"`
 }
+
+// DefaultMutableInterval is the default of [sync] mutable_interval.
+const DefaultMutableInterval = "6h"
 
 // DefaultUploadRate is the default of [sync] upload_rate in config.toml.
 const DefaultUploadRate = "4m"
@@ -108,7 +115,7 @@ func defaultGlobal() Global {
 		SELinux:      GlobalSELinux{Mode: SELinuxLabels},
 		Secrets:      GlobalSecrets{Delivery: DeliveryFiles},
 		Router:       GlobalRouter{Listen: DefaultRouterListen},
-		Sync:         GlobalSync{UploadRate: DefaultUploadRate},
+		Sync:         GlobalSync{UploadRate: DefaultUploadRate, MutableInterval: DefaultMutableInterval},
 	}
 }
 

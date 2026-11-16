@@ -42,6 +42,35 @@ type receiptStore struct {
 	// failSave, when set, makes save fail for the records it refuses
 	// (tests: a full disk).
 	failSave atomic.Pointer[func(*cmdRecord) error]
+	// syncDir, when set, replaces syncDirectory (tests: a failing or
+	// observed directory sync).
+	syncDir atomic.Pointer[func(dir string) error]
+}
+
+// syncDirectory fsyncs a directory, so a link or rename in it survives a
+// power failure (finding D1-11).
+func syncDirectory(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// publish makes the directory entry of a new or replaced record durable.
+func (s *receiptStore) publish() error {
+	sync := syncDirectory
+	if f := s.syncDir.Load(); f != nil {
+		sync = *f
+	}
+	if err := sync(s.dir); err != nil {
+		return fmt.Errorf("making the receipt durable: %w", err)
+	}
+	return nil
 }
 
 func (s *receiptStore) path(id string) string { return filepath.Join(s.dir, id+".json") }
@@ -116,8 +145,9 @@ func (s *receiptStore) create(r *cmdRecord) (*cmdRecord, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	defer os.Remove(tmp)
-	if err := os.Link(tmp, s.path(r.Command.ID)); err != nil {
+	err = os.Link(tmp, s.path(r.Command.ID))
+	os.Remove(tmp)
+	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			old, lerr := s.load(r.Command.ID)
 			if lerr != nil {
@@ -125,6 +155,12 @@ func (s *receiptStore) create(r *cmdRecord) (*cmdRecord, bool, error) {
 			}
 			return old, false, nil
 		}
+		return nil, false, err
+	}
+	// Accepted only once the new entry is durable; otherwise it is taken
+	// back, so a retry with the same ID starts afresh.
+	if err := s.publish(); err != nil {
+		os.Remove(s.path(r.Command.ID))
 		return nil, false, err
 	}
 	return r, true, nil
@@ -145,7 +181,10 @@ func (s *receiptStore) save(r *cmdRecord) error {
 		os.Remove(tmp)
 		return err
 	}
-	return nil
+	// The transition counts only once the rename is durable: a
+	// "delivering" record that a power failure could undo would let the
+	// command be dispatched again (finding D1-11).
+	return s.publish()
 }
 
 // list returns every record, in acceptance order; unreadable files are

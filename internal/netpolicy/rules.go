@@ -44,9 +44,11 @@ func Private(a netip.Addr) bool {
 
 // Rules renders the nftables script of level internet for a box whose
 // resolvers are given (IPv4 only; others are ignored). hostAddrs are the
-// host's own IPv4 addresses at start time; all of them are rejected (a
-// server's public address would otherwise reach host services, and a "lan"
-// exception must not open the host's LAN address).
+// host's own IPv4 addresses at start time and the addresses that lead to
+// the host (Facts.HostAlias); all of them are rejected (a server's public
+// address would otherwise reach host services, and a "lan" exception must
+// not open the host's LAN address or a private gateway alias of the
+// host).
 //
 // The script replaces any table of the same name, so applying it twice
 // leaves one copy. Order of the output chain (default accept): loopback,

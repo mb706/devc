@@ -23,8 +23,11 @@ type Facts struct {
 	Resolvers []netip.Addr
 	// Untrusted are the box's other nameservers; they get no exception.
 	Untrusted []netip.Addr
-	// HostAlias are the addresses the box's hosts file gives the engine's
-	// host alias.
+	// HostAlias are the addresses that reach the host other than its own:
+	// those the box's hosts file gives the engine's host alias and those
+	// the network backend maps to the host (BackendHostAddrs). The rules
+	// reject them with the host's addresses, before the LAN exception
+	// set, and the canary tries them.
 	HostAlias []netip.Addr
 }
 
@@ -93,6 +96,11 @@ func Gather(ci *engine.ContainerInfo, trusted []netip.Addr) (Facts, error) {
 		}
 		f.HostAlias = ParseHosts(b, HostAliases...)
 	}
+	for _, a := range BackendHostAddrs(ci) {
+		if !slices.Contains(f.HostAlias, a) {
+			f.HostAlias = append(f.HostAlias, a)
+		}
+	}
 	return f, nil
 }
 
@@ -123,7 +131,9 @@ func (in *Installer) Install(ctx context.Context, f Facts) error {
 	if err != nil {
 		return err
 	}
-	rules := Rules(f.Resolvers, addrs)
+	// The host alias and the backend's way to the host are the host too
+	// (finding D1-21): a "lan" exception must not open them.
+	rules := Rules(f.Resolvers, append(slices.Clip(addrs), f.HostAlias...))
 	if res, err := in.Engine.Unshare(ctx, []string{nsenter, "--net=" + f.Namespace, nft, "-f", "-"}, strings.NewReader(rules)); err != nil {
 		return fmt.Errorf("installing the network rules: %w%s", err, tail(res))
 	}

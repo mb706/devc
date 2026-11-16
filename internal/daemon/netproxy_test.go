@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -147,6 +148,31 @@ func TestNetProxy(t *testing.T) {
 	last := entries[len(entries)-1]
 	if !last.Allowed || last.Host != "exc.test" || last.Reason != "exception" {
 		t.Errorf("last log entry %+v", last)
+	}
+	// A tunnel through the exception ends when it is revoked, at once
+	// with net.sync (finding D1-06).
+	tun := r.rawBoxStream(t, proto.MethodHostProxy, proto.ProxyParams{})
+	fmt.Fprintf(tun, "CONNECT exc.test:%s HTTP/1.1\r\n\r\n", port)
+	tbr := bufio.NewReader(tun)
+	if resp, err := http.ReadResponse(tbr, &http.Request{Method: "CONNECT"}); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("CONNECT through the exception: %v %v", resp, err)
+	}
+	fmt.Fprintf(tun, "GET / HTTP/1.1\r\nHost: exc.test\r\n\r\n")
+	if resp, err := http.ReadResponse(tbr, nil); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("through the tunnel: %v %v", resp, err)
+	} else {
+		io.Copy(io.Discard, resp.Body)
+	}
+	if err := netpolicy.WriteExceptions(r.p.BoxNetExceptionsFile(hello), nil, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	var synced proto.NetSyncResult
+	if err := r.client(nil).Call(context.Background(), proto.MethodNetSync, proto.NetSyncParams{Ref: hello.String()}, &synced); err != nil {
+		t.Fatal(err)
+	}
+	_ = tun.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := tbr.ReadByte(); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("the tunnel survived the revocation: %v", err)
 	}
 
 	// Relays do not take the places of requests: with forty proxy streams
@@ -337,5 +363,46 @@ func TestRouterRefusals(t *testing.T) {
 	}
 	if code, body := get("3000.hello.demo.localhost"); code != 502 || !strings.Contains(body, "not running") {
 		t.Errorf("box not running: %d %q", code, body)
+	}
+	// Browser requests from other origins (D1-01). A request that passes
+	// reaches the box check (502 here); a refused one is a 403.
+	const own = "http://3000.hello.demo.localhost:7480"
+	for _, c := range []struct {
+		name, method string
+		hdr          map[string]string
+		want         int
+	}{
+		{"websocket from another realm's box", "GET", map[string]string{"Upgrade": "websocket", "Connection": "Upgrade", "Origin": "http://8080.evil.other.localhost:7480"}, 403},
+		{"websocket from the page's own origin", "GET", map[string]string{"Upgrade": "websocket", "Connection": "Upgrade", "Origin": own}, 502},
+		{"websocket from an opaque origin", "GET", map[string]string{"Upgrade": "websocket", "Connection": "keep-alive, Upgrade", "Origin": "null"}, 403},
+		{"websocket from another port of the box", "GET", map[string]string{"Upgrade": "websocket", "Connection": "Upgrade", "Origin": "http://4000.hello.demo.localhost:7480"}, 403},
+		{"form post from another origin", "POST", map[string]string{"Origin": "http://evil.example"}, 403},
+		{"delete from another origin", "DELETE", map[string]string{"Origin": "https://3000.hello.demo.localhost:7480"}, 403},
+		{"two origins", "POST", map[string]string{"Origin": own + ", http://evil.example"}, 403},
+		{"post from the page itself", "POST", map[string]string{"Origin": own, "Sec-Fetch-Site": "same-origin"}, 502},
+		{"post without browser headers", "POST", nil, 502},
+		{"cross-site image", "GET", map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Dest": "image"}, 403},
+		{"cross-site fetch", "GET", map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty", "Origin": "http://evil.example"}, 403},
+		{"cross-site frame", "GET", map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "iframe"}, 403},
+		{"cross-site navigation by post", "POST", map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}, 403},
+		{"unknown site value", "GET", map[string]string{"Sec-Fetch-Site": "elsewhere"}, 403},
+		{"cross-site top-level link", "GET", map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}, 502},
+		{"typed into the address bar", "GET", map[string]string{"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}, 502},
+		{"subresource of the page", "GET", map[string]string{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Dest": "script"}, 502},
+	} {
+		req, _ := http.NewRequest(c.method, base+"/", nil)
+		req.Host = "3000.hello.demo.localhost:7480"
+		for k, v := range c.hdr {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != c.want {
+			t.Errorf("%s: %d %q", c.name, resp.StatusCode, b)
+		}
 	}
 }

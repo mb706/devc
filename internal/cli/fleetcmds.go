@@ -368,7 +368,7 @@ func newStateCmd(a *app) *cobra.Command {
 		Use:   "import <file> [--realm <realm>]",
 		Short: "Restore a realm from a state export (into an empty realm)",
 		Long: "Restore what 'devc state export' wrote into a realm without durable state: the realm the export names, " +
-			"or --realm. The realm must be configured.",
+			"which must be configured. A realm is restored only under its own name (--realm may only repeat it).",
 		Args: exactArgs(1, "devc state import <file> [--realm <realm>]"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, probs, err := a.load()
@@ -388,8 +388,10 @@ func newStateCmd(a *app) *cobra.Command {
 				return err
 			}
 			realm := m.Realm
-			if intoRealm != "" {
-				realm = intoRealm
+			if intoRealm != "" && intoRealm != m.Realm {
+				// The journals, request logs and ownership records inside
+				// name the realm (finding D1-19).
+				return fmt.Errorf("the export holds realm %s: devc imports a realm only under its own name, because its session journals, request logs and ownership records name it; configure realm %s and import into it", m.Realm, m.Realm)
 			}
 			if err := a.realmArg(c, realm); err != nil {
 				return err
@@ -402,14 +404,14 @@ func newStateCmd(a *app) *cobra.Command {
 			defer cancel()
 			r := &fleet.Restorer{Config: c, Git: host, Workers: w, Progress: a.stderr}
 			fmt.Fprintf(a.stderr, "importing realm %s (exported on %s from machine %s)\n", realm, m.Created.Local().Format("2006-01-02 15:04"), m.Machine)
-			rep, err := r.Restore(ctx, realm, &fleet.DirSource{Dir: fleet.ExportTree(staging)}, false)
+			rep, err := r.Restore(ctx, realm, &fleet.DirSource{Dir: fleet.ExportTree(staging), Realm: m.Realm}, false)
 			if rep != nil {
 				a.printRestore(rep)
 			}
 			return err
 		},
 	}
-	imp.Flags().StringVar(&intoRealm, "realm", "", "restore into this realm instead of the one the export names")
+	imp.Flags().StringVar(&intoRealm, "realm", "", "the realm the export names (another name is refused)")
 	return group("state", "Restore, export and import a realm's durable state", false, pull, export, imp)
 }
 
@@ -422,6 +424,13 @@ func (a *app) printRestore(rep *fleet.RestoreReport) {
 	}
 	for _, r := range rep.IncompleteRepo {
 		fmt.Fprintf(a.stderr, "devc: %s: the archive's bundles are incomplete; restored what is complete\n", r)
+	}
+	for i, f := range rep.IncompleteFiles {
+		if i == 10 {
+			fmt.Fprintf(a.stderr, "devc: … and %d more files with incomplete generations\n", len(rep.IncompleteFiles)-i)
+			break
+		}
+		fmt.Fprintf(a.stderr, "devc: %s\n", f)
 	}
 	ctx := "no context repository"
 	if rep.Context != nil {
@@ -492,6 +501,12 @@ func newSyncCmd(a *app) *cobra.Command {
 					fmt.Fprintf(a.stdout, "%s: %s\n", h.URL, oneLine(h.Error, 400))
 				}
 				for _, r := range h.Realms {
+					if r.Incomplete != "" {
+						fmt.Fprintf(a.stdout, "%s: %s: the pass was incomplete: %s\n", h.URL, r.Realm, oneLine(r.Incomplete, 300))
+					}
+					if r.Waiting > 0 {
+						fmt.Fprintf(a.stdout, "%s: %s: %d changed files wait for their next generation ([sync] mutable_interval)\n", h.URL, r.Realm, r.Waiting)
+					}
 					for _, s := range r.SkippedSample {
 						fmt.Fprintf(a.stdout, "%s: %s: left out %s\n", h.URL, r.Realm, oneLine(s, 200))
 					}
@@ -515,6 +530,8 @@ func archiveSummary(s *proto.ArchiveHubStatus) string {
 		return "quota reached"
 	case s.State == proto.ArchiveNoCreds || s.State == proto.ArchiveStarting:
 		return s.State
+	case s.State == proto.ArchiveIncomplete:
+		return "incomplete (devc sync status)"
 	case s.Error != "":
 		return "error (devc sync status)"
 	}

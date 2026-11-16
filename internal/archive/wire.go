@@ -6,12 +6,18 @@ import (
 
 // Endpoints of the hub (machine certificates only; work order C17).
 //
-//	PUT /machine/archive/<realm>/<path>?offset=<n>[&final=1]
-//	    append to the machine's own archive (body: the bytes)
+//	PUT /machine/archive/<realm>/<path>?offset=<n>[&final=1][&class=<c>][&mode=<octal>]
+//	    append to the machine's own archive (body: the bytes). For a
+//	    bundle, final makes it complete. For a file generation, final
+//	    marks it complete at its length after the append (an empty body
+//	    with final creates an empty file); class (ClassAppend or
+//	    ClassMutable) and mode (permission bits) are recorded when the
+//	    generation is created. An empty body without final only reports
+//	    the stored length.
 //	GET /machine/archive-index
 //	    every machine's archives: ListReply
-//	GET /machine/archive-index/<machine>/<realm>
-//	    one archive: Index
+//	GET /machine/archive-index/<machine>/<realm>[?after=<path>]
+//	    one archive, a page of at most IndexPage entries: Index
 //	GET /machine/archive-file/<machine>/<realm>/<path>[?sha256=<length>]
 //	    a file's bytes (Range supported), or the SHA-256 of its first
 //	    <length> bytes as HashReply
@@ -31,6 +37,25 @@ const RequestHeader = "X-Devc-Request"
 // MaxChunk is the largest upload a hub accepts in one request by default
 // (hub.toml [archive] max_request may lower it).
 const MaxChunk = 8 << 20
+
+// Classes of archived files (finding D1-14), decided on the machine by the
+// harness manifests and recorded with each generation. Every generation
+// of an append-only file (a transcript, a host-written log) is kept; a
+// mutable file (anything else in shared harness state) gets a new
+// generation for any change, and the hub keeps the newest KeepMutable
+// complete generations of it.
+const (
+	ClassAppend  = "append"
+	ClassMutable = "mutable"
+	KeepMutable  = 3
+)
+
+// IndexPage is the most entries one index answer holds; MaxIndexEntries
+// the most a client reads of one archive.
+const (
+	IndexPage       = 2000
+	MaxIndexEntries = 1_000_000
+)
 
 // PutReply answers an upload: the stored length after it and, for a
 // bundle, whether it is complete.
@@ -65,19 +90,30 @@ type ListReply struct {
 }
 
 // Entry is one stored file, bundle or ref log of an archive. Complete is
-// false for a bundle whose upload did not finish.
+// false for a bundle whose upload did not finish; for a file generation
+// it says that the machine marked it complete, at Committed bytes
+// (finding D1-15: a generation still being uploaded is not used by a
+// restore). Class and Mode are what the machine recorded when the
+// generation was created.
 type Entry struct {
-	Path     string    `json:"path"`
-	Length   int64     `json:"length"`
-	Complete bool      `json:"complete,omitempty"`
-	Modified time.Time `json:"modified"`
+	Path      string    `json:"path"`
+	Length    int64     `json:"length"`
+	Complete  bool      `json:"complete,omitempty"`
+	Committed *int64    `json:"committed,omitempty"`
+	Class     string    `json:"class,omitempty"`
+	Mode      uint32    `json:"mode,omitempty"`
+	Modified  time.Time `json:"modified"`
 }
 
-// Index lists one machine's archive of one realm.
+// Index lists (a page of) one machine's archive of one realm, in the
+// order of the hub's tree; More says that another page follows, asked for
+// with after=Next.
 type Index struct {
 	Machine string  `json:"machine"`
 	Realm   string  `json:"realm"`
 	Entries []Entry `json:"entries"`
+	More    bool    `json:"more,omitempty"`
+	Next    string  `json:"next,omitempty"`
 }
 
 // HashReply is the SHA-256 (hex) of a stored file's first Length bytes.

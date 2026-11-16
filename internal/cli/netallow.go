@@ -284,6 +284,17 @@ func (a *app) applyExceptions(ctx context.Context, e *boxEnv, ref names.ProjectR
 		return e.mgr.SyncExceptions(ctx, ref)
 	default:
 		_, running, err := e.mgr.RunningLevel(ctx, ref)
+		if err == nil && running && level == netpolicy.Allowlist {
+			// The proxy reads the record for every request; this only has
+			// the daemon check its open tunnels now, so a revoked name
+			// loses them at once (finding D1-06). Without a daemon there
+			// is no proxy and nothing to close.
+			if cl, cerr := a.daemonClient(ctx, e.cfg, nil); cerr == nil {
+				var res proto.NetSyncResult
+				_ = cl.Call(ctx, proto.MethodNetSync, proto.NetSyncParams{Ref: ref.String()}, &res)
+				cl.Close()
+			}
+		}
 		return running, err
 	}
 }

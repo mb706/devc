@@ -69,8 +69,9 @@ const serveTimeout = 30 * time.Minute
 // ServeCall is the host git command that serves one service on a relay.
 // upload-pack hides devc's bookkeeping; receive-pack also hides
 // refs/remotes, refuses deletions on its own (the update hook refuses them
-// too), never collects garbage, refuses a pack above maxInput bytes (when
-// positive) and runs the hooks in hooksDir, with env added for them.
+// too), never collects garbage, keeps the incoming pack as it is, refuses
+// a pack above maxInput bytes (when positive) and runs the hooks in
+// hooksDir, with env added for them.
 func ServeCall(relay, service, hooksDir string, env []string, stdin io.Reader, maxInput int64) (Call, error) {
 	c := Call{Relay: relay, Stdin: stdin, Timeout: serveTimeout, Env: env}
 	switch service {
@@ -84,7 +85,9 @@ func ServeCall(relay, service, hooksDir string, env []string, stdin io.Reader, m
 		c.HooksDir = hooksDir
 		c.Config = []string{"receive.hideRefs=refs/devc", "receive.hideRefs=refs/remotes", "receive.denyDeletes=true",
 			"receive.autogc=false", "receive.fsckObjects=true", "receive.advertisePushOptions=false",
-			"receive.updateServerInfo=false", "receive.shallowUpdate=false"}
+			"receive.updateServerInfo=false", "receive.shallowUpdate=false",
+			// Kept packed, never expanded into loose objects (finding D1-05).
+			"receive.unpackLimit=1", "transfer.unpackLimit=1"}
 		if maxInput > 0 {
 			c.Config = append(c.Config, "receive.maxInputSize="+strconv.FormatInt(maxInput, 10))
 		}
@@ -375,6 +378,47 @@ func RelayUsage(dir string) (int64, error) {
 		return nil
 	})
 	return total, err
+}
+
+// QuarantinePrefix starts the names of the directories receive-pack
+// writes a push's objects to until its hooks have accepted it.
+const QuarantinePrefix = "tmp_objdir-incoming-"
+
+// quarantines lists the quarantine directories of a relay.
+func quarantines(relay string) []string {
+	des, _ := os.ReadDir(filepath.Join(relay, "objects"))
+	var out []string
+	for _, de := range des {
+		if de.IsDir() && strings.HasPrefix(de.Name(), QuarantinePrefix) {
+			out = append(out, filepath.Join(relay, "objects", de.Name()))
+		}
+	}
+	return out
+}
+
+// QuarantineUsage is what a running push has written to the relay so far:
+// the regular files in its quarantine directories (finding D1-05; with
+// receive.unpackLimit=1 that is the pack as it arrives, its index and the
+// bases a thin pack refers to).
+func QuarantineUsage(relay string) (int64, error) {
+	var total int64
+	for _, q := range quarantines(relay) {
+		n, err := RelayUsage(q)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// RemoveQuarantines removes what a push that was ended left in the relay.
+// Only one push runs on a relay at a time (it holds the box lock), and
+// nothing else writes quarantine directories.
+func RemoveQuarantines(relay string) {
+	for _, q := range quarantines(relay) {
+		_ = os.RemoveAll(q)
+	}
 }
 
 // SizeText writes a byte count for messages.

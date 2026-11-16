@@ -37,11 +37,16 @@ type ArchiveConfig struct {
 	MaxFiles     int    `toml:"max_files"`
 	// MaxRequest bounds one upload request.
 	MaxRequest string `toml:"max_request"`
-	// MaxUploads uploads may run at once on the hub, MachineUploads per
-	// machine; MaxDownloads reads of archived files.
-	MaxUploads     int `toml:"max_uploads"`
-	MachineUploads int `toml:"machine_uploads"`
-	MaxDownloads   int `toml:"max_downloads"`
+	// MaxUploads uploads (archive and secrets) may run at once on the
+	// hub, MachineUploads per machine; MaxDownloads reads (indexes,
+	// summaries, files, secrets) at once, MachineDownloads per machine.
+	MaxUploads       int `toml:"max_uploads"`
+	MachineUploads   int `toml:"machine_uploads"`
+	MaxDownloads     int `toml:"max_downloads"`
+	MachineDownloads int `toml:"machine_downloads"`
+	// MaxRealms bounds the realms one machine may hold on the hub
+	// (archive and secrets together).
+	MaxRealms int `toml:"max_realms"`
 	// MinFree is the free space the archive always leaves on the hub's
 	// file system.
 	MinFree string `toml:"min_free"`

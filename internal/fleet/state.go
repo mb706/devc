@@ -35,21 +35,46 @@ type RealmState struct {
 	Repos map[string]*RepoState `json:"repos"`
 }
 
-// FileState is one durable file: the generation being uploaded and how
-// much of it the hub holds, with what is needed to notice that the local
-// file changed before that point (inode, modification time, hashes of the
-// first and last anchorSize bytes sent).
+// FileState is one durable file: its class, the generation being uploaded
+// and how much of it the hub holds, and what is needed to notice a change.
+//
+// An append-only file (ClassAppend) is uploaded from the file itself:
+// Hash is the SHA-256 of the Sent bytes, and when the file's inode or
+// modification time changed, the whole uploaded prefix is hashed again; a
+// mismatch (or a file shorter than Sent) starts a new generation (finding
+// D1-14). A mutable file (ClassMutable) is uploaded from a snapshot copied
+// when its generation began (Snap, SnapSize), so a generation is one
+// consistent state of the file; any change of the source (Src) starts a
+// new generation, at most one per mutable interval.
 type FileState struct {
+	Class string `json:"class"`
 	Gen   int    `json:"gen"`
 	Sent  int64  `json:"sent"`
 	Ino   uint64 `json:"ino"`
 	MTime int64  `json:"mtime"`
-	Head  string `json:"head,omitempty"`
-	Tail  string `json:"tail,omitempty"`
+	Mode  uint32 `json:"mode,omitempty"`
+	Hash  string `json:"hash,omitempty"`
+	// Committed is the length at which the hub last marked this generation
+	// complete (-1: not yet).
+	Committed int64 `json:"committed"`
 	// Checked: the hub's length of this generation was confirmed.
 	Checked bool `json:"checked,omitempty"`
 	// Regen is when the last new generation began (they are rate-limited).
 	Regen time.Time `json:"regen,omitempty"`
+	// Snap is the snapshot a mutable generation is uploaded from, SnapSize
+	// its length, Src the source as it was copied.
+	Snap     string  `json:"snap,omitempty"`
+	SnapSize int64   `json:"snap_size,omitempty"`
+	Src      SrcStat `json:"src,omitempty"`
+}
+
+// SrcStat is what tells a changed source file: inode, modification time,
+// size and permission bits.
+type SrcStat struct {
+	Ino   uint64 `json:"ino,omitempty"`
+	MTime int64  `json:"mtime,omitempty"`
+	Size  int64  `json:"size,omitempty"`
+	Mode  uint32 `json:"mode,omitempty"`
 }
 
 // RepoState is one repository: Seq bundles are complete on the hub, Tips
@@ -77,7 +102,10 @@ type PendingBundle struct {
 	Refs map[string]string `json:"refs"`
 }
 
-const stateVersion = 1
+// stateVersion 2: file classes, full prefix hashes, completion marks and
+// snapshots (C19r1). A state of another version starts over; the hub's
+// answers rebuild it without uploading anything twice.
+const stateVersion = 2
 
 func newState(url, machine string) *State {
 	return &State{V: stateVersion, URL: url, Machine: machine, Realms: map[string]*RealmState{}}
@@ -185,24 +213,41 @@ func (st *stateStore) bundleDir() (string, error) {
 	return d, nil
 }
 
-// cleanBundles removes bundle files no pending bundle names.
-func (st *stateStore) cleanBundles(s *State) {
-	d := filepath.Join(st.dir(), "bundles")
-	des, err := os.ReadDir(d)
-	if errors.Is(err, fs.ErrNotExist) || err != nil {
-		return
+// snapDir holds the snapshots of mutable files being uploaded to this hub.
+func (st *stateStore) snapDir() (string, error) {
+	d := filepath.Join(st.dir(), "snap")
+	if err := st.p.Ensure(d); err != nil {
+		return "", err
 	}
+	return d, nil
+}
+
+// cleanBundles removes bundle files no pending bundle names and snapshots
+// no file state names.
+func (st *stateStore) cleanBundles(s *State) {
 	keep := map[string]bool{}
 	for _, r := range s.Realms {
 		for _, repo := range r.Repos {
 			if repo.Pending != nil {
-				keep[filepath.Base(repo.Pending.File)] = true
+				keep[repo.Pending.File] = true
+			}
+		}
+		for _, f := range r.Files {
+			if f.Snap != "" {
+				keep[f.Snap] = true
 			}
 		}
 	}
-	for _, de := range des {
-		if !keep[de.Name()] {
-			_ = os.RemoveAll(filepath.Join(d, de.Name()))
+	for _, sub := range []string{"bundles", "snap"} {
+		d := filepath.Join(st.dir(), sub)
+		des, err := os.ReadDir(d)
+		if errors.Is(err, fs.ErrNotExist) || err != nil {
+			continue
+		}
+		for _, de := range des {
+			if p := filepath.Join(d, de.Name()); !keep[p] {
+				_ = os.RemoveAll(p)
+			}
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -118,6 +119,38 @@ func TestArchiveWorker(t *testing.T) {
 	if len(contents) != 2 || contents["claude/projects/-w-demo-main/t1.jsonl"] != "line 1\nline 2\n" {
 		t.Errorf("tar entries: %v", contents)
 	}
+	// The tar entries carry the ordinary permission bits, never set-ID or
+	// sticky bits (finding D1-18).
+	os.Chmod(filepath.Join(dir, "claude/projects/-w-demo-main/t1.jsonl"), 0o4750)
+	out.Reset()
+	if err := (&ArchiveWorker{Root: dir, Out: &out}).Run(req); err != nil {
+		t.Fatal(err)
+	}
+	for tr := tar.NewReader(&out); ; {
+		h, err := tr.Next()
+		if err != nil {
+			break
+		}
+		if h.Name == "claude/projects/-w-demo-main/t1.jsonl" && h.Mode != 0o750 {
+			t.Errorf("mode in the tar stream: %o", h.Mode)
+		}
+	}
+
+	// A listing that would grow beyond its limit stops, says so, and
+	// still decodes (finding D1-16).
+	old := listingLimit
+	listingLimit = 100
+	t.Cleanup(func() { listingLimit = old })
+	req.Op = "list"
+	out.Reset()
+	if err := (&ArchiveWorker{Root: dir, Out: &out}).Run(req); err != nil {
+		t.Fatal(err)
+	}
+	cut, err := DecodeArchiveListing(out.Bytes())
+	if err != nil || len(cut.Files) != 1 || !strings.Contains(fmt.Sprint(cut.Skipped), "too large") {
+		t.Errorf("a listing beyond its limit: %+v %v", cut, err)
+	}
+	listingLimit = old
 	for name, c := range contents {
 		if strings.Contains(c, "HOST SECRET") || strings.Contains(c, "credential") {
 			t.Errorf("%s holds what must not leave", name)

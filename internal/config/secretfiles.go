@@ -3,6 +3,7 @@ package config
 import (
 	"path"
 	"strings"
+	"time"
 )
 
 // SecretStatePatterns maps home.secret_files of a manifest (paths below
@@ -21,7 +22,20 @@ func (h *Harness) SecretStatePatterns() []string {
 	return out
 }
 
-// secretStatePaths maps one secret_files entry.
+// TranscriptStatePatterns maps the manifest's transcript globs (relative
+// to home.dir) to patterns below the harness's state directory, like
+// SecretStatePatterns; globs outside the shared state map to nothing. The
+// archive keeps every generation of the files they match (finding D1-14).
+func (h *Harness) TranscriptStatePatterns() []string {
+	var out []string
+	for _, g := range h.Transcripts.Globs {
+		out = append(out, secretStatePaths(&h.Home, path.Join(h.Home.Dir, g))...)
+	}
+	return out
+}
+
+// secretStatePaths maps one secret_files entry (or another path pattern
+// relative to /home/dev).
 func secretStatePaths(hm *HarnessHome, f string) []string {
 	var out []string
 	under := func(dir, stateDir string) {
@@ -71,6 +85,14 @@ func validSecretPattern(f string) bool {
 // ArchiveMaxFile is [sync] max_file_size of the realm in bytes.
 func (r *Realm) ArchiveMaxFile() int64 {
 	return sizeOr(r.Sync.MaxFileSize, 256<<20)
+}
+
+// MutableInterval is [sync] mutable_interval of config.toml.
+func (g *Global) MutableInterval() time.Duration {
+	if d, err := time.ParseDuration(g.Sync.MutableInterval); err == nil && d > 0 {
+		return d
+	}
+	return 6 * time.Hour
 }
 
 // UploadRate is [sync] upload_rate of config.toml in bytes per second.

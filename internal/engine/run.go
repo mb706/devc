@@ -60,6 +60,9 @@ type RunOptions struct {
 	// process's own).
 	Stdout, Stderr io.Writer
 	Timeout        time.Duration
+	// MaxOutput caps each captured stream of Run (execx.DefaultMaxOutput
+	// when zero); the result says when it was cut.
+	MaxOutput int
 }
 
 // Args returns the arguments of `podman run` for o.
@@ -213,7 +216,7 @@ func (p *Podman) Run(ctx context.Context, o RunOptions) (execx.Result, error) {
 	if timeout == 0 {
 		timeout = lifecycleTimeout
 	}
-	return p.Runner.Run(ctx, execx.Cmd{Name: p.Bin, Args: args, Dir: "/", Stdin: o.stdin(), Timeout: timeout})
+	return p.Runner.Run(ctx, execx.Cmd{Name: p.Bin, Args: args, Dir: "/", Stdin: o.stdin(), Timeout: timeout, MaxOutput: o.MaxOutput})
 }
 
 // RunStream implements Engine: the container's output goes to o.Stdout and

@@ -16,23 +16,35 @@ import (
 // RestorePrefix holds the refs a restore fetched until it is done.
 const RestorePrefix = "refs/devc/restore/"
 
-// archiveSkip are the scratch namespaces that never enter the archive.
-var archiveSkip = []string{IncomingPrefix, RestorePrefix}
+// archiveSpaces are the ref namespaces the archive carries: those devc
+// itself writes in a relay, without the scratch namespaces (incoming,
+// restore). Anything else, refs/replace/ above all (finding D1-07: a
+// replacement ref changes how an existing banked commit reads without
+// moving its bank ref), is neither archived nor restored.
+var archiveSpaces = []string{HeadsPrefix, GithubPrefix, TagsPrefix, BankPrefix, SnapPrefix, DevcTagsPrefix, BoxTipPrefix}
 
-// ArchiveRefs lists the refs the archive carries: all but the scratch
-// namespaces.
+// ArchiveRef reports whether the archive carries ref name.
+func ArchiveRef(name string) bool {
+	if !validRefName(name) {
+		return false
+	}
+	for _, p := range archiveSpaces {
+		if strings.HasPrefix(name, p) && len(name) > len(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ArchiveRefs lists the refs the archive carries (ArchiveRef).
 func (r *Relay) ArchiveRefs(ctx context.Context) (map[string]string, error) {
-	refs, err := r.Refs(ctx)
+	refs, err := r.Refs(ctx, archiveSpaces...)
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]string{}
 	for _, ref := range refs {
-		skip := false
-		for _, p := range archiveSkip {
-			skip = skip || strings.HasPrefix(ref.Name, p)
-		}
-		if !skip {
+		if ArchiveRef(ref.Name) {
 			out[ref.Name] = ref.OID
 		}
 	}
@@ -138,7 +150,7 @@ func (r *Relay) RestoreRefs(ctx context.Context, want map[string]string) (create
 	for _, n := range names {
 		o := want[n]
 		switch cur, exists := have[n]; {
-		case !validRefName(n) || !ValidOID(o) || strings.HasPrefix(n, IncomingPrefix) || strings.HasPrefix(n, RestorePrefix):
+		case !ArchiveRef(n) || !ValidOID(o):
 			conflicts = append(conflicts, n+" (not a ref the archive restores)")
 		case exists && cur == o:
 		case exists:

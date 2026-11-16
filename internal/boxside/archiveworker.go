@@ -46,6 +46,19 @@ const (
 	archiveMaxSkips   = 100
 )
 
+// MaxArchiveListing bounds a list report end to end (finding D1-16): the
+// worker stops listing files before its report would exceed it (the rest
+// is reported as skipped), the host captures that much and the decoder
+// accepts that much. listingReserve is kept for the skips and counts.
+const (
+	MaxArchiveListing = 64 << 20
+	listingReserve    = 1 << 20
+)
+
+// listingLimit is what the files of a list report may take (tests lower
+// it).
+var listingLimit = MaxArchiveListing - listingReserve
+
 // ArchiveRequest is what the worker reads on stdin. Harnesses maps every
 // harness whose state is archived to its credential patterns
 // (config.Harness.SecretStatePatterns); other directories are not read.
@@ -110,7 +123,9 @@ type archiveWalk struct {
 	req     *ArchiveRequest
 	report  ArchiveListing
 	entries int
-	emit    func(dir *safefs.Dir, name, rel string, st unix.Stat_t) error
+	// listed is the size of the files listed so far in the report.
+	listed int
+	emit   func(dir *safefs.Dir, name, rel string, st unix.Stat_t) error
 }
 
 func (w *archiveWalk) skip(rel, reason string) {
@@ -229,7 +244,14 @@ func (aw *ArchiveWorker) Run(req *ArchiveRequest) error {
 	w := &archiveWalk{req: req, report: ArchiveListing{V: ArchiveProtoVersion, Files: []ArchiveFile{}, Skipped: []ArchiveSkip{}}}
 	if req.Op == "list" {
 		w.emit = func(_ *safefs.Dir, _ string, rel string, st unix.Stat_t) error {
-			w.report.Files = append(w.report.Files, ArchiveFile{Path: rel, Size: st.Size, MTime: st.Mtim.Nano()})
+			f := ArchiveFile{Path: rel, Size: st.Size, MTime: st.Mtim.Nano()}
+			b, _ := json.Marshal(f)
+			if w.listed+len(b)+1 > listingLimit {
+				w.skip(rel, "the listing of the harness state is too large; the rest is left out")
+				return errStopWalk
+			}
+			w.listed += len(b) + 1
+			w.report.Files = append(w.report.Files, f)
 			return nil
 		}
 		if err := w.run(aw.Root); err != nil {
@@ -250,7 +272,9 @@ func (aw *ArchiveWorker) Run(req *ArchiveRequest) error {
 			w.skip(rel, "changed while it was read")
 			return nil
 		}
-		hdr := &tar.Header{Typeflag: tar.TypeReg, Name: rel, Size: fi.Size(), Mode: 0o644, ModTime: fi.ModTime().UTC().Truncate(time.Second), Format: tar.FormatPAX}
+		// The ordinary permission bits travel (an executable hook stays
+		// executable); set-ID and sticky bits never do (finding D1-18).
+		hdr := &tar.Header{Typeflag: tar.TypeReg, Name: rel, Size: fi.Size(), Mode: int64(fi.Mode().Perm()), ModTime: fi.ModTime().UTC().Truncate(time.Second), Format: tar.FormatPAX}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
@@ -293,7 +317,7 @@ func (zeroReader) Read(p []byte) (int, error) {
 // DecodeArchiveListing decodes a list report strictly and validates every
 // path, size and skip (the walk ran over box-writable data).
 func DecodeArchiveListing(b []byte) (*ArchiveListing, error) {
-	if len(b) > 64<<20 {
+	if len(b) > MaxArchiveListing {
 		return nil, errors.New("the archive listing is too large")
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))

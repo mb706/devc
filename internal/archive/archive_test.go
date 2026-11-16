@@ -130,3 +130,29 @@ func TestSealed(t *testing.T) {
 		t.Error("trailing data was accepted")
 	}
 }
+
+// TestMatchGlob: transcript globs with "**" (finding D1-14).
+func TestMatchGlob(t *testing.T) {
+	for _, c := range []struct {
+		pattern, rel string
+		want         bool
+	}{
+		{"home/sessions/**/rollout-*.jsonl*", "home/sessions/rollout-1.jsonl", true},
+		{"home/sessions/**/rollout-*.jsonl*", "home/sessions/2026/11/16/rollout-1.jsonl", true},
+		{"home/sessions/**/rollout-*.jsonl*", "home/sessions/2026/x.jsonl", false},
+		{"home/sessions/**/rollout-*.jsonl*", "home/other/rollout-1.jsonl", false},
+		{"projects/*/*.jsonl", "projects/-w-demo/s.jsonl", true},
+		{"projects/*/*.jsonl", "projects/-w-demo/sub/s.jsonl", false},
+		{"projects/*/*.jsonl", "projects/s.jsonl", false},
+		{"**", "a/b/c", true},
+		{"a/**", "a", true},
+		{"[", "x", false},
+	} {
+		if got := MatchGlob(c.pattern, c.rel); got != c.want {
+			t.Errorf("MatchGlob(%q, %q) = %v", c.pattern, c.rel, got)
+		}
+	}
+	if ClassOf([]string{"projects/*/*.jsonl"}, "projects/p/s.jsonl") != ClassAppend || ClassOf(nil, "x") != ClassMutable {
+		t.Error("ClassOf")
+	}
+}

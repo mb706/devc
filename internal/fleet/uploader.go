@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"maps"
@@ -39,15 +40,15 @@ const (
 	// listed (a helper container) and the context repository checked.
 	DefaultInterval  = time.Minute
 	DefaultScanEvery = 5 * time.Minute
-	// regenEvery rate-limits new generations of a file that keeps being
-	// rewritten (a database in a shared home): at most one per hour.
+	// regenEvery rate-limits new generations of an append-only file whose
+	// uploaded part changed (every generation of such a file is kept, so
+	// one that keeps being rewritten must not flood the hub): at most one
+	// per hour. Mutable files have their own interval ([sync]
+	// mutable_interval).
 	regenEvery = time.Hour
 	// quotaPause is how long uploads to a hub rest after it said a quota
 	// is reached.
 	quotaPause = 10 * time.Minute
-	// anchorSize is the stretch at the start and before the sent offset
-	// that is hashed to notice a file rewritten before that offset.
-	anchorSize = 4096
 	// maxRefLog bounds a ref log read back from the hub.
 	maxRefLog = 64 << 20
 	// maxConflicts bounds the offset conflicts of one file in one pass.
@@ -105,6 +106,8 @@ type Uploader struct {
 	Rate    *RateLimiter
 	Log     *slog.Logger
 	Now     func() time.Time
+	// MutableEvery overrides [sync] mutable_interval (tests).
+	MutableEvery time.Duration
 
 	store *stateStore
 	state *State
@@ -216,6 +219,13 @@ func (u *Uploader) Pass(ctx context.Context, c *config.Config, cl *Client, w Wor
 	if u.status.Realms == nil {
 		u.status.Realms = []proto.ArchiveRealmStatus{}
 	}
+	for _, r := range realms {
+		if r.Incomplete != "" && passErr == nil {
+			u.status.State = proto.ArchiveIncomplete
+			u.status.Error = "realm " + r.Realm + ": " + r.Incomplete
+			break
+		}
+	}
 	if passErr == nil {
 		passErr = saveErr
 	}
@@ -231,10 +241,11 @@ func (u *Uploader) Pass(ctx context.Context, c *config.Config, cl *Client, w Wor
 }
 
 // candidate is a durable file to upload: its path below the realm's
-// durable directory and the size cap that applies.
+// durable directory, the size cap that applies and its class.
 type candidate struct {
-	rel string
-	max int64
+	rel   string
+	max   int64
+	class string
 }
 
 // hostFiles lists the host-written durable files of a realm (journals,
@@ -245,7 +256,9 @@ func hostFiles(dir string) []candidate {
 	add := func(rel string) {
 		fi, err := os.Lstat(filepath.Join(dir, rel))
 		if err == nil && fi.Mode().IsRegular() && archive.ValidRel(rel) == nil {
-			out = append(out, candidate{rel: rel, max: 1 << 40})
+			// Host-written logs grow by appending; one that is compacted or
+			// rotated starts a new generation, and every one is kept.
+			out = append(out, candidate{rel: rel, max: 1 << 40, class: archive.ClassAppend})
 		}
 	}
 	list := func(sub string) []os.DirEntry {
@@ -285,13 +298,16 @@ func (u *Uploader) realmPass(ctx context.Context, pc *passCtx) error {
 	if u.Scanner != nil {
 		l, err := u.Scanner.Listing(ctx, pc.w, pc.c, pc.realm)
 		if err != nil {
+			// The pass goes on with the host-written state, but is not
+			// complete (finding D1-16).
 			u.Log.Warn("listing the shared harness state", "realm", pc.realm, "err", err)
-			pc.status.SkippedSample = append(pc.status.SkippedSample, "harness state: "+proto.Printable(proto.Truncate(err.Error(), 200)))
+			pc.status.Incomplete = "the shared harness state could not be listed: " + proto.Printable(proto.Truncate(err.Error(), 300))
 		} else if l != nil {
 			harnessOK = true
-			pats := map[string][]string{}
+			pats, transcripts := map[string][]string{}, map[string][]string{}
 			for _, m := range pc.c.Harnesses() {
 				pats[m.ID] = m.SecretStatePatterns()
+				transcripts[m.ID] = m.TranscriptStatePatterns()
 			}
 			max := int64(256 << 20)
 			if r, ok := pc.c.Realm(pc.realm); ok {
@@ -303,7 +319,9 @@ func (u *Uploader) realmPass(ctx context.Context, pc *passCtx) error {
 				if !known || archive.Excluded(p, within) {
 					continue
 				}
-				cands = append(cands, candidate{rel: "harness/" + f.Path, max: max})
+				// The class comes from the manifest on this machine, never
+				// from the box (finding D1-14).
+				cands = append(cands, candidate{rel: "harness/" + f.Path, max: max, class: archive.ClassOf(transcripts[id], within)})
 			}
 			pc.status.Skipped, pc.status.Excluded = l.SkippedCount, l.Excluded
 			for _, s := range l.Skipped {
@@ -329,10 +347,13 @@ func (u *Uploader) realmPass(ctx context.Context, pc *passCtx) error {
 			}
 			continue
 		}
-		behind, err := u.syncFile(ctx, pc, cd)
+		behind, waiting, err := u.syncFile(ctx, pc, cd)
 		if behind > 0 {
 			pc.status.FilesBehind++
 			pc.status.BytesBehind += behind
+		}
+		if waiting {
+			pc.status.Waiting++
 		}
 		if err != nil {
 			firstErr = err
@@ -381,62 +402,225 @@ func hashRange(f *os.File, off, n int64) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// anchors computes the head and tail hashes of the first sent bytes.
-func anchors(f *os.File, sent int64) (head, tail string, err error) {
-	if head, err = hashRange(f, 0, min(sent, anchorSize)); err != nil {
-		return "", "", err
-	}
-	from := max(0, sent-anchorSize)
-	tail, err = hashRange(f, from, sent-from)
-	return head, tail, err
-}
-
-func statOf(fi os.FileInfo) (uint64, int64) {
+func statOf(fi os.FileInfo) SrcStat {
 	var ino uint64
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		ino = st.Ino
 	}
-	return ino, fi.ModTime().UnixNano()
+	return SrcStat{Ino: ino, MTime: fi.ModTime().UnixNano(), Size: fi.Size(), Mode: uint32(fi.Mode().Perm())}
+}
+
+// newFileState starts the bookkeeping of a file this uploader has none
+// for: after the newest generation the hub holds of it (generations only
+// grow, and the hub may have dropped old ones), resuming that generation
+// when its bytes are this file's.
+func (u *Uploader) newFileState(ctx context.Context, pc *passCtx, cd candidate) (*FileState, error) {
+	fs := &FileState{Class: cd.class, Committed: -1}
+	idx, err := pc.ownIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+	gen := -1
+	var newest archive.Entry
+	for _, e := range idx.Entries {
+		if ap, err := archive.ParsePath(e.Path); err == nil && ap.Kind == archive.KindFile && ap.Rel == cd.rel && ap.Gen > gen {
+			gen, newest = ap.Gen, e
+		}
+	}
+	if gen < 0 {
+		return fs, nil
+	}
+	fs.Gen = gen
+	if newest.Class != cd.class && newest.Class != "" {
+		fs.Gen++
+	}
+	return fs, nil
 }
 
 // syncFile uploads what the hub lacks of one file and returns how many
-// bytes are still behind.
-func (u *Uploader) syncFile(ctx context.Context, pc *passCtx, cd candidate) (int64, error) {
+// bytes are still behind (waiting reports a changed mutable file that
+// waits for its next generation).
+func (u *Uploader) syncFile(ctx context.Context, pc *passCtx, cd candidate) (behind int64, waiting bool, err error) {
 	f, err := pc.root.Open(cd.rel)
 	if err != nil {
-		return 0, nil // gone, or no longer a regular file
+		return 0, false, nil // gone, or no longer a regular file
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return 0, nil
+		return 0, false, nil
 	}
-	size := fi.Size()
-	if size > cd.max {
+	src := statOf(fi)
+	if src.Size > cd.max {
 		pc.status.Skipped++
-		return 0, nil
+		return 0, false, nil
 	}
-	ino, mtime := statOf(fi)
 	fs := pc.rs.Files[cd.rel]
 	if fs == nil {
-		fs = &FileState{}
+		if fs, err = u.newFileState(ctx, pc, cd); err != nil {
+			return src.Size, false, err
+		}
 		pc.rs.Files[cd.rel] = fs
 	}
-	if fs.Sent > 0 {
+	if fs.Class != cd.class {
+		// The manifest changed the file's class: a new generation records
+		// the new one.
+		u.Log.Info("archive: a file changed its class; uploading a new generation", "realm", pc.realm, "file", cd.rel, "class", cd.class)
+		u.dropSnap(fs)
+		*fs = FileState{Class: cd.class, Gen: fs.Gen + 1, Committed: -1, Regen: u.Now()}
+	}
+	if cd.class == archive.ClassMutable {
+		return u.syncMutable(ctx, pc, cd, f, src, fs)
+	}
+	return u.syncAppend(ctx, pc, cd, f, src, fs)
+}
+
+// syncAppend uploads an append-only file from the file itself.
+func (u *Uploader) syncAppend(ctx context.Context, pc *passCtx, cd candidate, f *os.File, src SrcStat, fs *FileState) (int64, bool, error) {
+	size := src.Size
+	if fs.Sent == size && fs.Committed == size && src.Ino == fs.Ino && src.MTime == fs.MTime && (size == 0 || fs.Hash != "") {
+		return 0, false, nil // unchanged and complete on the hub
+	}
+	// The prefix the hub holds must still be the file's: whenever the file
+	// changed (or there is more to send) all of it is hashed again.
+	h := sha256.New()
+	if fs.Sent > 0 && (size < fs.Sent || src.Ino != fs.Ino || src.MTime != fs.MTime || size > fs.Sent || fs.Hash == "") {
 		changed := size < fs.Sent
-		if !changed && (ino != fs.Ino || mtime != fs.MTime) {
-			head, tail, err := anchors(f, fs.Sent)
-			changed = err != nil || head != fs.Head || tail != fs.Tail
+		if !changed {
+			if _, err := io.Copy(h, io.NewSectionReader(f, 0, fs.Sent)); err != nil {
+				return size, false, nil
+			}
+			sum := hex.EncodeToString(h.Sum(nil))
+			if fs.Hash == "" {
+				fs.Hash = sum // not known before: nothing to compare with
+			}
+			changed = sum != fs.Hash
 		}
 		if changed {
 			if !fs.Regen.IsZero() && u.Now().Sub(fs.Regen) < regenEvery {
-				return size, nil
+				return size, false, nil
 			}
 			u.Log.Info("archive: a file changed before the uploaded part; uploading a new generation", "realm", pc.realm, "file", cd.rel, "generation", fs.Gen+1)
-			*fs = FileState{Gen: fs.Gen + 1, Regen: u.Now()}
+			*fs = FileState{Class: fs.Class, Gen: fs.Gen + 1, Committed: -1, Regen: u.Now()}
+			h.Reset()
+		}
+	} else if fs.Sent > 0 {
+		// Unchanged since the last pass and nothing more to send.
+		if fs.Committed != fs.Sent {
+			return u.commit(ctx, pc, cd, fs, fs.Sent, size)
+		}
+		return 0, false, nil
+	}
+	if fs.Sent == 0 {
+		fs.Mode = src.Mode
+	}
+	fs.Ino, fs.MTime = src.Ino, src.MTime
+	behind, err := u.upload(ctx, pc, cd, f, size, fs, h)
+	if err != nil || behind > 0 {
+		return behind, false, err
+	}
+	// Complete at this length only if the file did not change while it
+	// was read (a rewrite during the pass is found by the next one).
+	if fi, err := f.Stat(); err != nil || statOf(fi) != src {
+		return 0, false, nil
+	}
+	return u.commit(ctx, pc, cd, fs, fs.Sent, size)
+}
+
+// syncMutable uploads a mutable file through a snapshot: a new generation
+// for any change, at most one per mutable interval.
+func (u *Uploader) syncMutable(ctx context.Context, pc *passCtx, cd candidate, f *os.File, src SrcStat, fs *FileState) (int64, bool, error) {
+	if fs.Snap == "" {
+		started := fs.Committed >= 0 || fs.Sent > 0 || fs.Checked
+		switch {
+		case started && fs.Committed == fs.Sent && fs.Src == src:
+			return 0, false, nil // the hub has this state
+		case started && fs.Committed == fs.Sent && !fs.Regen.IsZero() && u.Now().Sub(fs.Regen) < u.mutableEvery(pc):
+			return 0, true, nil // changed; waits for its interval
+		}
+		gen := fs.Gen
+		if started {
+			gen++
+		}
+		snap, err := u.snapshot(f, src)
+		if err != nil {
+			u.Log.Info("archive: no consistent copy of a changing file; trying again next pass", "realm", pc.realm, "file", cd.rel, "err", err)
+			return src.Size, false, nil
+		}
+		*fs = FileState{Class: fs.Class, Gen: gen, Committed: -1, Regen: u.Now(), Mode: src.Mode, Snap: snap, SnapSize: src.Size, Src: src}
+	}
+	sf, err := os.OpenFile(fs.Snap, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		// The snapshot is gone: the generation is started again.
+		*fs = FileState{Class: fs.Class, Gen: fs.Gen + 1, Committed: -1}
+		return src.Size, false, nil
+	}
+	defer sf.Close()
+	behind, err := u.upload(ctx, pc, cd, sf, fs.SnapSize, fs, nil)
+	if err != nil || behind > 0 {
+		return behind, false, err
+	}
+	b, w, err := u.commit(ctx, pc, cd, fs, fs.SnapSize, fs.SnapSize)
+	if err == nil && fs.Committed == fs.SnapSize {
+		u.dropSnap(fs)
+	}
+	return b, w, err
+}
+
+// mutableEvery is the least time between two generations of a mutable
+// file.
+func (u *Uploader) mutableEvery(pc *passCtx) time.Duration {
+	if u.MutableEvery > 0 {
+		return u.MutableEvery
+	}
+	return pc.c.Global.MutableInterval()
+}
+
+// snapshot copies a mutable file (open as f, as it was at src) to a file
+// of the uploader's own; a copy during which the file changed is made
+// again, a few times.
+func (u *Uploader) snapshot(f *os.File, src SrcStat) (string, error) {
+	dir, err := u.store.snapDir()
+	if err != nil {
+		return "", err
+	}
+	for try := 0; try < 3; try++ {
+		out, err := os.CreateTemp(dir, "snap-")
+		if err != nil {
+			return "", err
+		}
+		n, err := io.Copy(out, io.NewSectionReader(f, 0, src.Size))
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+		fi, serr := f.Stat()
+		if err == nil && serr == nil && n == src.Size && statOf(fi) == src {
+			return out.Name(), nil
+		}
+		os.Remove(out.Name())
+		if serr != nil {
+			return "", serr
+		}
+		if fi != nil {
+			src = statOf(fi)
+		}
+		if err != nil {
+			return "", err
 		}
 	}
-	fs.Ino, fs.MTime = ino, mtime
+	return "", errors.New("the file kept changing while it was copied")
+}
+
+func (u *Uploader) dropSnap(fs *FileState) {
+	if fs.Snap != "" {
+		_ = os.Remove(fs.Snap)
+		fs.Snap = ""
+	}
+}
+
+// upload sends r's bytes from fs.Sent to size; h, when set, holds the hash
+// of the first fs.Sent bytes and is extended (fs.Hash follows it).
+func (u *Uploader) upload(ctx context.Context, pc *passCtx, cd candidate, r io.ReaderAt, size int64, fs *FileState, h hash.Hash) (int64, error) {
 	conflicts := 0
 	for fs.Sent < size {
 		if fs.Gen > archive.MaxGen {
@@ -444,7 +628,7 @@ func (u *Uploader) syncFile(ctx context.Context, pc *passCtx, cd candidate) (int
 		}
 		n := min(u.chunk, size-fs.Sent)
 		buf := make([]byte, n)
-		got, err := f.ReadAt(buf, fs.Sent)
+		got, err := r.ReadAt(buf, fs.Sent)
 		if got == 0 && err != nil {
 			return size - fs.Sent, nil // shrank meanwhile; the next pass sees it
 		}
@@ -452,7 +636,11 @@ func (u *Uploader) syncFile(ctx context.Context, pc *passCtx, cd candidate) (int
 		if err := u.Rate.Wait(ctx, len(buf)); err != nil {
 			return size - fs.Sent, err
 		}
-		reply, err := pc.cl.Put(ctx, pc.realm, archive.FilePath(cd.rel, fs.Gen), fs.Sent, buf, false)
+		o := PutOptions{}
+		if fs.Sent == 0 {
+			o.Class, o.Mode = fs.Class, fs.Mode
+		}
+		reply, err := pc.cl.Put(ctx, pc.realm, archive.FilePath(cd.rel, fs.Gen), fs.Sent, buf, o)
 		if err != nil {
 			var he *HubError
 			if errors.As(err, &he) {
@@ -462,30 +650,76 @@ func (u *Uploader) syncFile(ctx context.Context, pc *passCtx, cd candidate) (int
 				}
 				if l, known, _ := he.Conflict(); known && conflicts < maxConflicts {
 					conflicts++
-					if err := u.fileConflict(ctx, pc, cd.rel, f, fs, l, size); err != nil {
+					if err := u.fileConflict(ctx, pc, cd.rel, r, fs, l, size); err != nil {
 						return size - fs.Sent, err
 					}
+					if h != nil {
+						// The offset moved with the conflict: hash the prefix
+						// again.
+						h.Reset()
+						if _, err := io.Copy(h, io.NewSectionReader(r, 0, fs.Sent)); err != nil {
+							return size - fs.Sent, err
+						}
+						fs.Hash = hex.EncodeToString(h.Sum(nil))
+					}
 					continue
+				}
+				if he.Status == http.StatusConflict {
+					// A generation the hub will not take (an older one than
+					// it holds): the next pass asks the hub's index again.
+					delete(pc.rs.Files, cd.rel)
 				}
 			}
 			return size - fs.Sent, err
 		}
-		u.sent(int64(len(buf)))
-		fs.Sent, fs.Checked = reply.Length, true
-		if fs.Head, fs.Tail, err = anchors(f, fs.Sent); err != nil {
-			return size - fs.Sent, err
+		if reply.Length != fs.Sent+int64(len(buf)) {
+			return size - fs.Sent, fmt.Errorf("the hub stored %d bytes of %s, not %d", reply.Length, cd.rel, fs.Sent+int64(len(buf)))
 		}
+		u.sent(int64(len(buf)))
+		if h != nil {
+			h.Write(buf)
+			fs.Hash = hex.EncodeToString(h.Sum(nil))
+		}
+		fs.Sent, fs.Checked = reply.Length, true
 		u.store.maybeSave(u.state)
 	}
 	return 0, nil
 }
 
+// commit marks the generation complete at length on the hub (an empty
+// file is created that way, finding D1-20).
+func (u *Uploader) commit(ctx context.Context, pc *passCtx, cd candidate, fs *FileState, length, size int64) (int64, bool, error) {
+	o := PutOptions{Final: true}
+	if length == 0 {
+		o.Class, o.Mode = fs.Class, fs.Mode
+	}
+	reply, err := pc.cl.Put(ctx, pc.realm, archive.FilePath(cd.rel, fs.Gen), length, nil, o)
+	if err != nil {
+		var he *HubError
+		if errors.As(err, &he) && he.Status == http.StatusConflict {
+			// The hub holds another length: the next pass starts from what
+			// its index says.
+			u.dropSnap(fs)
+			delete(pc.rs.Files, cd.rel)
+		}
+		return size, false, err
+	}
+	if reply.Complete && reply.Length == length {
+		fs.Committed, fs.Checked = length, true
+	}
+	return 0, false, nil
+}
+
 // fileConflict handles a hub that holds length bytes of the generation
 // being uploaded, not fs.Sent.
-func (u *Uploader) fileConflict(ctx context.Context, pc *passCtx, rel string, f *os.File, fs *FileState, length, size int64) error {
+func (u *Uploader) fileConflict(ctx context.Context, pc *passCtx, rel string, f io.ReaderAt, fs *FileState, length, size int64) error {
+	next := func() {
+		*fs = FileState{Class: fs.Class, Gen: fs.Gen + 1, Committed: -1, Ino: fs.Ino, MTime: fs.MTime, Mode: fs.Mode, Regen: fs.Regen,
+			Snap: fs.Snap, SnapSize: fs.SnapSize, Src: fs.Src}
+	}
 	if length > size {
 		// The hub holds more than the file has: another content.
-		*fs = FileState{Gen: fs.Gen + 1, Ino: fs.Ino, MTime: fs.MTime, Regen: fs.Regen}
+		next()
 		return nil
 	}
 	if fs.Checked || length == 0 {
@@ -499,16 +733,17 @@ func (u *Uploader) fileConflict(ctx context.Context, pc *passCtx, rel string, f 
 	if err != nil {
 		return err
 	}
-	ours, err := hashRange(f, 0, length)
-	if err != nil {
+	h := sha256.New()
+	if _, err := io.Copy(h, io.NewSectionReader(f, 0, length)); err != nil {
 		return err
 	}
+	ours := hex.EncodeToString(h.Sum(nil))
 	if theirs == ours {
-		fs.Sent, fs.Checked = length, true
+		fs.Sent, fs.Checked, fs.Hash = length, true, ours
 		u.Log.Info("archive: the hub holds part of a file already; resuming", "realm", pc.realm, "file", rel, "offset", length)
 		return nil
 	}
-	*fs = FileState{Gen: fs.Gen + 1, Ino: fs.Ino, MTime: fs.MTime, Regen: fs.Regen}
+	next()
 	return nil
 }
 
@@ -680,7 +915,9 @@ func (u *Uploader) resyncRepo(ctx context.Context, pc *passCtx, repo string, rs 
 		if _, err := pc.cl.Fetch(ctx, pc.cl.Machine, pc.realm, archive.RefsPath(repo), 0, maxRefLog, &buf); err != nil {
 			return err
 		}
-		logLen = int64(buf.Len())
+		if logLen, err = u.terminateRefLog(ctx, pc, repo, buf.Bytes()); err != nil {
+			return err
+		}
 		tips = ReplayRefs(buf.Bytes(), seq)
 	}
 	if p := rs.Pending; p != nil {
@@ -697,9 +934,13 @@ func (u *Uploader) resyncRepo(ctx context.Context, pc *passCtx, repo string, rs 
 
 // ReplayRefs applies a ref log: the refs it records, from the lines whose
 // bundles are all complete (at most complete). Invalid lines and refs are
-// skipped.
+// skipped, and so is a last line without its newline (still being
+// uploaded, or cut off).
 func ReplayRefs(log []byte, complete int) map[string]string {
 	refs := map[string]string{}
+	if i := bytes.LastIndexByte(log, '\n'); i < len(log)-1 {
+		log = log[:i+1]
+	}
 	sc := bufio.NewScanner(bytes.NewReader(log))
 	sc.Buffer(make([]byte, 0, 64<<10), maxRefLog)
 	for sc.Scan() {
@@ -800,7 +1041,7 @@ func (u *Uploader) syncRepo(ctx context.Context, pc *passCtx, repo string, src r
 		if err := u.Rate.Wait(ctx, len(buf)); err != nil {
 			return err
 		}
-		reply, err := pc.cl.Put(ctx, pc.realm, path, p.Sent, buf, false)
+		reply, err := pc.cl.Put(ctx, pc.realm, path, p.Sent, buf, PutOptions{})
 		if err != nil {
 			var he *HubError
 			if errors.As(err, &he) {
@@ -825,7 +1066,7 @@ func (u *Uploader) syncRepo(ctx context.Context, pc *passCtx, repo string, src r
 		p.Sent = reply.Length
 		u.store.maybeSave(u.state)
 	}
-	if _, err := pc.cl.Put(ctx, pc.realm, path, p.Size, nil, true); err != nil {
+	if _, err := pc.cl.Put(ctx, pc.realm, path, p.Size, nil, PutOptions{Final: true}); err != nil {
 		// Made final before (the answer was lost): the hub says complete,
 		// with this attempt's length.
 		var he *HubError
@@ -872,15 +1113,62 @@ func (u *Uploader) appendRefs(ctx context.Context, pc *passCtx, repo string, rs 
 		return err
 	}
 	b = append(b, '\n')
-	reply, err := pc.cl.Put(ctx, pc.realm, archive.RefsPath(repo), rs.RefsLen, b, false)
-	if err != nil {
-		var he *HubError
-		if errors.As(err, &he) && he.Status == http.StatusConflict {
-			rs.Synced = false
-		}
-		return err
+	if int64(len(b)) > maxRefLog/4 {
+		return fmt.Errorf("%s: the ref log line would be %d bytes, more than the archive takes", repo, len(b))
 	}
-	u.sent(int64(len(b)))
-	rs.RefsLen, rs.Tips = reply.Length, maps.Clone(refs)
+	// The line goes through the same bounded, rate-limited chunks as files
+	// (finding D1-17). A line cut off by an interruption is ended by the
+	// next resync (terminateRefLog) and skipped by readers.
+	base := rs.RefsLen
+	sent := int64(0)
+	conflicts := 0
+	for sent < int64(len(b)) {
+		n := min(u.chunk, int64(len(b))-sent)
+		chunk := b[sent : sent+n]
+		if err := u.Rate.Wait(ctx, len(chunk)); err != nil {
+			return err
+		}
+		reply, err := pc.cl.Put(ctx, pc.realm, archive.RefsPath(repo), base+sent, chunk, PutOptions{})
+		if err != nil {
+			var he *HubError
+			if errors.As(err, &he) {
+				if he.Status == http.StatusRequestEntityTooLarge && u.chunk > 64<<10 {
+					u.chunk /= 2
+					continue
+				}
+				// A lost answer: the hub holds more of this very line.
+				if l, known, _ := he.Conflict(); known && l > base+sent && l <= base+int64(len(b)) && sent > 0 && conflicts < maxConflicts {
+					conflicts++
+					sent = l - base
+					continue
+				}
+				if he.Status == http.StatusConflict {
+					rs.Synced = false
+				}
+			}
+			if sent > 0 {
+				// Part of the line is on the hub: ask it again next pass.
+				rs.Synced = false
+			}
+			return err
+		}
+		u.sent(int64(len(chunk)))
+		sent = reply.Length - base
+	}
+	rs.RefsLen, rs.Tips = base+sent, maps.Clone(refs)
 	return nil
+}
+
+// terminateRefLog ends a ref log whose last line was cut off (an upload
+// interrupted inside a line): a newline makes that line complete and
+// invalid, so it is skipped and the next line starts cleanly.
+func (u *Uploader) terminateRefLog(ctx context.Context, pc *passCtx, repo string, log []byte) (int64, error) {
+	if len(log) == 0 || log[len(log)-1] == '\n' {
+		return int64(len(log)), nil
+	}
+	reply, err := pc.cl.Put(ctx, pc.realm, archive.RefsPath(repo), int64(len(log)), []byte("\n"), PutOptions{})
+	if err != nil {
+		return 0, err
+	}
+	return reply.Length, nil
 }

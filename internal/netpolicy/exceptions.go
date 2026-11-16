@@ -399,6 +399,24 @@ func NameEntries(list []Exception, now time.Time) EntryList {
 	return out
 }
 
+// NameEntriesEnd is the earliest end of an exception in force that
+// NameEntries counts (zero when none ends).
+func NameEntriesEnd(list []Exception, now time.Time) time.Time {
+	var end time.Time
+	for _, x := range list {
+		if x.Kind != KindAddr || !x.Active(now) || x.Until == nil {
+			continue
+		}
+		if _, err := netip.ParseAddr(x.Host); err == nil {
+			continue
+		}
+		if end.IsZero() || x.Until.Before(end) {
+			end = *x.Until
+		}
+	}
+	return end
+}
+
 // elementTimeout renders the timeout of a set element for the time left:
 // whole seconds, rounded up; "" for forever.
 func elementTimeout(x *Exception, now time.Time) (string, bool) {

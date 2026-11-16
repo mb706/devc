@@ -114,7 +114,8 @@ func proxyHeader(is *Issued) string { return url.QueryEscape(string(is.CertPEM))
 // cannot bound).
 type deadlineRecorder struct{ *httptest.ResponseRecorder }
 
-func (deadlineRecorder) SetReadDeadline(time.Time) error { return nil }
+func (deadlineRecorder) SetReadDeadline(time.Time) error  { return nil }
+func (deadlineRecorder) SetWriteDeadline(time.Time) error { return nil }
 
 func TestProxyFront(t *testing.T) {
 	h := newTestHub(t, "hub.test")

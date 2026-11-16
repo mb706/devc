@@ -136,6 +136,47 @@ func backendResolvers(ci *engine.ContainerInfo) []netip.Addr {
 	return out
 }
 
+// pastaHostAddr is the address Podman maps to the host for pasta
+// (--map-guest-addr, the host alias since Podman 5.3).
+var pastaHostAddr = netip.MustParseAddr("169.254.1.2")
+
+// slirpGatewayIndex is the address of slirp4netns's gateway in its
+// network; with allow_host_loopback it reaches the host's loopback.
+const slirpGatewayIndex = 2
+
+// BackendHostAddrs returns the addresses at which a container's network
+// backend may expose the host to it, from the engine's inspect data
+// (finding D1-21): slirp4netns's gateway (the host's loopback when
+// allow_host_loopback is set), pasta's mapped host address, and the
+// gateways of named networks. They are rejected like the host's own
+// addresses, before the LAN exception set.
+func BackendHostAddrs(ci *engine.ContainerInfo) []netip.Addr {
+	mode, opts, _ := strings.Cut(ci.HostConfig.NetworkMode, ":")
+	switch mode {
+	case "slirp4netns":
+		cidr := slirpDefaultCIDR
+		for _, o := range strings.Split(opts, ",") {
+			if v, ok := strings.CutPrefix(o, "cidr="); ok {
+				cidr = v
+			}
+		}
+		if a, ok := nthAddr(cidr, slirpGatewayIndex); ok {
+			return []netip.Addr{a}
+		}
+		return nil
+	case "pasta":
+		return []netip.Addr{pastaHostAddr}
+	}
+	var out []netip.Addr
+	for _, n := range ci.NetworkSettings.Networks {
+		if a, err := netip.ParseAddr(n.Gateway); err == nil && !slices.Contains(out, a.Unmap()) {
+			out = append(out, a.Unmap())
+		}
+	}
+	slices.SortFunc(out, func(x, y netip.Addr) int { return x.Compare(y) })
+	return out
+}
+
 // nthAddr returns the n-th address of an IPv4 network.
 func nthAddr(cidr string, n int) (netip.Addr, bool) {
 	p, err := netip.ParsePrefix(cidr)

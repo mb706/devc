@@ -5,7 +5,6 @@
 
 import { html, useState, useEffect, useRef, Component } from './lib.js';
 import { state, useStore, key, loadDetail, dropDetail, markSeen, run, sendPrompt, decide, stale, retryPending, dismissPending } from './store.js';
-import { MAX_EVENTS } from './timeline.js';
 import { followSession } from './stream.js';
 import { Icon, StateBadge, TopBar, Empty, ago, duration, useNow } from './ui.js';
 import { TerminalTab } from './terminal.js';
@@ -99,25 +98,44 @@ const RENDER_STEP = 300;
 function Timeline({ s, d, k }) {
   const now = useNow();
   const end = useRef(null);
+  const top = useRef(null);
+  const seen = useRef({ first: 0, n: 0 });
   const [shown, setShown] = useState(RENDER_STEP);
   const list = d.items;
-  const from = Math.max(0, list.length - shown);
+  // Entries paged in at the top are shown at once (and the view stays at
+  // them), within the window.
+  const first = d.events.length ? d.events[0].seq : 0;
+  let want = shown;
+  if (seen.current.first && first < seen.current.first) want = Math.min(list.length, shown + Math.max(0, list.length - seen.current.n));
   useEffect(() => {
-    // Stay at the bottom as new entries arrive, unless scrolled up.
+    if (want !== shown) setShown(want);
+    const older = seen.current.first && first < seen.current.first;
+    seen.current = { first, n: list.length };
+    if (older && top.current) top.current.scrollIntoView({ block: 'start' });
+  });
+  const from = Math.max(0, list.length - want);
+  useEffect(() => {
+    // Stay at the bottom as new entries arrive, unless scrolled up or
+    // looking at older history.
     const el = end.current;
-    if (!el) return;
+    if (!el || !d.live) return;
     const sc = document.scrollingElement;
     if (sc.scrollHeight - sc.scrollTop - sc.clientHeight < 400) el.scrollIntoView({ block: 'end' });
   }, [d.ver, (state.outbox[k] || []).length]);
   let head = null;
-  if (from > 0) head = html`<li class="tl-more"><button class="btn ghost small" onClick=${() => setShown(shown + RENDER_STEP)}>Show earlier</button></li>`;
-  else if (d.more && d.events.length >= MAX_EVENTS) head = html`<li class="tl tl-note"><${Icon} name="note" />Only the latest ${MAX_EVENTS} events are kept on this screen.</li>`;
+  if (from > 0) head = html`<li class="tl-more"><button class="btn ghost small" onClick=${() => setShown(want + RENDER_STEP)}>Show earlier</button></li>`;
   else if (d.more) head = html`<li class="tl-more"><button class="btn ghost small" disabled=${d.loading || d.older} onClick=${() => loadDetail(s.machine, s.session, d.events[0] ? d.events[0].seq : 0)}>Load earlier</button></li>`;
+  // The window moved back through the history (finding D1-13): newer
+  // events are not shown until the screen returns to the latest.
+  const latest = d.live ? null : html`<li class="tl-more tl-latest"><span class="hint">Showing older events; newer ones are not shown.</span>
+    <button class="btn small" disabled=${d.loading} onClick=${() => { setShown(RENDER_STEP); loadDetail(s.machine, s.session); }}><${Icon} name="down" />Back to the latest</button></li>`;
   return html`<ol class="timeline" aria-label="Timeline">
+    <li ref=${top} class="tl-top-marker" aria-hidden="true"></li>
     ${head}
     ${d.partial ? html`<li class="tl tl-note"><${Icon} name="offline" />Older events are on the machine, which is offline.</li>` : null}
     ${list.slice(from).map((it) => html`<${Item} key=${it.kind + it.seq} it=${it} harness=${s.harness} now=${now} />`)}
-    <${Outbox} k=${k} />
+    ${latest}
+    ${d.live ? html`<${Outbox} k=${k} />` : null}
     <li ref=${end} class="tl-end-marker" aria-hidden="true"></li>
   </ol>`;
 }

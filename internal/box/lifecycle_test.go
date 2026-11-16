@@ -1184,7 +1184,8 @@ func TestInternetLevel(t *testing.T) {
 		t.Fatalf("unshares: %q", r.eng.Unshares)
 	}
 	// Only the resolver the host vouches for gets a DNS exception (B13).
-	if want := netpolicy.Rules([]netip.Addr{netip.MustParseAddr("10.0.2.3")}, []netip.Addr{netip.MustParseAddr("192.168.1.5")}); r.eng.UnshareInputs[0] != want {
+	// slirp4netns's gateway is rejected with the host's addresses (D1-21).
+	if want := netpolicy.Rules([]netip.Addr{netip.MustParseAddr("10.0.2.3")}, []netip.Addr{netip.MustParseAddr("192.168.1.5"), netip.MustParseAddr("10.0.2.2")}); r.eng.UnshareInputs[0] != want {
 		t.Errorf("rules:\n%s", r.eng.UnshareInputs[0])
 	}
 	if !strings.Contains(r.out.String(), "10.66.0.9 in the box's resolver configuration are not among the host's resolvers") {
@@ -1198,7 +1199,7 @@ func TestInternetLevel(t *testing.T) {
 		t.Errorf("binding %+v (%v) for %+v", b, err, ci.State)
 	}
 	canary := r.eng.Execs[1]
-	if canary.User != "" || !slices.Equal(canary.Cmd[:4], []string{"/opt/devc/bin/devc", "box", "net-canary", "--port"}) || canary.Cmd[5] != "192.168.1.5" || len(canary.Cmd) != 6 {
+	if canary.User != "" || !slices.Equal(canary.Cmd[:4], []string{"/opt/devc/bin/devc", "box", "net-canary", "--port"}) || canary.Cmd[5] != "192.168.1.5" || canary.Cmd[6] != "10.0.2.2" || len(canary.Cmd) != 7 {
 		t.Errorf("canary: %+v", canary)
 	}
 

@@ -78,7 +78,7 @@ func (w *ContextWorker) git(stdin io.Reader, stdout io.Writer, args ...string) e
 		"-c", "color.ui=false", "-c", "core.quotePath=true", "-c", "core.fsmonitor=false",
 	}, args...)
 	cmd := exec.Command(w.Git, full...)
-	cmd.Env = []string{"GIT_DIR=" + w.gitDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
+	cmd.Env = []string{"GIT_DIR=" + w.gitDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_NO_REPLACE_OBJECTS=1",
 		"HOME=/tmp", "PATH=/usr/local/bin:/usr/bin:/bin", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C"}
 	cmd.Dir = "/"
 	cmd.Stdin = stdin
@@ -106,7 +106,7 @@ func (w *ContextWorker) ensureRepo() error {
 		return nil
 	}
 	cmd := exec.Command(w.Git, "init", "--bare", "--template=", "-q", "--initial-branch=main", w.gitDir())
-	cmd.Env = []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "HOME=/tmp", "PATH=/usr/local/bin:/usr/bin:/bin", "LC_ALL=C"}
+	cmd.Env = []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_NO_REPLACE_OBJECTS=1", "HOME=/tmp", "PATH=/usr/local/bin:/usr/bin:/bin", "LC_ALL=C"}
 	cmd.Dir = "/"
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git init: %w: %s", err, strings.TrimSpace(string(out)))

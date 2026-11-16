@@ -535,9 +535,9 @@ their certificate for this, beside the machine link:
 
 | Request | |
 |---|---|
-| `PUT /machine/archive/<realm>/<path>?offset=<n>[&final=1]` | append to the machine's own archive |
+| `PUT /machine/archive/<realm>/<path>?offset=<n>[&final=1][&class=…][&mode=…]` | append to the machine's own archive |
 | `GET /machine/archive-index` | every machine's archives (machine, realm, files, bytes) |
-| `GET /machine/archive-index/<machine>/<realm>` | one archive's files, bundles and ref logs with lengths |
+| `GET /machine/archive-index/<machine>/<realm>[?after=<path>]` | one archive's files, bundles and ref logs with lengths, in pages of at most 2000 |
 | `GET /machine/archive-file/<machine>/<realm>/<path>[?sha256=<n>]` | a stored file (ranges supported), or the SHA-256 of its first n bytes |
 | `PUT /machine/secrets/<realm>` | store an encrypted secrets bundle |
 | `GET /machine/secrets/<realm>[?machine=<m>]` | the newest bundle (of one machine) |
@@ -555,6 +555,21 @@ Uploads need `X-Devc-Request: 1`. The archive is a ratchet:
 - Bundles are stored in sequence: bundle n is accepted only after bundle
   n-1 is complete, is kept as `<name>.part` until the machine says it is
   final, and then becomes visible without replacing anything.
+- A file is stored in generations (`files/<path>`, `files/<path>~1`, …),
+  each with a record beside it (`<file>~meta`): its class and permission
+  bits, given by the machine when it created the generation, and the length
+  at which the machine last marked it complete (`final=1`; an empty body
+  with `final=1` stores an empty file). A restore uses the newest complete
+  generation. Generations only grow: one older than a stored one is refused.
+- The class comes from the harness manifests on the machine. Append-only
+  files (transcripts, and the host-written logs) keep every generation.
+  For a mutable file (anything else in shared harness state, such as a
+  database in a shared home) the machine uploads a new generation for any
+  change, at most one per `[sync] mutable_interval` (default 6 hours, in the
+  machine's `config.toml`), and the hub drops the generations older than
+  its newest three complete ones. That is the one thing the hub removes on
+  its own; a generation of an append-only file is never removed, whatever a
+  machine (or a box rewriting a transcript) does.
 
 Budgets (`[archive]` in `hub.toml`; defaults shown):
 
@@ -564,16 +579,23 @@ machine_quota = "50g"     # one machine's whole archive
 realm_quota = "20g"       # one machine's archive of one realm
 max_files = 200000        # files and bundles per machine
 max_request = "8m"        # one upload request (64k to 64m)
-max_uploads = 8           # uploads in progress on the hub
+max_realms = 100          # realms per machine (archive and secrets together)
+max_uploads = 8           # uploads (archive and secrets) in progress on the hub
 machine_uploads = 2       # uploads in progress per machine
-max_downloads = 8         # downloads in progress on the hub
+max_downloads = 8         # reads (indexes, summaries, files, secrets) in progress on the hub
+machine_downloads = 2     # reads in progress per machine
 min_free = "2g"           # free space always left on the hub's file system
 ```
 
-A reached quota is answered with 507 and a message saying which quota and
-what to do; the machine shows it in `devc sync status` and `devc hub
-status` and pauses its uploads to that hub for ten minutes at a time. Too
-many uploads at once get 429. On the hub:
+Secrets bundles count against the machine's quotas, file limit and realms.
+Every archive and secrets request takes a place among the hub's and the
+calling machine's admission limits before the hub reads its body or lists
+anything, so one machine cannot take every place; a download that makes no
+progress for 30 seconds is ended and frees its place. A reached quota is
+answered with 507 and a message saying which quota and what to do; the
+machine shows it in `devc sync status` and `devc hub status` and pauses its
+uploads to that hub for ten minutes at a time. A full admission gets 429
+with `Retry-After`. On the hub:
 
 ```sh
 devc hub archive ls                         # machines and realms, files, size, last write
@@ -581,9 +603,9 @@ devc hub archive du                         # per machine against its quota
 devc hub archive prune --machine old-laptop --before 2026-01-01 [--dry-run] [--yes]
 ```
 
-`prune` is the only way anything leaves the archive: it deletes a machine's
-files last written before the date, and the bundles and ref log of a
-repository whose newest bundle and ref log are older (a bundle is useless
+`prune` is the only way anything else leaves the archive: it deletes a
+machine's files last written before the date, and the bundles and ref log of
+a repository whose newest bundle and ref log are older (a bundle is useless
 without those before it). A running hub notices and counts the usage again.
 
 **Exposure.** Every enrolled machine can read every machine's archive (a new

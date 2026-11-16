@@ -449,3 +449,17 @@ Other checks and deferred work:
 | **`devc run` does not get `DISPLAY`** (only agent sessions through `devc box launch` and the login shell of `devc sh` read `/etc/devc/display.env`); scripts can source the file | nothing, or host-side `--env` for `devc run` while a desktop runs |
 | **Clipboard**: the viewer's clipboard reaches programs in the box and back (TigerVNC's defaults); documented as visible to the box, not switched off | `-SendCutText=0 -AcceptCutText=0` if it should be |
 | **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/gui/ ./internal/boxside/` in the toolchain image with cgo |
+
+### From C19r1
+
+| Item | Needs |
+|---|---|
+| **A backend whose host alias reaches the host's loopback** (slirp4netns with `allow_host_loopback=true`, pasta's mapped address) was not set up: on this host the box's `host.containers.internal` is the host's LAN address, which was rejected before too. The rules now reject slirp4netns's gateway, pasta's `169.254.1.2` and named networks' gateways from the engine's inspect data; their effect was checked in the generated rules only | a run with `allow_host_loopback=true` and on a pasta host, with a `lan` exception and a listener on the host's loopback |
+| **Router origins are strict**: a frontend on one port of a box that calls an API on another port (another origin) gets 403 for WebSockets and non-GET requests; there is no grant for intended cross-origin access | a per-project setting naming allowed origins, if it is wanted |
+| **Relays keep every push and bank as its own pack** (`unpackLimit = 1`) and are never repacked (`gc.auto = 0`): thousands of packs accumulate over a long-lived relay | an occasional `git repack -d` of relays by the host, if pack counts grow |
+| **Push watchdog granularity**: the watchdog measures every 200 ms, so a push can overshoot the relay budget by what the disk writes in that time before it is ended; the measurement covers the quarantine directory (objects), not ref and reflog writes | nothing (bounded), or a quota-limited quarantine file system |
+| **Index pages read whole directories**: a page skips subtrees before its cursor, but a single directory with very many entries is read in full for every page | nothing (admission-bounded), or a directory cursor kept between pages |
+| **Mutable-file snapshots** take up to `[sync] max_file_size` (default 256 MiB) per file being uploaded, per hub, in `local/archive/<hub>/snap/` until the generation is complete | nothing (documented here) |
+| **Archives from before C19r1** have no completion marks: a restore of such an archive uses each file's newest generation as before; after the upgrade the uploader marks the generations it still has local files for | nothing |
+| **Upload bookkeeping starts over** once (state version 2): the first pass after the upgrade compares each file with the hub by prefix hash, and uploads each mutable file of shared state again as a new generation unless the hub's newest complete one equals it | nothing |
+| **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/netpolicy/ ./internal/hub/ ./internal/fleet/ ./internal/daemon/` in the toolchain image with cgo |

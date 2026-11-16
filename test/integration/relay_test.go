@@ -207,6 +207,32 @@ func TestRelayService(t *testing.T) {
 		t.Errorf("no snapshot with turn.txt after the turn: %v\ndaemon:\n%s", withPrefix(relayRefs(t, e, ref), "refs/devc/snap/"), d.Log())
 	}
 
+	// 9. Storage during a push (finding D1-05): an ordinary large push
+	// lands; a push beyond the relay's budget is ended while git writes
+	// it, before any hook, and leaves nothing in the relay.
+	res = inMain("git checkout -q -b big && head -c 300000000 /dev/urandom > big.bin && git add big.bin && git commit -qm BIG && git push -q origin big")
+	if res.ExitCode != 0 || relayRefs(t, e, ref)["refs/heads/big"] == "" {
+		t.Errorf("a 300 MB push: exit %d, stderr %q\ndaemon:\n%s", res.ExitCode, res.Stderr, d.Log())
+	}
+	if ms, _ := filepath.Glob(filepath.Join(relay, "objects", "pack", "*.pack")); len(ms) == 0 {
+		t.Error("the push was not kept as a pack")
+	}
+	appendConfig(t, e, projectFile(refQ), "[git]\nrelay_quota = \"8m\"")
+	res = boxRun(e, refQ, "cd "+mainQ+" && head -c 60000000 /dev/urandom > big.bin && git add big.bin && git commit -qm BIG && git push origin HEAD:refs/heads/big")
+	if res.ExitCode == 0 || relayRefs(t, e, refQ)["refs/heads/big"] != "" {
+		t.Errorf("a push beyond the relay's budget: exit %d, stderr %q", res.ExitCode, res.Stderr)
+	}
+	if !strings.Contains(d.Log(), "a push was ended") {
+		t.Errorf("the watchdog did not end the push:\n%s", d.Log())
+	}
+	relayQ := relayDir(e, refQ)
+	if ms, _ := filepath.Glob(filepath.Join(relayQ, "objects", "tmp_objdir-incoming-*")); len(ms) != 0 {
+		t.Errorf("the ended push left %v", ms)
+	}
+	if used := dirSize(t, relayQ); used > 8<<20 {
+		t.Errorf("the relay holds %d bytes after the ended push", used)
+	}
+
 	// 7. With the daemon stopped the stub is back and nothing hangs.
 	d.Stop()
 	start := time.Now()
@@ -424,4 +450,17 @@ func TestSecretsDaemon(t *testing.T) {
 	if res.ExitCode != 0 || !strings.Contains(res.Stdout, "FAKE_TOKEN=<unset>") || !strings.Contains(res.Stderr, "not reachable") {
 		t.Errorf("without the daemon: %q %q", res.Stdout, res.Stderr)
 	}
+}
+
+// dirSize sums the regular files below dir.
+func dirSize(t *testing.T, dir string) int64 {
+	t.Helper()
+	var n int64
+	filepath.Walk(dir, func(_ string, fi os.FileInfo, err error) error {
+		if err == nil && fi.Mode().IsRegular() {
+			n += fi.Size()
+		}
+		return nil
+	})
+	return n
 }

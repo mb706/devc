@@ -21,6 +21,7 @@ export const state = {
   details: {}, // "machine/session" → timeline state (timeline.js)
   outbox: {}, // "machine/session" → prompts sent from here, until they appear
   pending: {}, // command ID → a command whose outcome is not known yet
+  sessionVer: {}, // "machine/session" → stream position its summary is from
   projects: null, // GET /api/projects answer, by machine
   projectsAt: 0,
   stream: 'closed', // closed, connecting, live, retrying
@@ -155,9 +156,23 @@ export async function loadSnapshot(current = () => true) {
   for (const m of machines.machines) ms[m.name] = m;
   const rs = {};
   for (const r of requests.requests) rs[key(r.machine, r.id)] = r;
-  set({ sessions, machines: ms, requests: rs, savedAt: 0, loadedAt: Date.now() });
+  const pos = Math.min(inbox.stream_id, machines.stream_id ?? inbox.stream_id, requests.stream_id);
+  const vers = {};
+  for (const k of Object.keys(sessions)) vers[k] = Math.max(state.sessionVer[k] || 0, inbox.stream_id || 0);
+  set({ sessions, sessionVer: vers, machines: ms, requests: rs, savedAt: 0, loadedAt: Date.now() });
   resolvePending();
-  return Math.min(inbox.stream_id, machines.stream_id ?? inbox.stream_id, requests.stream_id);
+  return pos;
+}
+
+// putSession stores a session summary that is current as of stream
+// position ver, unless a newer one is stored already (finding D1-12: a
+// detail read that began before a change must not undo it).
+function putSession(k, s, ver) {
+  const have = state.sessionVer[k] || 0;
+  if (ver && have > ver && state.sessions[k]) return false;
+  state.sessions[k] = s;
+  if (ver) state.sessionVer[k] = Math.max(have, ver);
+  return true;
 }
 
 // loadDetail reads a session's recent events (before: an older page).
@@ -193,7 +208,7 @@ export async function loadDetail(machine, sid, before = 0) {
       if (before && state.details[k] === d) d.older = false;
       return;
     }
-    state.sessions[k] = res.session;
+    putSession(k, res.session, res.stream_id);
     d.partial = res.partial;
     d.status = 0;
     if (before) {
@@ -237,16 +252,19 @@ export async function loadProjects(force = false) {
 
 // --- Stream messages (stream.js hands them here) ---
 
-export function applyChange(kind, data) {
+// applyChange applies one stream message; id is its stream position.
+export function applyChange(kind, data, id = 0) {
   switch (kind) {
     case 'session': {
-      const k = key(data.machine, data.session);
-      state.sessions[k] = data;
+      putSession(key(data.machine, data.session), data, id);
       break;
     }
-    case 'session.removed':
-      delete state.sessions[key(data.machine, data.session)];
+    case 'session.removed': {
+      const k = key(data.machine, data.session);
+      delete state.sessions[k];
+      delete state.sessionVer[k];
       break;
+    }
     case 'machine':
       state.machines[data.name] = data;
       if (data.online) resolvePending(data.name);
@@ -264,6 +282,12 @@ export function applyChange(kind, data) {
       const k = key(data.machine, data.session);
       const d = state.details[k];
       if (!d) break;
+      if (!d.live) {
+        // The window shows older history: the live end moves on without
+        // it ("Back to the latest" reads it again).
+        settleOutbox(k, data.event);
+        break;
+      }
       if (d.loading) {
         // Held back until the snapshot is in; bounded like the window.
         if (d.buffer.length < MAX_EVENTS) d.buffer.push(data.event);

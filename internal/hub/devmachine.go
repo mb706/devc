@@ -301,6 +301,21 @@ func newDevDesktop(s *Server, now time.Time) *devMachine {
 	m.add(j, proto.TypeSeen, proto.Seen{Turn: 1}, ago(590))
 	m.add(j, proto.TypeState, proto.State{State: proto.StateIdle, Source: proto.SourceOSC}, ago(589))
 
+	// A long history: more events than an open session keeps, with long
+	// runs of tool calls (findings D1-09, D1-13).
+	hist := m.newSession("home/blog", "history", "claude", ago(1500))
+	t := ago(1499)
+	for turn := 1; turn <= 12; turn++ {
+		steps := []devStep{devPrompt(fmt.Sprintf("Check the posts of %d for broken links and fix them.", 2012+turn)), devState(proto.StateWorking)}
+		for i := 0; i < 210; i++ {
+			steps = append(steps, devTool("Read", fmt.Sprintf("content/posts/%d/post-%03d.md", 2012+turn, i)))
+		}
+		steps = append(steps, devMessage(fmt.Sprintf("Turn %d: the posts of %d have no broken links left.", turn, 2012+turn)), devState(proto.StateDone))
+		t = m.script(hist, t, 2*time.Second, steps...)
+	}
+	m.add(hist, proto.TypeSeen, proto.Seen{Turn: 12}, t)
+	m.add(hist, proto.TypeState, proto.State{State: proto.StateIdle, Source: proto.SourceHook}, t.Add(time.Second))
+
 	old := now.Add(-50 * time.Hour)
 	at := now.Add(-20 * time.Second)
 	m.projects = []proto.ProjectView{

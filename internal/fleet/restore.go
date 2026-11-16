@@ -32,6 +32,8 @@ type Source interface {
 	// Fetch copies the first length bytes of the archived file p to w (the
 	// length its entry had; an append-only file may have grown since).
 	Fetch(ctx context.Context, p string, length int64, w io.Writer) error
+	// SourceRealm is the realm the archive was made of ("" when unknown).
+	SourceRealm() string
 	String() string
 }
 
@@ -56,14 +58,24 @@ func (h *HubSource) Fetch(ctx context.Context, p string, length int64, w io.Writ
 	return h.Client.FetchPrefix(ctx, h.Machine, h.Realm, p, length, w)
 }
 
+// SourceRealm implements Source.
+func (h *HubSource) SourceRealm() string { return h.Realm }
+
 func (h *HubSource) String() string {
 	return fmt.Sprintf("the archive of machine %s on %s", h.Machine, h.Client.URL)
 }
 
-// DirSource is an export extracted into a directory (files/…, bundles/…).
-// The directory came from an untrusted file: entries are found without
-// following symlinks and read through safefs.
-type DirSource struct{ Dir string }
+// DirSource is an export extracted into a directory (files/…, bundles/…)
+// of realm Realm (from its manifest). The directory came from an untrusted
+// file: entries are found without following symlinks and read through
+// safefs.
+type DirSource struct {
+	Dir   string
+	Realm string
+}
+
+// SourceRealm implements Source.
+func (d *DirSource) SourceRealm() string { return d.Realm }
 
 // Entries implements Source.
 func (d *DirSource) Entries(context.Context) ([]archive.Entry, error) {
@@ -90,7 +102,15 @@ func (d *DirSource) Entries(context.Context) ([]archive.Entry, error) {
 			if err != nil {
 				return nil
 			}
-			out = append(out, archive.Entry{Path: rel, Length: fi.Size(), Complete: ap.Kind == archive.KindBundle})
+			e := archive.Entry{Path: rel, Length: fi.Size(), Complete: true}
+			if ap.Kind == archive.KindFile {
+				// An export holds each file whole, with its permission bits.
+				e.Committed, e.Mode = &e.Length, uint32(fi.Mode().Perm())
+			}
+			if ap.Kind == archive.KindRefs {
+				e.Complete = false
+			}
+			out = append(out, e)
 			return nil
 		})
 		if err != nil {
@@ -200,6 +220,9 @@ type RestoreReport struct {
 	Context        *ctxrepo.RestoreResult `json:"context,omitempty"`
 	OlderVersions  int                    `json:"older_generations"`
 	IncompleteRepo []string               `json:"incomplete,omitempty"`
+	// IncompleteFiles are files whose newest generations were not
+	// complete: what was restored instead, or that nothing was.
+	IncompleteFiles []string `json:"incomplete_files,omitempty"`
 }
 
 func (r *Restorer) progress(format string, args ...any) {
@@ -228,6 +251,12 @@ func (r *Restorer) Restore(ctx context.Context, realm string, src Source, merge 
 	if !names.ValidRealm(realm) {
 		return nil, fmt.Errorf("invalid realm name %q", realm)
 	}
+	// Journals, request logs and session ownership name their realm inside;
+	// copied into another realm they would belong to neither (finding
+	// D1-19).
+	if from := src.SourceRealm(); from != "" && from != realm {
+		return nil, fmt.Errorf("%s holds realm %s, not %s: devc restores a realm only under its own name (the session journals, request logs and ownership records name the realm); configure realm %s and restore into it", src, from, realm, from)
+	}
 	if !merge {
 		if have := ExistingState(r.Config, realm); len(have) > 0 {
 			return nil, fmt.Errorf("realm %s already has durable state (%s): restore with --merge to add only what is missing", realm, strings.Join(have, ", "))
@@ -238,10 +267,9 @@ func (r *Restorer) Restore(ctx context.Context, realm string, src Source, merge 
 		return nil, fmt.Errorf("reading %s: %w", src, err)
 	}
 	rep := &RestoreReport{}
-	files := map[string]archive.Entry{}
-	gens := map[string]int{}
 	repos := map[string]*repoPlan{}
 	bundleSeqs := map[string]map[int]archive.Entry{}
+	fileGens := map[string]map[int]archive.Entry{}
 	for _, e := range entries {
 		ap, err := archive.ParsePath(e.Path)
 		if err != nil {
@@ -249,14 +277,10 @@ func (r *Restorer) Restore(ctx context.Context, realm string, src Source, merge 
 		}
 		switch ap.Kind {
 		case archive.KindFile:
-			if g, ok := gens[ap.Rel]; !ok || ap.Gen > g {
-				if ok {
-					rep.OlderVersions++
-				}
-				gens[ap.Rel], files[ap.Rel] = ap.Gen, e
-			} else {
-				rep.OlderVersions++
+			if fileGens[ap.Rel] == nil {
+				fileGens[ap.Rel] = map[int]archive.Entry{}
 			}
+			fileGens[ap.Rel][ap.Gen] = e
 		case archive.KindBundle:
 			if e.Complete {
 				if bundleSeqs[ap.Repo] == nil {
@@ -287,6 +311,7 @@ func (r *Restorer) Restore(ctx context.Context, realm string, src Source, merge 
 			rep.IncompleteRepo = append(rep.IncompleteRepo, repo)
 		}
 	}
+	files := chooseGenerations(fileGens, rep)
 	if err := r.restoreFiles(ctx, realm, src, files, rep); err != nil {
 		return rep, err
 	}
@@ -324,6 +349,83 @@ func (r *Restorer) Restore(ctx context.Context, realm string, src Source, merge 
 		}
 	}
 	return rep, nil
+}
+
+// legacyArchive reports an archive made before generations were marked
+// complete: none of its files has a mark.
+func legacyArchive(fileGens map[string]map[int]archive.Entry) bool {
+	for _, gens := range fileGens {
+		for _, e := range gens {
+			if e.Committed != nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// chooseGenerations picks per file the generation a restore uses: the
+// newest complete one, at the length it was marked complete with (finding
+// D1-15). Newer generations that are not complete are reported. A file
+// without any complete generation is restored from its newest one only
+// when it is append-only (any prefix of it is a state it had) and
+// reported; a mutable one is left out. Archives from before completion
+// marks restore their newest generations as they are.
+func chooseGenerations(fileGens map[string]map[int]archive.Entry, rep *RestoreReport) map[string]archive.Entry {
+	legacy := legacyArchive(fileGens)
+	files := map[string]archive.Entry{}
+	rels := make([]string, 0, len(fileGens))
+	for rel := range fileGens {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	for _, rel := range rels {
+		gens := fileGens[rel]
+		nums := make([]int, 0, len(gens))
+		for g := range gens {
+			nums = append(nums, g)
+		}
+		sort.Sort(sort.Reverse(sort.IntSlice(nums)))
+		rep.OlderVersions += len(nums) - 1
+		if legacy {
+			files[rel] = gens[nums[0]]
+			continue
+		}
+		var skipped []int
+		chosen := -1
+		for _, g := range nums {
+			if gens[g].Committed != nil {
+				chosen = g
+				break
+			}
+			skipped = append(skipped, g)
+		}
+		switch {
+		case chosen >= 0:
+			e := gens[chosen]
+			e.Length = *e.Committed
+			files[rel] = e
+			if len(skipped) > 0 {
+				rep.IncompleteFiles = append(rep.IncompleteFiles, fmt.Sprintf("%s: generation %d is incomplete; restored generation %d", rel, skipped[0], chosen))
+			}
+		case gens[nums[0]].Class == archive.ClassMutable:
+			rep.IncompleteFiles = append(rep.IncompleteFiles, fmt.Sprintf("%s: no complete generation; not restored", rel))
+		default:
+			files[rel] = gens[nums[0]]
+			rep.IncompleteFiles = append(rep.IncompleteFiles, fmt.Sprintf("%s: no complete generation; restored the incomplete generation %d as far as it goes", rel, nums[0]))
+		}
+	}
+	return files
+}
+
+// restoreMode is the permission bits a restored file gets: the archived
+// ones without set-ID and sticky bits, always readable and writable by
+// its owner (finding D1-18).
+func restoreMode(m uint32) uint32 {
+	if m == 0 {
+		return 0o600
+	}
+	return m&0o777 | 0o600
 }
 
 // restoreFiles writes the files that are missing. Each is created beneath
@@ -390,6 +492,9 @@ func (r *Restorer) restoreFiles(ctx context.Context, realm string, src Source, f
 				err = fmt.Errorf("larger than %d bytes", int64(maxRestoreFile))
 			} else {
 				err = src.Fetch(ctx, e.Path, e.Length, f)
+			}
+			if err == nil {
+				err = f.Chmod(os.FileMode(restoreMode(e.Mode)))
 			}
 			if cerr := f.Close(); err == nil {
 				err = cerr

@@ -335,6 +335,30 @@ func TestNetworkExceptions(t *testing.T) {
 		if got := greeting(e, hello, target); got != "" {
 			t.Errorf("a lan exception opened the host's own address: %q", got)
 		}
+		// Nor the host through the engine's host alias, reached by name,
+		// nor the backend's own way to the host (finding D1-21).
+		alias := strings.Fields(e.Run("run", hello, "--", "getent", "ahostsv4", "host.containers.internal").Stdout)
+		chain, _ := nftInBox(t, hello, "list", "chain", "inet", "devc", "output")
+		hostLine := ""
+		for _, l := range strings.Split(chain, "\n") {
+			if strings.Contains(l, "reject with icmp") && !strings.Contains(l, "/") {
+				hostLine = l
+			}
+		}
+		if len(alias) == 0 {
+			t.Log("the box has no host alias; skipping its check")
+		} else {
+			if !strings.Contains(hostLine, alias[0]) || strings.Index(chain, hostLine) > strings.Index(chain, "@lan4 accept") {
+				t.Errorf("the host alias %s is not rejected before the LAN set:\n%s", alias[0], chain)
+			}
+			if got := greeting(e, hello, "host.containers.internal:"+lp); got != "" {
+				t.Errorf("a lan exception opened the host through its alias: %q", got)
+			}
+		}
+		if mode := inspect(t, hello).HostConfig.NetworkMode; strings.HasPrefix(mode, "slirp4netns") && !strings.Contains(mode, "cidr=") &&
+			!strings.Contains(hostLine, "10.0.2.2") {
+			t.Errorf("slirp4netns's gateway is not rejected:\n%s", chain)
+		}
 		e.MustRun("net", "revoke", lanID)
 		if out, _ := nftInBox(t, hello, "list", "set", "inet", "devc", "lan4"); strings.Contains(out, "192.168.0.0/16") {
 			t.Errorf("the LAN set after revoking:\n%s", out)
@@ -421,6 +445,14 @@ func TestLocalURLs(t *testing.T) {
 		t.Errorf("WebSocket echo: %q %v", msg, err)
 	}
 	ws.Close(websocket.StatusNormalClosure, "")
+	// A page of another origin cannot open it (D1-01).
+	if ws, resp, err := websocket.Dial(ctx, "ws://127.0.0.1:"+strconv.Itoa(rp)+"/ws", &websocket.DialOptions{Host: host(8791),
+		HTTPHeader: http.Header{"Origin": {"http://8080.evil." + itest.RealmB + ".localhost:" + strconv.Itoa(rp)}}}); err == nil {
+		ws.Close(websocket.StatusNormalClosure, "")
+		t.Error("a WebSocket from another origin was routed")
+	} else if resp == nil || resp.StatusCode != 403 {
+		t.Errorf("WebSocket from another origin: %v", err)
+	}
 	// An unlisted port is a 404 that says how to allow it.
 	if code, body := get(8793, "/"); code != 404 || !strings.Contains(body, "box.ports") || !strings.Contains(body, "devc forward 8793") {
 		t.Errorf("unlisted port: %d %q", code, body)
