@@ -1,3 +1,6 @@
+// This file implements Fake, the in-memory engine that the unit tests of
+// the packages built on the engine run against.
+
 package engine
 
 import (
@@ -87,6 +90,7 @@ func NewFake() *Fake {
 	}
 }
 
+// Binary implements Engine.
 func (f *Fake) Binary() string { return f.Bin }
 
 // Put adds or replaces a container while other goroutines may use the
@@ -104,8 +108,10 @@ func (f *Fake) Drop(name string) {
 	delete(f.Containers, name)
 }
 
+// Version implements Engine.
 func (f *Fake) Version(context.Context) (Version, error) { return f.VersionVal, f.VersionErr }
 
+// Info implements Engine.
 func (f *Fake) Info(context.Context) (Info, error) { return f.InfoVal, f.InfoErr }
 
 // Ps implements Engine.

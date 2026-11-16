@@ -1,3 +1,6 @@
+// This file implements the launcher: launch descriptions, how they are
+// read and checked, and how a harness is prepared and executed.
+
 package boxside
 
 import (
@@ -30,9 +33,10 @@ const (
 // LaunchSchema is the current version of a launch description.
 const LaunchSchema = 1
 
-// Launch is /etc/devc/harness/<id>.json, written by the host at `devc up`
-// for every installed harness of the project. It is everything the
-// launcher needs; the box never sees the configuration directory.
+// Launch is /etc/devc/harness/<id>.json, written by the host when `devc up`
+// starts the box, for every installed harness of the project, and again
+// when a harness is installed or updated. It is everything the launcher
+// needs; the box never sees the configuration directory.
 type Launch struct {
 	Schema  int    `json:"schema"`
 	ID      string `json:"id"`
@@ -40,8 +44,9 @@ type Launch struct {
 	Display string `json:"display"`
 	Realm   string `json:"realm"`
 	Project string `json:"project"`
-	// Exe is the real executable: below /opt/devc/harness/<id>/current, or
-	// an absolute path in the image.
+	// Exe is the real executable: below /opt/devc/harness/<id>/v/<stamp>,
+	// the installation current when the description was written (so a
+	// session keeps its version), or an absolute path in the image.
 	Exe string `json:"exe"`
 	// Env is the manifest's [env] with home.env applied over it.
 	Env     map[string]string `json:"env"`
@@ -107,10 +112,13 @@ type LaunchSecret struct {
 	Env  string `json:"env,omitempty"`
 }
 
+// LaunchStatus says whether the harness reports its status through OSC
+// 7501, so the launcher runs it under the status wrapper.
 type LaunchStatus struct {
 	OSC7501 bool `json:"osc7501"`
 }
 
+// LaunchInput is what the box side needs of the manifest's [input].
 type LaunchInput struct {
 	Adapter   string `json:"adapter"`
 	SubmitKey string `json:"submit_key"`
@@ -245,6 +253,7 @@ func FindByBin(root, bin string) (*Launch, error) {
 	return nil, nil
 }
 
+// readCapped reads a whole file of at most max bytes.
 func readCapped(p string, max int64) ([]byte, error) {
 	f, err := os.Open(p)
 	if err != nil {
@@ -302,8 +311,11 @@ type Prepared struct {
 const MaxLaunchDepth = 16
 
 // PrepareLaunch performs steps 1-5 of the launcher (work order C03 section
-// 4): checks the executable, settles the session ID, adds the credential,
-// the granted secrets, the harness environment and the arguments.
+// 4): checks the executable and the nesting depth, settles the session ID,
+// adds the desktop's display, the harness environment and PATH, the
+// credential and granted secrets (from files or the daemon), the GitHub
+// token, and the arguments, and chooses between the harness itself and the
+// status wrapper around it.
 func PrepareLaunch(l *Launch, userArgs []string, e LaunchEnv) (*Prepared, error) {
 	if err := notSelf(filepath.Join(e.Root, l.Exe), e.Self); err != nil {
 		return nil, fmt.Errorf("harness %s: %w", l.ID, err)

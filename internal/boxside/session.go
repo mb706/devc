@@ -1,3 +1,7 @@
+// This file implements the in-box session commands: a session's tmux
+// window, the record of its end, the list of live sessions, and stopping
+// one.
+
 package boxside
 
 import (
@@ -60,6 +64,8 @@ func ExecTmux(environ []string) TmuxRunner {
 	}
 }
 
+// tmuxStderr is tmux's error output carried by err, which tells a missing
+// server from other failures.
 func tmuxStderr(err error) string {
 	var te *TmuxError
 	if errors.As(err, &te) {
@@ -314,6 +320,7 @@ func sessionProcesses(procDir string, self int) ([]sessionProc, error) {
 	return out, nil
 }
 
+// ownedBy reports whether the file belongs to uid.
 func ownedBy(fi os.FileInfo, uid int) bool {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	return ok && int(st.Uid) == uid

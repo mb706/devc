@@ -1,3 +1,6 @@
+// This file is the client side of the agent's in-box socket: hints,
+// requests to the host, and the box's description for box.hello.
+
 package boxside
 
 import (
@@ -19,7 +22,7 @@ const hintTimeout = 200 * time.Millisecond
 // costs latency.
 func SendHint(session string) { SendHintTo(AgentAbstract, session) }
 
-// SendHintTo is SendHint to the agent at addr (tests).
+// SendHintTo is SendHint to the agent at addr; tests pass their own.
 func SendHintTo(addr, session string) {
 	if !names.ValidSessionID(session) {
 		return

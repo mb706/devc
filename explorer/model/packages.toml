@@ -130,7 +130,7 @@ role = "Validates every name that can end up in a path, a container name, a git 
 [package."internal/tmux"]
 layer = "foundation"
 group = "session"
-role = "Builds every tmux command line devc uses: the in-box session start, the pane-died hook, the listing used for reconciliation, and the attach command run from the host."
+role = "Builds every tmux command line devc uses (session windows and their pane-died hook, listings, attaching and observing clients, the daemon's input) and the box's tmux configuration."
 
 [package."internal/ptywrap"]
 layer = "foundation"
@@ -209,7 +209,7 @@ role = "Manages the toolbox, the read-only tree mounted at /opt/devc in every bo
 [package."internal/boxside"]
 layer = "area"
 group = "box"
-role = "Everything the devc binary does inside a box, reached through the hidden `devc box …` commands and the harness shims: init and the box agent, the launcher, the hook receiver, session commands, and the git work that must happen in the box."
+role = "Everything the devc binary does inside a box, reached through the hidden `devc box …` commands and the harness shims (init and the box agent, the launcher, the hook receiver, session commands, the git work that must happen in the box), and the workers that run in the helper and context containers."
 
 [package."internal/session"]
 layer = "area"

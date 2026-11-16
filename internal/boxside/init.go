@@ -1,3 +1,6 @@
+// This file implements box init, the container's main process: the home,
+// dotfiles, seeds and skills, the readiness marker, and the wait.
+
 package boxside
 
 import (
@@ -55,10 +58,13 @@ func DefaultInitOptions(log io.Writer, mountPoints []string) InitOptions {
 		Shares: SharesDir, Log: log}
 }
 
-// Init is the box's main process: it prepares the home, links the dotfiles,
-// creates the spool, signals readiness and then waits until ctx ends (the
-// caller cancels it on SIGTERM or SIGINT). Problems with the home are
-// logged, not fatal: a box with an odd home is still usable.
+// Init is the box's main process: it removes an old readiness marker, runs
+// the network check of level internet, prepares the home (dotfiles, a
+// skeleton, harness seeds, share skills, the SSH include), creates the
+// spool, signals readiness, starts the agent and then waits until ctx ends
+// (the caller cancels it on SIGTERM or SIGINT). A failed network check
+// ends the box; problems with the home are logged, not fatal: a box with
+// an odd home is still usable.
 func Init(ctx context.Context, o InitOptions) error {
 	logf := func(format string, args ...any) {
 		if o.Log != nil {
@@ -118,6 +124,9 @@ func Init(ctx context.Context, o InitOptions) error {
 	return nil
 }
 
+// writeReady writes the readiness marker by rename, so the host, which
+// polls for a regular file, never sees it half written. It names init's
+// PID and the time, for whoever looks.
 func writeReady(path string) error {
 	b, _ := json.Marshal(map[string]any{"pid": os.Getpid(), "time": time.Now().UTC().Format(time.RFC3339Nano)})
 	tmp := path + ".tmp"
@@ -148,6 +157,8 @@ func PrepareHome(o InitOptions) []error {
 	return errs
 }
 
+// homeIsFresh reports whether home holds nothing but the host's mount
+// points, that is, whether this is the box's first start with this home.
 func homeIsFresh(home string, mountPoints []string) (bool, error) {
 	des, err := os.ReadDir(home)
 	if err != nil {

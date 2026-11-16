@@ -1,0 +1,112 @@
+id = "hook-to-spool"
+kind = "flow"
+title = "A hook becomes a spool line"
+summary = "A harness hook runs `devc box hook`; the receiver maps the hook's JSON to events, validates them as the host will, appends them to the session's spool file in one write and hints the host, whose ingester then reads the file through safefs."
+concern = "launching-a-harness"
+trigger = "Claude Code submits a prompt and runs its UserPromptSubmit hook"
+actors = ["harness", "hook", "spool", "box-agent", "daemon"]
+
+[[step]]
+section = "In the box"
+
+[[step]]
+from = "harness"
+to = "hook"
+via = "cmd:devc box hook"
+label = "devc box hook claude UserPromptSubmit < JSON"
+external = true
+text = "The baseline installed the hook, so the agent cannot remove it. The harness passes the hook's JSON on standard input; `DEVC_SESSION` is in its environment from the launcher."
+detail = "Outside a box (`DEVC_BOX` not 1) or with fewer than two arguments the command drains its input and exits 0. Flags are not parsed: a harness passes only positional arguments."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.RunHook"
+checks = ["internal/names.ValidSessionID"]
+text = "The receiver never fails and never prints except an answer to a question: some harnesses add hook output to the model's context. It reads at most 1 MiB, drains the rest so the harness never blocks, and does nothing without a valid session ID."
+detail = "Claude Code's `PreToolUse` for `AskUserQuestion` takes the question path instead ([[internal/boxside.askQuestion]]), which may wait for an answer through the box channel."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.mapClaude"
+text = "The input is mapped by harness kind and event: Claude's `UserPromptSubmit` becomes a `prompt` event and a `state` event \"working\" with source `hook`. Malformed input or an unknown event becomes a note."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.PromptData"
+text = "The prompt event carries the SHA-256 and length of the whole text and only its beginning; the daemon later recognises a prompt it typed by the hash."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.OSCActive"
+text = "If the status wrapper reports this session's state (`DEVC_STATUS=osc` and its marker file exists), the hook's state events are dropped and only the prompt remains."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.eventLine"
+checks = ["internal/proto.ValidateData"]
+text = "Each event gets the session ID and the box's time and is validated as the host will validate it. One that fails, or whose line would be too long, is replaced by a note, so a mapping bug shows in the journal."
+
+[[step]]
+from = "hook"
+to = "spool"
+via = "file"
+label = "append to /run/devc/spool/<session>.jsonl"
+ref = "internal/boxside.AppendEvents"
+text = "All lines go out in one write to a file opened with `O_APPEND` and `O_NOFOLLOW`, so concurrent hooks never interleave within a line."
+
+[[step]]
+from = "hook"
+to = "box-agent"
+via = "stream"
+label = "@devc-agent: host.hint {session}"
+ref = "internal/boxside.SendHintTo"
+text = "Then the receiver tells the host that the spool changed. The hint is a JSON-RPC notification with no answer, and gives up after 200 ms: a lost hint costs only latency."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.relay"
+unchecked = "the hook's connection to the abstract socket, accepted by localLoop"
+text = "The agent relays the notification unparsed on a new stream to the daemon; without a host it is simply dropped."
+
+[[step]]
+from = "box-agent"
+to = "daemon"
+via = "stream"
+label = "yamux stream: host.hint"
+ref = "internal/boxside.Agent.relay"
+text = "The stream arrives on this box's channel, which tells the daemon which box sent it."
+
+[[step]]
+section = "On the host"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.wake"
+unchecked = "the stream is served by acceptStreams, whose host.hint handler is a function literal that calls wake"
+text = "The hint's only effect is to wake the box's ingester; its content is checked and otherwise ignored."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.ingestLoop"
+unchecked = "the ingester goroutine waits on the channel wake writes to"
+text = "The ingester runs at once on a hint, every 250 ms while events arrive and every 2 s otherwise, skips a run when no spool file changed, and makes at most one run per 50 ms."
+
+[[step]]
+from = "spool"
+to = "daemon"
+via = "file"
+label = "<runtime>/<box-id>/spool/<session>.jsonl"
+external = true
+text = "The host reads the spool beneath the box's runtime directory through safefs: no symlinks, regular files only, from the offset reached last time, in bounded amounts."
+
+[[step]]
+at = "daemon"
+ref = "internal/session.Store.Ingest"
+unchecked = "the spool file the hook wrote is read here; the call itself comes from the ingester through Daemon.ingest"
+text = "Under the box's ingestion lock, each spool file is read from its offset."
+
+[[step]]
+at = "daemon"
+ref = "internal/proto.ParseSpoolLine"
+checks = ["internal/proto.ParseSpoolLine", "internal/session.Store.Claim"]
+text = "Every line is parsed strictly and validated field by field; a session ID another project owns is refused. The event gets the next `seq` and the host's time and is appended to the session's journal ([[concern:sessions-and-events]])."

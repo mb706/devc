@@ -1,3 +1,7 @@
+// This file implements the wrapper itself: the pseudo-terminal, the
+// harness started on it, raw mode, signals and the copying in both
+// directions.
+
 package ptywrap
 
 import (
@@ -328,8 +332,9 @@ func openPTY() (*os.File, *os.File, error) {
 	return ptmx, tty, nil
 }
 
-// reporter hands reports to a callback on its own goroutine. Reports that
-// arrive while the callback is busy are coalesced: only the latest waits.
+// reporter hands reports to a callback on its own goroutine, in order, so
+// a slow callback never holds up the output. Reports that arrive while the
+// callback is busy wait, at most maxPending of them.
 type reporter struct {
 	fn      func(Report)
 	mu      sync.Mutex

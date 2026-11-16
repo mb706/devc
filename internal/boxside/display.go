@@ -1,3 +1,6 @@
+// This file is the box side of the desktop sidecar: display.env and the
+// X display check.
+
 package boxside
 
 import (

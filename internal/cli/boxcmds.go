@@ -1,3 +1,7 @@
+// This file implements the box lifecycle commands (up, down, rm, rebuild,
+// ls, sh, run, root) and boxEnv, which joins the box manager to every
+// other part's contributions to a box.
+
 package cli
 
 import (
@@ -24,8 +28,9 @@ import (
 	"github.com/mb706/devc/internal/version"
 )
 
-// lifecycleTimeout bounds lifecycle commands; image builds have their own,
-// longer limit inside the engine wrapper.
+// lifecycleTimeout bounds a lifecycle command as a whole; inside it the
+// engine wrapper bounds an image build (two hours) and a pull (30 minutes)
+// on its own.
 const lifecycleTimeout = 3 * time.Hour
 
 // boxEnv is what the lifecycle commands share: configuration, engine and
@@ -39,6 +44,11 @@ type boxEnv struct {
 	bank *bankHook
 }
 
+// boxEnv loads the configuration and builds the box manager with every
+// part that adds to a box: mounts and environment (harness, gate, shares,
+// data), host files before a start, cleaners after a stop, the stop hooks
+// (sessions and context first, then banking), the start hooks and the
+// desktop sidecar as a dependent.
 func (a *app) boxEnv() (*boxEnv, error) {
 	c, probs, err := a.load()
 	if err != nil {
@@ -173,6 +183,7 @@ func stdoutIsTerminal() bool {
 	return err == nil
 }
 
+// newLifecycleCmds returns up, down, rm, rebuild, ls, sh, run and root.
 func newLifecycleCmds(a *app) []*cobra.Command {
 	var upRecreate, upBuild, upAll, upNoBank bool
 	up := &cobra.Command{
@@ -413,6 +424,9 @@ func splitDash(cmd *cobra.Command, args []string) ([]string, []string, error) {
 	return args[:at], args[at:], nil
 }
 
+// withBox runs fn for the project named in args (or containing the
+// current directory) under lifecycleTimeout, and prints configuration
+// problems if fn reports them.
 func (a *app) withBox(cmd *cobra.Command, args []string, fn func(context.Context, *boxEnv, names.ProjectRef) error) error {
 	e, err := a.boxEnv()
 	if err != nil {
@@ -467,6 +481,8 @@ func (a *app) forAllBoxes(cmd *cobra.Command, running bool, fn func(context.Cont
 	return nil
 }
 
+// withExec is withBox for the commands that run something in the box:
+// no time limit, and the command's exit status becomes devc's.
 func (a *app) withExec(cmd *cobra.Command, args []string, fn func(context.Context, *boxEnv, names.ProjectRef, box.ExecOptions) (int, error)) error {
 	e, err := a.boxEnv()
 	if err != nil {

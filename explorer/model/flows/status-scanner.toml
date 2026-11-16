@@ -1,0 +1,67 @@
+id = "status-scanner"
+kind = "tour"
+title = "Reading status out of a terminal"
+summary = "How the status wrapper finds OSC 7501 sequences in a harness's output that arrives in arbitrary pieces, holds back only what may still become one, answers the query, parses reports strictly and turns them into state events, while every other byte passes unchanged."
+concern = "launching-a-harness"
+actors = ["status-wrapper", "hook"]
+
+[[step]]
+section = "The protocol and the promise"
+
+[[step]]
+ref = "pkg:internal/ptywrap"
+text = "The package comment states the protocol (report, query and reply, terminated by BEL or `ESC \\`, at most 4096 bytes) and the promise that matters most: everything else the harness writes and everything the terminal sends passes unchanged."
+
+[[step]]
+ref = "internal/ptywrap.Run"
+text = "The output goroutine reads the pseudo-terminal in chunks of up to 32 KiB, feeds each to the scanner, answers queries, hands reports on, and writes what remains to the outer terminal. When the outer terminal goes away it keeps reading, so the harness never blocks."
+
+[[step]]
+section = "Finding sequences"
+
+[[step]]
+ref = "internal/ptywrap.Scanner.Feed"
+text = "The scanner looks only at escape bytes (`bytes.IndexByte`), so output without escapes is copied in one go. Bytes held from the previous chunk are put in front of the new one first."
+
+[[step]]
+ref = "internal/ptywrap.match"
+text = "At an escape byte there are three outcomes. Not `ESC ] 7501 ;`: pass it on. A prefix of it at the end of the chunk, or a sequence whose terminator has not arrived: hold it back. A complete sequence: take it out of the output. Another control character or escape inside the sequence aborts it, as a terminal would, and the bytes pass untouched; so does a sequence longer than 4096 bytes."
+
+[[step]]
+ref = "internal/ptywrap.Scanner.HeldPrefix"
+text = "A held prefix shorter than `ESC ] 7501 ;` may be something else entirely (a lone Escape key echoed back). The wrapper waits at most 30 ms for the next byte, then flushes it ([[internal/ptywrap.Scanner.Flush]])."
+
+[[step]]
+section = "Query and reports"
+
+[[step]]
+ref = "internal/ptywrap.Item.Query"
+text = "`?` alone is the detection query. The wrapper writes its reply (`ptywrap.Reply`: the states and kinds it maps) into the harness's input, with the harness's own terminator, before the rest of that chunk reaches the terminal, so the reply precedes any answer to a query that follows."
+
+[[step]]
+ref = "internal/ptywrap.ParseReport"
+text = "A report is `key=value` pairs separated by colons. Keys are lower-case letters, values a small alphabet; malformed pairs are skipped and the last of repeated keys wins. `state` must be one of six words or the report is void; `kind` counts only with `blocked`."
+
+[[step]]
+ref = "internal/ptywrap.decodeText"
+text = "`msg` and `title` are base64 of UTF-8 without control characters, at most 2048 and 192 bytes decoded; a report that breaks a limit is discarded whole, so nothing a harness sends can reach a terminal or a phone as an escape sequence."
+
+[[step]]
+ref = "internal/ptywrap.reporter.put"
+text = "Valid reports go to a goroutine of their own, so a slow spool write never slows the output; at most 16 wait, and beyond that the oldest are dropped."
+
+[[step]]
+section = "Into the spool"
+
+[[step]]
+ref = "internal/boxside.stateWriter.report"
+text = "Only the harness's own record counts (no `id`), never `clear`, and only when something changed. The first report creates `/run/devc/status/<session>`; each counted one becomes a `state` event with source `osc`, validated and appended like a hook's."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.OSCActive"
+text = "From then on the hook receiver drops its own state events for the session: `DEVC_STATUS=osc` alone is not enough, so a harness that never reports keeps its hook states."
+
+[[step]]
+ref = "internal/boxside.ExitWith"
+text = "When the harness has exited, the wrapper drains output for up to two seconds while something else still holds the terminal, flushes what it held, restores the outer terminal, removes the marker, and ends the way the harness ended."

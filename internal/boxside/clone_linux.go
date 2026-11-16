@@ -1,3 +1,6 @@
+// This file holds rawClone, the raw clone(2) call of the self-test's
+// userns-clone item.
+
 package boxside
 
 import "golang.org/x/sys/unix"

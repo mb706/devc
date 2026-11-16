@@ -1,3 +1,6 @@
+// This file implements the commands that run something in a box (sh, run,
+// root) and EnsureRunning, which starts the box for them when needed.
+
 package box
 
 import (
@@ -136,6 +139,8 @@ func rootExec(container string, cmd []string, extraEnv ...string) engine.ExecOpt
 	}
 }
 
+// workdir is the working directory in the box for the host directory cwd:
+// the same place when cwd lies inside the project, else the project root.
 func (m *Manager) workdir(ref names.ProjectRef, cwd string) string {
 	if cwd != "" {
 		if p, ok := InBoxPath(m.Config.Paths, ref, cwd); ok {
@@ -210,6 +215,8 @@ func (m *Manager) Root(ctx context.Context, ref names.ProjectRef, argv []string,
 	return m.Engine.ExecInteractive(ctx, eo)
 }
 
+// appendRootLog appends one line to the env's root-log.jsonl, a file devc
+// writes in the configuration directory at the user's command.
 func (m *Manager) appendRootLog(env string, ref names.ProjectRef, argv []string) error {
 	now := time.Now
 	if m.Now != nil {

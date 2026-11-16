@@ -1,3 +1,6 @@
+// This file implements the hook receiver: hook input mapped to events per
+// harness kind and appended to the spool.
+
 package boxside
 
 import (
@@ -83,6 +86,8 @@ func RunHook(kind, event string, e HookEnv) {
 	_ = AppendEvents(e.SpoolDir, session, e.now(), ps)
 }
 
+// noteF is a note event about a hook that could not be mapped, so the
+// problem shows in the journal.
 func noteF(kind, event, msg string) []Payload {
 	return []Payload{{proto.TypeNote, proto.Note{Text: proto.Truncate(kind+" hook "+event+": "+msg, proto.MaxNoteText)}}}
 }
@@ -148,6 +153,8 @@ func short(s string, max int) string {
 	return s
 }
 
+// harnessPayloads maps a session start: the harness's own session ID,
+// transcript and directory, and state idle.
 func harnessPayloads(m map[string]json.RawMessage) []Payload {
 	return []Payload{
 		{proto.TypeHarness, proto.Harness{
@@ -167,6 +174,7 @@ func PromptData(text string) proto.Prompt {
 	return proto.Prompt{SHA256: hex.EncodeToString(sum[:]), Length: utf8.RuneCountInString(text), Text: proto.Truncate(text, proto.MaxPromptText)}
 }
 
+// promptPayloads maps a submitted prompt and state working.
 func promptPayloads(m map[string]json.RawMessage) []Payload {
 	return []Payload{
 		{proto.TypePrompt, PromptData(str(m, "prompt"))},
@@ -174,6 +182,8 @@ func promptPayloads(m map[string]json.RawMessage) []Payload {
 	}
 }
 
+// stopPayloads maps the end of a turn: the last message, if any, and
+// state done.
 func stopPayloads(m map[string]json.RawMessage) []Payload {
 	var ps []Payload
 	if msg := str(m, "last_assistant_message"); msg != "" {
@@ -182,6 +192,7 @@ func stopPayloads(m map[string]json.RawMessage) []Payload {
 	return append(ps, Payload{proto.TypeState, proto.State{State: proto.StateDone, Source: proto.SourceHook}})
 }
 
+// endPayloads maps the end of the session with the harness's reason.
 func endPayloads(m map[string]json.RawMessage) []Payload {
 	reason := short(str(m, "reason"), proto.MaxReason)
 	if reason == "" {
@@ -198,6 +209,7 @@ func questionID() string {
 	return "q" + hex.EncodeToString(b)
 }
 
+// blocked is a question (or permission prompt) and state blocked.
 func blocked(kind, text string) []Payload {
 	return []Payload{
 		{proto.TypeQuestion, proto.Question{ID: questionID(), Text: proto.Truncate(text, proto.MaxQuestionText)}},

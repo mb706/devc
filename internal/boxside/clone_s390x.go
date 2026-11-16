@@ -1,3 +1,5 @@
+// This file places clone's flags on s390x, which passes them second.
+
 package boxside
 
 // cloneFlagArgs places the flags in the second argument of clone: s390

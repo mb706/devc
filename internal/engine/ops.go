@@ -1,3 +1,7 @@
+// This file implements the engine operations beyond queries: images and
+// builds, the lifecycle verbs (create, init, start, stop, rm), exec and
+// unshare.
+
 package engine
 
 import (
@@ -70,6 +74,8 @@ func ParseImageInspect(data []byte) (ImageInfo, error) {
 // out option syntax.
 var imageRefRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,254}$`)
 
+// checkImageRef refuses a reference that is not one (or could be read as an
+// option).
 func checkImageRef(ref string) error {
 	if !imageRefRE.MatchString(ref) {
 		return fmt.Errorf("invalid image reference %q", ref)
@@ -77,6 +83,8 @@ func checkImageRef(ref string) error {
 	return nil
 }
 
+// notFound reports whether err is an engine exit whose error output says
+// one of needles: the engine reports a missing object only in words.
 func notFound(err error, needles ...string) bool {
 	var ee *execx.ExitError
 	if !errors.As(err, &ee) {
@@ -141,7 +149,7 @@ type BuildOptions struct {
 
 var buildArgRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// BuildArgs returns the arguments of `podman build` for o, in a fixed order.
+// Args returns the arguments of `podman build` for o, in a fixed order.
 func (o BuildOptions) Args() ([]string, error) {
 	if !strings.HasPrefix(o.ContextDir, "/") || !strings.HasPrefix(o.File, "/") {
 		return nil, fmt.Errorf("build context and file must be absolute paths")
@@ -218,6 +226,8 @@ func (p *Podman) Pull(ctx context.Context, ref string, out io.Writer) error {
 	return p.stream(ctx, PullTimeout, out, "pull", ref)
 }
 
+// runLong runs a lifecycle verb, which may take longer than a query (two
+// minutes at most).
 func (p *Podman) runLong(ctx context.Context, args ...string) (execx.Result, error) {
 	return p.Runner.Run(ctx, execx.Cmd{Name: p.Bin, Args: args, Timeout: lifecycleTimeout, Dir: "/"})
 }
@@ -242,6 +252,8 @@ func (p *Podman) Create(ctx context.Context, args []string) (string, error) {
 	return id, nil
 }
 
+// simple runs a lifecycle verb on one container and turns the engine's
+// "no such container" into ErrNoSuchContainer.
 func (p *Podman) simple(ctx context.Context, verb, name string, extra ...string) error {
 	if err := checkContainerName(name); err != nil {
 		return err

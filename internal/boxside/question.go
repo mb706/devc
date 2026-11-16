@@ -1,3 +1,6 @@
+// This file implements question hooks, which may wait for an answer
+// from the host and hand it back to the harness.
+
 package boxside
 
 // Questions a harness asks through a hook that can carry an answer back
@@ -149,6 +152,8 @@ func resolveAnswer(options []string, r *proto.QuestionReply) string {
 	return r.Text
 }
 
+// questionPayloads is the question within the event limits, and state
+// blocked.
 func questionPayloads(spec questionSpec) []Payload {
 	q := proto.Question{ID: spec.id, Text: proto.Truncate(spec.text, proto.MaxQuestionText)}
 	for i, o := range spec.options {
@@ -171,6 +176,7 @@ func questionPayloads(spec questionSpec) []Payload {
 	}
 }
 
+// recordQuestion appends the question to the spool.
 func recordQuestion(session string, spec questionSpec, e HookEnv) {
 	_ = AppendEvents(e.SpoolDir, session, e.now(), questionPayloads(spec))
 }

@@ -1,3 +1,7 @@
+// This file prepares the host side of a box before it starts: the
+// directories behind its mounts, the mount points of nested mounts, and
+// the files rendered for /etc/devc.
+
 package box
 
 import (
@@ -131,6 +135,8 @@ func checkRealFile(p string) error {
 	return nil
 }
 
+// checkRealDir requires a directory (not a symlink to one) at a mount's
+// source: the engine would follow a link when it mounts.
 func checkRealDir(p string) error {
 	fi, err := os.Lstat(p)
 	if err != nil {
@@ -191,9 +197,10 @@ func prepareMountPoints(s *Spec) error {
 	return nil
 }
 
-// writeEtc renders /etc/devc for a box: box.json and a copy of the
-// configured dotfiles. The directory is mounted read-only, so the box
-// cannot change it; the configuration directory itself is never mounted.
+// writeEtc renders /etc/devc for a box: box.json, the tmux configuration
+// and a copy of the configured dotfiles. The directory is mounted
+// read-only, so the box cannot change it; the configuration directory
+// itself is never mounted.
 func writeEtc(p *paths.Paths, r *config.Resolved, version string, homeMounts []string) error {
 	ref := names.ProjectRef{Realm: r.Realm, Project: r.Project}
 	dir := p.BoxEtcDir(ref)

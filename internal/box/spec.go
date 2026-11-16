@@ -4,11 +4,19 @@
 // selection and building, and the lifecycle commands up, down, rm, rebuild,
 // ls, sh, run and root.
 //
+// Files: spec.go builds the definition (Spec, BuildSpec) and its hash;
+// lifecycle.go is the Manager with up, down, rm, rebuild and ls, the start
+// sequence, rollback and the box lock; exec.go holds sh, run, root and
+// EnsureRunning; dirs.go prepares the host directories, the nested mount
+// points and /etc/devc; image.go chooses, builds or pulls the image;
+// capabilities.go keeps the record of what a start was given; and
+// netexceptions.go applies network exceptions to a running box.
+//
 // Security rules: everything that ends up in the argument list comes from
 // the configuration directory or from devc itself (README rule 1); the
 // argument list is built as a vector, never a shell string (rule 3); every
 // container found by name is checked for devc's labels before it is used
-// (C02 amendment); commands that create or start a box refuse while the
+// (Manager.Find); commands that create or start a box refuse while the
 // project's configuration has problems, and protections that cannot be
 // applied (resource limits, network levels) fail the box (rule 6); host
 // code never runs anything in box-writable directories (rule 2): mount
@@ -59,6 +67,8 @@ type Mount struct {
 	File bool
 }
 
+// arg renders the mount for --mount. AddMount has refused the characters
+// that this syntax would split on.
 func (m Mount) arg() string {
 	s := "type=bind,source=" + m.Source + ",destination=" + m.Target
 	if m.ReadOnly {
@@ -408,6 +418,8 @@ func (s *Spec) AddLabel(key, value string) error {
 	return nil
 }
 
+// envNameOK accepts letters, digits and underscores, not starting with a
+// digit, so a name can never carry "=" or an option into --env.
 func envNameOK(n string) bool {
 	if n == "" {
 		return false
@@ -463,7 +475,8 @@ func (s *Spec) argsWithoutHash() []string {
 }
 
 // Hash is the configuration hash: the argument list without the hash label,
-// the image ID and the seccomp profile digest.
+// the image reference and command, the image ID and the seccomp profile
+// digest. A box whose label differs from it has drifted.
 func (s *Spec) Hash() string {
 	h := sha256.New()
 	for _, a := range s.argsWithoutHash() {

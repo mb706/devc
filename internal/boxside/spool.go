@@ -1,3 +1,6 @@
+// This file implements the box's side of the spool: appending validated
+// events, and looking for a session's end.
+
 package boxside
 
 import (
@@ -69,6 +72,8 @@ func AppendEvents(spoolDir, session string, now time.Time, ps []Payload) error {
 	return nil
 }
 
+// eventLine encodes one event and validates it as the host will; a line
+// the host would skip as too long is an error.
 func eventLine(session string, now time.Time, p Payload) ([]byte, error) {
 	e, err := proto.New(session, p.Type, p.Data, now)
 	if err != nil {

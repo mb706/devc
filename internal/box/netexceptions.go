@@ -1,3 +1,6 @@
+// This file keeps a running box's network exceptions in its kernel rules
+// in step with the project's exception record.
+
 package box
 
 // Network exceptions in the kernel (work order C13 section 2). The record

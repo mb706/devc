@@ -26,6 +26,11 @@
 // everything the terminal sends passes unchanged; the only bytes the
 // wrapper adds are the answer to a query, in the harness's input.
 //
+// Files: scanner.go finds the sequences in the output and parses reports;
+// wrapper.go allocates the pseudo-terminal, starts the harness on it and
+// copies bytes in both directions. OpenPTY and SetSize also serve the
+// daemon's terminal streams.
+//
 // Security rules: the harness is box code and its reports are hostile
 // input; they are parsed strictly and turned into events through the same
 // validation as hook events. The wrapper runs inside the box with the

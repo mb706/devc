@@ -3,6 +3,11 @@
 // shelling out through internal/execx and parsing JSON, and Fake implements
 // it for tests. No Podman Go bindings are used.
 //
+// Files: engine.go holds the interface, the queries (version, info, ps,
+// inspect) and their parsers; ops.go images, builds, the lifecycle verbs
+// and exec; run.go throwaway containers (`podman run --rm`); fake.go the
+// in-memory engine for tests.
+//
 // Security rules: every call is an argument vector (README rule 3); names,
 // image references and label values passed in are validated so they cannot
 // be read as options. Every engine command runs with "/" as its working
@@ -245,7 +250,7 @@ func (c Container) Name() string {
 }
 
 // ContainerInfo is the subset of `podman container inspect` devc needs. Raw
-// keeps the full object for later chunks.
+// keeps the full object for the fields this type does not parse.
 type ContainerInfo struct {
 	ID            string         `json:"Id"`
 	Name          string         `json:"Name"`
@@ -315,6 +320,9 @@ type HostConfig struct {
 	Init        bool     `json:"Init"`
 }
 
+// ContainerState is the state part of `podman container inspect`: Status
+// is the engine's word ("created", "initialized", "running", "exited", …);
+// Pid is the main process as the host sees it.
 type ContainerState struct {
 	Status   string    `json:"Status"`
 	Running  bool      `json:"Running"`
@@ -408,8 +416,10 @@ func NewPodman(bin string, runner execx.Runner) *Podman {
 
 var _ Engine = (*Podman)(nil)
 
+// Binary implements Engine.
 func (p *Podman) Binary() string { return p.Bin }
 
+// run runs a quick query with the engine's short timeout, from "/".
 func (p *Podman) run(ctx context.Context, args ...string) (execx.Result, error) {
 	return p.Runner.Run(ctx, execx.Cmd{Name: p.Bin, Args: args, Timeout: p.Timeout, Dir: "/"})
 }
@@ -473,6 +483,8 @@ func (p *Podman) Ps(ctx context.Context, o PsOptions) ([]Container, error) {
 
 var containerNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
+// checkContainerName refuses a name the engine could read as an option or
+// that devc never creates.
 func checkContainerName(name string) error {
 	if !containerNameRE.MatchString(name) {
 		return fmt.Errorf("invalid container name %q", name)

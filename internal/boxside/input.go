@@ -1,3 +1,6 @@
+// This file implements the daemon's input to session panes: listing the
+// clients, pasting text and sending keys.
+
 package boxside
 
 // Input to a session's pane (work order C09 sections 3 and 4): what the box

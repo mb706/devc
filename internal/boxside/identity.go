@@ -1,3 +1,6 @@
+// This file implements the identity fix (`devc box fix-identity`), which
+// `devc up` runs as the box's root after every start.
+
 package boxside
 
 import (
@@ -46,6 +49,8 @@ func FixIdentity(root, shell string) (changed bool, err error) {
 	return c1 || c2, nil
 }
 
+// rewriteFile replaces path with fn of its content, by rename, keeping its
+// mode; it writes nothing when the content stays the same.
 func rewriteFile(path string, fn func([]byte) []byte) (bool, error) {
 	old, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -80,6 +85,8 @@ func rewriteFile(path string, fn func([]byte) []byte) (bool, error) {
 	return true, nil
 }
 
+// account is one fixed account: line renders its canonical entry from the
+// fields of the entry it replaces (nil when it is new).
 type account struct {
 	name, id string
 	line     func(old []string) string

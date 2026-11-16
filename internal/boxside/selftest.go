@@ -1,3 +1,7 @@
+// This file implements `devc box selftest`, which tries from inside a box
+// what its hardening must refuse. devc never runs it by itself; the user
+// and the escape tests do.
+
 package boxside
 
 import (
@@ -119,6 +123,8 @@ func errnoErr(e syscall.Errno) error {
 	return e
 }
 
+// procStatus reads /proc/self/status, where the kernel reports the
+// process's capability sets and no_new_privs.
 func procStatus() (map[string]string, error) {
 	b, err := os.ReadFile("/proc/self/status")
 	if err != nil {
@@ -212,6 +218,8 @@ func ChildProbe(exe string) func(string) (string, error) {
 	}
 }
 
+// socketsWork shows that the socket rules refuse only what they must:
+// AF_UNIX, AF_INET and AF_NETLINK sockets still open.
 func socketsWork() (bool, string) {
 	var bad []string
 	for _, s := range []struct {
@@ -232,6 +240,8 @@ func socketsWork() (bool, string) {
 	return true, "AF_UNIX, AF_INET and AF_NETLINK sockets work"
 }
 
+// tryCreate creates and removes a file in dir; an error means dir cannot be
+// written.
 func tryCreate(dir string) error {
 	p := filepath.Join(dir, fmt.Sprintf(".devc-selftest-%d", os.Getpid()))
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)

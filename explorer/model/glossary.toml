@@ -213,3 +213,88 @@ aka = ["problem"]
 text = "An error found while loading the configuration, with its file and key. Loading never stops at one; `devc config check` lists them all, and a box is not created, started or changed while a problem touches its project, realm, env, manifests or granted services."
 refs = ["internal/config.Problem", "internal/config.Config.ProblemsFor"]
 see = ["configuration-directory"]
+
+[[term]]
+id = "config-hash"
+title = "Configuration hash"
+aka = ["confighash", "drift", "drifted"]
+text = "The SHA-256 of a box's `podman create` arguments, its image reference and ID and the seccomp profile, stored on the container as the label `devc.confighash`. When the hash `devc up` computes differs from the label, the box has drifted: `up` refuses and exits 1 until `devc up --recreate`."
+refs = ["internal/box.Spec.Hash", "internal/box.ErrDrift"]
+see = ["box"]
+
+[[term]]
+id = "box-lock"
+title = "Box lock"
+text = "An exclusive `flock` on `local/boxes/<realm>/<project>/lock` that serialises the operations on one box across devc processes: up, down, rm, starts for sh, run, root and sessions, git operations, changes of network exceptions. A second command waits up to ten minutes."
+refs = ["internal/box.LockBox"]
+see = ["box"]
+
+[[term]]
+id = "readiness-marker"
+title = "Readiness marker"
+aka = ["ready"]
+text = "`/run/devc/ready`, which box init writes once the home is prepared and, at level internet, its network check passed. devc removes it before every start and polls for it after; since the box can write it, it proves only that box init got that far."
+refs = ["internal/boxside.writeReady", "internal/box.Manager.afterStart"]
+see = ["box-agent"]
+
+[[term]]
+id = "capability-record"
+title = "Capability record"
+aka = ["capabilities.json", "start record"]
+text = "What a box's last successful start was given (secrets, SSH grants, network level and allowlist, GitHub grant, services), in `local/boxes/<realm>/<project>/capabilities.json`. What the daemon or the gate hands out on demand is the intersection of this record and the current configuration; a stopped box has none."
+refs = ["internal/box.Capabilities", "internal/box.CapabilitiesOf"]
+see = ["grant"]
+
+[[term]]
+id = "identity-fix"
+title = "Identity fix"
+aka = ["fix-identity"]
+text = "`devc box fix-identity`, which `devc up` runs as the box's root after every start: UID and GID 1000 become `dev` with home /home/dev, 2000 becomes `vault`, and every other line of /etc/passwd and /etc/group stays as it was."
+refs = ["internal/boxside.FixIdentity"]
+see = ["vault"]
+
+[[term]]
+id = "vault"
+title = "vault"
+text = "The second fixed account in every box, UID and GID 2000, created by the identity fix. The data workers give it sealed data and devc's own directories in a project, so the box user, who is not their owner and has no capabilities, cannot change them."
+refs = ["internal/paths.VaultUID", "internal/boxside.RewritePasswd"]
+see = ["identity-fix"]
+
+[[term]]
+id = "seccomp-profile"
+title = "Seccomp profile"
+aka = ["seccomp.json"]
+text = "The system-call filter of every box and auxiliary container, `<state>/toolbox/seccomp.json`: Podman's default profile without user-namespace creation (`clone` and `unshare` with `CLONE_NEWUSER`, `clone3`), AF_ALG sockets or `socketcall`. devc derives it from the embedded base at every toolbox sync and refuses a base of another shape."
+refs = ["internal/toolbox.DeriveProfile", "internal/toolbox.Toolbox.SeccompPath"]
+see = ["toolbox"]
+
+[[term]]
+id = "self-test"
+title = "Self-test"
+aka = ["selftest"]
+text = "`devc box selftest`: run inside a box, it tries what the hardening must refuse (capabilities, user namespaces, AF_ALG, socketcall, nftables, writing the read-only mounts) and what must still work. devc never runs it by itself; the escape tests and the user do."
+refs = ["internal/boxside.SelfTest"]
+see = ["seccomp-profile"]
+
+[[term]]
+id = "status-wrapper"
+title = "Status wrapper"
+aka = ["devc box pty", "wrapper"]
+text = "`devc box pty`: the launcher runs a harness whose manifest sets `status.osc7501` through it when there is a terminal. It runs the harness on a pseudo-terminal of its own, answers its OSC 7501 query, which tmux does not, and turns its status reports into state events; every other byte passes unchanged."
+refs = ["internal/boxside.RunPTY", "pkg:internal/ptywrap"]
+see = ["osc-7501", "session"]
+
+[[term]]
+id = "osc-7501"
+title = "OSC 7501"
+aka = ["Program Status Protocol", "status report"]
+text = "Escape sequences `ESC ] 7501 ; … ST` in which a program reports its state (idle, working, done, blocked, error) in its own terminal output, after asking with `ESC ] 7501 ; ?` whether the terminal understands them: the Program Status Protocol."
+refs = ["internal/ptywrap.ParseReport", "internal/ptywrap.Reply"]
+see = ["status-wrapper"]
+
+[[term]]
+id = "pane-died-hook"
+title = "Pane-died hook"
+text = "The tmux hook devc sets on every session window: when the harness's process ends, the window stays (`remain-on-exit`) and tmux runs `devc box session ended`, which writes `session.end` with the exit status or signal unless the spool has one, and removes the pane."
+refs = ["internal/tmux.PaneDiedHook", "internal/boxside.SessionEnded"]
+see = ["session"]

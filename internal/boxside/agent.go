@@ -1,3 +1,6 @@
+// This file implements the box agent: its two sockets, the host's
+// channel and the relaying of in-box clients.
+
 package boxside
 
 // The box agent (work order C08 section 3): part of `devc box init`, started
@@ -142,6 +145,7 @@ func RunAgent(ctx context.Context, o AgentOptions) {
 	a.setHost(nil)
 }
 
+// logf writes one timestamped line to agent.log.
 func (a *Agent) logf(format string, args ...any) {
 	fmt.Fprintf(a.o.Log, "%s devc agent: %s\n", time.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, args...))
 }
@@ -159,6 +163,8 @@ func (a *Agent) goSafe(what string, fn func()) {
 	}()
 }
 
+// sleep waits the retry pause after a listener failed; false means ctx
+// ended meanwhile.
 func (a *Agent) sleep(ctx context.Context) bool {
 	select {
 	case <-ctx.Done():
@@ -175,6 +181,7 @@ func (a *Agent) Connected() bool {
 	return a.host != nil && !a.host.IsClosed()
 }
 
+// current is the host session relays go to, nil once it has closed.
 func (a *Agent) current() *yamux.Session {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -195,6 +202,7 @@ func (a *Agent) setHost(s *yamux.Session) {
 	}
 }
 
+// clearHost forgets s if it is still the host session; a newer one stays.
 func (a *Agent) clearHost(s *yamux.Session) {
 	a.mu.Lock()
 	if a.host == s {
@@ -203,6 +211,7 @@ func (a *Agent) clearHost(s *yamux.Session) {
 	a.mu.Unlock()
 }
 
+// yamuxConfig is the agent's side of the channel's multiplexer.
 func (a *Agent) yamuxConfig() *yamux.Config {
 	cfg := yamux.DefaultConfig()
 	cfg.AcceptBacklog = 64
@@ -252,6 +261,9 @@ func listenSocket(path string) (*net.UnixListener, error) {
 	return ln, nil
 }
 
+// acceptHost accepts connections on the host socket until the listener
+// fails. A connection whose peer AcceptHost refuses is closed; an
+// accepted one becomes the host session, replacing the previous one.
 func (a *Agent) acceptHost(ctx context.Context, ln *net.UnixListener) {
 	for {
 		c, err := ln.AcceptUnix()
@@ -328,6 +340,9 @@ func (a *Agent) serveHost(ctx context.Context, s *yamux.Session) {
 	}
 }
 
+// handleHello serves box.hello: the box's description from box.json and
+// the channel protocol this agent speaks; the daemon decides whether the
+// versions fit.
 func (a *Agent) handleHello(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var h proto.Hello
 	if err := proto.DecodeParams(params, &h); err != nil {
@@ -348,6 +363,7 @@ func (a *Agent) handleHello(_ context.Context, _ *proto.Conn, params json.RawMes
 	return r, nil
 }
 
+// handleSessions serves box.sessions: the sessions alive in the box.
 func (a *Agent) handleSessions(context.Context, *proto.Conn, json.RawMessage) (any, error) {
 	if a.o.Sessions == nil {
 		return nil, proto.Errorf(proto.CodeInternal, "session listing is not available")
@@ -499,6 +515,8 @@ func OpenAgentLog(run string) io.Writer {
 	return &cappedLog{path: filepath.Join(run, filepath.Base(AgentLog)), max: maxAgentLog}
 }
 
+// Write implements io.Writer. It never fails, so logging can never stop
+// the agent.
 func (l *cappedLog) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

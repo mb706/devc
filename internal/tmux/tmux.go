@@ -1,7 +1,9 @@
 // Package tmux builds every tmux command line devc uses (plan 3.5): the
-// in-box session start, the pane-died hook, the listing used for
-// reconciliation, and the attach command run from the host. Nothing else
-// in devc assembles a tmux command.
+// window of a new session and its tagging with the pane-died hook, the
+// listings of panes and clients, the attach command (`devc attach` and
+// `devc <harness>`), the observing client of the web app's terminal, the
+// daemon's input (paste buffers, named keys), and the configuration file
+// /etc/devc/tmux.conf. Nothing else in devc assembles a tmux command.
 //
 // Model: one tmux server per box on the socket "devc" with devc's own
 // configuration file, one tmux session "devc", one window per devc session

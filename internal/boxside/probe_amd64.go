@@ -1,5 +1,10 @@
+// This file holds the socketcall probe on amd64, where 64-bit programs can
+// still enter the 32-bit system call table.
+
 package boxside
 
+// int80 issues a 32-bit system call through the int 0x80 gate
+// (int80_amd64.s) and returns the raw result.
 func int80(trap, a1, a2, a3 uintptr) uintptr
 
 // i386SysSocketcall is socketcall's number in the 32-bit x86 table.

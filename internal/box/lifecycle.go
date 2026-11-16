@@ -1,3 +1,6 @@
+// This file implements the Manager: up with its start sequence and
+// rollback, down, rm, rebuild and ls, and the box lock they all hold.
+
 package box
 
 import (
@@ -146,9 +149,8 @@ func (m *Manager) Find(ctx context.Context, ref names.ProjectRef) (*engine.Conta
 	return &ci, nil
 }
 
-// plan computes the specification of a project's box without changing
-// anything on the host except, when ensure is set, the toolbox and the
-// image.
+// plan is a box's definition as one command computed it, with what it was
+// computed from.
 type plan struct {
 	resolved *config.Resolved
 	source   ImageSource
@@ -159,6 +161,9 @@ type plan struct {
 	net *netpolicy.Facts
 }
 
+// plan computes the specification of a project's box without changing
+// anything on the host except, when ensure is set, the toolbox (synced to
+// this devc) and the image (built or pulled when missing).
 func (m *Manager) plan(ctx context.Context, ref names.ProjectRef, ensure, build bool) (*plan, error) {
 	r, err := m.Config.Resolved(ref)
 	if err != nil {
@@ -535,6 +540,8 @@ func addrList(as []netip.Addr) string {
 	return strings.Join(s, ", ")
 }
 
+// createAndStart creates the container from the plan and starts it; a
+// failure at any point removes the container again and runs the cleaners.
 func (m *Manager) createAndStart(ctx context.Context, pl *plan) error {
 	if err := m.publish(ctx, pl); err != nil {
 		return m.rollback(ctx, pl, rollbackCleanOnly, err)
@@ -609,11 +616,15 @@ func (m *Manager) relabel(ctx context.Context, pl *plan) error {
 	return nil
 }
 
+// selinuxHost reports whether the host has SELinux (enforcing or
+// permissive), the same test DetectHost makes.
 func (m *Manager) selinuxHost() bool {
 	_, err := os.Stat(filepath.Join(m.HostRoot, "sys", "fs", "selinux", "enforce"))
 	return err == nil
 }
 
+// clearReady removes the readiness marker before a start, so only the box
+// init of this start can make the box count as ready.
 func (m *Manager) clearReady(runtime string) error {
 	err := os.Remove(filepath.Join(runtime, "ready"))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -699,6 +710,8 @@ func (m *Manager) afterReady(ctx context.Context, ref names.ProjectRef, name str
 	}
 }
 
+// outputTail is the last 1000 bytes of a command's output, for an error
+// message.
 func outputTail(res execx.Result) string {
 	s := strings.TrimSpace(string(res.Stderr) + "\n" + string(res.Stdout))
 	if s == "" {
@@ -710,7 +723,11 @@ func outputTail(res execx.Result) string {
 	return "\n" + s
 }
 
-// Down stops a project's box.
+// Down stops a project's box: the stop hooks first (a BeforeStop that wraps
+// ErrKeepRunning keeps the box running), then its dependents, then the
+// engine's stop with ten seconds' grace, then the cleaners. Unlike up it
+// does not refuse while the configuration has problems: stopping only
+// takes something away.
 func (m *Manager) Down(ctx context.Context, ref names.ProjectRef) error {
 	unlock, err := m.lockBox(ctx, ref)
 	if err != nil {

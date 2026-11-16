@@ -1,3 +1,6 @@
+// This file is the box side of the status wrapper: its options, the
+// state events it writes, and the marker the hook receiver looks for.
+
 package boxside
 
 import (
@@ -60,6 +63,8 @@ type stateWriter struct {
 	marked  bool
 }
 
+// report receives one parsed report from the wrapper's reporter
+// goroutine; the first one creates the session's marker file.
 func (w *stateWriter) report(r ptywrap.Report) {
 	if r.ID != "" || r.State == ptywrap.StateClear {
 		return

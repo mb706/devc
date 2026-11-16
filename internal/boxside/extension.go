@@ -1,3 +1,6 @@
+// This file implements harness extensions: registration with the agent
+// and the delivery of the daemon's messages through them.
+
 package boxside
 
 // Harness extensions (work order C16): a harness that can load code (pi's
@@ -45,6 +48,8 @@ type extConn struct {
 	harness string
 }
 
+// set makes c the extension of session; the previous one is closed (the
+// newest registration wins).
 func (e *extensions) set(session string, c *extConn) {
 	e.mu.Lock()
 	if e.m == nil {
@@ -58,6 +63,7 @@ func (e *extensions) set(session string, c *extConn) {
 	}
 }
 
+// remove forgets c if it is still the extension of session.
 func (e *extensions) remove(session string, c *extConn) {
 	e.mu.Lock()
 	if e.m[session] == c {

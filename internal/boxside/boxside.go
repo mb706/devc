@@ -10,11 +10,29 @@
 // git-remote-devc), and the worktree links to the data root. Workers run
 // outside boxes: rm-worker and the data workers (seal, trash, savepoints,
 // restore) in the helper container, the context worker in the context
-// container (internal/ctxrepo).
+// container (internal/ctxrepo). Box init also runs the agent, the box end
+// of the channel to the host's daemon, which listens on
+// /run/devc/agent.sock for the host and on the abstract socket
+// @devc-agent for in-box clients.
 //
-// Since C08, box init also runs the agent (agent.go): the box end of the
-// channel to the host's daemon, which listens on /run/devc/agent.sock for
-// the host and on the abstract socket @devc-agent for in-box clients.
+// Files, by topic:
+//   - the box itself: boxside.go (paths, box.json, the shell), init.go
+//     (box init), identity.go (fix-identity), selftest.go with clone_*.go,
+//     probe_*.go and int80_amd64.s (the self-test and its probes);
+//   - the agent: agent.go, agentclient.go (how in-box programs reach it),
+//     extension.go (harness extensions), netrelay.go (network relays);
+//   - harnesses: launch.go (the launcher), session.go (tmux windows),
+//     pty.go (the status wrapper's events), display.go (the desktop's
+//     display), hook.go and question.go (hooks), spool.go (the spool),
+//     input.go (the daemon's input to panes);
+//   - git: git.go, snapshot.go, worktree.go, remotehelper.go;
+//   - the host's services: gate.go (SSH), github.go, net.go (dial, the
+//     network canary, init's network check);
+//   - data: datalayout.go (the zones of a data directory), datalinks.go
+//     (the worktrees' data links, made in the box), dataproto.go,
+//     dataworker.go and datasync.go (the data workers);
+//   - workers outside boxes: helper.go (the helper container's checks
+//     and rm-worker), archiveworker.go, context.go, contextarchive.go.
 //
 // Security rules: code here runs in the box and trusts nothing the box can
 // write. It reads its own description only from /etc/devc, which the host
@@ -52,7 +70,8 @@ const (
 	SpoolDirName = "spool"
 )
 
-// Info is /etc/devc/box.json, written by the host at every `devc up`.
+// Info is /etc/devc/box.json, written by the host whenever `devc up`
+// creates or starts the box.
 type Info struct {
 	Schema      int    `json:"schema"`
 	Realm       string `json:"realm"`

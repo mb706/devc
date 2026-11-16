@@ -268,7 +268,7 @@ id = "harness"
 zone = "box"
 title = "Harness"
 kind = "process"
-summary = "The coding agent (Claude Code, Codex, Cursor's CLI, OpenCode, pi), described by a manifest: installed in the toolbox, run in a session's tmux window."
+summary = "The coding agent (Claude Code, Codex, Cursor's CLI, OpenCode, pi), described by a manifest: installed in the toolbox, run in a session's tmux window or, started through its shim from a shell, in that shell's terminal."
 
 [[actor]]
 id = "tmux"
@@ -313,7 +313,7 @@ transport = "The daemon connects to the agent's socket (`<runtime>/<box-id>/agen
 carries = "The daemon's requests to the box ([[surface:box-agent]]): hello, live sessions, input to panes, listeners for exceptions and services."
 boundary = true
 checks = ["internal/daemon.CheckPeer", "internal/proto.HelloReply.Validate", "internal/proto.DecodeResult"]
-concerns = ["sessions-and-events"]
+concerns = ["sessions-and-events", "box-init-and-agent"]
 
 [[channel]]
 id = "agent-local"
@@ -322,6 +322,7 @@ to = "box-agent"
 title = "Agent socket"
 transport = "The abstract socket `@devc-agent`, which only processes in the box's network namespace reach."
 carries = "Requests of in-box clients to the host, one JSON-RPC message first: requests, secrets, questions, hints, and git, gate and proxy streams."
+concerns = ["box-init-and-agent"]
 
 [[channel]]
 id = "box-streams"
@@ -332,7 +333,7 @@ transport = "A new yamux stream of the box channel per in-box client; the agent 
 carries = "The box's requests to the host ([[surface:host-api]]). The daemon attributes each to the box by the channel it arrives on; nothing the box says selects a project."
 boundary = true
 checks = ["internal/proto.ParseMessage", "internal/proto.DecodeParams", "internal/requests.Validate"]
-concerns = ["sessions-and-events"]
+concerns = ["sessions-and-events", "box-init-and-agent"]
 
 [[channel]]
 id = "spool-write"
@@ -341,7 +342,7 @@ to = "spool"
 title = "Spool append"
 transport = "One `write` per hook call to the session's spool file, opened with O_APPEND and O_NOFOLLOW."
 carries = "Session events, one JSON object per line, without seq."
-concerns = ["sessions-and-events"]
+concerns = ["sessions-and-events", "launching-a-harness"]
 
 [[channel]]
 id = "spool-read"
@@ -361,6 +362,7 @@ to = "podman"
 title = "Engine commands (CLI)"
 transport = "The podman binary, run with argument vectors from `/`; JSON output parsed."
 carries = "Creating, starting and stopping boxes, `podman exec` into them, throwaway containers."
+concerns = ["box-lifecycle"]
 
 [[channel]]
 id = "daemon-podman"
@@ -379,6 +381,18 @@ transport = "`podman exec` as the box user with an argument vector."
 carries = "In-box commands the host runs (session start, stop and listing, snapshots, worktrees, the repository report); their output comes back to the host."
 boundary = true
 checks = ["internal/session.ParseLive"]
+concerns = ["box-lifecycle", "launching-a-harness"]
+
+[[channel]]
+id = "podman-box"
+from = "podman"
+to = "box-agent"
+title = "Box start"
+transport = "`podman create` with devc's argument vector, then `podman start`; the entrypoint `/opt/devc/bin/devc box init` runs as UID 1000 under Podman's init."
+carries = "The box's definition (user namespace, no capabilities, no new privileges, seccomp profile, mounts, limits, network). Back to the host comes only the readiness marker in the runtime directory, which proves just that box init got that far."
+boundary = true
+checks = ["internal/box.Manager.isReady", "internal/box.Manager.verifyRunning"]
+concerns = ["box-lifecycle", "isolation", "box-init-and-agent"]
 
 [[channel]]
 id = "podman-helper"
@@ -387,6 +401,7 @@ to = "helper"
 title = "Helper run"
 transport = "`podman run --rm --network none` with the helper root filesystem as a throwaway overlay, only the target tree mounted and only the capabilities the worker needs."
 carries = "One worker request (often JSON on stdin); a report back."
+concerns = ["box-lifecycle"]
 
 [[channel]]
 id = "podman-context"
@@ -420,7 +435,7 @@ to = "tmux"
 title = "Pane input"
 transport = "tmux command lines with argument vectors; pasted text on tmux's standard input, never as an argument."
 carries = "The daemon's input: a bracketed paste and the submit key, named keys, the list of clients watching a window."
-concerns = ["sessions-and-events"]
+concerns = ["sessions-and-events", "launching-a-harness"]
 
 [[channel]]
 id = "tools-tmux"
@@ -429,6 +444,7 @@ to = "tmux"
 title = "Session windows"
 transport = "tmux command lines with argument vectors."
 carries = "A new window per session (running the launcher), tagged with the session's ID; listing and killing windows."
+concerns = ["launching-a-harness"]
 
 [[channel]]
 id = "tmux-launcher"
@@ -437,6 +453,7 @@ to = "launcher"
 title = "Window command"
 transport = "The window's command, `/opt/devc/bin/devc box launch <harness> -- …`."
 carries = "The harness to start and its arguments."
+concerns = ["launching-a-harness"]
 
 [[channel]]
 id = "launcher-harness"
@@ -445,6 +462,7 @@ to = "harness"
 title = "exec"
 transport = "The launcher replaces itself with the real harness binary, or with the status wrapper around it when the manifest says the harness reports its status through OSC 7501 and there is a terminal."
 carries = "The environment of the session (`DEVC_SESSION`), the credential, the settings."
+concerns = ["launching-a-harness"]
 
 [[channel]]
 id = "tmux-harness"
@@ -453,7 +471,7 @@ to = "harness"
 title = "Terminal"
 transport = "The pseudo-terminal of the session's pane."
 carries = "Keys and pasted text in; the harness's screen out."
-concerns = ["sessions-and-events"]
+concerns = ["sessions-and-events", "launching-a-harness"]
 
 [[channel]]
 id = "harness-hook"
@@ -462,7 +480,7 @@ to = "hook"
 title = "Hooks"
 transport = "The harness runs `devc box hook <kind> <event>` with its hook input as JSON on standard input (at most 1 MiB is read)."
 carries = "What the harness reports: session start, prompts, questions, permission prompts, the final message, the end."
-concerns = ["sessions-and-events"]
+concerns = ["sessions-and-events", "launching-a-harness"]
 
 [[channel]]
 id = "hub-link"

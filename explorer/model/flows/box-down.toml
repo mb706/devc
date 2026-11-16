@@ -1,0 +1,104 @@
+id = "box-down"
+kind = "flow"
+title = "devc down"
+summary = "Stopping a box after preserving its work: the box's events are ingested and its work banked while it still runs (a bank that fails keeps it running), the desktop sidecar goes, Podman stops the container, the sessions are ended and the realm's context committed, and what the start delivered is removed. Home, project files and state stay."
+concern = "box-lifecycle"
+trigger = "devc down demo/hello"
+actors = ["user", "cli", "state-dir", "podman", "box-agent"]
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc down"
+label = "devc down demo/hello"
+external = true
+text = "The user names a project or runs the command inside one. `--all` stops every running box of the configuration; `--no-bank` stops without banking."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.boxEnv"
+text = "The box manager is built with its stop hooks in this order: sessions and context first, then banking."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.Down"
+text = "`down` takes the box lock but, unlike `up`, does not refuse while the configuration has problems: stopping only takes something away."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.Find"
+checks = ["internal/box.Manager.Find"]
+text = "A container with the box's name must carry devc's labels for this project. A box that does not exist or does not run only gets the clean-up below, and its open sessions are ended as lost."
+
+[[step]]
+section = "Preserve first, while the box runs"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.sessionHooks.BeforeStop"
+text = "The box's spool is ingested and the sessions reconciled with what still runs in it, so nothing it reported is lost with the stop."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.bankHook.BeforeStop"
+text = "In a project with a relay, the box's commits and uncommitted work are banked into the relay ([[term:banking]]). If that fails the box keeps running and `down` fails with what to do, unless `--no-bank` was given."
+detail = "A configuration with problems banks nothing, says so, and lets the box stop. Errors of the other stop hook are warnings; only a bank that could not preserve the work stops `down` ([[internal/box.ErrKeepRunning]], [[finding:B4]])."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.removeDependents"
+text = "The desktop sidecar, which joined the box's network namespace, is removed before the box stops."
+
+[[step]]
+section = "Stop"
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman stop --time 10"
+ref = "internal/engine.Podman.Stop"
+text = "Podman sends the container its stop signal and kills what is left after ten seconds."
+
+[[step]]
+from = "podman"
+to = "box-agent"
+via = "signal"
+label = "SIGTERM"
+external = true
+text = "The signal reaches box init through Podman's init."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Init"
+unchecked = "SIGTERM cancels the context the init command made with signal.NotifyContext, which Init waits on"
+text = "Box init's context ends and `Init` returns; the process exits, which closes the agent's sockets and the host's channel, and the container stops."
+
+[[step]]
+section = "After the stop"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.sessionHooks.AfterStop"
+text = "What the box wrote while stopping is ingested, sessions still open end with reason `box-down`, and the realm's context (notes and memory) is committed."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.cleanup"
+text = "The cleaners run, all of them even if one fails: the delivered secrets in `<runtime>/<box-id>-secrets` and the box's gate key are removed."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "remove local/boxes/<realm>/<project>/capabilities.json"
+ref = "internal/box.RemoveCapabilities"
+text = "A stopped box keeps no capability record, so nothing more is handed out for it until it is started again."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "devc: stopping devc-demo-hello"
+ref = "internal/box.Manager.printf"
+text = "What stays: the container (stopped), the home, the project directory, the relay and journals, the harness state, the network exceptions. `devc up` starts the same container again unless its definition has drifted."

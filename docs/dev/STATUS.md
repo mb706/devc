@@ -36,7 +36,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | X1 Explorer: the tool (extraction, model, checks) | done | 5680f03 |
 | X2 Explorer: the app, shell and code views | done | ed0e2f5 |
 | X3 Explorer: the app, views of the model | done | 279209e |
-| X4 Explorer content: foundations, configuration, toolbox, harnesses, host setup | in progress | |
+| X4 Explorer content: foundations, configuration, toolbox, harnesses, host setup | done | d228d59 |
+| X5 Explorer content: boxes | in progress | |
 
 ## Resuming
 
@@ -1237,3 +1238,16 @@ The four confirmed findings of the closing check (`docs/dev/reviews/F1-review.md
 - `packages.toml`: roles of `internal/safefs`, `internal/config`, `internal/doctor` and `internal/service` corrected.
 
 **Comments** (40 Go files, comments only, `./dev explore comments-only` clean): package comments with file overviews for cli, config, names, paths, execx, harness, doctor; file comments for every file of the area that lacked one; about 35 doc comments on unexported functions the pages point at. Corrected: `cmd/devc` (relay hooks were missing), `flock` (lock files also in the runtime directory; what it serialises), `safefs` and `safefs.Dir` (host code uses Dir too), `doctor` ("never changes the host"), `extract` (its other users), `paths.Paths.EnvRootLog` ("the only file devc writes" in the configuration directory), `config.Env`, `config.Config.ProblemsFor` (granted services), `cli.app.serviceManager` (not only the timer), `cli.CommandTree` (no longer names the explorer).
+
+### X5 Explorer content: boxes: life cycle, isolation, and the box side
+
+**Model written** (`explorer/model/`):
+
+- Concerns (order 20–23): `box-lifecycle` (state machine of a box), `isolation` (diagram of the user-namespace mapping; every `podman create` restriction with the argument that applies it and what happens when it cannot be applied), `box-init-and-agent` (diagram of the processes in a running box and who starts them), `launching-a-harness`. Every non-test file of the area belongs to one of them; 30 invariants with their code and tests. `isolation` and `launching-a-harness` run to about 1,400 words: the first carries the sandbox's central claim, the second the five parts the work order names.
+- Flows: `box-up`, `box-init`, `session-launch` (from `devc <harness>` on the host; the shim path is a pointer to `binary-dispatch`), `hook-to-spool`, `box-down`, all connected by the tool (`unchecked` only for the readiness marker, the agent started through a function value, connections arriving on a listener, a signal, the ingester's wake channel and a spool file read by the host). Tour: `status-scanner`.
+- `system.toml`: channel `podman-box` (the box's start, with the readiness marker as the only thing coming back); the box concerns added to the channels they touch; the harness actor's summary covers the shim path.
+- `layout.toml`: runtime entries `ready`, `agent.sock`, `agent.log`, `status/<session>`; mounts of share directories, the gate's SSH configuration file and data input zones; the texts of `etc`, `capabilities.json` and `<box-id>` corrected.
+- `glossary.toml`: 11 terms (configuration hash, box lock, readiness marker, capability record, identity fix, vault, seccomp profile, self-test, status wrapper, OSC 7501, pane-died hook).
+- `packages.toml`: roles of `internal/tmux` and `internal/boxside` corrected.
+
+**Comments** (36 Go files, comments only, `./dev explore comments-only` clean): package comments with file overviews for box, engine, boxside, ptywrap; the tmux package comment lists everything it builds; file comments for every file of the area; about 60 doc comments on unexported functions the pages point at. Corrected: `engine.BuildOptions.Args` (named BuildArgs), `boxside.Launch.Exe` (said `current`; it is the concrete version directory), `ptywrap.reporter` (said only the latest report waits; up to 16 do), `cli.lifecycleTimeout` (said builds have a longer limit; theirs is shorter), `engine.RunOptions.UserNS` (the rm helper does not use the box's mapping), `box.Spec.Hash`, `box.writeEtc`, `boxside.Init`, `boxside.Info`, `boxside.Launch`, `boxside.PrepareLaunch` (incomplete), the boxside package comment (history removed).

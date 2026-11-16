@@ -1,3 +1,6 @@
+// This file implements the capability record: what a box was given at its
+// last successful start, against which grants handed out later are checked.
+
 package box
 
 // The capabilities a box was started with (finding C1-02). Secrets the

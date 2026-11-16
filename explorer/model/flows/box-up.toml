@@ -1,0 +1,193 @@
+id = "box-up"
+kind = "flow"
+title = "devc up"
+summary = "From `devc up` to a running box that has passed its checks: the definition is computed and compared with the existing container, the host writes everything the box will see, Podman creates and starts it, and devc fixes the in-box identity, waits for box init and records what the box was started with."
+concern = "box-lifecycle"
+trigger = "devc up demo/hello"
+actors = ["user", "cli", "state-dir", "podman", "box-tools", "box-agent"]
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc up"
+label = "devc up demo/hello"
+external = true
+text = "The user names a project, or runs the command inside a project directory. `--recreate` replaces an existing container, `--build` rebuilds the env image first."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.boxEnv"
+text = "The configuration is loaded and the box manager is built with every part that adds to a box: mounts and environment from the harness, gate, shares and data packages, files they write before a start, cleaners, stop and start hooks, and the desktop sidecar as a dependent."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.requireRelay"
+text = "A project with an upstream must have its relay already (`devc project init`)."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.Up"
+checks = ["internal/config.Config.ProblemsFor"]
+text = "Nothing is created or started while the project's configuration has problems. Then the box lock is taken, so no other devc command works on this box until `up` is done."
+detail = "The lock is `local/boxes/<realm>/<project>/lock` ([[internal/box.LockBox]]); a second command waits up to ten minutes and says once that it is waiting."
+
+[[step]]
+section = "The definition"
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman build / podman pull"
+ref = "internal/box.EnsureImage"
+text = "The toolbox is synced to this devc first. The image is built from the env's Containerfile when it is missing (or with `--build`), or pulled when missing; the engine reports its ID."
+
+[[step]]
+at = "cli"
+ref = "internal/box.BuildSpec"
+text = "The box definition is rendered from the resolved configuration, the image and the host's facts (SELinux, delegated cgroup controllers): every argument of `podman create`, in a fixed order. Its hash covers the arguments, the image ID and the seccomp profile."
+detail = "A limit that cannot be applied, an unknown network level or `capabilities.nested` ends `up` here with an error. [[concern:isolation]] goes through the arguments one by one."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.Find"
+checks = ["internal/box.Manager.Find"]
+text = "The container named `devc-<realm>-<project>` is looked up. One that lacks devc's labels for this project is never touched. With no container `up` creates one; a container with another hash has drifted, and `up` stops with exit status 1 unless `--recreate` was given."
+detail = "A running container with the same hash is left alone when box init has written its readiness marker since the last start; at level internet the host also checks that the rules devc installed are still bound to it, and otherwise stops it and starts it again. A running box that never reported ready gets the rest of its start (fix-identity and the wait) without being restarted."
+
+[[step]]
+section = "What the box will see"
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "local/boxes/<realm>/<project>/etc"
+ref = "internal/box.writeEtc"
+text = "`box.json`, the tmux configuration and a copy of the dotfiles are rendered into the directory the box will see read-only at /etc/devc. This happens only on a path that creates or starts the box."
+
+[[step]]
+at = "cli"
+ref = "internal/harness.BoxHooks.Prepare"
+text = "The preparers write their files: baselines, launch descriptions and seeds, delivered secrets, the gate's SSH configuration and key, the shares' links, the data layout."
+
+[[step]]
+at = "cli"
+ref = "internal/box.prepareDirs"
+checks = ["internal/box.checkRealDir", "internal/box.checkRealFile"]
+text = "Every mount source is created below its root without following a symlink, and must then be a real directory (or, for a file mount, a regular file)."
+
+[[step]]
+at = "cli"
+ref = "internal/box.prepareMountPoints"
+checks = ["internal/safefs.Root.MkdirAll", "internal/safefs.Root.RequireDirs"]
+text = "A mount that lies inside another mount (the package cache inside the box-writable home) needs a real directory at its place in the parent's source; a symlink the box planted there is refused, not followed."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.publish"
+text = "Last, the capability record, the network binding and the readiness marker of an earlier start are removed, so none of them can vouch for this one."
+
+[[step]]
+section = "Create and start"
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman create <arguments>"
+ref = "internal/engine.Podman.Create"
+text = "The container is created from the argument vector, with `devc.confighash` as one of its labels. If this or any later step fails, the container is removed again and the delivered secrets with it."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman start"
+ref = "internal/box.Manager.startBox"
+text = "The box is started. At level internet `podman init` comes first: the host installs the firewall rules into the new network namespace and records the binding before any box process runs."
+
+[[step]]
+from = "podman"
+to = "box-agent"
+via = "cmd:devc box init"
+label = "PID 1 runs /opt/devc/bin/devc box init"
+external = true
+text = "The entrypoint is devc's, whatever the image declares; it runs as the box user under Podman's init."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Init"
+text = "Box init removes any old readiness marker, runs the network check of level internet, prepares the home and creates the spool ([[flow:box-init]])."
+
+[[step]]
+section = "After the start"
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman exec --user 0 … devc box fix-identity"
+ref = "internal/box.rootExec"
+text = "Meanwhile the host runs the identity fix as the box's root, with a fixed system PATH, `HOME=/root` and `/` as working directory, so nothing the box planted is found."
+
+[[step]]
+from = "podman"
+to = "box-tools"
+via = "cmd:devc box fix-identity"
+label = "devc box fix-identity"
+external = true
+text = "Podman runs the command in the box."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.FixIdentity"
+text = "UID and GID 1000 become `dev` with home /home/dev and the chosen shell, 2000 becomes `vault`; every other line of /etc/passwd and /etc/group is kept as it was."
+
+[[step]]
+from = "podman"
+to = "cli"
+via = "reply"
+label = "exit status"
+external = true
+text = "A failure ends the start: the container is removed again."
+
+[[step]]
+from = "box-agent"
+to = "cli"
+via = "file"
+label = "/run/devc/ready"
+ref = "internal/boxside.writeReady"
+text = "Box init writes its readiness marker by rename into the runtime directory, which the host sees as `<runtime>/<box-id>/ready`."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.afterStart"
+unchecked = "the host polls for the readiness marker that box init writes into the shared runtime directory"
+text = "The host polls for the marker every 100 ms, at most 20 seconds, and notices a box that stopped meanwhile."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.checkNetwork"
+text = "At level internet the box must not reach the host: the host listens on its own addresses while `devc box net-canary` tries to connect from inside. A connection that gets through fails the start."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "local/boxes/<realm>/<project>/capabilities.json"
+ref = "internal/box.WriteCapabilities"
+text = "Only now is the capability record written: the container ID and the secrets, SSH hosts, network level, GitHub grant and services this start was given. Grants handed out later are checked against it."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.afterReady"
+text = "The start hooks run: data links in the worktrees, network exceptions still valid, the repository's GitHub remote. Their failures are warnings."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "devc: devc-demo-hello is ready"
+ref = "internal/box.Manager.printf"
+text = "The user sees what happened at each stage on standard error and, last, that the box is ready."

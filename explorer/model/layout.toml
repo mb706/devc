@@ -238,7 +238,7 @@ ref = "internal/paths.Paths.BoxHomeDir"
 
 [[tree.entry]]
 path = "local/boxes/<realm>/<project>/etc"
-text = "Rendered for the box and mounted read-only at /etc/devc: `box.json`, the tmux configuration, the dotfiles, and `harness/<id>.json` launch descriptions with their seeds."
+text = "Rendered for the box and mounted read-only at /etc/devc: `box.json`, the tmux configuration, the dotfiles, `harness/<id>.json` launch descriptions with their seeds, at level internet the network binding `netns.json`, the gate's `ssh_config` and `gate_known_hosts`, and `display.env` while a desktop runs."
 writer = "host"
 ref = "internal/paths.Paths.BoxEtcDir"
 
@@ -268,7 +268,7 @@ ref = "internal/paths.Paths.BoxLockFile"
 
 [[tree.entry]]
 path = "local/boxes/<realm>/<project>/capabilities.json"
-text = "The secrets and SSH grants in force at the box's last successful start."
+text = "What the box's last successful start was given: its container ID, secrets, SSH grants, network level and allowlist, GitHub grant and services. Written at the end of a successful start, removed at the beginning of the next and whenever the box stops; grants on demand are checked against it."
 writer = "host"
 ref = "internal/paths.Paths.BoxCapabilitiesFile"
 
@@ -490,7 +490,7 @@ ref = "internal/daemon.SocketPath"
 
 [[tree.entry]]
 path = "<box-id>"
-text = "A box's runtime directory, mounted at /run/devc and box-writable: `spool/` with the session event files, the agent's socket `agent.sock`, its log. The box ID is the first 12 hex characters of the SHA-256 of `<realm>/<project>`."
+text = "A box's runtime directory, mounted at /run/devc and box-writable: `spool/` with the session event files, the readiness marker, the agent's socket and log, the status wrapper's markers. The box ID is the first 12 hex characters of the SHA-256 of `<realm>/<project>`."
 writer = "both"
 ref = "internal/paths.Paths.BoxRuntimeDir"
 
@@ -499,6 +499,30 @@ path = "<box-id>/spool"
 text = "The session event files the box appends to; the host reads them only through safefs."
 writer = "box"
 ref = "internal/paths.Paths.SpoolDir"
+
+[[tree.entry]]
+path = "<box-id>/ready"
+text = "The readiness marker, written by box init by rename once the home is prepared (and, at level internet, the network check passed); devc removes it before every start. Box-writable, so it proves only that init got that far."
+writer = "box"
+ref = "internal/boxside.writeReady"
+
+[[tree.entry]]
+path = "<box-id>/agent.sock"
+text = "The agent's socket, which the daemon connects to; the agent accepts only a peer outside the box's PID namespace, and the daemon only a listener in the box's container."
+writer = "box"
+ref = "internal/boxside.AgentSocket"
+
+[[tree.entry]]
+path = "<box-id>/agent.log"
+text = "The agent's log, opened without following symlinks and started over at 1 MiB."
+writer = "box"
+ref = "internal/boxside.OpenAgentLog"
+
+[[tree.entry]]
+path = "<box-id>/status/<session>"
+text = "Exists while the status wrapper reports the session's state through OSC 7501; the hook receiver then drops its own state events."
+writer = "box"
+ref = "internal/boxside.StatusDir"
 
 [[tree.entry]]
 path = "<box-id>-secrets"
@@ -626,3 +650,24 @@ target = "/opt/shares"
 mode = "ro"
 text = "The shares the project and its realm list."
 ref = "internal/shares.BoxHooks.Contribute"
+
+[[mount]]
+source = "<state>/durable/shares/<name>"
+target = "/opt/shares/.v/<name>"
+mode = "ro"
+text = "Each share's whole directory, all its versions; the entry `<name>` in /opt/shares leads to the current one."
+ref = "internal/shares.BoxHooks.Contribute"
+
+[[mount]]
+source = "<state>/local/boxes/<realm>/<project>/etc/ssh_config"
+target = "/etc/ssh/ssh_config.d/50-devc.conf"
+mode = "ro"
+text = "A box with SSH grants: the generated client configuration for the gate, mounted as a single file so the image's ssh reads it."
+ref = "internal/gate.BoxHooks.Contribute"
+
+[[mount]]
+source = "<projects root>/<realm>/<project>/<data root>/<input zone>"
+target = "/w/<realm>/<project>/<data root>/<input zone>"
+mode = "ro"
+text = "Each input zone of a data project the box mounts, nested read-only over the project mount."
+ref = "internal/data.BoxHooks.Contribute"

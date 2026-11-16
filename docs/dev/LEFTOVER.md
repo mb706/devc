@@ -408,3 +408,11 @@ The authors of the explorer's content read the code area by area and reported wh
 5. **A failed `EnsureShim` after publishing** makes `harness install` report an error although `current` has already switched to the new version.
 6. `STATUS.md` section C03 says Codex logs in with an environment token; the code uses the shared home.
 
+### Boxes and the box side (X5)
+
+1. **tmux in a box passes escape sequences and clipboard writes through to your terminal.** `internal/tmux.Config` turns on `allow-passthrough` and `set-clipboard`, so a program in a box can send escape sequences and clipboard contents to the terminal of whoever is attached. A terminal attached to a box is under the box's influence in any case (the tmux client runs there), but this is not among the accepted limits in part 5 and the two options make it easy.
+2. **Nothing on the host checks a running box's hardening.** `devc box selftest` exists but never runs automatically; only the integration test `TestEscape` runs it.
+3. **`box.Manager.Remove` on a container that is already gone skips the after-stop hooks**, so the box's open sessions stay open. `Down` in the same situation ends them as lost.
+4. **`clearInHelper` (for `rm --home`) uses Podman's default ID mapping**, unlike the data and fleet helpers. It works because of the capabilities it is given.
+5. Spec section 6.4 says `devc root` commands are logged in `env.toml`; the code writes `root-log.jsonl`.
+

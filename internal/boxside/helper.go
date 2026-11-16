@@ -1,3 +1,6 @@
+// This file holds what the helper container's workers share: the check
+// that they run there, the target they work on, and rm-worker's deletion.
+
 package boxside
 
 import (

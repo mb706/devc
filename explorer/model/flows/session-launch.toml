@@ -1,0 +1,167 @@
+id = "session-launch"
+kind = "flow"
+title = "Starting a harness session"
+summary = "`devc claude` on the host to a harness running in its own tmux window under the status wrapper: the host prepares the box and picks a session ID, the box creates and tags the window, the launcher adds the credential and registers the session, and the wrapper starts the harness on a pseudo-terminal of its own."
+concern = "launching-a-harness"
+trigger = "devc claude demo/hello"
+actors = ["cli", "box-tools", "tmux", "launcher", "status-wrapper", "harness"]
+
+[[step]]
+section = "On the host"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.startSession"
+text = "The user ran `devc claude demo/hello`: one command per harness, named after its `bin`. Typing `claude` in a box's shell instead goes through the shim straight to the launcher below, without tmux ([[flow:binary-dispatch]])."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.prepareSession"
+checks = ["internal/names.Check"]
+text = "The project must list the harness, and the harness and tmux must be installed. A savepoint is taken first when the project asks for one."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.EnsureRunning"
+text = "The box is started if it does not run and is not ready ([[flow:box-up]]); a box started before the harness was installed has no launch description and must be restarted. In a project with a relay, a task worktree is created when missing."
+
+[[step]]
+at = "cli"
+ref = "internal/names.NewSessionID"
+text = "The session ID is generated on the host: `s` and 20 base32 characters, time-ordered."
+
+[[step]]
+from = "cli"
+to = "box-tools"
+via = "cmd:devc box session start"
+label = "podman exec -it … devc box session start --id <sid> --harness claude"
+ref = "internal/engine.Podman.ExecInteractive"
+text = "The host runs the session command in the box with a terminal, as the box user, from `/`. With `--detach` (or without a terminal) it adds `--detach` and prints only the session ID."
+
+[[step]]
+section = "The window"
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.StartSession"
+checks = ["internal/names.ValidSessionID", "internal/names.Valid"]
+text = "The session ID, harness and worktree are checked again in the box, and so are the toolbox's tmux and the box's tmux configuration."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.ReadLaunch"
+checks = ["internal/boxside.Launch.Validate"]
+text = "The harness's launch description is read and validated, and its executable must exist and not be devc, so no window opens only to close at once."
+
+[[step]]
+from = "box-tools"
+to = "tmux"
+via = "exec"
+label = "tmux new-window -e DEVC_SESSION=… -- devc box launch claude --"
+ref = "internal/tmux.NewWindow"
+text = "A window named `main/claude` is added to the tmux session `devc` (which is created with it when the server does not run yet), in the worktree, with `DEVC_SESSION` and `DEVC_WORKTREE` set for this window alone."
+
+[[step]]
+at = "box-tools"
+ref = "internal/tmux.TagWindow"
+text = "The window is tagged with `@devc_session=<sid>`, and `remain-on-exit` and the pane-died hook are set on it, so a user configuration cannot hide the session's end."
+
+[[step]]
+at = "box-tools"
+ref = "internal/tmux.Attach"
+text = "The session command replaces itself with `tmux attach` through a grouped session of its own, destroyed when the client detaches. The user now sees the window."
+
+[[step]]
+section = "The launcher"
+
+[[step]]
+from = "tmux"
+to = "launcher"
+via = "cmd:devc box launch"
+label = "devc box launch claude --"
+external = true
+text = "tmux starts the window's command directly, not through a shell."
+
+[[step]]
+at = "launcher"
+ref = "internal/boxside.ReadLaunch"
+checks = ["internal/boxside.Launch.Validate"]
+text = "The launcher reads and validates the description again: it is the launcher's only source of what to run."
+
+[[step]]
+at = "launcher"
+ref = "internal/boxside.PrepareLaunch"
+checks = ["internal/boxside.notSelf"]
+text = "The session ID from the window is kept. The environment gets the manifest's variables, `PATH` entries, `DEVC_SESSION`, `DEVC_HARNESS` and the launch depth, then the credential: from `/run/devc-secrets`, or asked from the daemon with `secrets.delivery = \"daemon\"`."
+detail = "A launch nested more than 16 deep, or an executable that resolves to devc, is refused. A harness started from inside another harness gets a session of its own."
+
+[[step]]
+at = "launcher"
+ref = "internal/boxside.registerSession"
+text = "`session.start` with the harness, the worktree, the working directory and the launcher's PID is appended to the spool. It is best effort: the harness starts even when the spool cannot be written."
+
+[[step]]
+section = "Only when the manifest asks for OSC 7501 and there is a terminal"
+
+[[step]]
+from = "launcher"
+to = "status-wrapper"
+via = "cmd:devc box pty"
+label = "exec devc box pty --argv0 claude -- <exe> …"
+ref = "internal/boxside.RunLaunch"
+text = "The launcher replaces itself with the status wrapper, so the PID it recorded stays the session's. Without the manifest's `status.osc7501`, without a terminal or with `DEVC_NO_PTY=1`, it execs the harness itself."
+
+[[step]]
+at = "status-wrapper"
+ref = "internal/boxside.RunPTY"
+checks = ["internal/boxside.CheckPTYArgs"]
+text = "The executable must be an absolute path. `DEVC_STATUS=osc` is added to the harness's environment."
+
+[[step]]
+at = "status-wrapper"
+ref = "internal/ptywrap.openPTY"
+text = "A new pseudo-terminal gets the settings and size of the window's terminal; the window's terminal goes into raw mode until the harness ends, whatever happens."
+
+[[step]]
+from = "status-wrapper"
+to = "harness"
+via = "exec"
+label = "start the harness on the new pseudo-terminal"
+ref = "internal/ptywrap.Run"
+text = "The harness runs as the leader of a new session with the pseudo-terminal as its controlling terminal; the wrapper forwards signals and size changes."
+
+[[step]]
+from = "harness"
+to = "status-wrapper"
+via = "stream"
+label = "ESC ] 7501 ; ? BEL"
+external = true
+text = "At start the harness asks whether the terminal speaks the status protocol."
+
+[[step]]
+at = "status-wrapper"
+ref = "internal/ptywrap.Scanner.Feed"
+unchecked = "the harness's output, read from the pseudo-terminal by the wrapper's output goroutine"
+text = "The scanner takes the query out of the output and the wrapper answers it in the harness's input before the rest of the output reaches the window ([[flow:status-scanner]]). From now on the harness's status reports become state events."
+
+[[step]]
+section = "When the harness ends"
+
+[[step]]
+at = "status-wrapper"
+ref = "internal/boxside.ExitWith"
+text = "The wrapper restores the terminal and exits with the harness's status, or by the same signal, so tmux records the harness's own end."
+
+[[step]]
+from = "tmux"
+to = "box-tools"
+via = "cmd:devc box session ended"
+label = "pane-died: devc box session ended --pane … --session …"
+external = true
+text = "The window stays (`remain-on-exit`) and tmux runs the pane-died hook, with every value quoted for the shell."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.SessionEnded"
+checks = ["internal/names.ValidSessionID", "internal/tmux.ValidPaneID"]
+text = "The values are validated, `session.end` with the status or signal is written unless the spool holds one already, and the dead pane is removed."

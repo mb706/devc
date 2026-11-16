@@ -1,3 +1,7 @@
+// This file decides where a box's image comes from and makes it present:
+// an env built from its Containerfile, an env's base image, or a project's
+// image, pulled when missing.
+
 package box
 
 import (

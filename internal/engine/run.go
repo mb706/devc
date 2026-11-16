@@ -1,3 +1,6 @@
+// This file implements throwaway containers (`podman run --rm`): the
+// helper, context and installer containers and other short jobs.
+
 package engine
 
 import (
@@ -41,8 +44,10 @@ type RunOptions struct {
 	CapDropAll bool
 	CapAdd     []string
 	// UserNS is the user-namespace mode (--userns=<value>), "" for the
-	// engine default. The helper container uses the box's mapping
-	// (keep-id:uid=1000,gid=1000) so that in-box UIDs mean the same host IDs.
+	// engine default. Helpers that must see a box's files with the box's
+	// owners (the data and fleet workers) use the box's mapping
+	// (keep-id:uid=1000,gid=1000), so that in-box UIDs mean the same host
+	// IDs; the deletion helper of `devc rm --home` uses the default.
 	UserNS string
 	Mounts []RunMount
 	// Tmpfs lists empty tmpfs mounts (absolute paths).

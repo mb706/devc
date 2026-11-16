@@ -1,0 +1,162 @@
+id = "box-init"
+kind = "flow"
+title = "Box init"
+summary = "Inside a starting box, from the first devc process to an agent that answers: the checks before anything else, the home, the readiness marker the host waits for, then the agent's two sockets, the daemon's connection and a first request from a program in the box."
+concern = "box-init-and-agent"
+trigger = "podman start devc-demo-hello (during devc up)"
+actors = ["cli", "podman", "daemon", "box-agent", "box-tools"]
+
+[[step]]
+section = "Before the box counts as ready"
+
+[[step]]
+from = "podman"
+to = "box-agent"
+via = "cmd:devc box init"
+label = "/opt/devc/bin/devc box init"
+external = true
+text = "Podman starts the container's entrypoint, devc's whatever the image declares, as UID 1000 under Podman's own init."
+
+[[step]]
+at = "box-agent"
+ref = "internal/cli.requireBox"
+checks = ["internal/cli.requireBox"]
+text = "The command runs only inside a box (`DEVC_BOX=1` and `/etc/devc/box.json`). SIGTERM and SIGINT will end it; SIGHUP is ignored."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.ReadInfo"
+text = "`box.json`, rendered by the host into the read-only `/etc/devc`, gives the home's mount points and the network level. If it cannot be read, the level counts as unknown and the next check runs as for level internet."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.NetworkCheck"
+checks = ["internal/netpolicy.CheckBinding", "internal/netpolicy.CheckSentinel"]
+text = "At level internet the binding record must name this box's network namespace, the start of its PID 1 and the boot, and the sentinel must refuse a connection, as the host's rules make it."
+detail = "Other levels need no check. A plain `podman start` of a box of level internet fails here: the record names an earlier start."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Init"
+text = "Init removes a readiness marker an earlier run left, then runs the network check; a failure ends init, and with it the box."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.PrepareHome"
+text = "The dotfiles become symlinks in the home (a real file of the same name wins), a home with nothing but mount points gets a copy of `/etc/skel`, and `~/.local/bin` exists."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.ApplySeeds"
+text = "Each harness's rendered seed files are written into its home: `missing` seeds only where nothing is, `always` seeds every time."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.LinkSkills"
+text = "Shares whose root holds `SKILL.md` are linked into the skill directories of the home; links into shares that are gone are removed. Problems here and in the two steps before are logged, never fatal."
+
+[[step]]
+from = "box-agent"
+to = "cli"
+via = "file"
+label = "/run/devc/ready"
+ref = "internal/boxside.writeReady"
+text = "With the spool directory in place, init writes the readiness marker by rename into the runtime directory, which the host sees as `<runtime>/<box-id>/ready`."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.afterStart"
+unchecked = "the host polls for the file box init writes into the shared runtime directory"
+text = "`devc up` has been polling for the marker; it now runs its own checks and records what the box was started with ([[flow:box-up]])."
+
+[[step]]
+section = "The agent"
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.RunAgent"
+unchecked = "Init starts the agent through the function value in InitOptions.Agent, which the init command fills"
+text = "Only after the marker does init start the agent in a goroutine of its own; a panic in it is logged and init keeps waiting."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.listenSocket"
+text = "The agent removes whatever lies at `/run/devc/agent.sock` (the box owns the directory) and listens there for the host."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.localLoop"
+text = "It also listens on the abstract socket `@devc-agent`, which only processes in the box's network namespace can reach, for at most 32 clients at once."
+
+[[step]]
+section = "The host connects"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.connect"
+text = "The daemon keeps a worker for every running box; the worker connects, checks, says hello and serves the channel until it closes, then connects again."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.DialBoxSocket"
+text = "The socket is opened beneath the box's runtime directory without following symlinks, must be a socket, and is connected."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.acceptHost"
+checks = ["internal/boxside.HostPeer"]
+unchecked = "a connection arriving on the listener the agent opened"
+text = "The agent accepts the connection as the host's only if the kernel reports its peer with PID 0, a process outside the box's PID namespace. It becomes a yamux session; an older host session is closed."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.CheckPeer"
+text = "The daemon checks its peer too: the listening process must belong to the box's container and share the PID namespace of its main process."
+
+[[step]]
+from = "daemon"
+to = "box-agent"
+via = "rpc:box.hello"
+label = "box.hello {protocol, devc version}"
+ref = "internal/daemon.boxWorker.connect"
+text = "On the control stream the daemon asks the box who it is."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.handleHello"
+text = "The agent answers from `box.json`: realm, project, box name, devc version and the channel protocol it speaks."
+
+[[step]]
+from = "box-agent"
+to = "daemon"
+via = "reply"
+label = "HelloReply"
+ref = "internal/boxside.AgentHello"
+text = "The answer goes back on the same stream."
+
+[[step]]
+at = "daemon"
+ref = "internal/proto.HelloReply.Validate"
+text = "The reply is validated strictly and must name this realm and project and the daemon's protocol version; only then is the channel connected ([[flow:box-channel]])."
+
+[[step]]
+section = "A program in the box asks the host"
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.AgentCall"
+text = "A program in the box (here `devc box agent-status`) connects to `@devc-agent` and sends one JSON-RPC request."
+
+[[step]]
+from = "box-tools"
+to = "box-agent"
+via = "stream"
+label = "@devc-agent: host.ping"
+ref = "internal/boxside.AgentCallAt"
+text = "The request is the first line on the connection."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.relay"
+unchecked = "the in-box client's connection, accepted by localLoop"
+text = "The agent reads that line within ten seconds and opens a new stream to the host for it; the bytes go through unparsed in both directions. Without a host the request is answered at once with \"host unavailable\"."

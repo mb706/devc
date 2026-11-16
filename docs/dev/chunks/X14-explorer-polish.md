@@ -10,3 +10,10 @@ Small problems in the tool and the app that the content authors met. This list g
 - The outline (app and `query outline`) drops a doc comment's first line when it starts with "(".
 - With seven actors, the lane titles of a sequence diagram are cut after about nine characters.
 - There is no reference form for a section of `docs/dev/STATUS.md`, where deviations are recorded (check whether `doc:` with a heading anchor already covers it, and document it).
+
+## From X5
+
+- `explorer/README.md` should say how a `cmd:` step connects to a run function written as a function literal.
+- A `reply` step passed the connection check although its code is reached only through a function value: the check is looser than it looks. Decide whether such a connection should be shown as weaker.
+- Two concern pages run to about 1,400 words (`isolation`, `launching-a-harness`); check that long pages still read well, with the side column in view.
+
