@@ -26,6 +26,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/mb706/devc/internal/config"
+	"github.com/mb706/devc/internal/fleet"
 	"github.com/mb706/devc/internal/hubnode"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
@@ -146,6 +147,11 @@ type hubLink struct {
 	roleWant bool
 	roleSent *bool
 	roleCh   chan struct{}
+
+	// uploader keeps this machine's archive on the hub current
+	// (archive.go); archiveWake starts a pass at once.
+	uploader    *fleet.Uploader
+	archiveWake chan struct{}
 }
 
 // start begins connecting (the daemon runs).
@@ -187,13 +193,22 @@ func (m *hubManager) sync(c *config.Config) {
 		}
 		ctx, cancel := context.WithCancel(m.ctx)
 		l := &hubLink{m: m, url: u, stamp: stamp, stop: cancel, done: make(chan struct{}), state: proto.HubConnecting,
-			since: time.Now().UTC(), roleCh: make(chan struct{}, 1)}
+			since: time.Now().UTC(), roleCh: make(chan struct{}, 1), archiveWake: make(chan struct{}, 1)}
+		if old := m.links[u]; old != nil {
+			// The bookkeeping carries over a reconnection with new
+			// credentials (the machine name decides whether it is kept).
+			l.uploader = old.uploader
+		}
+		if l.uploader == nil {
+			l.uploader = m.d.newUploader(u)
+		}
 		m.links[u] = l
 		p := m.p
 		m.d.goSafe("hub "+u, func() {
 			defer close(l.done)
 			l.run(ctx, p)
 		})
+		m.d.goSafe("archive "+u, func() { l.archiveLoop(ctx) })
 	}
 	for u, l := range m.links {
 		if !want[u] {
@@ -250,6 +265,10 @@ func (m *hubManager) status() []proto.HubStatus {
 			st.State, st.Detail, st.Since, st.Machine = l.state, l.detail, &since, l.machine
 			st.Notifier = l.state == proto.HubConnected && l.roleSent != nil && *l.roleSent
 			l.mu.Unlock()
+			if l.uploader != nil {
+				a := l.uploader.Status()
+				st.Archive = &a
+			}
 		}
 		out = append(out, st)
 	}

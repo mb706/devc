@@ -25,6 +25,9 @@ dir = ".codex"
 env = { CODEX_HOME = "/home/dev/.codex" }
 shared = []
 per_box = ["app-server-daemon", "app-server-control", "ipc", "tmp"]
+# The login: Codex rotates its tokens, so a copy on a second machine breaks
+# one of the two. It never enters the hub archive or a state export.
+secret_files = [".codex/auth.json"]
 
 [auth]
 method = "shared-home"

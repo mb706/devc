@@ -20,7 +20,9 @@
 // argument vector from / (rule 3). The daemon dials out to the hubs listed
 // in config.toml (hublink.go); a hub may call only the allowlisted,
 // box-scoped methods of hubMethods, with origin hub, and sees no host
-// paths.
+// paths. Beside each hub link an uploader keeps the hub's archive of the
+// durable state current (archive.go, internal/fleet), reading box-writable
+// harness state only through a helper-container listing and safefs.
 package daemon
 
 import (
@@ -45,6 +47,7 @@ import (
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
+	"github.com/mb706/devc/internal/fleet"
 	"github.com/mb706/devc/internal/flock"
 	"github.com/mb706/devc/internal/github"
 	"github.com/mb706/devc/internal/names"
@@ -131,6 +134,13 @@ type Options struct {
 	// GitHub are the GitHub base URLs (DEVC_GITHUB_API, DEVC_GITHUB_URL;
 	// zero: github.com's), work order C15.
 	GitHub github.Endpoints
+	// ArchiveInterval is the pause between archive passes
+	// (fleet.DefaultInterval); ArchiveScanEvery how often the shared
+	// harness state is listed (fleet.DefaultScanEvery). ArchiveWorkers
+	// replaces the container workers (tests).
+	ArchiveInterval  time.Duration
+	ArchiveScanEvery time.Duration
+	ArchiveWorkers   func(*config.Config, engine.Engine) fleet.Workers
 }
 
 // env is one loaded configuration and what is built from it.
@@ -184,6 +194,10 @@ type Daemon struct {
 	minter   *github.Minter
 	ghReads  *readBudget
 	ghTokens *readBudget
+
+	// scanner lists the shared harness state for the archive uploaders of
+	// all hubs (archive.go).
+	scanner *fleet.HarnessScanner
 }
 
 // boxInfo is what the last box-watch pass saw of a configured project.
@@ -240,6 +254,8 @@ func New(o Options) (*Daemon, error) {
 	def(&o.HelloTimeout, helloTimeout)
 	def(&o.MaxBackoff, maxBackoff)
 	def(&o.TurnBankInterval, DefaultTurnBank)
+	def(&o.ArchiveInterval, fleet.DefaultInterval)
+	def(&o.ArchiveScanEvery, fleet.DefaultScanEvery)
 	if o.ProcDir == "" {
 		o.ProcDir = "/proc"
 	}
@@ -258,6 +274,7 @@ func New(o Options) (*Daemon, error) {
 		procDir: o.ProcDir, runtime: rt, boxes: map[names.ProjectRef]*boxInfo{}, windows: map[names.ProjectRef]map[string]string{},
 		warnings: map[names.ProjectRef]*pendingWarn{}, hub: newHub(o.Log, instance), fetchLimit: newRateLimit(fetchThroughEvery)}
 	d.minter = &github.Minter{}
+	d.scanner = &fleet.HarnessScanner{Every: o.ArchiveScanEvery}
 	d.ghReads = newReadBudget(ghReadsPerMinute)
 	d.ghTokens = newReadBudget(ghTokensPerMinute)
 	d.requests = newRequestService(d)

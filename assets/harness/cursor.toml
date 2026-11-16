@@ -29,6 +29,8 @@ also = [".config/cursor"]
 env = { }
 shared = []
 per_box = []
+# The login (unverified file names): never archived on a hub or exported.
+secret_files = [".config/cursor/auth.json", ".cursor/auth.json"]
 
 [auth]
 # `cursor-agent login` writes ~/.config/cursor/auth.json. The alternative is

@@ -5,9 +5,11 @@
 // inbox, offers a JSON API with server-sent events for a user interface,
 // and sends notifications through ntfy. Its CA issues the client
 // certificates that are the front door for machines and devices, by hand
-// or through single-use enrolment tokens. The hub holds nothing that
-// cannot be rebuilt from the machines, except its registry of certificates
-// and the user's password.
+// or through single-use enrolment tokens. It also keeps the archive of
+// the machines' durable state and their encrypted secrets bundles (work
+// order C17, archive.go). Its view of the sessions can be rebuilt from the
+// machines; its registry of certificates, the user's password and the
+// archive cannot.
 //
 // Security rules: the hub is public-facing and can type into agent
 // sessions. Nothing reaches a route without a client certificate from its
@@ -25,7 +27,9 @@
 // X-Devc-Request: 1 and come from the hub's own origin, and no CORS
 // headers are sent. Secrets never reach the log. Everything a machine sends is decoded strictly
 // and validated before it is stored (events through proto.ValidateData);
-// a machine can only write rows under its own registry name. Over the
+// a machine can only write rows under its own registry name, and only
+// append to the archive below its own registry name (a ratchet with
+// budgets: archive.go). Over the
 // machine link the hub only calls methods; which ones a hub may call, and
 // with what effect, is decided by the daemon (internal/daemon/hublink.go).
 // The CA key never leaves the hub directory (0600 in 0700); the server
@@ -81,7 +85,11 @@ func ValidHost(s string) bool { return len(s) <= 253 && hostRE.MatchString(s) }
 // Init creates the hub directory (0700), the CA, the database and, when
 // publicName is given, the server key, a certificate request and a server
 // certificate for it. It refuses a directory that already has a CA.
-func Init(dir, publicName string) error {
+func Init(dir, publicName string) error { return InitFrom(dir, publicName, "") }
+
+// InitFrom is Init with the CA of another hub directory (caFrom, a second
+// hub of the same fleet: work order C17) instead of a new one.
+func InitFrom(dir, publicName, caFrom string) error {
 	l := Layout{Dir: dir}
 	if _, err := os.Stat(l.CACert()); err == nil {
 		return fmt.Errorf("%s already holds a hub CA", dir)
@@ -97,7 +105,27 @@ func Init(dir, publicName string) error {
 			return err
 		}
 	}
-	if err := createCA(l); err != nil {
+	if caFrom != "" {
+		src := Layout{Dir: caFrom}
+		if _, err := LoadCA(src); err != nil {
+			return fmt.Errorf("reading the CA of %s: %w", caFrom, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(l.CAKey()), 0o700); err != nil {
+			return err
+		}
+		for _, f := range []struct {
+			from, to string
+			mode     os.FileMode
+		}{{src.CAKey(), l.CAKey(), 0o600}, {src.CACert(), l.CACert(), 0o644}} {
+			b, err := os.ReadFile(f.from)
+			if err != nil {
+				return err
+			}
+			if err := writeNew(f.to, b, f.mode); err != nil {
+				return err
+			}
+		}
+	} else if err := createCA(l); err != nil {
 		return err
 	}
 	st, err := OpenStore(l.DB())

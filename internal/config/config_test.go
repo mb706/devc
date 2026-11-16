@@ -356,6 +356,12 @@ func TestBrokenConfigurations(t *testing.T) {
 	}
 	cases := []brokenCase{
 		{"unknown global key", pre("config.toml", "bogus = 1"), "config.toml", "bogus", "unknown key"},
+		// Work order C17: credential files and the archive's sizes.
+		{"secret file outside shared state", set("harness/pi.toml", minimalManifest("pi")+"secret_files = [\".pi/auth.json\"]\n"), "harness/pi.toml", "home.secret_files[0]", "shared state"},
+		{"secret file brackets", set("harness/pi.toml", minimalManifest("pi")+"strategy = \"shared\"\nsecret_files = [\".pi/[ab].json\"]\n"), "harness/pi.toml", "home.secret_files[0]", "brackets"},
+		{"secret file absolute", set("harness/pi.toml", minimalManifest("pi")+"strategy = \"shared\"\nsecret_files = [\"/etc/shadow\"]\n"), "harness/pi.toml", "home.secret_files[0]", "relative"},
+		{"secret file twice", set("harness/pi.toml", minimalManifest("pi")+"strategy = \"shared\"\nsecret_files = [\".pi/a\", \".pi/a\"]\n"), "harness/pi.toml", "home.secret_files[1]", "listed twice"},
+		{"archive file size", add("realms/other/realm.toml", "\n[sync]\nmax_file_size = \"lots\"\n"), "realms/other/realm.toml", "sync.max_file_size", "size"},
 		// Work order C16: shares and the new manifest keys.
 		{"share built in", pre(tools, "shares = [\"dep-source\"]"), tools, "shares[0]", "built in"},
 		{"share name", pre(tools, "shares = [\"Bad Name\"]"), tools, "shares[0]", "share"},
@@ -583,5 +589,25 @@ func TestResolvedShares(t *testing.T) {
 	r, _ = c.Resolved(names.ProjectRef{Realm: "other", Project: "tools"})
 	if len(r.Shares) != 0 {
 		t.Errorf("other/tools shares %v", r.Shares)
+	}
+}
+
+func TestSecretStatePatterns(t *testing.T) {
+	shared := &Harness{Home: HarnessHome{Strategy: "shared", Dir: ".codex", Also: []string{".config/cursor"},
+		SecretFiles: []string{".codex/auth.json", ".config/cursor/*.json", ".elsewhere/x"}}}
+	if got := shared.SecretStatePatterns(); !slices.Equal(got, []string{"home/auth.json", "also/.config/cursor/*.json"}) {
+		t.Errorf("shared: %q", got)
+	}
+	private := &Harness{Home: HarnessHome{Strategy: "private", Dir: ".claude", Shared: []string{"projects"},
+		SecretFiles: []string{".claude/projects/creds", ".claude/settings.json"}}}
+	if got := private.SecretStatePatterns(); !slices.Equal(got, []string{"projects/creds"}) {
+		t.Errorf("private: %q", got)
+	}
+	c, _ := load(t, copyExample(t))
+	for id, want := range map[string]string{"codex": "home/auth.json", "pi": "home/auth.json"} {
+		m, ok := c.Harness(id)
+		if !ok || !slices.Contains(m.SecretStatePatterns(), want) {
+			t.Errorf("built-in %s: %v", id, m.SecretStatePatterns())
+		}
 	}
 }

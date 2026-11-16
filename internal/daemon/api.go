@@ -46,7 +46,8 @@ func (d *Daemon) handlers() map[string]proto.Handler {
 		// Decisions on this socket come from this machine: origin local.
 		proto.MethodRequestsDecide: d.decideHandler(proto.OriginLocal),
 
-		proto.MethodHubsStatus: d.apiHubs,
+		proto.MethodHubsStatus:    d.apiHubs,
+		proto.MethodArchiveStatus: d.apiArchiveStatus,
 
 		proto.MethodNetSync: d.apiNetSync,
 

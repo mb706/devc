@@ -28,6 +28,9 @@ dir = ".pi/agent"
 env = { PI_CODING_AGENT_DIR = "/home/dev/.pi/agent" }
 shared = []
 per_box = []
+# Provider logins (OAuth tokens that rotate) stay on this machine: never
+# archived on a hub or exported.
+secret_files = [".pi/agent/auth.json"]
 
 [auth]
 method = "shared-home"         # `pi auth login` writes auth.json into the shared agent directory

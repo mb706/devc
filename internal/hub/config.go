@@ -23,6 +23,28 @@ type Config struct {
 	PublicURL string         `toml:"public_url"`
 	Ntfy      *NtfyConfig    `toml:"ntfy"`
 	Terminal  TerminalConfig `toml:"terminal"`
+	Archive   ArchiveConfig  `toml:"archive"`
+}
+
+// ArchiveConfig bounds what machines may store in the archive (work order
+// C17): sizes as "50g", "8m" (units b, k, m, g). Empty values take the
+// defaults of DefaultArchiveLimits.
+type ArchiveConfig struct {
+	// MachineQuota bounds a machine's whole archive, RealmQuota its archive
+	// of one realm, MaxFiles the files (and bundles) it may hold.
+	MachineQuota string `toml:"machine_quota"`
+	RealmQuota   string `toml:"realm_quota"`
+	MaxFiles     int    `toml:"max_files"`
+	// MaxRequest bounds one upload request.
+	MaxRequest string `toml:"max_request"`
+	// MaxUploads uploads may run at once on the hub, MachineUploads per
+	// machine; MaxDownloads reads of archived files.
+	MaxUploads     int `toml:"max_uploads"`
+	MachineUploads int `toml:"machine_uploads"`
+	MaxDownloads   int `toml:"max_downloads"`
+	// MinFree is the free space the archive always leaves on the hub's
+	// file system.
+	MinFree string `toml:"min_free"`
 }
 
 // TerminalConfig governs the web app's terminal (work order C12): with
@@ -79,6 +101,9 @@ func (c *Config) validate() error {
 			return fmt.Errorf("public_url %q must be scheme://host[:port], without a path", c.PublicURL)
 		}
 		c.PublicURL = u.Scheme + "://" + u.Host
+	}
+	if _, err := c.Archive.Limits(); err != nil {
+		return err
 	}
 	if n := c.Ntfy; n != nil {
 		u, err := url.Parse(n.URL)

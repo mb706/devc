@@ -537,7 +537,7 @@ func newSecretCmd(a *app) *cobra.Command {
 			return secrets.NewFileStore(c.Paths).Delete(args[0], args[1])
 		},
 	}
-	return group("secret", "Manage per-realm secrets", false, set, ls, rm)
+	return group("secret", "Manage per-realm secrets", false, append([]*cobra.Command{set, ls, rm}, newSecretFleetCmds(a)...)...)
 }
 
 func (a *app) loginRunner(e *toolEnv) *harness.LoginRunner {

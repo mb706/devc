@@ -415,7 +415,8 @@ func TestRateLimit(t *testing.T) {
 
 // samplePath fills a route pattern's wildcards.
 func samplePath(pattern string) string {
-	r := strings.NewReplacer("{token}", strings.Repeat("A", 43), "{machine}", "m1", "{session}", "s0000000000000000000a", "{id}", "123e4567-e89b-12d3-a456-426614174000")
+	r := strings.NewReplacer("{token}", strings.Repeat("A", 43), "{machine}", "m1", "{session}", "s0000000000000000000a", "{id}", "123e4567-e89b-12d3-a456-426614174000",
+		"{realm}", "demo", "{path...}", "files/journal/demo/s0000000000000000000a.jsonl")
 	return r.Replace(pattern)
 }
 
@@ -441,11 +442,20 @@ func TestEveryRouteNeedsACertificate(t *testing.T) {
 		if strings.HasPrefix(rt.path, "/api/") && rt.access != accessUser && rt.path != "/api/login" && rt.path != actPath {
 			t.Errorf("API route %s %s does not need a login session", rt.method, rt.path)
 		}
+		// The machine link and the archive (C17) need a machine certificate,
+		// and uploads the request header.
+		if strings.HasPrefix(rt.path, "/machine") != (rt.access == accessMachine) {
+			t.Errorf("route %s %s: machine paths and the machine access class must go together", rt.method, rt.path)
+		}
+		if rt.access == accessMachine && rt.method != "GET" && rt.xsite != xsiteToken {
+			t.Errorf("machine route %s %s changes state without the request header", rt.method, rt.path)
+		}
 	}
 	if enrols != 2 {
 		t.Errorf("%d enrolment routes", enrols)
 	}
-	extra := []string{"/", "/api/", "/api/nothing", "/enroll/", "/enroll/x/../../api/inbox", "/enroll/" + strings.Repeat("A", 43) + "/x", "/machine/", "/index.html"}
+	extra := []string{"/", "/api/", "/api/nothing", "/enroll/", "/enroll/x/../../api/inbox", "/enroll/" + strings.Repeat("A", 43) + "/x", "/machine/", "/index.html",
+		"/machine/archive/demo/files/gate-log.jsonl?offset=0", "/machine/archive-index", "/machine/secrets/demo", "/enroll/x/../../machine/archive-index"}
 	for _, mode := range []string{"proxy", "direct"} {
 		h := newTestHub(t, "hub.test")
 		dev := h.issue(RoleDevice, "phone")
@@ -496,7 +506,7 @@ func TestEveryRouteNeedsACertificate(t *testing.T) {
 				}
 			}
 			for _, path := range extra {
-				for _, method := range []string{"GET", "POST"} {
+				for _, method := range []string{"GET", "POST", "PUT"} {
 					reached = nil
 					p.lim = newLimiter()
 					if w := send(method, path); w.Code != 404 || len(reached) != 0 || w.Header().Get("Connection") != "close" {

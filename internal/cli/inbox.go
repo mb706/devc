@@ -302,6 +302,26 @@ func newBoxCmd(a *app) *cobra.Command {
 		},
 	}
 
+	// archive-worker runs in the helper container with a realm's shared
+	// harness state at /target: it lists or packs what the archive may
+	// carry (work order C17). The request comes on stdin as JSON.
+	archiveWorker := &cobra.Command{
+		Use:    "archive-worker",
+		Short:  "List or pack shared harness state for the archive (helper container only)",
+		Args:   noArgs,
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := boxside.RequireHelper(a.getenv, "/"); err != nil {
+				return err
+			}
+			req, err := boxside.ReadArchiveRequest(cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
+			return (&boxside.ArchiveWorker{Root: boxside.HelperTarget, Out: a.stdout}).Run(req)
+		},
+	}
+
 	agentStatus := &cobra.Command{
 		Use:   "agent-status",
 		Short: "Say whether the host's daemon is connected to this box",
@@ -328,7 +348,7 @@ func newBoxCmd(a *app) *cobra.Command {
 	}
 
 	subs := []*cobra.Command{initCmd, fixIdentity, shell, selftest, probe, launch, hook, pty, agentStatus, newBoxSecretCmd(a), newBoxGitCredentialCmd(a),
-		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker, dataWorker, newBoxDialCmd(a), newBoxCanaryCmd(a), newStatxWorkerCmd(a), newBoxGateConnectCmd(a)}
+		newBoxSessionCmd(a), newContextWorkerCmd(a), rmWorker, dataWorker, archiveWorker, newBoxDialCmd(a), newBoxCanaryCmd(a), newStatxWorkerCmd(a), newBoxGateConnectCmd(a)}
 	return group("box", "Commands that run inside a box (internal)", true, append(subs, newBoxGitCmds(a)...)...)
 }
 
@@ -495,7 +515,29 @@ func newContextWorkerCmd(a *app) *cobra.Command {
 		},
 	}
 	log.Flags().IntVarP(&n, "number", "n", 20, "number of commits")
-	c := group("context-worker", "Context repository operations (context container only)", true, commit, diff, log)
+	// bundle and restore exchange files with the host through
+	// boxside.ContextIOMount (work order C17).
+	bundle := &cobra.Command{
+		Use: "bundle", Short: "Bundle the objects the host's archive lacks", Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			w, err := worker()
+			if err != nil {
+				return err
+			}
+			return w.Bundle(boxside.ContextIOMount)
+		},
+	}
+	restore := &cobra.Command{
+		Use: "restore", Short: "Fetch bundles and create the refs that are missing", Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			w, err := worker()
+			if err != nil {
+				return err
+			}
+			return w.Restore(boxside.ContextIOMount)
+		},
+	}
+	c := group("context-worker", "Context repository operations (context container only)", true, commit, diff, log, bundle, restore)
 	return c
 }
 

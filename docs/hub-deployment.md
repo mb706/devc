@@ -20,9 +20,12 @@ has two locks:
   was created with; the same cookie with another certificate is refused.
 
 The hub keeps its state in its own directory, `$DEVC_HUB_DIR` (default
-`~/.local/share/devc-hub`), never mixed with a machine's state. It holds
-nothing that cannot be rebuilt from the machines, except its CA, its registry
-of certificates and the password: back up `ca/`, `hub.db` and `hub.toml`.
+`~/.local/share/devc-hub`), never mixed with a machine's state. Its view of
+the sessions can be rebuilt from the machines; its CA, its registry of
+certificates, the password, and the archive of the machines' durable state
+(`archive/`, section 10) and their encrypted secrets (`secrets/`) cannot:
+back up `ca/`, `hub.db`, `hub.toml`, `archive/` and `secrets/`, or run a
+second hub (section 11).
 
 ## 1. Create the hub and set the password
 
@@ -430,6 +433,8 @@ type into online sessions, but cannot leave the boxes.
 
 ## 9. The API
 
+(The machine endpoints of the archive are in section 10.)
+
 JSON over HTTPS for device certificates (`machine` certificates may only use
 `/machine`). Every endpoint but `POST /api/login` and `POST /api/act`
 needs a login session bound to the request's certificate (401 with
@@ -518,3 +523,113 @@ curl $C -H 'Content-Type: application/json' -H 'X-Devc-Request: 1' -H 'Origin: h
      -d '{"password":"…"}' https://hub.example.org/api/login
 curl $C https://hub.example.org/api/inbox
 ```
+
+## 10. The archive of durable state
+
+Every machine uploads its realms' durable state to every hub it joined
+(realms with `[sync] hub = false` excepted): journals and logs as they grow,
+relays and context repositories as git bundles with a log of their refs, and
+the shared harness state without credential files. Secrets never; they come
+only as encrypted bundles (below). Machines use plain HTTPS requests with
+their certificate for this, beside the machine link:
+
+| Request | |
+|---|---|
+| `PUT /machine/archive/<realm>/<path>?offset=<n>[&final=1]` | append to the machine's own archive |
+| `GET /machine/archive-index` | every machine's archives (machine, realm, files, bytes) |
+| `GET /machine/archive-index/<machine>/<realm>` | one archive's files, bundles and ref logs with lengths |
+| `GET /machine/archive-file/<machine>/<realm>/<path>[?sha256=<n>]` | a stored file (ranges supported), or the SHA-256 of its first n bytes |
+| `PUT /machine/secrets/<realm>` | store an encrypted secrets bundle |
+| `GET /machine/secrets/<realm>[?machine=<m>]` | the newest bundle (of one machine) |
+
+Uploads need `X-Devc-Request: 1`. The archive is a ratchet:
+
+- A machine writes only below `archive/<its registry name>/<realm>/`; the name
+  comes from its certificate, never from the request. Paths are validated
+  (`files/<path>` for the kinds of durable state the archive carries,
+  `bundles/relay/<project>/…` and `bundles/context/…`), nothing outside
+  that tree can be named.
+- An upload appends at `offset`, which must equal the stored length, or the
+  hub answers 409 with the stored length and the machine resumes from
+  there. Nothing is ever overwritten, truncated or deleted by a machine.
+- Bundles are stored in sequence: bundle n is accepted only after bundle
+  n-1 is complete, is kept as `<name>.part` until the machine says it is
+  final, and then becomes visible without replacing anything.
+
+Budgets (`[archive]` in `hub.toml`; defaults shown):
+
+```toml
+[archive]
+machine_quota = "50g"     # one machine's whole archive
+realm_quota = "20g"       # one machine's archive of one realm
+max_files = 200000        # files and bundles per machine
+max_request = "8m"        # one upload request (64k to 64m)
+max_uploads = 8           # uploads in progress on the hub
+machine_uploads = 2       # uploads in progress per machine
+max_downloads = 8         # downloads in progress on the hub
+min_free = "2g"           # free space always left on the hub's file system
+```
+
+A reached quota is answered with 507 and a message saying which quota and
+what to do; the machine shows it in `devc sync status` and `devc hub
+status` and pauses its uploads to that hub for ten minutes at a time. Too
+many uploads at once get 429. On the hub:
+
+```sh
+devc hub archive ls                         # machines and realms, files, size, last write
+devc hub archive du                         # per machine against its quota
+devc hub archive prune --machine old-laptop --before 2026-01-01 [--dry-run] [--yes]
+```
+
+`prune` is the only way anything leaves the archive: it deletes a machine's
+files last written before the date, and the bundles and ref log of a
+repository whose newest bundle and ref log are older (a bundle is useless
+without those before it). A running hub notices and counts the usage again.
+
+**Exposure.** Every enrolled machine can read every machine's archive (a new
+machine restores a lost one's state with `devc state pull <realm> --from
+<hub> --machine <name>`). The hub is therefore a place where every
+enrolled machine, and whoever controls the hub, can read all archived realm
+state: transcripts, journals, code in the relays, notes and memory. Secrets
+are the exception: `devc secret push` encrypts them on the machine with a
+key derived from a passphrase (argon2id, XChaCha20-Poly1305) and the hub
+keeps only that ciphertext, the last ten versions per machine and realm.
+
+## 11. A second hub
+
+A machine may list several hubs; each builds its own view, keeps its own
+archive (uploads go to each hub independently), and the first connected hub
+in the machine's list sends notifications. To run a second hub for the same
+fleet:
+
+```sh
+# on the second server, with a copy of the first hub's ca/ directory in /tmp/hub1
+devc hub init --public-name hub2.example.org --ca-from /tmp/hub1   # the same CA, its own database
+devc hub user set-password
+devc hub ca import phone.crt          # register certificates issued by the first hub,
+devc hub ca import laptop.crt         # or enrol machines and devices here anew
+devc hub serve --listen …             # as in section 3
+```
+
+- **Same CA files.** With the first hub's `ca.crt` and `ca.key`, both hubs
+  trust the same certificates and machines use the same `--ca` file for
+  both. Each hub has its own registry, though: register a certificate with
+  `devc hub ca import <cert>` (it must have been issued by this CA), or enrol
+  it on the second hub with a token. Revoke on both.
+- **Its own database** (`hub.db`) and its own password; nothing is
+  replicated between hubs.
+- **Optionally its own ntfy** (`[ntfy]` in its `hub.toml`): only the hub that
+  is a machine's notifier publishes for it. When the first hub is
+  unreachable, the machine makes the next connected hub its notifier and
+  hands the role back when the first returns.
+
+On each machine, join the second hub as well; with the same CA the machine's
+existing certificate works once it is registered there:
+
+```sh
+devc join https://hub2.example.org --cert <state>/durable/node/hubs/<id>/cert.pem \
+    --key <state>/durable/node/hubs/<id>/key.pem --ca ca.crt
+devc hub status        # both hubs: connected, which one notifies, the archive on each
+devc sync status       # what each hub's archive still lacks
+```
+

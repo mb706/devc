@@ -71,7 +71,7 @@ func parseLevel(s string) (slog.Level, error) {
 
 func newDaemonCmd(a *app) *cobra.Command {
 	var level string
-	var housekeeping, reconcile time.Duration
+	var housekeeping, reconcile, archiveInterval, archiveScan time.Duration
 	var testResolve, testExempt []string
 	var routerListen string
 	cmd := &cobra.Command{
@@ -150,6 +150,8 @@ func newDaemonCmd(a *app) *cobra.Command {
 				ProxyExempt:          exempt,
 				RouterListen:         routerListen,
 				GitHub:               ghEndpoints,
+				ArchiveInterval:      archiveInterval,
+				ArchiveScanEvery:     archiveScan,
 			})
 			if err != nil {
 				return err
@@ -162,6 +164,10 @@ func newDaemonCmd(a *app) *cobra.Command {
 	cmd.Flags().StringVar(&level, "log-level", "info", "debug, info, warn or error")
 	cmd.Flags().DurationVar(&housekeeping, "housekeeping-interval", 0, "interval of bank and context commit (tests)")
 	cmd.Flags().DurationVar(&reconcile, "reconcile-interval", 0, "interval of session reconciliation (tests)")
+	cmd.Flags().DurationVar(&archiveInterval, "archive-interval", 0, "pause between archive passes (tests)")
+	cmd.Flags().DurationVar(&archiveScan, "archive-scan", 0, "interval of listing the shared harness state for the archive (tests)")
+	_ = cmd.Flags().MarkHidden("archive-interval")
+	_ = cmd.Flags().MarkHidden("archive-scan")
 	_ = cmd.Flags().MarkHidden("housekeeping-interval")
 	_ = cmd.Flags().MarkHidden("reconcile-interval")
 	// Tests of the allowlist proxy reach a local server without the

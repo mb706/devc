@@ -16,10 +16,21 @@ type Global struct {
 	Hubs         []Hub          `toml:"hubs" json:"hubs"`
 	Terminal     GlobalTerminal `toml:"terminal" json:"terminal"`
 	Router       GlobalRouter   `toml:"router" json:"router"`
+	Sync         GlobalSync     `toml:"sync" json:"sync"`
 	// MachineName names this machine in the data manifest (work order
 	// C14); empty means the host name.
 	MachineName string `toml:"machine_name" json:"machine_name"`
 }
+
+// GlobalSync governs the archive of durable state on the hubs (work
+// order C17): UploadRate bounds the bytes per second the daemon sends to
+// each hub (a size such as "4m").
+type GlobalSync struct {
+	UploadRate string `toml:"upload_rate" json:"upload_rate"`
+}
+
+// DefaultUploadRate is the default of [sync] upload_rate in config.toml.
+const DefaultUploadRate = "4m"
 
 // GlobalRouter is the daemon's router for local URLs (work order C13):
 // http://<port>.<project>.<realm>.localhost:<port of Listen> reaches a
@@ -97,6 +108,7 @@ func defaultGlobal() Global {
 		SELinux:      GlobalSELinux{Mode: SELinuxLabels},
 		Secrets:      GlobalSecrets{Delivery: DeliveryFiles},
 		Router:       GlobalRouter{Listen: DefaultRouterListen},
+		Sync:         GlobalSync{UploadRate: DefaultUploadRate},
 	}
 }
 
@@ -163,14 +175,22 @@ type HarnessOverride struct {
 	Secret string `toml:"secret" json:"secret,omitempty"`
 }
 
+// RealmSync is [sync] of a realm: with Hub the realm's durable state is
+// archived on every hub the machine joined (work order C17); MaxFileSize
+// caps each file of the box-writable harness state the archive reads
+// (larger files are skipped and counted).
 type RealmSync struct {
-	Hub bool `toml:"hub" json:"hub"`
+	Hub         bool   `toml:"hub" json:"hub"`
+	MaxFileSize string `toml:"max_file_size" json:"max_file_size"`
 }
+
+// DefaultMaxArchiveFile is the default of [sync] max_file_size.
+const DefaultMaxArchiveFile = "256m"
 
 func defaultRealm() Realm {
 	return Realm{
 		Network: RealmNetwork{Default: "internet"},
-		Sync:    RealmSync{Hub: true},
+		Sync:    RealmSync{Hub: true, MaxFileSize: DefaultMaxArchiveFile},
 	}
 }
 
@@ -392,6 +412,12 @@ type HarnessHome struct {
 	Shared []string          `toml:"shared" json:"shared"`
 	PerBox []string          `toml:"per_box" json:"per_box"`
 	Seed   []HarnessSeed     `toml:"seed" json:"seed"`
+	// SecretFiles lists the credential files in the harness's shared state,
+	// relative to /home/dev (path.Match patterns per component; a
+	// directory covers everything below it). They never enter the hub
+	// archive or a state export (work order C17): harnesses that rotate
+	// their tokens break when two machines use one login.
+	SecretFiles []string `toml:"secret_files" json:"secret_files,omitempty"`
 }
 
 type HarnessSeed struct {

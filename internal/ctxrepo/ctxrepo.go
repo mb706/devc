@@ -15,16 +15,21 @@
 package ctxrepo
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/boxside"
+	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/flock"
@@ -55,6 +60,11 @@ type Repo struct {
 const workerTimeout = 10 * time.Minute
 
 func (r *Repo) run(ctx context.Context, realm string, args ...string) (execx.Result, error) {
+	return r.runWith(ctx, realm, nil, args...)
+}
+
+// runWith runs the worker with extra mounts.
+func (r *Repo) runWith(ctx context.Context, realm string, extra []engine.RunMount, args ...string) (execx.Result, error) {
 	if !names.ValidRealm(realm) {
 		return execx.Result{}, fmt.Errorf("invalid realm name %q", realm)
 	}
@@ -85,10 +95,10 @@ func (r *Repo) run(ctx context.Context, realm string, args ...string) (execx.Res
 		Network:      "none",
 		SecurityOpts: r.SecurityOpts,
 		CapDropAll:   true,
-		Mounts: []engine.RunMount{
+		Mounts: append([]engine.RunMount{
 			{Source: dir, Target: boxside.ContextMount},
 			{Source: r.Toolbox.Dir, Target: paths.InBoxTools, ReadOnly: true},
-		},
+		}, extra...),
 		// As for the installers: the directories above devc's mounts are
 		// tmpfs, not image-layer directories.
 		Tmpfs:   toolbox.InstallerTmpfs,
@@ -167,4 +177,122 @@ func lastLines(s string, n int) string {
 		ls = ls[len(ls)-n:]
 	}
 	return strings.Join(ls, "\n")
+}
+
+// New returns the context repository runner of a configuration: the
+// toolbox of its state directory, the auxiliary containers' security
+// options (label=disable on SELinux hosts only with selinux.mode
+// "disable"), the installer image's build context in the cache.
+func New(c *config.Config, eng engine.Engine, exe, version string, out io.Writer) *Repo {
+	tb := toolbox.New(c.Paths.ToolboxDir())
+	disable := false
+	if _, err := os.Stat("/sys/fs/selinux/enforce"); err == nil {
+		disable = c.Global.SELinux.Mode == config.SELinuxDisable
+	}
+	return &Repo{
+		Paths: c.Paths, Engine: eng, Toolbox: tb, Executable: exe, Version: version,
+		SecurityOpts: tb.AuxSecurityOpts(disable),
+		ImageContext: filepath.Join(c.Paths.CacheDir(), "aux", "installer"), Out: out,
+	}
+}
+
+// maxBundleResult caps the worker's JSON answers.
+const maxBundleResult = 4 << 20
+
+// BundleResult is a bundle of the context repository: its refs now and,
+// when there were new objects, the bundle file in the exchange directory.
+type BundleResult struct {
+	Refs map[string]string
+	// File is the bundle (in the directory given to Bundle), "" when
+	// nothing was new.
+	File string
+}
+
+// Bundle bundles the objects of the realm's context repository that the
+// commits in excludes do not reach (all of them without excludes). dir is
+// a new, empty host directory of the caller's; the worker writes the
+// bundle there, and it is checked to be a regular file (not a link) before
+// it is handed back.
+func (r *Repo) Bundle(ctx context.Context, realm string, excludes []string, dir string) (*BundleResult, error) {
+	var b strings.Builder
+	for _, e := range excludes {
+		if boxside.ValidOID(e) {
+			b.WriteString(e + "\n")
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, boxside.ContextExcludesFile), []byte(b.String()), 0o600); err != nil {
+		return nil, err
+	}
+	res, err := r.runWith(ctx, realm, []engine.RunMount{{Source: dir, Target: boxside.ContextIOMount}}, "bundle")
+	if err != nil {
+		return nil, err
+	}
+	var out boxside.ContextBundleResult
+	if err := decodeStrict(res.Stdout, &out); err != nil {
+		return nil, fmt.Errorf("the context worker's bundle report is invalid: %w", err)
+	}
+	refs := map[string]string{}
+	for k, v := range out.Refs {
+		if !boxside.ValidContextRef(k) || !boxside.ValidOID(v) {
+			return nil, fmt.Errorf("the context worker reported an invalid ref %q", proto.Printable(proto.Truncate(k, 100)))
+		}
+		refs[k] = v
+	}
+	br := &BundleResult{Refs: refs}
+	if out.Bundle {
+		p := filepath.Join(dir, boxside.ContextBundleFile)
+		fi, err := os.Lstat(p)
+		if err != nil || !fi.Mode().IsRegular() {
+			return nil, errors.New("the context worker wrote no regular bundle file")
+		}
+		br.File = p
+	}
+	return br, nil
+}
+
+// RestoreResult reports a restore of the context repository.
+type RestoreResult = boxside.ContextRestoreResult
+
+// Restore fetches the bundles in dir (named <seq>.bundle, applied in
+// order) into the realm's context repository and creates the refs of
+// refs that are missing; see boxside.ContextWorker.Restore. dir is a host
+// directory of the caller's, mounted read-only.
+func (r *Repo) Restore(ctx context.Context, realm string, refs map[string]string, dir string) (*RestoreResult, error) {
+	b, err := json.Marshal(refs)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, boxside.ContextRefsFile), b, 0o600); err != nil {
+		return nil, err
+	}
+	res, err := r.runWith(ctx, realm, []engine.RunMount{{Source: dir, Target: boxside.ContextIOMount, ReadOnly: true}}, "restore")
+	if err != nil {
+		return nil, err
+	}
+	var out RestoreResult
+	if err := decodeStrict(res.Stdout, &out); err != nil {
+		return nil, fmt.Errorf("the context worker's restore report is invalid: %w", err)
+	}
+	for i := range out.Conflicts {
+		out.Conflicts[i] = proto.Printable(proto.Truncate(out.Conflicts[i], 300))
+	}
+	for i := range out.Skipped {
+		out.Skipped[i] = proto.Printable(proto.Truncate(out.Skipped[i], 300))
+	}
+	return &out, nil
+}
+
+func decodeStrict(b []byte, v any) error {
+	if len(b) > maxBundleResult {
+		return errors.New("too large")
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("data after the report")
+	}
+	return nil
 }

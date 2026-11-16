@@ -62,9 +62,8 @@ prints a project's settings with all defaults applied. A command that would
 create or start a box refuses while that project's configuration has a
 problem.
 
-Some keys are accepted for features that are not available yet and have no
-effect: `[sync]`. `build_from_repo` and
-`capabilities.nested` are refused with a message.
+`build_from_repo` and `capabilities.nested` are accepted for features that
+are not available yet and are refused with a message.
 
 State lives in `~/.local/share/devc` (`--state-dir`, `DEVC_STATE_DIR` or
 `state_dir`): `durable/` holds what is worth backing up (relays, journals,
@@ -299,6 +298,70 @@ your phone through ntfy. A hub can read the sessions' events, type into sessions
 and stop them, and decide low-risk requests; it cannot stop the daemon, run
 anything on the host, change the configuration, or approve high-risk
 requests.
+
+### The archive on the hubs
+
+Every hub a machine joined also keeps an archive of the machine's durable
+state, so a machine can be wiped or replaced and its work brought back.
+For every realm with `[sync] hub = true` (the default; `false` keeps a realm
+off the hubs) the daemon uploads, in the background and rate-limited
+(`[sync] upload_rate` in `config.toml`, default 4 MiB/s per hub), what each
+hub lacks:
+
+- session journals, request, network and gate logs and the savepoint index,
+  as they grow (a log that was compacted or rotated is uploaded again as a
+  new generation; the old one stays);
+- relays and the context repository as git bundles of new objects, with a
+  log of their refs;
+- the shared harness state (transcripts, shared homes) except credential
+  files. It is box-writable, so the daemon reads it with the same care as
+  everything else a box writes: links, FIFOs and other special files, names
+  outside a plain character set and files above `[sync] max_file_size`
+  (realm, default 256 MiB) are left out and counted.
+
+Secrets never travel in the archive. A hub only ever adds: a machine can
+append to its own archive and read every machine's, never change or delete
+anything (the hub's owner prunes, on the hub). Uploads use their own
+connections and never hold up events or commands.
+
+```sh
+devc sync status [--now]          # per hub and realm: what is behind, what was left out, the last error
+devc state pull work --from https://hub.example.org --list
+devc state pull work --from https://hub.example.org [--machine old-laptop] [--merge]
+```
+
+`devc state pull` restores one machine's archive of a realm (by default this
+machine's own, by the name the hub knows it by) into the local durable
+state: journals and logs, relays and the context repository rebuilt from
+their bundles, the shared harness state. It refuses a realm that has
+durable state already, unless `--merge`, which adds only the files and refs
+that are missing (a ref that exists with another value is reported and
+kept). Sessions restored this way appear among this machine's sessions. A
+hub that reports a full quota says so in `devc sync status` and
+`devc hub status`; uploads to it pause for ten minutes at a time until it
+has room.
+
+Every enrolled machine can read every machine's archive on a hub, so the
+hub holds all archived realm state of the fleet: treat it like the
+machines themselves.
+
+### Secrets on another machine
+
+```sh
+devc secret push work --to https://hub.example.org      # asks for a passphrase twice
+devc secret pull work --from https://hub.example.org [--machine laptop] [--overwrite]
+```
+
+`push` encrypts every secret of the realm on this machine with a key derived
+from a passphrase (argon2id, XChaCha20-Poly1305) and stores the result on
+the hub, which keeps the last ten versions of each machine and can read
+none of them. `pull` fetches the newest one (of one machine with
+`--machine`), asks for the passphrase and stores the secrets that are
+missing; existing ones with another value are kept unless `--overwrite`.
+The passphrase comes from a hidden prompt, or one line on stdin when stdin
+is not a terminal; it is never an argument. Harness logins of `shared-home`
+harnesses are not secrets in this sense and are never carried: log in on
+each machine.
 
 ### The web app
 
@@ -1012,6 +1075,15 @@ documentation; none has been tried against a real account, see
   fragile when shared. devc's managed configuration in `/etc/opencode`
   names the instructions file.
 
+A manifest names the credential files in its shared state with
+`home.secret_files` (paths below `/home/dev`, `*` and `?` allowed; a
+directory covers everything below it): Codex's `~/.codex/auth.json`, pi's
+`~/.pi/agent/auth.json` and Cursor's login. They never enter the hub
+archive or a state export and are never restored (see "Backups"). These
+harnesses rotate their tokens, so a login copied to a second machine breaks
+on one of the two: log in once per machine and realm. Claude Code's token
+does not rotate; it is a realm secret, which `devc secret push` carries.
+
 A manifest can ask for toolbox components with `install.needs = ["node"]`,
 keep state in several home directories (`home.also`), and pass extra
 arguments when a structured input adapter is chosen (`input.args`). pi's
@@ -1148,6 +1220,36 @@ The files are box-written: keep Emacs from applying `.dir-locals.el` and
 file-local variables without asking (`enable-local-variables` set to `:safe`
 or `nil`).
 
+## Backups
+
+A realm's durable state is `durable/realms/<realm>/` in the state directory:
+append-only journals and logs, git repositories (relays and the context
+repository), the shared harness state and the realm's secrets. Three ways
+to keep it safe, which can be combined:
+
+1. **Point your backup tool at the state directory** (or just `durable/`).
+   A filesystem snapshot is consistent, and so is a plain copy: the files
+   are append-only or git, so the worst a copy taken while devc writes can
+   hold is a partial last line or an unreferenced object. This is the only
+   option that includes the secrets (as 0600 files: encrypt the backup).
+2. **`devc state export <realm> [--out file.tar]`** writes one tar file for
+   any backup tool: journals and logs as they are, relays and the context
+   repository (committed first) as full git bundles, the shared harness
+   state without credential files, never secrets. `devc state import
+   <file> [--realm <realm>]` restores it into a realm without durable state
+   (a fresh machine, or after `rm -rf` of the realm's durable directory).
+   Carry secrets separately (`devc secret push`, or your password manager).
+3. **The hub archive**, for machines treated as disposable: with one or two
+   hubs joined, everything above except secrets is mirrored as it grows,
+   and `devc state pull` brings it back on a new machine
+   (`devc secret pull` the secrets). Logins of `shared-home` harnesses are
+   repeated with `devc login`.
+
+Box homes, caches, savepoint repositories and the toolbox are not durable
+state; project directories (your work tree and data zones) are backed up
+like any other directory, or through the relay (banked commits) and
+`devc data push`.
+
 ## What is protected and what is not
 
 A box is a container on your kernel. devc makes it a hardened one and keeps
@@ -1175,6 +1277,11 @@ everything that matters outside it, but it is not a virtual machine.
   to a process of that box; what arrives on it is bounded and checked.
 - Banked commits, sealed data, session journals and notes commits are kept
   where the box cannot change them.
+- The hub archive is append-only for machines: what a box writes into
+  shared harness state reaches it only as regular files read without
+  following links, credential files never, and no machine can overwrite or
+  delete what is archived. Secrets reach a hub only encrypted with your
+  passphrase.
 - Your GitHub credential stays on the host: `devc gh` reads through the
   daemon with requests it builds itself (GET only, the project's repositories
   only), and pull requests and comments a box asks for wait for your

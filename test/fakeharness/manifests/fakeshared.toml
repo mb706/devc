@@ -16,6 +16,7 @@ strategy = "shared"
 dir = ".fakeshared"
 env = { FAKEAGENT_DIR = "/home/dev/.fakeshared" }
 per_box = ["perbox"]
+secret_files = [".fakeshared/auth.json"]
 
 [auth]
 method = "shared-home"

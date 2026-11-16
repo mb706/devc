@@ -36,13 +36,14 @@ func (a *app) hubDir(flag string) (string, error) {
 func newHubCmd(a *app) *cobra.Command {
 	var dirFlag string
 
-	var publicName string
+	var publicName, caFrom string
 	initCmd := &cobra.Command{
-		Use:   "init [--public-name host[:port]]",
+		Use:   "init [--public-name host[:port]] [--ca-from <hub dir>]",
 		Short: "Create the hub directory, its CA and database",
 		Long: "Create the hub directory ($DEVC_HUB_DIR, default ~/.local/share/devc-hub) with a private CA (ECDSA P-256, " +
 			"ten years) and the database. With --public-name it also writes the server key, a certificate request for a " +
-			"public CA (server/server.csr) and a server certificate from the devc CA (server/server.crt) for that name.",
+			"public CA (server/server.csr) and a server certificate from the devc CA (server/server.crt) for that name. " +
+			"--ca-from copies the CA of another hub directory instead of making one (a second hub of the same fleet).",
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			dir, err := a.hubDir(dirFlag)
@@ -50,7 +51,7 @@ func newHubCmd(a *app) *cobra.Command {
 				return err
 			}
 			defer syscall.Umask(syscall.Umask(0o077))
-			if err := hub.Init(dir, publicName); err != nil {
+			if err := hub.InitFrom(dir, publicName, caFrom); err != nil {
 				return err
 			}
 			l := hub.Layout{Dir: dir}
@@ -63,6 +64,7 @@ func newHubCmd(a *app) *cobra.Command {
 		},
 	}
 	initCmd.Flags().StringVar(&publicName, "public-name", "", "host[:port] clients use to reach the hub")
+	initCmd.Flags().StringVar(&caFrom, "ca-from", "", "copy the CA from this hub directory (a second hub)")
 
 	var outDir string
 	var legacy bool
@@ -249,7 +251,34 @@ func newHubCmd(a *app) *cobra.Command {
 	}
 	revoke.Flags().StringVar(&revokeRole, "role", "", "only certificates of this role")
 
-	ca := group("ca", "Manage the hub's certificates", false, issue, lsCmd, revoke)
+	importCmd := &cobra.Command{
+		Use:   "import <cert.pem>",
+		Short: "Register a certificate this CA issued on another hub (a second hub with the same CA)",
+		Args:  exactArgs(1, "devc hub ca import <cert.pem>"),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir, err := a.hubDir(dirFlag)
+			if err != nil {
+				return err
+			}
+			b, err := os.ReadFile(args[0])
+			if err != nil {
+				return err
+			}
+			l := hub.Layout{Dir: dir}
+			st, err := hub.OpenStore(l.DB())
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			rec, err := hub.ImportCert(l, st, b)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(a.stdout, "registered the %s certificate of %s (%s), valid until %s\n", rec.Role, rec.Name, rec.Fingerprint[:16], rec.Expires.Local().Format("2006-01-02"))
+			return nil
+		},
+	}
+	ca := group("ca", "Manage the hub's certificates", false, issue, lsCmd, revoke, importCmd)
 
 	var listen, tlsCert, tlsKey, servePublic, level string
 	var behindProxy, devNoAuth bool
@@ -354,7 +383,7 @@ func newHubCmd(a *app) *cobra.Command {
 			} else if len(res.Hubs) == 0 {
 				fmt.Fprintln(a.stdout, "no hubs listed ('devc join <hub-url> --cert <file> --key <file>')")
 			} else {
-				tw := table(a.stdout, "HUB", "STATE", "NOTIFIER", "MACHINE", "SINCE", "DETAIL")
+				tw := table(a.stdout, "HUB", "STATE", "NOTIFIER", "MACHINE", "SINCE", "ARCHIVE", "DETAIL")
 				for _, h := range res.Hubs {
 					since := ""
 					if h.Since != nil {
@@ -364,7 +393,7 @@ func newHubCmd(a *app) *cobra.Command {
 					if h.Notifier {
 						notifier = "yes"
 					}
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", h.URL, h.State, notifier, h.Machine, since, oneLine(h.Detail, 80))
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", h.URL, h.State, notifier, h.Machine, since, archiveSummary(h.Archive), oneLine(h.Detail, 80))
 				}
 				if err := tw.Flush(); err != nil {
 					return err
@@ -381,7 +410,7 @@ func newHubCmd(a *app) *cobra.Command {
 	}
 	status.Flags().BoolVar(&statusJSON, "json", false, "print JSON")
 
-	subs := append([]*cobra.Command{initCmd, ca, serve, status}, newHubAccessCmds(a, &dirFlag)...)
+	subs := append([]*cobra.Command{initCmd, ca, serve, status, newHubArchiveCmd(a, &dirFlag)}, newHubAccessCmds(a, &dirFlag)...)
 	cmd := group("hub", "Run a hub, or show this machine's hubs", false, subs...)
 	cmd.PersistentFlags().StringVar(&dirFlag, "hub-dir", "", "hub directory (default $DEVC_HUB_DIR or ~/.local/share/devc-hub)")
 	return cmd

@@ -407,3 +407,18 @@ Other checks and deferred work:
 | **SELinux**: the share and source mounts get no labels of their own (the share directories are devc's, read-only); not checked on an SELinux host | a run on Fedora |
 | **Existing boxes**: every box definition gained the `/src` and `/opt/shares` mounts, so boxes created before C16 report drift (`devc up --recreate`) | a recreation per box |
 | **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/extract/ ./internal/shares/ ./internal/depsrc/ ./internal/boxside/ ./internal/daemon/` in the toolchain image with cgo |
+
+### From C17
+
+| Item | Needs |
+|---|---|
+| **Credential file names of Cursor** (`~/.config/cursor/auth.json`, `~/.cursor/auth.json`) and pi (`~/.pi/agent/auth.json`) are assumed, not observed; Codex's `~/.codex/auth.json` is documented by OpenAI. A harness that keeps its login elsewhere would have it archived | a login with each harness, then `find` in the realm's harness state |
+| **SELinux**: the archive worker's helper container gets the realm's `label=level:` like the data workers; not run on an SELinux host | a run on Fedora |
+| **Uploads are rate-limited but not niced**: `git bundle` of a large relay and the helper container run at normal CPU and I/O priority | `nice`/`ionice` for the daemon's archive children, if it matters in practice |
+| **Restores stage whole bundles** in `local/tmp/` before fetching them, and `state import` extracts the whole export first, so a restore needs up to twice the archive's size on disk | streaming, if large relays make it a problem |
+| **The hub counts a machine's usage by walking its archive** once per start (and after a prune); a machine with the maximum 200,000 files makes its first upload after a restart wait for that walk | nothing, or a usage table in the database |
+| **Shares are not archived or exported** (`durable/shares/` is not part of a realm's durable state, section 1 of the work order); they are published again from their relays | a decision whether shares belong to the fleet state |
+| **Restored journals** are shown as sessions of the restoring machine and archived again under its name; a restored session that was live on the lost machine is ended as lost by reconciliation | nothing (documented) |
+| **`--merge` into the context repository** keeps the local `main`; the archived history is fetched but only reported when `main` differs (no merge commit) | merging notes and memory of two machines, if wanted |
+| **Hub-side checks of bundles**: the hub stores bundles without looking inside; a hostile machine can archive garbage under its own name (bounded by its quota), which a restore then refuses at `git fetch` (fsck) | nothing |
+| **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/fleet/ ./internal/hub/ ./internal/daemon/` in the toolchain image with cgo |

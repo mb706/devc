@@ -209,6 +209,8 @@ func newRoot(a *app) *cobra.Command {
 		newHubCmd(a),
 		newJoinCmd(a),
 		newLeaveCmd(a),
+		newStateCmd(a),
+		newSyncCmd(a),
 	)
 	root.AddCommand(newLifecycleCmds(a)...)
 	root.AddCommand(newHarnessCmds(a)...)

@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"software.sslmate.com/src/go-pkcs12"
+
+	"github.com/mb706/devc/internal/names"
 )
 
 // Roles of client certificates.
@@ -349,4 +351,41 @@ func RoleOf(cert *x509.Certificate) string {
 		return cert.Subject.OrganizationalUnit[0]
 	}
 	return ""
+}
+
+// ImportCert registers in this hub's registry a client certificate its CA
+// signed elsewhere: by another hub with the same CA (a second hub, work
+// order C17). The certificate must verify against the CA for client
+// authentication; role (OU) and name (CN) are taken from it.
+func ImportCert(l Layout, st *Store, certPEM []byte) (CertRecord, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return CertRecord{}, errors.New("the file holds no PEM certificate")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return CertRecord{}, err
+	}
+	ca, err := LoadCACert(l)
+	if err != nil {
+		return CertRecord{}, err
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(ca)
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		return CertRecord{}, fmt.Errorf("the certificate was not issued by this hub's CA for clients: %w", err)
+	}
+	role := ""
+	if len(cert.Subject.OrganizationalUnit) == 1 {
+		role = cert.Subject.OrganizationalUnit[0]
+	}
+	if (role != RoleMachine && role != RoleDevice) || !names.Valid(cert.Subject.CommonName) {
+		return CertRecord{}, fmt.Errorf("the certificate names no valid role and name (%q, %q)", role, cert.Subject.CommonName)
+	}
+	rec := CertRecord{Fingerprint: Fingerprint(cert), Role: role, Name: cert.Subject.CommonName, Serial: cert.SerialNumber.String(),
+		Issued: cert.NotBefore.UTC(), Expires: cert.NotAfter.UTC()}
+	if err := st.AddCert(rec); err != nil {
+		return CertRecord{}, err
+	}
+	return rec, nil
 }

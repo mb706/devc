@@ -260,6 +260,9 @@ func validateGlobal(c *Config, ps *problems) {
 	if g.MachineName != "" && !ValidMachineName(g.MachineName) {
 		k.bad("machine_name", "%q must start with a letter or digit and contain only letters, digits, '.', '_' and '-' (at most 63 characters)", g.MachineName)
 	}
+	if n, err := ParseSize(g.Sync.UploadRate); err != nil || n < 1024 {
+		k.bad("sync.upload_rate", "%q must be a size of at least 1k (bytes per second to each hub), for example 4m", g.Sync.UploadRate)
+	}
 	if l := g.Router.Listen; l != RouterOff {
 		ap, err := netip.ParseAddrPort(l)
 		if err != nil || !ap.Addr().Unmap().IsLoopback() || ap.Port() == 0 {
@@ -416,6 +419,17 @@ func validateHarness(h *Harness, ps *problems) {
 		}
 		dirs = append(dirs, a)
 	}
+	for i, f := range hm.SecretFiles {
+		key := idx("home.secret_files", i)
+		switch {
+		case !k.relPath(key, f, "secret file"):
+		case !validSecretPattern(f):
+			k.bad(key, "%q may use * and ? as patterns but no brackets or backslashes", f)
+		case len(secretStatePaths(hm, f)) == 0:
+			k.bad(key, "%q is not in the harness's shared state (home.dir or home.also with strategy \"shared\", a home.shared subdirectory with \"private\"); only shared state reaches the archive", f)
+		}
+	}
+	k.noDuplicates("home.secret_files", hm.SecretFiles)
 	if hm.Strategy == "shared" && len(hm.Shared) > 0 {
 		k.bad("home.shared", "only applies to strategy \"private\"; with \"shared\" the whole directory is shared")
 	}
@@ -594,6 +608,9 @@ func validateRealm(c *Config, r *Realm, ps *problems) {
 	k.enum("network.default", r.Network.Default, networkLevels)
 	k.netAllowlist("network.allowlist", r.Network.Allowlist)
 	k.shares("shares", r.Shares)
+	if n, err := ParseSize(r.Sync.MaxFileSize); err != nil || n < 1 {
+		k.bad("sync.max_file_size", "%q is not a size: use a number with a unit b, k, m or g, for example 256m", r.Sync.MaxFileSize)
+	}
 	validateRealmGitHub(k, r.GitHub)
 	if r.SELinux.Level != "" && !selinuxRE.MatchString(r.SELinux.Level) {
 		k.bad("selinux.level", "%q does not match s0 or s0:cN[,cN…], for example s0:c100,c200", r.SELinux.Level)

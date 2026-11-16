@@ -30,7 +30,6 @@ import (
 	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/session"
 	"github.com/mb706/devc/internal/tmux"
-	"github.com/mb706/devc/internal/toolbox"
 	"github.com/mb706/devc/internal/version"
 )
 
@@ -921,16 +920,7 @@ func (a *app) ctxRepo(c *config.Config, eng engine.Engine) (*ctxrepo.Repo, error
 	if err != nil {
 		return nil, fmt.Errorf("locating the devc executable: %w", err)
 	}
-	tb := toolbox.New(c.Paths.ToolboxDir())
-	disable := false
-	if _, err := os.Stat("/sys/fs/selinux/enforce"); err == nil {
-		disable = c.Global.SELinux.Mode == config.SELinuxDisable
-	}
-	return &ctxrepo.Repo{
-		Paths: c.Paths, Engine: eng, Toolbox: tb, Executable: exe, Version: version.Version,
-		SecurityOpts: tb.AuxSecurityOpts(disable),
-		ImageContext: filepath.Join(c.Paths.CacheDir(), "aux", "installer"), Out: a.stderr,
-	}, nil
+	return ctxrepo.New(c, eng, exe, version.Version, a.stderr), nil
 }
 
 // contextRealm picks the realm of a context command: the argument, else

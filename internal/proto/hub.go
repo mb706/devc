@@ -86,10 +86,60 @@ type HubStatus struct {
 	Notifier bool       `json:"notifier"`
 	// Machine is the name the hub knows this machine by.
 	Machine string `json:"machine,omitempty"`
+	// Archive is the state of this machine's archive on the hub.
+	Archive *ArchiveHubStatus `json:"archive,omitempty"`
 }
 
 // HubsStatusResult is the result of hubs.status, in the order of the hub
 // list in config.toml.
 type HubsStatusResult struct {
 	Hubs []HubStatus `json:"hubs"`
+}
+
+// MethodArchiveStatus is the daemon's local method that reports the
+// archive uploads to every hub (work order C17); hubs cannot call it.
+const MethodArchiveStatus = "archive.status"
+
+// Archive states of a hub.
+const (
+	ArchiveIdle      = "idle"
+	ArchiveUploading = "uploading"
+	ArchiveError     = "error"
+	ArchiveNoCreds   = "no-credentials"
+	ArchiveStarting  = "starting"
+)
+
+// ArchiveHubStatus is the archive of this machine on one hub: what is
+// behind per realm after the last pass, and the last error (a reached
+// quota says what to do).
+type ArchiveHubStatus struct {
+	URL        string               `json:"url"`
+	Machine    string               `json:"machine,omitempty"`
+	State      string               `json:"state"`
+	Error      string               `json:"error,omitempty"`
+	Quota      bool                 `json:"quota,omitempty"`
+	LastPass   *time.Time           `json:"last_pass,omitempty"`
+	LastUpload *time.Time           `json:"last_upload,omitempty"`
+	Sent       int64                `json:"sent"`
+	Realms     []ArchiveRealmStatus `json:"realms"`
+}
+
+// ArchiveRealmStatus is one realm on one hub: files and bytes not yet
+// uploaded, repositories with refs not yet recorded, entries of the
+// shared harness state left out (with a few examples) and credential
+// files excluded.
+type ArchiveRealmStatus struct {
+	Realm         string   `json:"realm"`
+	FilesBehind   int      `json:"files_behind"`
+	BytesBehind   int64    `json:"bytes_behind"`
+	ReposBehind   int      `json:"repos_behind"`
+	Skipped       int      `json:"skipped"`
+	SkippedSample []string `json:"skipped_sample,omitempty"`
+	Excluded      int      `json:"excluded"`
+}
+
+// ArchiveStatusResult is the result of archive.status, in the order of the
+// hub list.
+type ArchiveStatusResult struct {
+	Hubs []ArchiveHubStatus `json:"hubs"`
 }

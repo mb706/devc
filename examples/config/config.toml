@@ -30,6 +30,9 @@ listen = "127.0.0.1:7480"      # local URLs http://<port>.<project>.<realm>.loca
                                # for listed or forwarded box ports, served by the daemon;
                                # a loopback address only, or "off"
 
+[sync]
+upload_rate = "4m"             # bytes per second the daemon sends to each hub's archive
+
 # Hubs this machine reports to, in order of preference (the first connected
 # one sends notifications). None by default; 'devc join' adds an entry and
 # stores the hub's credentials, 'devc leave' removes both.

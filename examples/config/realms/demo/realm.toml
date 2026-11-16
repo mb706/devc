@@ -27,7 +27,8 @@ auth = ""                      # overrides the manifest's auth method
 secret = ""                    # overrides the secret name
 
 [sync]
-hub = true
+hub = true                     # archive this realm's durable state on every joined hub
+max_file_size = "256m"         # larger files of shared harness state are skipped (and counted)
 
 # A GitHub App you own, for projects with grants.github = "app" (see the guide).
 # [github.app]

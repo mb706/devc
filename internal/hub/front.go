@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mb706/devc/internal/archive"
 	"github.com/mb706/devc/internal/proto"
 )
 
@@ -92,6 +93,15 @@ func routeTable() []route {
 	}
 	return []route{
 		{"GET", "/machine", accessMachine, xsiteRead, h((*Server).handleMachineRoute)},
+		// The archive (work order C17, archive.go): a machine appends to its
+		// own tree only (the name comes from its certificate) and reads
+		// every machine's; encrypted secrets bundles likewise.
+		{"PUT", archive.UploadPrefix + "{realm}/{path...}", accessMachine, xsiteToken, h((*Server).apiArchivePut)},
+		{"GET", archive.IndexPath, accessMachine, xsiteRead, h((*Server).apiArchiveList)},
+		{"GET", archive.IndexPath + "/{machine}/{realm}", accessMachine, xsiteRead, h((*Server).apiArchiveIndex)},
+		{"GET", archive.FilePrefix + "{machine}/{realm}/{path...}", accessMachine, xsiteRead, h((*Server).apiArchiveFile)},
+		{"PUT", archive.SecretsPrefix + "{realm}", accessMachine, xsiteToken, h((*Server).apiSecretsPut)},
+		{"GET", archive.SecretsPrefix + "{realm}", accessMachine, xsiteRead, h((*Server).apiSecretsGet)},
 
 		{"POST", "/api/login", accessDevice, xsiteStrict, h((*Server).apiLogin)},
 		// The button's token travels in the ActionHeader, never in the URL
@@ -196,8 +206,14 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	who = id.Name
 	s.seen(id)
 	r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, id))
-	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-	if !s.bodyDeadline(w, r) {
+	// Archive uploads are the one kind of request that may carry several
+	// MiB (their route still needs a machine certificate).
+	limit, timeout := int64(maxBody), bodyTimeout
+	if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, archive.UploadPrefix) && s.archive != nil {
+		limit, timeout = s.archive.lim.MaxRequest, uploadBodyTimeout
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if !s.bodyDeadline(w, r, timeout) {
 		return
 	}
 	s.mux.ServeHTTP(w, r)
@@ -209,12 +225,12 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 // (a command for its receipt) must not lose its connection. Requests
 // without a body (reads, the event stream, WebSocket upgrades) get none.
 // When the deadline cannot be set, the request is refused.
-func (s *Server) bodyDeadline(w http.ResponseWriter, r *http.Request) bool {
+func (s *Server) bodyDeadline(w http.ResponseWriter, r *http.Request, timeout time.Duration) bool {
 	if r.Body == nil || r.Body == http.NoBody || (r.ContentLength == 0 && len(r.TransferEncoding) == 0) {
 		return true
 	}
 	rc := http.NewResponseController(w)
-	if err := rc.SetReadDeadline(time.Now().Add(bodyTimeout)); err != nil {
+	if err := rc.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		s.log.Error("cannot bound the reading of a request body", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return false
@@ -253,7 +269,7 @@ func (s *Server) gate(w http.ResponseWriter, r *http.Request, addr string) {
 	}
 	if isEnrolPath(r.URL.Path) && s.enrolOpen() {
 		r.Body = http.MaxBytesReader(w, r.Body, maxEnrolBody)
-		if !s.bodyDeadline(w, r) {
+		if !s.bodyDeadline(w, r, bodyTimeout) {
 			return
 		}
 		s.enrolMux.ServeHTTP(w, r)

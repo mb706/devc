@@ -92,6 +92,9 @@ type Server struct {
 	// (login, buttons, the app's files, enrolment: finding C2-04).
 	anonSem  chan struct{}
 	notifier *notifier
+	// archive is the archive of durable state and the secrets bundles
+	// (archive.go).
+	archive *archiveStore
 	// pruneMu orders the pruning of an offline machine's sessions before a
 	// new link of that machine loads them.
 	pruneMu sync.RWMutex
@@ -132,8 +135,10 @@ var (
 	maxAnonymous = 64
 	// maxHashWaiting logins may wait for a hashing slot.
 	maxHashWaiting = 8
-	// bodyTimeout bounds the reading of a request body.
-	bodyTimeout = 10 * time.Second
+	// bodyTimeout bounds the reading of a request body; uploadBodyTimeout
+	// that of an archive upload, which may be several MiB.
+	bodyTimeout       = 10 * time.Second
+	uploadBodyTimeout = 2 * time.Minute
 )
 
 // initState fills the parts of a Server both modes share.
@@ -250,6 +255,12 @@ func New(o Options) (*Server, error) {
 		}
 		s.publicURL = cfg.PublicURL
 	}
+	lim, err := cfg.Archive.Limits()
+	if err != nil {
+		st.Close()
+		return nil, fmt.Errorf("%s: %w", l.ConfigFile(), err)
+	}
+	s.archive = newArchiveStore(l, lim)
 	s.buildMuxes()
 	s.notifier = newNotifier(s, cfg.Ntfy)
 	return s, nil

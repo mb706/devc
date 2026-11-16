@@ -330,6 +330,19 @@ func (p *Paths) NodeHubDir(id string) string {
 	return filepath.Join(p.NodeHubsDir(), id)
 }
 
+// ArchiveDir holds the daemon's bookkeeping of the hub archive (work order
+// C17): one directory per hub (named by its ID) with the upload state and
+// the bundles waiting to be uploaded.
+func (p *Paths) ArchiveDir() string { return filepath.Join(p.LocalDir(), "archive") }
+
+// ArchiveHubDir is the archive bookkeeping of one hub.
+func (p *Paths) ArchiveHubDir(id string) string {
+	if len(id) != 16 || strings.Trim(id, "0123456789abcdef") != "" {
+		panic(fmt.Sprintf("paths: invalid hub ID %q", id))
+	}
+	return filepath.Join(p.ArchiveDir(), id)
+}
+
 // ReceiptsDir holds the daemon's command receipts (work order C09).
 func (p *Paths) ReceiptsDir() string { return filepath.Join(p.LocalDir(), "receipts") }
 func (p *Paths) BoxLocalDir(r names.ProjectRef) string {

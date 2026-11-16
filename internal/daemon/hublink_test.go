@@ -42,7 +42,7 @@ func TestHubAllowlist(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("hub methods %q, want %q", got, want)
 	}
-	for _, m := range []string{proto.MethodDaemonStop, proto.MethodHubsStatus, proto.MethodHostGit, proto.MethodHostRequest, proto.MethodHostSecret, proto.MethodBoxPaste} {
+	for _, m := range []string{proto.MethodDaemonStop, proto.MethodHubsStatus, proto.MethodArchiveStatus, proto.MethodHostGit, proto.MethodHostRequest, proto.MethodHostSecret, proto.MethodBoxPaste} {
 		if hs[m] != nil {
 			t.Errorf("a hub may call %s", m)
 		}
@@ -359,5 +359,17 @@ func TestHubRoles(t *testing.T) {
 		var st proto.HubsStatusResult
 		r.client(nil).Call(context.Background(), proto.MethodHubsStatus, nil, &st)
 		return len(st.Hubs) == 3 && st.Hubs[2].State == proto.HubNoCreds
+	})
+	// The archive uploads (work order C17) are reported per hub on the
+	// local socket, in the same order, and in hubs.status.
+	waitHub(t, "archive status", func() bool {
+		var as proto.ArchiveStatusResult
+		if err := r.client(nil).Call(context.Background(), proto.MethodArchiveStatus, map[string]bool{"wake": true}, &as); err != nil {
+			t.Fatal(err)
+		}
+		var hs proto.HubsStatusResult
+		r.client(nil).Call(context.Background(), proto.MethodHubsStatus, nil, &hs)
+		return len(as.Hubs) == 3 && as.Hubs[0].URL == a.url() && as.Hubs[2].State == proto.ArchiveNoCreds &&
+			len(hs.Hubs) == 3 && hs.Hubs[1].Archive != nil && hs.Hubs[1].Archive.URL == b.url()
 	})
 }

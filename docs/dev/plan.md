@@ -37,6 +37,8 @@ internal/
   extract/           safe extraction of untrusted archives (tar, gzip, bzip2, zip) for shares and sources (C16)
   shares/            publishing directories of relays as read-only shares; their mounts in boxes (C16)
   depsrc/            devc src in a box: dependency-source specs, installed versions, registry downloads (C16)
+  archive/           archive names, hub wire types, sealed secrets, credential-file exclusion (C17)
+  fleet/             machine side of the archive: uploads, restore, export, secrets between machines (C17)
   daemon/            machine daemon: API, box channels, relay service, gate, forwards   (phase 2)
   hub/               hub server: listeners, projections, inbox, ntfy, web app           (phase 2)
   selinux/ apparmor/ host integration helpers
