@@ -56,6 +56,8 @@ X.symbolPanel = (function () {
     else wrap.appendChild(U.h("div.sp-doc.muted.small", "No doc comment."));
 
     runsIn(wrap, s);
+    var bl = X.backlinks ? X.backlinks.section(s.ref) : "";
+    if (bl) wrap.insertAdjacentHTML("beforeend", bl);
 
     if (opts.excerpt) excerpt(wrap, s);
 

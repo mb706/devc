@@ -529,6 +529,10 @@ type Finding struct {
 	Response     string `json:"response,omitempty"`
 	ResponseFile string `json:"responseFile,omitempty"`
 	ResponseLine int    `json:"responseLine,omitempty"`
+	// Cited are the places in Go comments (tests included) that mention
+	// the finding, as the patterns would link them; Site.In is the
+	// declaration the comment documents or sits in.
+	Cited []Site `json:"cited,omitempty"`
 }
 
 // WorkOrder is one work order of docs/dev/chunks.
@@ -538,6 +542,9 @@ type WorkOrder struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 	File  string `json:"file"`
+	// Cited are the places in Go comments that mention the work order (see
+	// Finding.Cited).
+	Cited []Site `json:"cited,omitempty"`
 }
 
 // Pattern is a text pattern that becomes references. To apply one: find the

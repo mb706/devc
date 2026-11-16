@@ -123,3 +123,19 @@ func TestFindings(t *testing.T) {
 		t.Errorf("the response of A1 lost its list: %q", got[0].Response)
 	}
 }
+
+func TestCiteInComments(t *testing.T) {
+	w := loadTestWorld(t)
+	findings := []Finding{{ID: "C1-05"}, {ID: "B6"}}
+	orders := []WorkOrder{{ID: "C10a"}}
+	citeInComments(w, findings, orders)
+	if got := findings[0].Cited; len(got) != 1 || got[0].File != "server/server.go" || got[0].Line != 6 || got[0].In != "server.Server" {
+		t.Errorf("C1-05 cited at %+v, want server/server.go:6 documenting server.Server", got)
+	}
+	if got := findings[1].Cited; len(got) != 0 {
+		t.Errorf("B6 is not mentioned, cited at %+v", got)
+	}
+	if got := orders[0].Cited; len(got) != 1 || got[0].Line != 11 || got[0].In != "server.Server.handlers" {
+		t.Errorf("C10a cited at %+v, want server/server.go:11 in server.Server.handlers", got)
+	}
+}

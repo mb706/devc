@@ -11,6 +11,7 @@ xdg-open explorer/dist/index.html
 ./dev explore query help # questions about the code for people writing the model
 ./dev explore comments-only [commit]      # did the Go code change only in its comments since HEAD?
 explorer/check.sh [--no-build] [dir]      # build, then check the app in headless Chrome (screenshots in dir)
+explorer/check.sh --no-build --shot '#/concerns/network' [dir]   # screenshots of one page, both themes, two widths
 ```
 
 `explorer/dist/` is generated and ignored by git. It is a static site without a server and without network access: open `index.html` from disk. The explorer does not describe itself: the packages below `explorer/` are left out.
@@ -320,7 +321,7 @@ Every node and edge may carry a reference; clicking it opens the code.
 - Configuration keys, from the `toml` tags of the configuration types, with the code that reads each field.
 - Environment variables named `DEVC_…` and where they are used.
 - Which functions are reachable from each actor's entry points.
-- The documents: `README.md`, `specs-v2.md`, `docs/**`, with headings, review findings and work orders indexed, so that "finding C1-05" or "work order C10a" in a comment becomes a link.
+- The documents: `README.md`, `specs-v2.md`, `docs/**`, with headings, review findings and work orders indexed, so that "finding C1-05" or "work order C10a" in a comment becomes a link; for every finding and work order, the places in Go comments that cite it.
 
 The data contract between tool and app is the set of Go types in `explorer/tool/schema.go`.
 
@@ -364,3 +365,63 @@ Search covers all of it.
 - New package: add it to `packages.toml` and to a concern.
 - New behaviour worth explaining: extend the concern, add or extend a flow.
 - The app and the tool have no knowledge of devc beyond the model: a new concern, flow or diagram needs no code change.
+
+## Writing for the explorer
+
+What an author of the model needs to know beyond the format: how long things can be before they are cut, what reads well, and how to look at the result. The numbers are for a laptop screen (1280 pixels wide, often with the inspector open, which leaves the view about 760) and a large monitor (1920).
+
+### Preview every page you write
+
+```sh
+./dev explore --check                                    # errors and warnings only, about 3 s
+./dev explore                                            # build explorer/dist
+explorer/check.sh --no-build --shot '#/concerns/network' --shot '#/flows/box-up?step=7' "$(mktemp -d)"
+```
+
+`--shot` takes any route of the app (copy it from the address bar after `index.html`), loads it in headless Chrome in the light and the dark theme at 1280 × 800 and 1920 × 1080, saves four PNG files per route in the directory, and fails if the page logs an error. Look at all four: the 1280 shots show what is cut or wrapped; the 1920 shots, whether a diagram uses the room. For a page with the inspector open, add `?i=<reference>` to the route (`#/runtime?i=actor:daemon`). A site built elsewhere (`./dev explore --out bin/x`) is checked with `--site bin/x`. The full `explorer/check.sh` (about two minutes) visits every view and runs the app's assertions; run it once before you hand in.
+
+Routes: `#/overview`, `#/runtime`, `#/concerns/<id>` (`?diagram=<id>` scrolls to a diagram, `?h=<anchor>` to a heading), `#/flows/<id>?step=<n>`, `#/state`, `#/glossary?sel=<id>`, `#/docs/<path>`, `#/docs/findings?sel=<id>`, `#/code/<file>?sym=<reference>`, `#/pkg/<path>`.
+
+### Text
+
+- **Markdown** in every text field: headings, paragraphs, `**bold**`, `*italic*`, `` `code` ``, lists (nested by indentation), tables, block quotes, fenced code (` ```go `, `toml`, `sh`, `json` are highlighted), links. Raw HTML is shown as text. `[[reference]]` becomes a link with the target's name; `[[reference|words]]` uses your words. A backticked name that is exactly one symbol, package or file (`` `internal/box.Up` ``, `` `internal/box` ``) becomes a link too; a bare name (`` `Up` ``) stays code. Mentions such as "finding C1-05", "work order C10a", "plan 3.6", "spec section 13" become links by themselves.
+- **Summaries** (zones, actors, concerns, flows) are one sentence. What is shown where: the first sentence in lists and search results; the first paragraph, cut at 420 characters, in hover cards; three lines (about 150 characters) on concern and flow cards; two lines (about 200 characters) in the flow player's header. Longer summaries are cut with an ellipsis, not lost: the full text is on the object's own page.
+- **Titles**: concerns and flows up to about 40 characters (they are headings and card titles); actors, zones and channels up to about 20, two or three words (actor titles wrap to two lines on a card 96 to 190 pixels wide; channel titles are labels on the map).
+- **Invariants** are one sentence each, a property that holds, up to about 200 characters; put the reason in the concern's text. Name the code that enforces each one (`refs`) and, where there is one, the test that shows it (`tests`).
+- **Glossary terms**: the first paragraph is the definition the hover card shows (cut at 420 characters); put examples and history in later paragraphs.
+- **Key symbols** are shown with the first sentence of their doc comment: that sentence should say what the symbol is for.
+
+### Concerns
+
+- The page is the concern's text in a column of about 74 characters, with a side column of its code, key symbols, flows, related concerns, spec sections and tests. The invariants come after the text, numbered, each with its code.
+- Use `##` for sections (they get a rule above them and appear under "On this page" when there are three or more); `###` inside them. Write the five sections of the template; leave out one that has nothing to say rather than filling it.
+- A diagram appears after the paragraph (or list) that first names it with `[[diagram:<id>]]`; a diagram the text does not name comes after the first section. Name it where the reader needs it.
+
+### Diagrams (`kind = "graph"`)
+
+- Nodes are boxes 104 to 190 pixels wide; edges are routed at right angles through the gaps between the boxes, so leave a cell empty where many edges must pass. Labels sit on the edges, where they cover no box.
+- **Columns**: four fit everywhere (1280 with the inspector open); five at 1280 without it; six at 1920. A wider diagram scrolls sideways. **Rows**: any number, but up to five keeps a diagram on one screen.
+- **Node labels**: up to about 25 characters (two lines). Give a node a `ref` when it stands for code: the box then shows the symbol's name under the label and opens the code on click. `zone` colours the box like that zone; use it where the zone is the point (box or host), not for decoration.
+- **Edge labels**: up to about 24 characters; longer ones wrap into a box of up to 150 pixels and crowd the picture. An edge's `ref` makes its label and line open the code.
+- A state machine of a dozen states works: edges both ways between two nodes run side by side, and an edge from a node to itself is a loop. Place states so that most edges join neighbours: an edge that skips a column must go around the boxes between.
+
+### Flows
+
+- The player shows the sequence diagram beside the current step and the step's code in the inspector. Lifelines are drawn while each has at least 84 pixels: up to eight actors at 1280 with the inspector open, eleven at 1920; with more, or on a narrow window, the diagram becomes a list of steps. Seven actors or fewer read best.
+- **Order of `actors`**: the initiator on the left, the box (or whatever is least trusted) on the right; keep the actors of one zone together, because consecutive actors of one zone share a band in that zone's colour, and a message that crosses a trust boundary is marked where it enters the receiver's band.
+- **Length**: 10 to 30 steps read well; 40 still work. Put a `section` every five to ten steps; it is a heading across the lifelines and in the step panel.
+- **`label`** (messages): what travels, short: `session.send {id, text}`, `podman create`. Up to about 30 characters fits between neighbouring lifelines; a longer label reaches over the lifelines beside it (readable, but busier) and is cut only at the diagram's edge, about 90 characters at 1280. The full label is always in the step panel.
+- **Steps of one actor** show the name of their `ref` (`Daemon.apiSend`) on the lifeline; name the function that does the step, not its caller. Give an `external` step a short `label`; else the diagram shows its first words.
+- **`text`**: one or two sentences, shown in full in the step panel (the first sentence in lists and tooltips). Longer explanations go in `detail`, shown under the text.
+- **Connections**: the step panel shows the path the build found from the previous step of the same actor, or your `unchecked` reason under "not verified by the tool". A step whose connection was not found carries a mark in the diagram; fix it, or say why with `unchecked`.
+- **Tours** have no diagram: a list of steps beside the step panel. Give each step a `ref` and a sentence of why to read it.
+
+### The runtime map, the overview and the state view
+
+- **Runtime**: zones are placed on the grid of `col`, `row`, `colspan` and `rowspan`; inside a zone the explorer places actors next to what they talk to. A zone of more than about twelve actors becomes tall; split it if it means two things. A channel's `title` is its label on the map (shown on hover), `carries` and `checks` are the rows of the Boundaries table under the map.
+- **Overview**: the reading order is the concerns and flows in the order `overview.md` first names them (`[[concern:…]]`, `[[flow:…]]`), then the remaining concerns in their `order`, each followed by its flows and tours. Name the first five or so in the overview's text in the order a newcomer should read them.
+- **State**: an entry's `path` is shown below its parents (missing parents are added without text); `<name>` parts are styled as placeholders. `writer` is shown in zone colours: `box` in the untrusted colour, `host` in the host's, `user` in the zone of the model's person actor, `both` in two. A mount's `mode` starting with `rw` is drawn as a heavy arrow (the box can write there), `ro` as a dashed one.
+
+### Before you hand in
+
+`./dev explore --strict` is clean for your files (no unresolved references, no flow step without a connection or an `unchecked` reason), every page you wrote has been looked at in both themes at both widths, and `explorer/check.sh` passes.

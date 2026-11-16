@@ -240,7 +240,8 @@ X.source = (function () {
         if (hasMarks) {
           var ms = marks.get(n);
           mk = '<i class="mk">' + (ms ? ms.map(function (m) {
-            return '<a class="mkx ' + esc(m.cls || "") + '"' + (m.ref ? ' data-ref="' + esc(m.ref) + '"' : "") + ' title="' + esc(m.title || "") + '"></a>';
+            return '<a class="mkx ' + esc(m.cls || "") + '"' + (m.ref ? ' data-ref="' + esc(m.ref) + '" data-nocard' : "") +
+              (m.href ? ' href="' + esc(m.href) + '" data-act="full"' : "") + ' title="' + esc(m.title || "") + '"></a>';
           }).join("") : "") + "</i>";
         }
         out[n - from] = '<div class="r" data-n="' + n + '"><i class="n" data-n="' + n + '"></i>' + mk + '<span class="c">' + (ls[n - 1] || "") + "</span></div>";

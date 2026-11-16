@@ -34,6 +34,8 @@ X.data = (function () {
   var events = index(core.events, "name");
   var configs = index(core.config, "key");
   var envs = index(core.env, "name");
+  // A document without headings arrives with null (a nil slice in Go).
+  (core.documents || []).forEach(function (d) { if (!d.headings) d.headings = []; });
   var docs = index(core.documents, "path");
   var findings = index(core.findings, "id");
   var workOrders = index(core.workOrders, "id");

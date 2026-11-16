@@ -122,6 +122,7 @@
       '<a class="btn" href="' + esc(X.router.hrefKeep("packages", "", {})) + '">' + U.icon("layer") + "On the package map</a></div></header>" +
       (p.doc ? '<section class="pp-sec"><h2 class="sec-h">Package comment' + (p.docFile ? ' <span class="muted small">' + R.chip("file:" + p.docFile, { act: "full", cls: "small" }) + "</span>" : "") + '</h2><div class="doc prose">' + X.doc.render(p.doc, { pkg: p.path }) + "</div></section>" :
         '<section class="pp-sec"><p class="muted">No package comment.</p></section>') +
+      (X.backlinks && X.backlinks.packageSection(p.path) ? '<section class="pp-sec"><h2 class="sec-h">In the model</h2>' + X.backlinks.packageSection(p.path) + "</section>" : "") +
       '<section class="pp-sec"><h2 class="sec-h">Files <span class="count">' + p.files.length + '</span></h2><div class="pp-files"></div></section>' +
       '<section class="pp-sec"><h2 class="sec-h">Neighbours</h2>' + neighbours(p) + "</section>" +
       '<section class="pp-sec"><h2 class="sec-h">Declarations <label class="check"><input type="checkbox" data-a="unexp"' + (showUnexp ? " checked" : "") + '> unexported</label></h2><div class="pp-decls">' + declarations(p, showUnexp) + "</div></section>" +
@@ -177,6 +178,15 @@
     render: render
   });
 
+  // inModelBrief: the concerns a package belongs to, for the summary.
+  function inModelBrief(p) {
+    var x = X.backlinks ? X.backlinks.inPackage(p.path) : null;
+    if (!x || !x.concerns.length) return "";
+    return '<h3 class="sp-label">Concerns</h3><div class="chips">' + x.concerns.map(function (c) {
+      return R.chip("concern:" + c.id) + (c.whole ? "" : '<span class="muted small">(' + U.plural(c.files.length, "file") + ")</span>");
+    }).join("") + "</div>";
+  }
+
   // ----- the inspector's summary
 
   X.inspector.register("package", function (info, body) {
@@ -188,6 +198,7 @@
       (p.role ? '<p class="lead">' + X.doc.inline(p.role, { pkg: p.path }) + "</p>" : "") +
       facts(p) +
       '<h3 class="sp-label">May run in</h3>' + runsBars(p) +
+      inModelBrief(p) +
       (p.doc ? '<h3 class="sp-label">Package comment</h3><div class="doc prose clamp">' + X.doc.render(p.doc, { pkg: p.path }) + '</div><button class="btn ghost small" data-a="more">Show all</button>' : "") +
       '<h3 class="sp-label">Files <span class="count">' + files.length + "</span></h3>" +
       '<ul class="flist">' + files.map(function (f) {

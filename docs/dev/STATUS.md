@@ -34,7 +34,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | Review E (verification of the last fixes) + C19r3, C19r4 | done | c336d39 |
 | Closing check F + C19r5 | done | 0e79147 |
 | X1 Explorer: the tool (extraction, model, checks) | done | 5680f03 |
-| X2 Explorer: the app, shell and code views | in progress | |
+| X2 Explorer: the app, shell and code views | done | ed0e2f5 |
+| X3 Explorer: the app, views of the model | in progress | |
 
 ## Resuming
 
@@ -1186,3 +1187,39 @@ The four confirmed findings of the closing check (`docs/dev/reviews/F1-review.md
 **Deviations.** None from the work order. No change to the tool or `schema.go` was needed: every view works from the data X1 emits. `explorer/README.md` gained one line (`explorer/check.sh`). The X1 placeholder `app.js` is gone.
 
 **How to check.** `explorer/check.sh [--no-build] [dir]` builds the site, opens it from `file://` in headless Chrome, visits 40 routes (every view of this chunk, inspector views of each kind, every surface, extremes chosen from the data: the largest file, the package with most files, the most used symbol, an interface, a file that is not Go) in light and dark at 1280 pixels and a set at 1920, saves 94 screenshots plus the search and hover card, fails on any console error or exception, and asserts: search finds the most used symbol through the dialog and opens it; text search finds lines; a link in the source lands on the definition with its symbol panel, and back returns; a hover card appears; the inspector's back button returns and the URL follows; the largest package page lists all its files; 291 references (every model reference plus one of each kind and three that do not exist) render as chips, cards and inspector views; the app starts within 1.5 s and the largest file opens within 1.5 s. Result: all pass; start 135 ms (first contentful paint about 50 ms), the largest file 80–150 ms, text search over all code 8 ms once loaded.
+
+### X3 Explorer: the app, part 2 (the views of the model)
+
+**What exists.** Every view of the explorer is built; `explorer/app/` grew by about 3,700 lines (plain HTML, CSS, JavaScript; classic scripts, nothing fetched).
+
+| File | What it is |
+|---|---|
+| `js/markdown.js` | `X.md`: Markdown for the model and the documents (headings with `data-anchor`, emphasis, code, fenced code highlighted for go/toml/sh/json/…, nested lists, tables, quotes, links to documents and files as references, `[[ref]]`, the build's patterns through `X.doc.inline`); `headings`, `slug` (as the tool's), `plainText`, `cardText`. Raw HTML is escaped. |
+| `js/model.js` | `X.model`: step numbering (`steps`, `stepAt`, `noOf`), the channel of a message (`channelOf`), whether it crosses a trust boundary (`crosses`: the channel's `boundary`, else the trust of the two zones), who takes part in what, the reading order, writer colours, `refsIn`, `symbolName`. |
+| `js/backlinks.js` | `X.backlinks`: one index from every reference to where the model mentions it (concern packages, files, key symbols, invariants, tests, text; flow steps, checks, messages, text; terms; layout entries and mounts; diagram nodes and edges; actor entry points; channel checks; surfaces); `of`, `inPackage`, `section` (the symbol panel's "In the model"), `packageSection`; the source margin marks (flow step ●, key symbol ○, enforcement ◆). |
+| `js/graph.js` | `X.graph.render(el, diagram, {concern})`: concern diagrams on their grid, edges routed orthogonally, labels off the boxes, loops, hover lights a node's edges. |
+| `js/views/runtime.js` | Runtime view, `X.runtimeMap` (also small on the overview), Boundaries table, filters by concern or flow, the inspector's actor, channel and zone views, their cards. |
+| `js/views/flows.js` | Flows index, player, `X.seq` (sequence diagram), compact step list, step panel with connections; the flow card and inspector view. |
+| `js/views/concerns.js` | Concerns index and page (diagrams placed where the text names them, invariants, side column with a small layer picture), concern and diagram cards and inspector views. |
+| `js/views/overview.js`, `state.js`, `glossary.js`, `docs.js` | Overview (reading order with checkboxes in localStorage, small map, legend, numbers); State (folding trees, writer marks, mounts as two sides); Glossary (filter, letters, term cards); Documents (list, document with outline, findings table; inspector views of a document section, a finding, a work order). |
+| `css/model.css` | Styles of all of the above. |
+
+**Shared parts changed.**
+
+- `connectors.js`: kept its API and added an orthogonal router (`router: "grid"`, for edges with `avoid`): A* over a grid of 6-pixel cells around the obstacles, a cost for turns and for cells earlier edges took, so parallel edges run side by side; loops on the least used side; hit areas with `data-ref` (`hit`), HTML labels placed where they cover no obstacle (`labels: "html"`, `labelWhen`, `labelAway`), `onDraw`, `edgeOf`. `setClass` now changes classes in place instead of redrawing.
+- `source.js`: margin marks take `href` (a click goes to the flow step or the concern). `symbol.js` shows "In the model"; `package.js` has an "In the model" section and the summary lists the package's concerns. `data.js` turns a document's `null` headings into `[]` (the tool writes nil slices as null). `placeholder.js` keeps only the not-found page.
+- A CSS fix for X2's chips: `.chip + .chip` matched across the text between two inline chips and put a gap before the second; inline chips have no margin now.
+
+**Tool and schema.** `Finding.Cited` and `WorkOrder.Cited` (`[]Site`): the places in Go comments, tests included, that mention a finding or work order as the patterns link them, with the declaration the comment documents or sits in (`citeInComments` in `docs.go`, test `TestCiteInComments`; the synthetic module's `server.go` gained two comments on existing lines). The findings table needs them and the app cannot compute them without loading all 22 MB of chunks. No change to the model's format.
+
+**Deviations and choices.**
+
+1. The runtime map's actors are placed by the app inside each zone (slots of the zone's grid, a local search that shortens channels); the model gives only the zones' grid. Channels are routed through the gaps; boundary channels are heavier with a gate where they enter the receiving zone. The small map on the overview shows zones and actors without channels: at that size they were noise.
+2. The reading order is the concerns and flows in the order `overview.md` first names them, then the rest in concern order with their flows; there is no reading-order field in the format (documented in "Writing for the explorer").
+3. A message that crosses a trust boundary is the channel's `boundary` where a channel joins the two actors (a reply uses the channel of its call), else ends in zones of different trust.
+4. Full views of model objects: an actor, zone or channel is the runtime map with the inspector on it (`#/runtime?i=actor:x`); a diagram is its concern page (`?diagram=`); a heading is `#/docs/<path>?h=<anchor or number>`.
+5. The package map's import lines stay as X2 drew them; routing them was tried and looked worse (see LEFTOVER).
+6. `explorer/check.sh` gained `--site <dir>` (check a site built with `--out`) and `--shot '<route>'` (four screenshots of one page, both themes, 1280 and 1920, and its console errors) for the authors of the model.
+7. The temporary large model lived under `bin/` (git-ignored), not in a `/tmp` directory: `--model` must be below the repository, the only directory the toolchain container mounts.
+
+**How to check.** `explorer/check.sh [dir]` now also visits the overview, runtime (with an actor, a channel and a flow filter), concerns (index, page, diagram), flows (index, player, tour), state, glossary, documents, a document, the findings, and the inspector views of a flow, concern, term and finding, in both themes (138 screenshots), and asserts: pressing j/k steps through a flow and the diagram, step panel, URL and inspector follow; a reference in a concern's text opens the inspector; the concern page shows all its diagrams; the runtime map draws a connector for every channel (all routed) and a gate on every boundary channel, in about 100 ms; hovering a `[[term:…]]` shows its definition; the findings table lists where a finding is cited and a citation opens the code at its line; a flow step's declaration carries a margin mark and its symbol panel lists the backlinks; search finds a concern; the largest document renders in under 100 ms. Result: all pass on the model and on the large temporary model (40 concerns, 60 flows, a 40-step and a ten-actor flow, a 15-node diagram, a concern three times as long, 100 terms). `./dev test ./explorer/tool/` passes.

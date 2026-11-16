@@ -449,3 +449,88 @@ func applyPatterns(text string, pats []Pattern, lookup func(kind, ref string) bo
 	sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
 	return out
 }
+
+// citeInComments records, on every finding and work order, the places in
+// the module's Go comments that mention it (as the app would link them),
+// so that a reader can go from a finding to the hardening it explains.
+// A site's In is the declaration the comment documents or sits in.
+func citeInComments(w *world, findings []Finding, orders []WorkOrder) {
+	fi := map[string]int{}
+	for i, f := range findings {
+		fi[f.ID] = i
+	}
+	oi := map[string]int{}
+	for i, o := range orders {
+		oi[o.ID] = i
+	}
+	lookup := func(kind, ref string) bool {
+		switch kind {
+		case "finding":
+			_, ok := fi[strings.TrimPrefix(ref, "finding:")]
+			return ok
+		case "chunk":
+			_, ok := oi[strings.TrimPrefix(ref, "chunk:")]
+			return ok
+		}
+		// Documents are not recorded; patterns that come later cannot take
+		// a span from the findings and work orders, which come first.
+		return false
+	}
+	var pats []Pattern
+	for _, p := range docPatterns() {
+		if p.Lookup == "finding" || p.Lookup == "chunk" {
+			pats = append(pats, p)
+		}
+	}
+	byFile := map[string][]*symInfo{}
+	for _, s := range w.symList {
+		byFile[s.File] = append(byFile[s.File], s)
+	}
+	seen := map[string]bool{}
+	for _, f := range w.prog.files {
+		if f.AST == nil {
+			continue
+		}
+		syms := byFile[f.Path]
+		for _, cg := range f.AST.Comments {
+			for _, c := range cg.List {
+				line := f.line(c.Pos())
+				for i, l := range strings.Split(c.Text, "\n") {
+					for _, m := range applyPatterns(l, pats, lookup) {
+						site := Site{File: f.Path, Line: line + i, In: commentOwner(syms, line+i, f.line(cg.End()))}
+						key := m.Ref + "\x00" + site.File + "\x00" + itoa(site.Line)
+						if seen[key] {
+							continue
+						}
+						seen[key] = true
+						if id, ok := strings.CutPrefix(m.Ref, "finding:"); ok {
+							findings[fi[id]].Cited = append(findings[fi[id]].Cited, site)
+						} else if id, ok := strings.CutPrefix(m.Ref, "chunk:"); ok {
+							orders[oi[id]].Cited = append(orders[oi[id]].Cited, site)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// commentOwner is the innermost declaration around a comment line, else
+// the declaration that a comment group ending on groupEnd documents.
+func commentOwner(syms []*symInfo, line, groupEnd int) string {
+	best, bestLen := "", 1<<30
+	for _, s := range syms {
+		if s.Line <= line && line <= s.EndLine && s.EndLine-s.Line < bestLen {
+			best, bestLen = s.Ref, s.EndLine-s.Line
+		}
+	}
+	if best != "" {
+		return best
+	}
+	for _, s := range syms {
+		if s.Line == groupEnd+1 && s.Parent == "" {
+			return s.Ref
+		}
+	}
+	return ""
+}

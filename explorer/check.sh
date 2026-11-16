@@ -1,15 +1,26 @@
 #!/usr/bin/env bash
-# Checks the explorer app in a headless Chrome (work order X2): builds the
-# site, opens it from its file:// URL, visits every route of the app's
+# Checks the explorer app in a headless Chrome (work orders X2, X3): builds
+# the site, opens it from its file:// URL, visits every route of the app's
 # views in light and dark at 1280 pixels (and a few at 1920), saves a
 # screenshot of each, fails on any console error or uncaught exception,
-# and runs assertions in the page: search finds a symbol, following a link
-# in the source lands on the definition, the inspector's back button
-# works, a package page lists its files, and the largest file opens in
-# about a second. Nothing about the code base is written here: the routes
-# and the things to look for are chosen from the site's data.
+# and runs assertions in the page: search finds a symbol and a concern,
+# following a link in the source lands on the definition, the inspector's
+# back button works, a package page lists its files, stepping through a
+# flow changes the step, the URL and the inspected code, a reference in a
+# concern's text opens the inspector, the runtime map draws a connector
+# for every channel, a term shows its definition on hover, the findings
+# lead to code, the source marks flow steps, and the app, the largest file,
+# the largest document and the runtime map are fast. Nothing about the
+# code base is written here: the routes and the things to look for are
+# chosen from the site's data.
 #
-#   explorer/check.sh [--no-build] [output-directory]
+#   explorer/check.sh [--no-build] [--site dir] [--shot '#/route']... [output-directory]
+#
+#   --no-build   check explorer/dist as it is
+#   --site dir   check the site in dir (built with --out); implies --no-build
+#   --shot frag  only take screenshots of this route (repeatable), in both
+#                themes at 1280 and 1920 pixels, and report console errors;
+#                for authors previewing their pages
 #
 # Needs python3 (standard library only: a minimal DevTools protocol client
 # below) and Chrome or Chromium: $CHROME, else chrome-headless-shell or
@@ -20,9 +31,13 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 BUILD=1
 OUT_ARG=""
+SITE_DIR="$REPO/explorer/dist"
+SHOTS=()
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	--no-build) BUILD=0; shift ;;
+	--site) SITE_DIR="$(cd "$2" && pwd -P)"; BUILD=0; shift 2 ;;
+	--shot) SHOTS+=("$2"); shift 2 ;;
 	*) OUT_ARG="$1"; shift ;;
 	esac
 done
@@ -48,7 +63,7 @@ CHROME_BIN="$(find_chrome)"
 if [ "$BUILD" = 1 ]; then
 	"$REPO/dev" explore >"$OUT/build.log" 2>&1 || { tail -20 "$OUT/build.log" >&2; echo "explorer/check.sh: the build failed" >&2; exit 1; }
 fi
-SITE="$REPO/explorer/dist/index.html"
+SITE="$SITE_DIR/index.html"
 [ -f "$SITE" ] || { echo "explorer/check.sh: $SITE is missing (run ./dev explore)" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
@@ -69,6 +84,7 @@ cat >"$WORK/cdp.py" <<'PY'
 import base64, json, os, socket, struct, sys, time, urllib.request
 
 site, cdp, out = sys.argv[1], sys.argv[2], sys.argv[3]
+only = sys.argv[4:]
 base = "file://" + site
 
 def wait_http(url, tries=100):
@@ -189,6 +205,27 @@ if not any("deliberate" in p for p in problems):
     raise SystemExit("the check did not notice a deliberate exception: " + repr(problems))
 problems.clear()
 
+# Only screenshots of the routes asked for.
+if only:
+    for frag in only:
+        frag = frag if frag.startswith("#") else "#" + frag
+        name = "".join(ch if ch.isalnum() else "-" for ch in frag.strip("#/"))[:80].strip("-") or "root"
+        for scheme in ("light", "dark"):
+            for w, h in ((1280, 800), (1920, 1080)):
+                size(w, h, scheme)
+                page.goto(frag)
+                time.sleep(0.8)
+                page.shot(f"{name}-{w}-{scheme}")
+                collect(f"{frag} {w} {scheme}")
+    print(f"{len(only) * 4} screenshots in {out}")
+    if problems:
+        print("problems:")
+        for p in problems:
+            print("  " + p)
+        sys.exit(1)
+    print("no errors or exceptions")
+    sys.exit(0)
+
 # Choose what to look at from the data: the extremes.
 pick = page.js("""(() => {
   const c = X.data.core, by = (a, f) => a.slice().sort((x, y) => f(y) - f(x))[0];
@@ -202,7 +239,25 @@ pick = page.js("""(() => {
   const iface = c.symbols.find(s => s.typeKind === 'interface' && c.implementations.some(i => i.interface === s.ref));
   const cmd = by(c.commands, x => (x.flags || []).length);
   const cfg = by(c.config.filter(k => k.kind === 'value'), k => ((X.data.sym(k.field) || {}).uses || 0));
+  const M = X.data.model;
+  const flowsF = (M.flows || []).filter(f => f.kind !== 'tour' && X.model.steps(f).length > 1);
+  const longFlow = flowsF.length ? by(flowsF, f => X.model.steps(f).length) : null;
+  const tour = (M.flows || []).find(f => f.kind === 'tour');
+  const concern = (M.concerns || []).length ? by(M.concerns, c => (c.diagrams || []).length * 100000 + (c.body || '').length) : null;
+  const actor = (M.actors || []).length ? by(M.actors, a => (M.channels || []).filter(x => x.from === a.id || x.to === a.id).length) : null;
+  const bch = (M.channels || []).find(x => x.boundary) || (M.channels || [])[0];
+  const finding = c.findings.length ? by(c.findings, f => (f.cited || []).length) : null;
+  const doc = c.documents.length ? by(c.documents, d => d.bytes) : null;
+  const termConcern = (M.concerns || []).find(x => /\\[\\[term:/.test(x.body || ''));
+  let stepSym = null;
+  (M.flows || []).forEach(f => X.model.steps(f).forEach(st => { const s = st.step.ref && X.data.sym(st.step.ref); if (!stepSym && s && s.kind !== 'field') stepSym = s; }));
   return {
+    flow: longFlow ? longFlow.id : '', flowSteps: longFlow ? X.model.steps(longFlow).length : 0, tour: tour ? tour.id : '',
+    concern: concern ? concern.id : '', diagram: concern && (concern.diagrams || []).length ? concern.diagrams[0].id : '',
+    actor: actor ? actor.id : '', channel: bch ? bch.id : '', term: (M.terms || []).length ? M.terms[0].id : '',
+    finding: finding ? finding.id : '', findingCited: finding ? (finding.cited || []).length : 0, doc: doc ? doc.path : '',
+    termConcern: termConcern ? termConcern.id : '', stepFile: stepSym ? stepSym.file : '', stepLine: stepSym ? stepSym.line : 0,
+    channels: (M.channels || []).filter(x => X.data.actor(x.from) && X.data.actor(x.to)).length,
     big: big.path, bigLines: lines(big), other: other ? other.path : '', pkg: pkg.path, pkgFiles: pkg.files.length,
     used: used.ref, usedName: used.name, fn: fn.ref, iface: iface ? iface.ref : '', cmd: cmd.path, cfg: cfg ? cfg.key : '',
     rpc: c.rpc.length ? c.rpc[0].name : '', dir: pkg.path.split('/')[0],
@@ -211,13 +266,14 @@ pick = page.js("""(() => {
 })()""")
 
 routes = [
-    ("overview", "#/overview", ".stats"),
-    ("runtime", "#/runtime", ".placeholder"),
-    ("concerns", "#/concerns", ".placeholder"),
-    ("flows", "#/flows", ".placeholder"),
-    ("state", "#/state", ".placeholder"),
-    ("glossary", "#/glossary", ".placeholder"),
-    ("docs", "#/docs", ".placeholder"),
+    ("overview", "#/overview", ".ov-text"),
+    ("runtime", "#/runtime", ".rt-map .rt-actor"),
+    ("concerns", "#/concerns", ".page h1"),
+    ("flows", "#/flows", ".page h1"),
+    ("state", "#/state", ".page h1"),
+    ("glossary", "#/glossary", ".page h1"),
+    ("docs", "#/docs", ".dl-i"),
+    ("findings", "#/docs/findings", ".fd-table tbody tr"),
     ("packages", "#/packages", ".layers .ptile"),
     ("packages-zone", "#/packages?color=zone&all=1", ".layers .ptile"),
     ("packages-tests", "#/packages?color=tests", ".layers .ptile"),
@@ -236,6 +292,29 @@ routes = [
 ]
 if pick["other"]:
     routes.append(("code-other", f"#/code/{pick['other']}", ".src .r"))
+if pick["actor"]:
+    routes.append(("runtime-actor", f"#/runtime?i=actor:{pick['actor']}", ".insp-body .ins-head"))
+if pick["channel"]:
+    routes.append(("runtime-channel", f"#/runtime?i=channel:{pick['channel']}", ".insp-body .ins-ends"))
+if pick["flow"]:
+    routes.append(("runtime-flow", f"#/runtime?flow={pick['flow']}", ".rt-map.filtered"))
+    routes.append(("flow", f"#/flows/{pick['flow']}?step={max(1, pick['flowSteps'] // 2)}", ".fp-step .fs-nav"))
+    routes.append(("insp-flow", f"#/flows?i=flow:{pick['flow']}", ".insp-body .fl-list"))
+if pick["tour"]:
+    routes.append(("tour", f"#/flows/{pick['tour']}", ".fl-step.cur"))
+if pick["concern"]:
+    routes.append(("concern", f"#/concerns/{pick['concern']}", ".cp-body"))
+    routes.append(("insp-concern", f"#/concerns?i=concern:{pick['concern']}", ".insp-body .lp"))
+    if pick["diagram"]:
+        routes.append(("concern-diagram", f"#/concerns/{pick['concern']}?diagram={pick['diagram']}", ".gd-fig .gd-node"))
+if pick["term"]:
+    routes.append(("insp-term", f"#/glossary?sel={pick['term']}&i=term:{pick['term']}", ".insp-body .md"))
+if pick["finding"]:
+    routes.append(("insp-finding", f"#/docs/findings?sel={pick['finding']}&i=finding:{pick['finding']}", ".insp-body .ins-title"))
+if pick["doc"]:
+    routes.append(("doc", f"#/docs/{pick['doc']}", ".dv-md .md-h"))
+if pick["stepFile"]:
+    routes.append(("code-marks", f"#/code/{pick['stepFile']}?line={pick['stepLine']}", ".src .mkx"))
 if pick["iface"]:
     routes.append(("code-interface", f"#/code/?sym={pick['iface']}", ".cv-sym .sp-dyn"))
 if pick["rpc"]:
@@ -243,7 +322,8 @@ if pick["rpc"]:
 for s in pick["surfaces"]:
     routes.append((f"interfaces-{s}", f"#/interfaces/{s}", ".xt-table tbody tr"))
 
-wide = {"packages", "code-big", "code-symbol", "insp-symbol", "package", "size", "interfaces-" + (pick["surfaces"][0] if pick["surfaces"] else "")}
+wide = {"packages", "code-big", "code-symbol", "insp-symbol", "package", "size", "interfaces-" + (pick["surfaces"][0] if pick["surfaces"] else ""),
+        "overview", "runtime", "runtime-actor", "flow", "concern", "concern-diagram", "doc", "tour"}
 count = 0
 for scheme in ("light", "dark"):
     for name, frag, ready in routes:
@@ -345,6 +425,115 @@ n = page.js("document.querySelectorAll('.pp-files tbody tr[data-key]').length")
 check(n == pick["pkgFiles"], f"the page of {pick['pkg']} lists its {pick['pkgFiles']} files ({n})")
 collect("package page")
 
+# Stepping through a flow changes the step, the URL and the inspected code.
+if pick["flow"]:
+    page.goto(f"#/flows/{pick['flow']}?step=1")
+    page.wait("document.querySelector('.fp-step .fs-nav') && X.inspector.current()", "the flow player and its first code")
+    first = page.js("X.inspector.current()")
+    page.js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'j', bubbles: true}))")
+    page.wait("/[?&]step=2(&|$)/.test(location.hash)", "step 2 in the URL", 5)
+    want = page.js(f"(() => {{ const e = X.model.stepAt(X.data.flow({json.dumps(pick['flow'])}), 2).step; return e.ref || ('actor:' + (e.at || e.from)); }})()")
+    page.wait(f"X.inspector.current() === {json.dumps(want)}", "the inspector to follow the step", 5)
+    cur = page.js("(document.querySelector('.seq-row.cur') || document.querySelector('.fl-step.cur') || {dataset: {}}).dataset.no")
+    stepCount = page.js("document.querySelector('.fs-count').textContent")
+    check(cur == "2" and "2" in stepCount and page.js(f"location.hash.indexOf('i=' + {json.dumps(want)}) > 0"),
+          f"pressing j moves {pick['flow']} from step 1 ({first}) to step 2 ({want}): diagram, panel, URL and inspector follow")
+    page.js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'k', bubbles: true}))")
+    page.wait("/[?&]step=1(&|$)/.test(location.hash)", "back to step 1", 5)
+    check(True, "pressing k goes back to step 1")
+    collect("flow player")
+
+# A reference in a concern's text opens the inspector.
+if pick["concern"]:
+    page.goto(f"#/concerns/{pick['concern']}")
+    page.wait("document.querySelector('.cp-body')", "the concern page")
+    ref = page.js("(() => { const a = [...document.querySelectorAll('.cp-body a.chip[data-ref]')].find(a => !/^diagram:/.test(a.dataset.ref));"
+                  " if (!a) return null; a.scrollIntoView({block: 'center'}); a.click(); return a.dataset.ref; })()")
+    if ref:
+        page.wait(f"X.inspector.current() === {json.dumps(ref)} && document.querySelector('.insp-body').children.length", "the inspector to show the reference", 5)
+        check(True, f"clicking {ref} in the text of {pick['concern']} opens it in the inspector")
+    else:
+        check(False, f"the text of {pick['concern']} has a reference to click")
+    if pick["diagram"]:
+        n = page.js("document.querySelectorAll('.cp-body .gd-fig').length")
+        want = page.js(f"(X.data.concern({json.dumps(pick['concern'])}).diagrams || []).length")
+        check(n == want, f"the page of {pick['concern']} shows its {want} diagrams ({n})")
+    collect("concern")
+
+# The runtime map draws a connector for every channel, and is fast.
+if pick["actor"]:
+    page.goto("#/overview")
+    t0 = page.js("performance.now()")
+    page.js("location.hash = '#/runtime'")
+    page.wait("document.querySelectorAll('.rt-map g.cx').length > 0", "the runtime map's connectors")
+    ms = int(page.js("performance.now()") - t0)
+    n = page.js("document.querySelectorAll('.rt-map g.cx .cx-edge').length")
+    routed = page.js("[...document.querySelectorAll('.rt-map g.cx .cx-edge')].filter(p => !/C/.test(p.getAttribute('d'))).length")
+    check(n == pick["channels"], f"the runtime map draws {n} connectors for {pick['channels']} channels ({routed} routed through the gaps)")
+    check(ms < 1500, f"the runtime map is drawn in {ms} ms")
+    gates = page.js("document.querySelectorAll('.rt-map .cx-gate').length")
+    want = page.js("X.data.model.channels.filter(c => c.boundary && c.from !== c.to && X.data.actor(c.from) && X.data.actor(c.to)).length")
+    check(gates == want, f"every boundary channel carries a gate ({gates} of {want})")
+    collect("runtime")
+
+# A [[term:…]] shows its definition on hover.
+if pick["term"]:
+    page.goto(f"#/concerns/{pick['termConcern']}" if pick["termConcern"] else "#/glossary")
+    page.wait("document.querySelector('[data-ref^=\"term:\"]')", "a term reference")
+    pos = page.js("(() => { const a = document.querySelector('.cp-body [data-ref^=\"term:\"]') || document.querySelector('.gl-row [data-ref^=\"term:\"]');"
+                  " if (!a) return null; a.scrollIntoView({block: 'center'}); const r = a.getBoundingClientRect(); return [r.left + Math.min(r.width / 2, 20), r.top + r.height / 2, a.dataset.ref]; })()")
+    if pos:
+        time.sleep(0.2)
+        page.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": pos[0], "y": pos[1]})
+        page.wait("document.querySelector('.hovercard.on')", "the term's card", 5)
+        words = page.js(f"X.md.plainText(X.data.term({json.dumps(pos[2][5:])}).text).split(/\\s+/).slice(0, 4).join(' ')")
+        text = page.js("document.querySelector('.hovercard.on').textContent")
+        check(words in " ".join(text.split()), f"hovering {pos[2]} shows its definition ({words!r}…)")
+        page.shot("hovercard-term")
+        page.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 5, "y": 5})
+    else:
+        check(False, "a term reference to hover")
+    collect("term")
+
+# The findings lead to the code that cites them.
+if pick["finding"] and pick["findingCited"]:
+    sel = f".fd-table tr[data-key=\"{pick['finding']}\"]"
+    page.goto(f"#/docs/findings?q={pick['finding']}")
+    page.wait(f"document.querySelector({json.dumps(sel + ' .chip[data-ref]')})", "the finding's citations")
+    chips = page.js(f"document.querySelectorAll({json.dumps(sel + ' td:last-child .chip[data-ref]')}).length")
+    check(chips > 0, f"the findings table lists where {pick['finding']} is cited ({chips} shown, {pick['findingCited']} in all)")
+    page.js(f"document.querySelector({json.dumps(sel + ' a[data-row]')}).click()")
+    page.wait("document.querySelector('.insp-body a.site')", "the finding in the inspector")
+    site = page.js("(() => { const a = document.querySelector('.insp-body a.site'); a.click(); return [a.dataset.file, a.dataset.line]; })()")
+    page.wait(f"location.hash.indexOf('#/code/' + {json.dumps(site[0])}) === 0 && /[?&]line={site[1]}(&|$)/.test(location.hash)", "the cited line", 5)
+    check(True, f"a citation of {pick['finding']} opens {site[0]}:{site[1]}")
+    collect("findings")
+
+# The source marks a flow step, and the symbol panel says where the model
+# mentions it.
+if pick["stepFile"]:
+    page.goto(f"#/code/{pick['stepFile']}")
+    page.wait(f"document.querySelector('.src .r[data-n=\"{pick['stepLine']}\"] .mkx')", "the mark at the step's declaration")
+    check(True, f"{pick['stepFile']}:{pick['stepLine']} carries a mark for a flow step")
+    page.js(f"(() => {{ const s = X.data.symbolsOfFile({json.dumps(pick['stepFile'])}).find(x => x.line === {pick['stepLine']}); location.hash = '#/code/' + s.file + '?sym=' + s.ref; }})()")
+    page.wait("document.querySelector('.cv-sym .bl-sec .bl')", "the symbol's backlinks")
+    check(True, "its symbol panel lists where the model mentions it")
+    collect("marks")
+
+# Search finds a concern by its title.
+if pick["concern"]:
+    title = page.js(f"X.data.concern({json.dumps(pick['concern'])}).title")
+    res = page.js(f"X.search.query({json.dumps(title)}).slice(0, 3).map(r => r.item.ref)")
+    check("concern:" + pick["concern"] in res, f"search for {title!r} finds the concern ({res})")
+
+# The largest document renders quickly.
+if pick["doc"]:
+    page.goto(f"#/docs/{pick['doc']}")
+    page.wait("document.documentElement.dataset.docRenderMs", "the largest document")
+    ms = int(page.js("document.documentElement.dataset.docRenderMs"))
+    check(ms < 1000, f"the largest document ({pick['doc']}) renders in {ms} ms")
+    collect("document")
+
 # Every reference of the model, and one of every other kind, renders as a
 # chip, a hover card and an inspector view without an exception.
 page.goto("#/overview")
@@ -384,4 +573,4 @@ if problems or failures:
 print("no errors or exceptions; all assertions hold")
 PY
 
-python3 -I "$WORK/cdp.py" "$SITE" "$CDP_PORT" "$OUT"
+python3 -I "$WORK/cdp.py" "$SITE" "$CDP_PORT" "$OUT" ${SHOTS[@]+"${SHOTS[@]}"}

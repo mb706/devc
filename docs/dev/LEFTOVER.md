@@ -349,6 +349,15 @@ After upgrading to C19r4: a desktop that runs from before is refused by `devc gu
 - Middle click on a source identifier opens a new tab through `window.open` (the identifiers carry no `href` to keep large files light).
 - The first `./dev explore` compiles the tool, which links most of devc (through `internal/cli`); only the cached build time (about 5 s) was measured.
 
+### Explorer (X3)
+
+- Checked in headless Chrome only (no Firefox here), like X2. The router, the sequence diagram and the Markdown renderer use nothing beyond what X2 already relies on.
+- The package map's import lines still run behind faded tiles. Routing them with the connector layer's grid router was tried and dropped: a package with twenty imports turns into orthogonal spaghetti around the layer headers; curves show the fan-out better.
+- On a narrow runtime map (the inspector open at 1280) the labels of an actor with many channels crowd around it; they prefer the far ends and avoid the cards, but there is little room. Hovering one channel shows its label alone.
+- Placement of actors inside a zone minimises the length of their channels; it does not count crossings. With today's model no channel runs behind a card; a much denser model could.
+- A dense graph diagram (25 edges on 15 nodes) is legible but busy: the router lays parallel edges in tracks 6 pixels apart.
+- The large temporary model (40 concerns, 60 flows, a 40-step flow, a ten-actor flow, a 15-node diagram, a concern three times as long, 100 terms) was built under `bin/` (only the repository is mounted in the toolchain container) and deleted afterwards; `explorer/check.sh --site` passed on it.
+
 ## 6. Deferred work
 
 | Work | What it would take |

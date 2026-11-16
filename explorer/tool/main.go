@@ -143,6 +143,7 @@ func analyze(modelDir string, stderr io.Writer) (*result, error) {
 	}
 	findings := indexFindings(docs)
 	orders := indexWorkOrders(docs)
+	citeInComments(w, findings, orders)
 
 	reach, shares := w.computeReach(lm.Model.Actors, cmds)
 

@@ -3,12 +3,12 @@ package server
 
 import "example.com/m/proto"
 
-// Server serves methods.
+// Server serves methods; see finding C1-05 and finding Z9.
 type Server struct{}
 
 func (s *Server) handlers() map[string]proto.Handler {
 	return map[string]proto.Handler{
-		proto.MethodPing:  s.ping,
+		proto.MethodPing:  s.ping, // as work order C10a says
 		proto.MethodSend:  s.factory("a"),
 		proto.MethodBuilt: s.builder(proto.MethodBuilt),
 	}
