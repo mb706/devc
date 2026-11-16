@@ -1,25 +1,26 @@
-package daemon
-
-// Service logins (work order C18). A service is a capability a box is
-// started with (grants.services, recorded in box.Capabilities like secrets
-// and SSH grants, finding C1-02): the daemon tells the box agent on which
-// loopback ports to listen (box.services), the agent relays each
-// connection unparsed on a host.service stream (the pattern of C13's proxy
-// and host exceptions), and the daemon decides everything: the service
-// must be in force for this box (granted at its start and now, with an
-// unchanged definition), the request head is checked on its raw bytes and
-// against the rules (svclogin.CheckHead, svclogin.Allowed), and only then
-// does net/http's server parse it and svclogin.Proxy forward it to the
-// upstream with the credential, which never travels towards the box.
+// This file serves service logins (work order C18). A service is a
+// capability a box is started with (grants.services, recorded in
+// box.Capabilities like secrets and SSH grants, finding C1-02): the daemon
+// tells the box agent on which loopback ports to listen (box.services),
+// the agent relays each connection unparsed on a host.service stream (the
+// pattern of C13's proxy and host exceptions), and the daemon decides
+// everything: the service must be in force for this box (granted at its
+// start and now, with an unchanged definition), the request head is
+// checked on its raw bytes and against the rules (svclogin.CheckHead,
+// svclogin.Allowed), and only then does net/http's server parse it and
+// svclogin.Proxy forward it to the upstream with the credential, which
+// never travels towards the box.
 //
 // Cookie services need a login (devc service login), whose jar is a realm
-// secret. A jar older than auth.refresh, or a 401 or a redirect to the
-// login path from the upstream, marks the service as needing a login: boxes
-// get 503 with a clear message and the live sessions of the box a note.
-// With auth.auto the daemon runs the login itself, once at a time per
-// service and at most once a minute, as a child process of the same
-// binary (`devc service login`), so the CLI's checks, lock and container
-// apply unchanged.
+// secret. A missing jar, one older than auth.refresh or without a live
+// cookie for the upstream's host, or a 401 or a redirect to the login path
+// from the upstream, means the service needs a login: boxes get 503 with a
+// clear message and the live sessions of the box a note. With auth.auto
+// the daemon runs the login itself, once at a time per service and at most
+// once a minute, as a child process of the same binary (`devc service
+// login`), so the CLI's checks, lock and container apply unchanged.
+
+package daemon
 
 import (
 	"bufio"
@@ -83,6 +84,8 @@ type serviceManager struct {
 	lastErr  map[string]error
 }
 
+// loginFlight is an automatic login in progress; requests that need it
+// meanwhile wait on done instead of starting another.
 type loginFlight struct {
 	done chan struct{}
 	err  error
@@ -158,6 +161,8 @@ func (m *serviceManager) log(realm, name string) *svclogin.Log {
 	return l
 }
 
+// append logs one request of a box; a log that cannot be written is a
+// warning and changes no decision.
 func (m *serviceManager) append(realm, name string, e svclogin.LogEntry) {
 	if err := m.log(realm, name).Append(e); err != nil {
 		m.d.log.Warn("writing a service log", "service", serviceID(realm, name), "err", err)
@@ -214,7 +219,14 @@ func writeRefusal(c *relayConn, status int, msg string) {
 	c.Close()
 }
 
-// serveService serves one host.service stream.
+// serveService serves one host.service stream, in this order: the service
+// must be in force for this box, the head must arrive within 30 seconds
+// and pass svclogin.CheckHead, and a rule must allow its method and
+// normalised path; only then does the HTTP server see the stream. A
+// refusal is answered with its status and logged here; an incomplete head
+// only closes the stream, and a refusal for a service that is not defined
+// is not logged, so a box cannot make the host create a log for a name of
+// its choosing.
 func (w *boxWorker) serveService(ctx context.Context, st *yamux.Stream, br *bufio.Reader, m *proto.RPCMessage) {
 	conn := &relayConn{st: st, r: br}
 	d := w.d

@@ -1,3 +1,7 @@
+// This file implements the sidecar's life cycle under the box lock (up,
+// reuse, down, removal before the box stops or starts, status), the files
+// it puts where the box can see them and the host's record of its viewer.
+
 package gui
 
 import (
@@ -163,6 +167,10 @@ func (m *Manager) Up(ctx context.Context, ref names.ProjectRef, o UpOptions) (*V
 	return v, err
 }
 
+// up is Up with the box lock held and the box running and ready (boxCI is
+// its container): it reuses or refuses a sidecar of this start, or removes
+// whatever sidecar there is and makes a new one. A limit that cannot be
+// applied fails before anything is removed.
 func (m *Manager) up(ctx context.Context, ref names.ProjectRef, boxCI *engine.ContainerInfo, o UpOptions) (*Viewer, error) {
 	cur, err := m.find(ctx, ref)
 	if err != nil {
@@ -507,6 +515,8 @@ func (m *Manager) Status(ctx context.Context, ref names.ProjectRef) (*Status, er
 
 // --- files ---
 
+// displayEnvPath is display.env in the host directory behind the box's
+// /etc/devc, which the box sees read-only.
 func (m *Manager) displayEnvPath(ref names.ProjectRef) string {
 	return filepath.Join(m.Paths.BoxEtcDir(ref), boxside.DisplayEnvName)
 }
@@ -596,6 +606,9 @@ func (m *Manager) recordPath(ref names.ProjectRef) (string, error) {
 	return filepath.Join(rt, "gui", names.BoxID(ref)+".json"), nil
 }
 
+// readRecord reads the record strictly, without following a symlink: it
+// must name this project's sidecar and hold a container ID, an
+// eight-character password and a port.
 func (m *Manager) readRecord(ref names.ProjectRef) (*Record, error) {
 	p, err := m.recordPath(ref)
 	if err != nil {

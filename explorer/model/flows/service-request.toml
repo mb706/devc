@@ -1,0 +1,157 @@
+id = "service-request"
+kind = "flow"
+title = "A request through a service login"
+summary = "A program in a box sends a request to a granted header service on its loopback port: the agent relays it unparsed; the daemon checks the relay budget, that the service is in force, the raw head, the normalised path and the rules; only then net/http parses it and the proxy adds the credential, strips the box's own credentials, forwards it, filters the answer, scrubs its headers and logs the request."
+concern = "service-logins"
+trigger = "curl http://127.0.0.1:8602/wiki/page (in a box granted the header service wiki)"
+actors = ["service-upstream", "state-dir", "daemon", "box-agent", "box-program"]
+
+[[step]]
+section = "In the box"
+
+[[step]]
+from = "box-program"
+to = "box-agent"
+via = "stream"
+label = "TCP 127.0.0.1:8602: GET /wiki/page HTTP/1.1"
+external = true
+text = "The box sees an ordinary HTTP server without TLS or credentials. The agent listens on that port because the daemon's `box.services` named the service with it; the port closes when the service is no longer in force."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.relayTCP"
+unchecked = "the connection is accepted by the service listener that setServices opened (acceptRelays), which starts relayTCP for it"
+text = "The agent holds no policy. It needs one of its 64 relay places, room among 512 new relays per ten seconds, and a connected host; otherwise it closes the connection at once."
+
+[[step]]
+from = "box-agent"
+to = "daemon"
+via = "stream"
+label = "yamux stream: host.service {name: wiki}, then the bytes"
+ref = "internal/boxside.Agent.relayTCP"
+text = "A new stream of the box channel starts with a request line naming the service; then the agent copies bytes both ways, unparsed. A box could send any name here: the daemon decides."
+
+[[step]]
+section = "Before net/http sees the request"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveStream"
+unchecked = "the stream is accepted by acceptStreams, which starts serveStream for it"
+checks = ["internal/proto.ParseMessage"]
+text = "The first line must arrive within 30 seconds. A `host.service` stream needs one of the box's 64 relay places, shared with the proxy and host exceptions; without one the box gets 503."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveService"
+checks = ["internal/proto.DecodeParams", "internal/names.Valid"]
+text = "The name must be a valid name, or the stream just closes. The configuration is reloaded if it changed, so a grant removed a moment ago is gone for this request."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.serviceInForce"
+checks = ["internal/daemon.resolvedOf", "internal/daemon.Daemon.startedWith", "internal/box.Capabilities.Service"]
+text = "The project's configuration has no problems, it grants `wiki` now, the capability record belongs to this container and lists `wiki` with the same fingerprint and port. Otherwise 403 with the reason, logged when the service exists."
+
+[[step]]
+at = "daemon"
+ref = "internal/svclogin.ReadHead"
+text = "The head must arrive within 30 seconds, fit 64 KiB (`431`), and end every line in CRLF (`400`). A connection that ends before its head is closed without an answer."
+
+[[step]]
+at = "daemon"
+ref = "internal/svclogin.CheckHead"
+checks = ["internal/svclogin.CheckHead", "internal/svclogin.LocalHost"]
+text = "On the raw bytes: a request line with single spaces and origin form, HTTP/1.0 or 1.1, token header names, no line folding or control characters, at most 100 fields, unambiguous length framing, exactly one `Host: 127.0.0.1:8602` or `localhost:8602`, no upgrade, `Expect` only for 100-continue."
+detail = "The statuses: 400 for anything malformed or ambiguous, 431 for too many fields, 501 for a Transfer-Encoding other than chunked, 505 for another HTTP version, 403 for an upgrade (WebSocket, h2c), 417 for another Expect."
+
+[[step]]
+at = "daemon"
+ref = "internal/svclogin.NormalizeTarget"
+checks = ["internal/svclogin.NormalizeTarget"]
+text = "The path is brought into its one normal form: percent-encoded letters, digits and `-._~` decoded, other encodings upper-cased; encoded `/`, `\\`, `%`, reserved or control characters, `.` and `..` segments (also before `;`), empty segments and fragments are refused (`400`)."
+
+[[step]]
+at = "daemon"
+ref = "internal/svclogin.Allowed"
+text = "The first `[[allow]]` rule whose methods include GET and whose path is `/wiki/page` or above it at a segment boundary allows it. Otherwise 403, with the rule that would be needed for the agent to ask the user."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.connListener.push"
+text = "From here on every read and write on the stream ends at `limits.timeout` plus five seconds, and a timer closes the stream then whatever happens. The checked head, followed by the rest of the stream, goes to the daemon's one HTTP server for services."
+detail = "That server has keep-alives off: it answers one request and closes, so nothing sent after the first request is ever served, and what it parses is exactly the head checked above."
+
+[[step]]
+section = "The proxy"
+
+[[step]]
+at = "daemon"
+ref = "internal/svclogin.Proxy.ServeHTTP"
+unchecked = "net/http's server, started by serviceManager.start on the connListener, accepts the stream and calls the handler; ConnContext attaches the decision made above"
+text = "A declared body over `max_body` gets 413; the rest of the exchange runs under `limits.timeout`."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.serviceManager.credential"
+text = "The credential for this request. A header service reads its secret each time; a cookie service would take its jar's `Cookie` for this path, or answer 503 when a login is needed ([[flow:service-login]])."
+
+[[step]]
+from = "daemon"
+to = "state-dir"
+via = "file"
+label = "read durable/realms/<realm>/secrets/<value_secret>"
+ref = "internal/secrets.FileStore.Get"
+text = "A missing secret answers 503 with the `devc secret set` the user must run."
+
+[[step]]
+at = "daemon"
+ref = "internal/svclogin.HeaderCredential"
+checks = ["internal/svclogin.normalizeValue", "internal/svclogin.credentialParts"]
+text = "One normal form: line ending and surrounding white space removed, printable ASCII only, every word but a leading scheme such as `Bearer` at least eight characters. The value and its secret parts become the list to scrub."
+
+[[step]]
+at = "daemon"
+ref = "internal/svclogin.Credential.check"
+text = "The last look before anything goes out: the value is in its normal form and among the values to scrub, and nothing to scrub is shorter than eight characters (`503` otherwise)."
+
+[[step]]
+at = "daemon"
+ref = "internal/svclogin.rewrite"
+text = "The target becomes the normalised path, `Host` the upstream's. The box's `Authorization`, `Cookie`, `Cookie2`, the credential's header, `Proxy-*`, `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Via`, `Upgrade` and `HTTP2-Settings` are removed; `Origin` and `Referer` on the local address are mapped to the upstream, any other dropped; then the credential is set."
+
+[[step]]
+from = "daemon"
+to = "service-upstream"
+via = "stream"
+label = "GET /wiki/page, Host: wiki.example.org, credential"
+ref = "internal/svclogin.noTrace.RoundTrip"
+unchecked = "httputil.ReverseProxy, which ServeHTTP set up with this transport, calls RoundTrip"
+text = "Over TLS with the host's trust store, never through a proxy, HTTP/2 where offered; no redirect is followed. 1xx answers are discarded by the transport and never reach the box."
+
+[[step]]
+at = "daemon"
+ref = "internal/svclogin.modifyResponse"
+text = "A protocol switch is refused (`502`). `Set-Cookie`, `Set-Cookie2`, `Alt-Svc`, `Authentication-Info` and `Proxy-*` are dropped, a `Location` or `Content-Location` on the upstream is rewritten to `http://127.0.0.1:8602`, trailers are dropped, and a body over `max_body` is refused or cut off."
+detail = "For a cookie service a 401, or a redirect to `login_path` on the upstream, becomes 503: the service is marked as needing a login, the box's live sessions get a note, and with `auto` a login starts in the background."
+
+[[step]]
+at = "daemon"
+ref = "internal/svclogin.scrubber.header"
+text = "Every header value is scrubbed of the credential and its parts, as written and URL-encoded; a header whose name holds one is dropped. The body passes unscrubbed."
+
+[[step]]
+from = "daemon"
+to = "state-dir"
+via = "file"
+label = "durable/realms/<realm>/service-log/wiki.jsonl"
+ref = "internal/svclogin.Log.Append"
+text = "Time, box, method, normalised path without the query, status, and devc's reason for a refusal; never headers or bodies. Past 4 MiB the log moves to `.1`."
+
+[[step]]
+from = "daemon"
+to = "box-program"
+via = "reply"
+label = "HTTP/1.1 200, Connection: close"
+ref = "internal/svclogin.Proxy.ServeHTTP"
+text = "The answer travels back through the stream and the agent, and the connection closes."

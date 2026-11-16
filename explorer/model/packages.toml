@@ -199,7 +199,7 @@ role = "Stores per-realm secrets on the host and writes the ones a box is given 
 [package."internal/github"]
 layer = "area"
 group = "access"
-role = "devc's side of GitHub: the repository an upstream names, the requests of the read-only facade, the host's own credential, and GitHub App installation tokens."
+role = "devc's side of GitHub: the repository an upstream names, the validation and requests of the read-only facade, the host's own credential, the two writes devc makes (pull requests and comments), and GitHub App installation tokens with their permission rules."
 
 [package."internal/toolbox"]
 layer = "area"
@@ -271,7 +271,7 @@ role = "Keeps each realm's context repository: the notes and memory directories 
 [package."internal/gui"]
 layer = "assembly"
 group = "box"
-role = "Runs the desktop sidecar of a box: a second container from the auxiliary desktop image that joins the box's network and user namespaces and nothing else."
+role = "Runs the desktop sidecar of a box: a second container from the auxiliary desktop image that joins the box's network and user namespaces and nothing else, with the X cookie it hands the box, its viewer's forward and its resource limits."
 
 [package."internal/shares"]
 layer = "assembly"

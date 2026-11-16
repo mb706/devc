@@ -159,6 +159,18 @@ writer = "host"
 ref = "internal/paths.Paths.SecretsDir"
 
 [[tree.entry]]
+path = "durable/realms/<realm>/secrets/github-token"
+text = "The host's own GitHub credential (or `gh auth token` instead): read by the daemon's read facade and by `devc pr`, never handed to a box by them."
+writer = "host"
+ref = "internal/github.HostTokenSecret"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/secrets/_jar.<service>"
+text = "A cookie service's jar, written by `devc service login` with the time of the login and read by the daemon's service proxy; no project may grant it."
+writer = "host"
+ref = "internal/config.JarSecret"
+
+[[tree.entry]]
 path = "durable/realms/<realm>/requests/<project>.jsonl"
 text = "The project's request log: one line per change of a request, compacted past 4 MiB; only the daemon writes it."
 writer = "host"
@@ -369,6 +381,12 @@ writer = "host"
 ref = "internal/daemon.newReportFile"
 
 [[tree.entry]]
+path = "local/tmp/service-login-<random>"
+text = "The scratch directory of one cookie login (0700): the service directory's other files and `secrets/<NAME>` (0600) for each login secret, mounted at /login in the login container, removed afterwards."
+writer = "host"
+ref = "internal/svclogin.Login.Run"
+
+[[tree.entry]]
 path = "local/context-<realm>.lock"
 text = "Serialises the context worker and manifest appends of a realm."
 writer = "host"
@@ -506,6 +524,12 @@ text = "The build context of the installer image: the Containerfile embedded in 
 writer = "host"
 ref = "internal/toolbox.EnsureAuxImage"
 
+[[tree.entry]]
+path = "cache/aux/desktop"
+text = "The build context of the desktop image: the Containerfile and the `devc-desktop` script embedded in devc."
+writer = "host"
+ref = "internal/gui.AuxImage"
+
 [[tree]]
 id = "runtime"
 title = "Runtime directory"
@@ -559,6 +583,18 @@ path = "<box-id>/status/<session>"
 text = "Exists while the status wrapper reports the session's state through OSC 7501; the hook receiver then drops its own state events."
 writer = "box"
 ref = "internal/boxside.StatusDir"
+
+[[tree.entry]]
+path = "<box-id>/display.xauth"
+text = "The desktop's X cookie (0600) while a sidecar runs, at /run/devc/display.xauth in the box: written by the host beneath a directory descriptor under a fresh name and renamed, readable and replaceable by the box."
+writer = "host"
+ref = "internal/gui.Manager.writeCookie"
+
+[[tree.entry]]
+path = "gui/<box-id>.json"
+text = "The host's record of a running desktop (0600): container, the box's start, the VNC password, the viewer's forward and port. No box sees it."
+writer = "host"
+ref = "internal/gui.Record"
 
 [[tree.entry]]
 path = "<box-id>-secrets"

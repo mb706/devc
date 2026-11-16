@@ -1,15 +1,15 @@
-package svclogin
+// This file implements the cookie jars of cookie services. A login command
+// prints its cookies as a JSON array on standard output; that output comes
+// from a container that ran with a password and the network, so it is
+// parsed strictly: known fields only, RFC 6265 names and values, values of
+// at least MinCredential characters (finding D2-07: every cookie is
+// scrubbed from responses), a domain that matches the service's host,
+// bounded counts and sizes. devc stores the result with the time of the
+// login as the realm secret _jar.<service>. Error messages never repeat
+// what the output held (finding D2-08): cookies are named by their
+// position, and JSON errors by kind and offset.
 
-// Cookie jars of cookie services. A login command prints its cookies as a
-// JSON array on standard output; that output comes from a container that
-// ran with a password and the network, so it is parsed strictly: known
-// fields only, RFC 6265 names and values, values of at least MinCredential
-// characters (finding D2-07: every cookie is scrubbed from responses), a
-// domain that matches the service's host, bounded counts and sizes. devc
-// stores the result with the time of the login as the realm secret
-// _jar.<service>. Error messages never repeat what the output held (finding
-// D2-08): cookies are named by their position, and JSON errors by kind
-// and offset.
+package svclogin
 
 import (
 	"bytes"

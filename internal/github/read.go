@@ -1,10 +1,10 @@
-package github
-
-// The read-only facade (work order C15 section 2). A box sends
-// proto.GitHubParams; PlanRead validates every field and decides the
-// repository, and Client.Read performs the GET requests the plan stands
+// This file implements the read-only facade (work order C15 section 2). A
+// box sends proto.GitHubParams; PlanRead validates every field and decides
+// the repository, and Client.Read performs the GET requests the plan stands
 // for. Nothing the box sends becomes a URL, a method or a header as it is:
 // paths are assembled from known segments and validated names only.
+
+package github
 
 import (
 	"bytes"
@@ -255,8 +255,12 @@ func (c *Client) Read(ctx context.Context, pl Plan) (*ReadResult, error) {
 	return nil, badRead("unknown operation %q", pl.Op)
 }
 
+// getFunc is one GET below the plan's repository, as Read builds it.
 type getFunc func(path string, q url.Values, accept string, max int64, keepEnd bool) (*Response, error)
 
+// orErr passes an answer back as GitHub sent it, a refusal included: the
+// box sees GitHub's status and message. A refusal's body is text unless
+// its content type says JSON.
 func orErr(r *Response, err error, text bool) (*ReadResult, error) {
 	if err != nil {
 		return nil, err
@@ -267,6 +271,7 @@ func orErr(r *Response, err error, text bool) (*ReadResult, error) {
 	return resultOf(r, text), nil
 }
 
+// isJSON reports whether a content type is JSON; a missing one counts.
 func isJSON(ct string) bool {
 	return ct == "" || strings.Contains(ct, "json")
 }

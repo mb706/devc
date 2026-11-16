@@ -817,3 +817,113 @@ aka = ["/src"]
 text = "`cache/realms/<realm>/src`, mounted read-write at `/src` in every box of the realm: the dependency sources `devc src` fetched, one directory per ecosystem, name and version. Shared and writable by the realm's boxes, never pruned."
 refs = ["internal/paths.Paths.RealmSrcCacheDir", "internal/depsrc.Fetch"]
 see = ["realm"]
+
+[[term]]
+id = "read-facade"
+title = "GitHub read facade"
+aka = ["devc gh", "host.github"]
+text = "The daemon's read-only access to GitHub for boxes: `devc gh` in a box names an operation, the daemon validates it, reads the project's repository (or one listed in `grants.github_read`) with the host's GitHub credential, and passes GitHub's status and body back, scrubbed. The credential never enters the box."
+refs = ["internal/daemon.boxWorker.serveGitHub", "internal/github.PlanRead"]
+see = ["host-github-credential", "github-token-mode"]
+
+[[term]]
+id = "host-github-credential"
+title = "Host GitHub credential"
+aka = ["github-token"]
+text = "The user's own GitHub token on the host: the realm secret `github-token`, else what `gh auth token` prints. Only the read facade and `devc pr` use it; no box receives it."
+refs = ["internal/github.HostToken"]
+see = ["read-facade"]
+
+[[term]]
+id = "github-token-mode"
+title = "Token mode"
+aka = ["grants.github = \"app\"", "token:<secret>"]
+text = "`grants.github = \"app\"` or `\"token:<secret>\"`: the box gets a GitHub token of its own, asked from the daemon by the launcher (`GH_TOKEN`) and by the box repository's credential helper for `git push github`. The default, `relay`, gives the box none."
+refs = ["internal/config.Grants.GitHubTokenMode", "internal/daemon.Daemon.githubToken"]
+see = ["installation-token", "git-credential-helper"]
+
+[[term]]
+id = "installation-token"
+title = "Installation token"
+aka = ["App token", "minted token"]
+text = "A token the daemon mints with the realm's GitHub App (`[github.app]`) for one repository, by its verified ID, and the permissions granted at the box's start and now, never `workflows`. Cached until five minutes before the expiry GitHub gives it."
+refs = ["internal/github.Minter.Token", "internal/github.Minter.verify"]
+see = ["github-token-mode"]
+
+[[term]]
+id = "git-credential-helper"
+title = "Credential helper (GitHub)"
+aka = ["devc box git-credential"]
+text = "`/opt/devc/bin/devc box git-credential`, which the box repository names for the GitHub host in the token modes: for `get` it asks the daemon for the token and prints it if git asked about that protocol and host; it stores nothing."
+refs = ["internal/boxside.GitCredential", "internal/gitx.Service.ConfigureGitHub"]
+see = ["github-token-mode"]
+
+[[term]]
+id = "service"
+title = "Service"
+aka = ["service login", "service.toml"]
+text = "A web service a realm defines in `services/<name>/service.toml` that granted boxes reach as plain HTTP on a loopback port: the daemon checks each request against the service's rules and adds the credential, a header from a realm secret or the cookies of a login, on the way to the upstream."
+refs = ["internal/config.Service", "internal/daemon.boxWorker.serveService"]
+see = ["service-rule", "cookie-jar"]
+
+[[term]]
+id = "service-rule"
+title = "Service rule"
+aka = ["[[allow]]"]
+text = "One `[[allow]]` entry of a service: methods and a path in normal form. A request passes when the first rule lists its method and its normalised path equals the rule's path or lies below it at a segment boundary; everything else gets 403 with the rule that would be needed."
+refs = ["internal/config.ServiceRule", "internal/svclogin.Allowed"]
+see = ["service"]
+
+[[term]]
+id = "cookie-jar"
+title = "Cookie jar"
+aka = ["_jar.<service>", "jar"]
+text = "The cookies a cookie service's login command printed, checked strictly and stored with the time of the login as the realm secret `_jar.<service>`. The proxy sends the cookies that apply to each request; no project may grant the secret."
+refs = ["internal/svclogin.Jar", "internal/svclogin.ParseLoginOutput"]
+see = ["login-container", "service"]
+
+[[term]]
+id = "login-container"
+title = "Login container"
+text = "The throwaway container in which `devc service login` runs a cookie service's login command: network on, no capabilities, only a scratch directory with the service's files and the login secrets mounted. Its standard output becomes the cookie jar."
+refs = ["internal/svclogin.Login.Run"]
+see = ["cookie-jar"]
+
+[[term]]
+id = "scrubbing"
+title = "Scrubbing"
+aka = ["scrub", "[redacted]"]
+text = "Replacing a credential wherever it appears in what goes back to a box: the GitHub client in every body and error it passes on, the service proxy in every response header (as written and URL-encoded). Service bodies are not scrubbed."
+refs = ["internal/github.Client.Scrub", "internal/svclogin.scrubber.header"]
+
+[[term]]
+id = "desktop-sidecar"
+title = "Desktop sidecar"
+aka = ["sidecar", "devc gui"]
+text = "`devc-<realm>-<project>_gui`: a container that joins only a box's network and user namespaces and serves an X display with a VNC server and the noVNC viewer on the shared loopback interface. Started by `devc gui up`, removed before the box stops, is removed or starts."
+refs = ["internal/gui.SidecarArgs", "internal/gui.Manager.Up"]
+see = ["x-cookie", "viewer", "box-dependent"]
+
+[[term]]
+id = "x-cookie"
+title = "X cookie"
+aka = ["display.xauth", "display cookie"]
+text = "The 16-byte cookie that admits an X client to the desktop: drawn for each sidecar, handed to it on standard input, and written for the box as `/run/devc/display.xauth`, readable in the box on purpose."
+refs = ["internal/gui.NewSecrets", "internal/gui.Manager.writeCookie"]
+see = ["desktop-sidecar"]
+
+[[term]]
+id = "viewer"
+title = "Viewer"
+aka = ["noVNC"]
+text = "The desktop's web page, noVNC on port 6080 of the box's loopback interface, reached from the host through a detached `devc forward`. The printed address carries the VNC password after `#`, which the browser keeps to itself."
+refs = ["internal/gui.Viewer.URL", "internal/cli.cliForwards.Start"]
+see = ["desktop-sidecar"]
+
+[[term]]
+id = "box-dependent"
+title = "Box dependent"
+aka = ["dependent"]
+text = "A container that joined a box's namespaces and must go before the box stops, is removed or starts again; the desktop sidecar is the only one. One that cannot be removed stops the operation."
+refs = ["internal/box.Dependent", "internal/box.Manager.removeDependents"]
+see = ["desktop-sidecar"]

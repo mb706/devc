@@ -6,16 +6,27 @@
 // minted per repository with chosen permissions and cached), and the
 // permission rules of [grants.github_token].
 //
+// Files: github.go holds the endpoints and the repository an upstream URL
+// names; client.go the REST client every call goes through, the two writes
+// (pull requests and comments) and the host credential; read.go the
+// facade's validation (PlanRead) and its reads; mint.go installation
+// tokens; jwt.go the App's JWT; perms.go the permission rules.
+//
 // Security rules: everything a box sends is hostile input (README rule 2).
 // A box never supplies a URL, a method, a header or a repository outside
 // its grant: PlanRead and ParseAPIPath accept only known operations and
-// validated names, and the client builds every request itself from the
-// configured base URL. The host credential and minted tokens never appear
-// in argument lists, logs or error messages (rule 5); responses are
-// scrubbed of the host credential before they reach a box. Requests go only
-// to the base URLs from DEVC_GITHUB_API and DEVC_GITHUB_URL (defaults
-// https://api.github.com and https://github.com), which tests point at
-// fake servers.
+// validated names, and the client builds every request itself on the
+// configured API base. The host credential and minted tokens never appear
+// in argument lists, logs or error messages (rule 5); every answer body and
+// error is scrubbed of the client's own credential before devc passes it
+// on. Requests are built only on the API base from DEVC_GITHUB_API
+// (default https://api.github.com); a redirect is followed only to an
+// https URL (job logs live on signed storage URLs) or, for a plain-http
+// test API, to that API's own host, and Go's client drops the
+// credential when a redirect leaves the API's host. DEVC_GITHUB_URL
+// (default https://github.com) is the web and git host: it decides which
+// upstreams are GitHub's, where the box's remote "github" points and which
+// host `gh auth token` is asked about. Tests point both at fake servers.
 package github
 
 import (

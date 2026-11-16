@@ -31,6 +31,12 @@
 // in its labels; a running sidecar with others (one made by an earlier
 // devc, or before the configuration changed) is never reused or silently
 // replaced: `gui up` refuses it until --restart replaces it.
+//
+// Files: sidecar.go holds the sidecar's name, labels, limits and `podman
+// create` arguments; secrets.go the cookie and password drawn for each
+// start; manager.go the life cycle (up, reuse, down, removal as the box's
+// dependent, status), the files in the box's runtime and etc directories
+// and the host's record of a running sidecar.
 package gui
 
 import (

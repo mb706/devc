@@ -161,6 +161,10 @@ func (c *Config) GrantedTo(s *Service) []names.ProjectRef {
 	return out
 }
 
+// loadServices reads every service directory of a realm. A definition
+// that does not decode is left out with a problem; one that decodes is
+// kept and validated later (validateServices), and its problems block the
+// projects that grant it.
 func (c *Config) loadServices(realm string, ps *problems) {
 	dir := c.Paths.ServiceDefsDir(realm)
 	for _, name := range subdirs(dir, ps) {

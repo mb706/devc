@@ -1,9 +1,9 @@
-package cli
+// This file holds the commands of service logins (work order C18): devc
+// service ls, login, status <realm> <name> and log. The other subcommands
+// of `devc service` manage the systemd units (servicecmds.go); `devc
+// service status` without arguments still reports those.
 
-// Service logins (work order C18): devc service ls, login, status <realm>
-// <name> and log. The other subcommands of `devc service` manage the
-// systemd units (servicecmds.go); `devc service status` without arguments
-// still reports those.
+package cli
 
 import (
 	"context"
@@ -34,9 +34,10 @@ type serviceStatus struct {
 	Upstream string   `json:"upstream"`
 	Projects []string `json:"projects"`
 	Rules    []string `json:"rules"`
-	// Login is "ok", "needs-login", "no-secret", "invalid-secret" (too
-	// short, or not one line) or "invalid"; Detail says
-	// more.
+	// Login is "ok", "needs-login", "no-secret" (the secret cannot be
+	// read), "invalid-secret" (it is not a credential the proxy would
+	// send: svclogin.HeaderCredential refuses it) or "invalid" (the
+	// definition has problems); Detail says more.
 	Login  string `json:"login"`
 	Detail string `json:"detail,omitempty"`
 	// Cookie services.

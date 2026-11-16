@@ -1,14 +1,15 @@
-package svclogin
+// This file implements the logins of cookie services: the service's login
+// command runs in a throwaway container (auth.image, by default the
+// installer image) with the network on, every capability dropped and
+// nothing mounted but a scratch directory, which holds the other files of
+// the service's directory and the login secrets (auth.secrets) as 0600
+// files. Its standard output is the cookie jar (ParseLoginOutput); its
+// standard error is shown to the user with every secret value removed.
+// Every error Run returns is redacted the same way before it is shown,
+// logged or stored (finding D2-08). The jar becomes the realm secret
+// _jar.<service>.
 
-// Logins of cookie services: the service's login command runs in a
-// throwaway container (auth.image, by default the installer image) with
-// the network on and nothing mounted but a scratch directory, which holds
-// the other files of the service's directory and the login secrets
-// (auth.secrets) as 0600 files. Its standard output is the cookie jar
-// (ParseLoginOutput); its standard error is shown to the user with every
-// secret value removed. Every error Run returns is redacted the same way
-// before it is shown, logged or stored (finding D2-08). The jar becomes
-// the realm secret _jar.<service>.
+package svclogin
 
 import (
 	"bytes"
@@ -103,6 +104,8 @@ func (l *Login) Run(ctx context.Context, s *config.Service) (*Result, error) {
 	return res, nil
 }
 
+// run is Run before its error is redacted: the secret values it has read
+// reach Run through redactp, also when it fails part-way.
 func (l *Login) run(ctx context.Context, s *config.Service, redactp *[]string) (*Result, error) {
 	if s.Auth.Kind != config.ServiceAuthCookie {
 		return nil, fmt.Errorf("the service %s uses a header credential, which needs no login: store it with 'devc secret set %s %s'", s.Name, s.Realm, s.Auth.ValueSecret)

@@ -1,0 +1,150 @@
+id = "request-pr"
+kind = "flow"
+title = "A box asks for a pull request"
+summary = "An agent asks with devc request pr; the daemon validates and stores the high-risk request; the user approves it on the host; the daemon runs devc pr create --yes as a child process, which reads the host's credential, banks, pushes the branch to the upstream and opens the pull request, and the outcome with its URL goes back to the request."
+concern = "github"
+trigger = "devc request pr --title 'Fix the parser' (in a box, on branch fix-parser), then devc requests approve <id> on the host"
+actors = ["user", "github", "cli", "daemon", "box-tools", "harness"]
+
+[[step]]
+section = "The box asks"
+
+[[step]]
+from = "harness"
+to = "box-tools"
+via = "cmd:devc request pr"
+label = "devc request pr --title 'Fix the parser'"
+external = true
+text = "The agent runs the command in its box; the sandbox description tells it to push the branch to origin first, then ask."
+
+[[step]]
+at = "box-tools"
+ref = "internal/cli.currentBranch"
+text = "Without `--branch` the command takes the branch checked out in the working directory (`git symbolic-ref --short HEAD`, run by box git)."
+
+[[step]]
+from = "box-tools"
+to = "daemon"
+via = "rpc:host.request"
+label = "host.request {kind: pr, title, body, branch, base, draft}"
+ref = "internal/boxside.AgentCall"
+checks = ["internal/requests.Validate"]
+unchecked = "the run function then calls the request group's send closure, a function value held in a local variable, which validates the request and calls AgentCall"
+text = "The request is validated as the host will (a title of one line, branch and base that pass the ref name rules) and goes through the agent on a new stream of the box channel; the session comes from `DEVC_SESSION`."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.create"
+checks = ["internal/proto.DecodeParams", "internal/requests.Validate", "internal/daemon.resolvedOf"]
+text = "The project is the channel's. The request is validated again and stored as pending; `pr` is high risk, so no `[requests] auto` entry can approve it ([[flow:request-approve]] shows the budgets and the log)."
+
+[[step]]
+from = "daemon"
+to = "box-tools"
+via = "reply"
+label = "{id, status: pending, risk: high}"
+ref = "internal/daemon.requestService.create"
+text = "The command prints the ID and that the user must approve it on the host."
+
+[[step]]
+section = "The user approves"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc requests approve"
+label = "devc requests approve <id>"
+external = true
+text = "`devc requests` shows `pull request: Fix the parser (fix-parser)`: the branch the box chose is in the summary."
+
+[[step]]
+from = "cli"
+to = "daemon"
+via = "rpc:requests.decide"
+label = "requests.decide {id, approve: true}"
+ref = "internal/cli.app.decideRequest"
+text = "On the daemon's socket the decision's origin is `local`."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.decideLocked"
+checks = ["internal/requests.MayDecide"]
+text = "A high-risk request can be decided only locally, never from a hub. The approval is stored and the job queued."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.execute"
+unchecked = "one of the two request workers takes the job from the executor's queue"
+text = "A request worker carries the request out."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestCommands"
+text = "`devc pr create --yes --branch=fix-parser --title=… --body=… -- <project>`: box-chosen text in `--flag=value` form and before `--`, the project after it, so none of it can become an option. A request without a branch fails here."
+
+[[step]]
+from = "daemon"
+to = "cli"
+via = "cmd:devc pr create"
+label = "devc … pr create --yes --branch=… -- <project>"
+ref = "internal/daemon.Daemon.runChild"
+text = "A child process of the same binary with the daemon's directories, from `/`, its output captured."
+
+[[step]]
+section = "devc pr create"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.prCreate"
+checks = ["internal/names.CheckRef"]
+text = "Branch and base are checked again as ref names."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.refuseProblems"
+text = "A project whose configuration has problems publishes nothing, as for `devc push`."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.githubClient"
+text = "The repository from the upstream and the host's credential ([[internal/github.HostToken]]) are read before anything is pushed, so a missing credential publishes nothing."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.publishBranch"
+text = "Under the box lock, a running box is banked first ([[concern:git-ratchet]]), so the relay has the box's latest commits of the branch."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.Push"
+text = "As `devc push` does ([[concern:upstream]]): the relay must have the branch; the commits the upstream lacks are shown; a non-fast-forward is refused, since a request never passes `--force`; `--yes` stands for the confirmation the approval gave."
+
+[[step]]
+from = "cli"
+to = "github"
+via = "exec"
+label = "git push --porcelain --no-verify github <oid>:refs/heads/fix-parser"
+ref = "internal/gitx.Service.pushUpstream"
+text = "Host git pushes the commit that was shown, with the user's own git credentials rather than the GitHub token; the branch appears on the upstream under the name the box chose."
+
+[[step]]
+from = "cli"
+to = "github"
+via = "stream"
+label = "POST /repos/<o>/<r>/pulls {title, head, base, body, draft}"
+ref = "internal/github.Client.CreatePull"
+text = "With the host's credential. The base is `--base`, else the project's `default_branch`, else the relay's HEAD, else `main`; GitHub's answer gives the number and URL."
+detail = "Nothing compares the branch with the base before the push: a request whose branch is the base has already fast-forwarded that upstream branch when the pull request fails ([[doc:docs/dev/LEFTOVER.md#7]])."
+
+[[step]]
+from = "cli"
+to = "daemon"
+via = "reply"
+label = "exit 0; output with the URL"
+ref = "internal/cli.app.prCreate"
+text = "The URL is printed on standard output; the daemon captures standard output and standard error together."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.transitionLocked"
+text = "The request becomes done (or failed) with the last 2,000 characters of the output, the URL among them, while it is still the approval this run carried out. `devc request status <id>` in the box shows it."

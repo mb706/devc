@@ -1,0 +1,129 @@
+id = "service-login"
+kind = "flow"
+title = "devc service login for a cookie service"
+summary = "The user logs in to a cookie service: devc takes the service's lock, puts the login's files and secrets into a scratch directory, runs the login command in a throwaway container without capabilities, parses the cookies it prints strictly, and stores them as the realm secret _jar.<name> for the daemon's proxy."
+concern = "service-logins"
+trigger = "devc service login demo intranet"
+actors = ["user", "cli", "state-dir", "podman", "service-login", "service-upstream"]
+
+[[step]]
+section = "Before the container"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc service login"
+label = "devc service login demo intranet"
+external = true
+text = "On the host. The daemon runs the same command with `--quiet` for a service with `auto = true`, at most once a minute ([[internal/daemon.serviceManager.runLogin]])."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.serviceArg"
+text = "The realm and the name are validated and the service looked up; a header service is refused at once, since its credential needs no login."
+
+[[step]]
+at = "cli"
+ref = "internal/config.Config.ServiceProblems"
+text = "A definition with problems is refused: run `devc config check`."
+
+[[step]]
+at = "cli"
+ref = "internal/svclogin.Login.Run"
+text = "Every error from here on is redacted against the login's secret values before it is shown, logged or stored."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "lock local/services/<realm>/<name>.lock"
+ref = "internal/flock.Acquire"
+text = "Logins of one service, from the CLI or the daemon, are serialised; a second waits up to six minutes."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "read durable/realms/<realm>/secrets/<auth.secrets>"
+ref = "internal/secrets.FileStore.Get"
+text = "Each secret the login names, such as a user name and a password; a missing one is an error naming `devc secret set`. Their values, as stored and trimmed, are what gets redacted."
+
+[[step]]
+at = "cli"
+ref = "internal/svclogin.copyLoginFiles"
+text = "A scratch directory below `local/tmp` (0700) receives the service directory's regular, non-hidden files except `service.toml` (at most 32, each up to 1 MiB, the executable bit kept) and `secrets/<NAME>` for each secret (0600). It is removed afterwards."
+
+[[step]]
+at = "cli"
+ref = "internal/toolbox.EnsureInstallerImage"
+text = "Without `auth.image` the login runs in the installer image, built here when it is missing or stale."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run --rm --cap-drop=ALL … -v <scratch>:/login <image> <auth.login>"
+ref = "internal/engine.Podman.RunStream"
+text = "No new privileges, the toolbox's seccomp profile, the network on, only the scratch directory mounted (at /login, the working directory), tmpfs mounts, `HOME=/tmp`, the service's name and upstream and the secrets' directory in the environment, no standard input, five minutes."
+
+[[step]]
+section = "In the container"
+
+[[step]]
+from = "podman"
+to = "service-login"
+via = "exec"
+label = "auth.login, e.g. ./login.sh"
+external = true
+text = "The login command, typically a script from the service's directory, reads the secrets from `$DEVC_SECRETS_DIR`. There is no terminal and no standard input, so a second factor cannot be typed."
+
+[[step]]
+from = "service-login"
+to = "service-upstream"
+via = "stream"
+label = "the site's login form"
+external = true
+text = "It logs in however the site wants; devc does not see this exchange."
+
+[[step]]
+from = "service-login"
+to = "cli"
+via = "reply"
+label = "stdout: [{name, value, domain, path, expiry}, …]"
+external = true
+text = "The cookies as a JSON array on standard output (at most 256 KiB kept); standard error is kept up to 64 KiB. A nonzero exit status fails the login with the end of standard error."
+
+[[step]]
+section = "Checking and storing"
+
+[[step]]
+at = "cli"
+ref = "internal/svclogin.cleanStderr"
+text = "Every secret value is removed from standard error, longest first, and control characters are made printable."
+
+[[step]]
+at = "cli"
+ref = "internal/svclogin.ParseLoginOutput"
+checks = ["internal/svclogin.ParseLoginOutput", "internal/svclogin.checkCookies"]
+text = "Strictly: exactly the five known fields, nothing after the array, 1 to 64 cookies, RFC 6265 names and values of 8 to 4,096 characters, a domain that is the upstream's host or above it, valid paths and expiries, no duplicate, at least one not yet expired. Errors name cookies by position and never repeat the output."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "durable/realms/<realm>/secrets/_jar.intranet"
+ref = "internal/secrets.FileStore.Set"
+text = "The jar, with the time of the login, as a realm secret no box mounts; no project may grant a `_jar.` secret."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "local/services/<realm>/<name>.json"
+ref = "internal/svclogin.WriteState"
+text = "The login state starts over, so a mark that the service needed a login no longer applies."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.statusOf"
+text = "The command prints the cleaned standard error, the number of cookies and until when the login is valid: the earlier of the login time plus `refresh` and the first cookie expiry. From now on the daemon adds the matching cookies to each allowed request ([[flow:service-request]])."

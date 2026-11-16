@@ -41,3 +41,9 @@ Small problems in the tool and the app that the content authors met. This list g
 - The shortest-path rule again chose a misleading route (`data-push` through `Service.Pull` until `Service.Push` was named as a step). Same fix as for X7: prefer the nearest earlier step.
 - `query flow <id>`: print the paths the tool found (third request).
 
+## From X10
+
+- Closures held in local variables and functions passed as values are not followed by the call graph; after a `cmd:` step the tool connects from the literal's other callees. Follow a function literal assigned to a local variable and called in the same function.
+- A word counter for concern pages (prose only), reported by `--check` when a page passes the limit.
+- Diagram labels such as `127.0.0.1:6001` wrap in the middle of a token; do not break inside code-like tokens.
+

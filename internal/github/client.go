@@ -1,3 +1,7 @@
+// This file implements the REST client every GitHub call goes through
+// (bodies capped and scrubbed of the client's credential), the two writes
+// devc makes (pull requests and comments) and the host's own credential.
+
 package github
 
 import (
@@ -71,8 +75,9 @@ type Response struct {
 	Status      int
 	ContentType string
 	Body        []byte
-	// Truncated says the body was longer than the cap; Total is the length
-	// read (at most the cap plus one byte unless keepEnd).
+	// Truncated says the body was longer than the cap. Dropped counts the
+	// bytes cut from the front of a body read with keepEnd (logs); a body
+	// read from the front is cut at the cap and its rest is not counted.
 	Truncated bool
 	Dropped   int64
 }
@@ -176,6 +181,8 @@ func (c *Client) Scrub(b []byte) []byte {
 	return bytes.ReplaceAll(b, []byte(c.Token), []byte("[redacted]"))
 }
 
+// scrubErr is Scrub for error texts, which may repeat a request or an
+// answer.
 func (c *Client) scrubErr(err error) error {
 	if err == nil || c.Token == "" || !strings.Contains(err.Error(), c.Token) {
 		return err
@@ -315,6 +322,9 @@ func HostToken(ctx context.Context, store secrets.Store, realm string, runner ex
 	return tok, nil
 }
 
+// validToken accepts what can serve as a token: one word of printable
+// ASCII, at most 4 KiB, so that it fits a header and a credential helper's
+// answer and cannot add a line to either.
 func validToken(s string) bool {
 	if s == "" || len(s) > 4096 {
 		return false

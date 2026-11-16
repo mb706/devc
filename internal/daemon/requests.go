@@ -538,8 +538,10 @@ func requestCommands(ref names.ProjectRef, req proto.Request) ([][]string, strin
 	case proto.RequestPR:
 		// The same command the user runs (work order C15): it banks, pushes
 		// the branch to the upstream (the approval is the confirmation) and
-		// opens the pull request. Box-chosen text goes in --flag=value form
-		// and after "--", so nothing becomes an option.
+		// opens the pull request. Box-chosen text goes only into
+		// --flag=value arguments, before the "--" that ends the options and
+		// precedes the project, so none of it becomes an option or an
+		// argument.
 		if p.Branch == "" {
 			return nil, "the request names no branch"
 		}

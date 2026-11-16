@@ -1,3 +1,7 @@
+// This file draws the two secrets of a desktop, new for every start: the X
+// cookie, which the box gets too, and the VNC password, which stays in the
+// sidecar and on the host and reaches the user in the viewer's URL.
+
 package gui
 
 import (

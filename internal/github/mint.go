@@ -1,10 +1,8 @@
-package github
-
-// Installation tokens of a GitHub App (work order C15 section 4): an RS256
-// JWT signed with the App's key authenticates devc as the App, and POST
-// /app/installations/<id>/access_tokens mints a token restricted to one
-// repository and the chosen permissions. Tokens are cached until five
-// minutes before they expire.
+// This file implements installation tokens of a GitHub App (work order C15
+// section 4): an RS256 JWT signed with the App's key authenticates devc as
+// the App, and POST /app/installations/<id>/access_tokens mints a token
+// restricted to one repository and the chosen permissions. Tokens are
+// cached until five minutes before they expire.
 //
 // Before the first token for a repository (finding D2-03), the
 // installation is verified to cover exactly that owner and repository: the
@@ -12,12 +10,15 @@ package github
 // and be the configured one, if any; then a metadata-only probe token for
 // the repository's name reads the one repository it can see from GET
 // /installation/repositories, whose full name must be the project's, and
-// is revoked. Tokens are restricted by that verified repository ID.
+// is revoked. Tokens are restricted by that verified repository ID. The
+// verification is kept for 24 hours and forgotten when a mint fails.
 //
 // Caches are per project and per App key (finding D2-09): their keys hold
 // the project's scope and a fingerprint of the key's public half, and the
 // key is parsed before any cache lookup, so a project with a broken or
 // different key never receives another project's token.
+
+package github
 
 import (
 	"context"
@@ -171,6 +172,8 @@ func (m *Minter) Token(ctx context.Context, api *url.URL, scope string, app App,
 	return t, nil
 }
 
+// client is a REST client with tok (the App's JWT or a probe token), on
+// the tests' transport when one is set.
 func (m *Minter) client(api *url.URL, tok string) *Client {
 	c := NewClient(api, tok)
 	if m.HTTP != nil {

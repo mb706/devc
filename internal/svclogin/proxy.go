@@ -1,15 +1,16 @@
-package svclogin
+// This file implements the reverse proxy of service streams. The daemon has
+// already read and checked the request head (CheckHead) and decided that a
+// rule allows it; net/http's server parses the same bytes, and
+// httputil.ReverseProxy forwards the request to the upstream (over TLS
+// unless the service allows plain http): with Host set to the upstream's,
+// the path in its normalised form, the box's own credential, cookie,
+// forwarding and proxy headers removed and the service's credential added.
+// On the way back Set-Cookie is dropped, Location headers that point at
+// the upstream are rewritten to the local address, 1xx responses and
+// trailers never pass, and every header is scrubbed of the credential.
+// Bodies pass through within the size limit, unscrubbed.
 
-// The reverse proxy of service streams. The daemon has already read and
-// checked the request head (CheckHead) and decided that a rule allows it;
-// net/http's server parses the same bytes, and httputil.ReverseProxy
-// forwards the request to the upstream over TLS: with Host set to the
-// upstream's, the path in its normalised form, the box's own credential,
-// cookie and proxy headers removed and the service's credential added. On
-// the way back Set-Cookie is dropped, Location headers that point at the
-// upstream are rewritten to the local address, 1xx responses and trailers
-// never pass, and every header is scrubbed of the credential. Bodies pass
-// through within the size limit.
+package svclogin
 
 import (
 	"context"
@@ -449,6 +450,8 @@ func (t noTrace) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// endBody releases the context noTrace made for the upstream request once
+// the reverse proxy has closed the response body.
 type endBody struct {
 	io.ReadCloser
 	end func()
@@ -565,6 +568,9 @@ func (c Credential) check() error {
 	return nil
 }
 
+// newScrubber scrubs each value as it is and in its URL query and path
+// encodings (a Location header may carry it encoded), longest first, so a
+// value inside another goes with it.
 func newScrubber(vals []string) *scrubber {
 	seen := map[string]bool{}
 	var out []string
@@ -586,6 +592,8 @@ func newScrubber(vals []string) *scrubber {
 // Redacted replaces a credential found in a response.
 const Redacted = "[devc: redacted]"
 
+// text replaces every value to scrub in v, longest first, and reports
+// whether there was one.
 func (s *scrubber) text(v string) (string, bool) {
 	found := false
 	for _, x := range s.values {

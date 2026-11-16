@@ -1,3 +1,7 @@
+// This file implements the token a GitHub App authenticates itself with:
+// its private key parsed from PEM, and an RS256 JWT built with the standard
+// library.
+
 package github
 
 import (

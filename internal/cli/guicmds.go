@@ -1,3 +1,8 @@
+// This file holds the desktop commands (work order C19): devc gui up, down,
+// status and build, which drive internal/gui with the detached forwards of
+// `devc forward`, and `devc browser`, a forward of a box browser's
+// debugging port.
+
 package cli
 
 import (
@@ -20,8 +25,8 @@ import (
 )
 
 // guiManager is the desktop sidecar manager (work order C19) for a box
-// environment; it is also the box manager's dependent, so down, rm and
-// every start remove the sidecar first.
+// environment; boxEnv also registers one as the box manager's dependent,
+// so down, rm and every start remove the sidecar first.
 func (a *app) guiManager(e *boxEnv) *gui.Manager {
 	return &gui.Manager{Box: e.mgr, Engine: e.mgr.Engine, Paths: e.cfg.Paths, Toolbox: e.mgr.Toolbox,
 		ImageContext: filepath.Join(e.cfg.Paths.CacheDir(), "aux", "desktop"),
@@ -35,6 +40,9 @@ type cliForwards struct {
 	e *boxEnv
 }
 
+// Start opens the host's listener here, pins the box's namespaces once to
+// check the box, and hands the listener to a background `devc forward`
+// process, whose record the sidecar's record then names.
 func (f cliForwards) Start(ctx context.Context, ref names.ProjectRef, boxPort int, bind string, hostPort int, explicit bool) (string, int, error) {
 	if _, err := execx.LookPath("nsenter"); err != nil {
 		return "", 0, fmt.Errorf("forwarding needs nsenter (package util-linux): %w", err)

@@ -1,0 +1,137 @@
+id = "gh-read"
+kind = "flow"
+title = "devc gh pr view in a box"
+summary = "An agent reads a pull request with its comments: the in-box command validates the read and sends it on a host.github stream; the daemon checks the project, the repository and the budget, reads with the host's credential, and answers with GitHub's status and the scrubbed body, which the command prints in a readable form."
+concern = "github"
+trigger = "devc gh pr view 12 --comments (in a box)"
+actors = ["github", "state-dir", "daemon", "box-tools"]
+
+[[step]]
+section = "In the box"
+
+[[step]]
+at = "box-tools"
+ref = "internal/cli.app.ghRead"
+checks = ["internal/cli.requireBox"]
+text = "`devc gh pr view 12 --comments` builds `{op: pr.view, number: 12, comments: true}`; `--repo` would name another repository. The command runs only inside a box."
+
+[[step]]
+at = "box-tools"
+ref = "internal/github.PlanRead"
+checks = ["internal/github.PlanRead"]
+text = "The read is validated here as the host will validate it, with a placeholder for the project's repository, so a mistake is a usage error before anything is sent."
+
+[[step]]
+from = "box-tools"
+to = "daemon"
+via = "rpc:host.github"
+label = "host.github {op, number, comments}"
+ref = "internal/boxside.GitHubRead"
+text = "One JSON-RPC line opens a new stream through the agent's abstract socket; the agent relays it unparsed on the box channel. The command waits up to four minutes."
+
+[[step]]
+section = "The daemon checks"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveStream"
+checks = ["internal/proto.ParseMessage"]
+text = "The first line must arrive within 30 seconds. `host.github` takes the stream over, and holds one of the box's 32 request places while it is served."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveGitHub"
+checks = ["internal/proto.DecodeParams"]
+text = "The parameters are decoded strictly: an unknown field such as `url`, `method` or `headers` is refused. The configuration is reloaded if it changed, so a grant removed a moment ago is gone for this read."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.resolvedOf"
+checks = ["internal/config.Config.ProblemsFor"]
+text = "The project is the one the channel belongs to; its configuration must be free of problems."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.githubRepo"
+checks = ["internal/github.ParseRepo"]
+text = "The project's repository comes from its `upstream` as configured now, on the web host of `DEVC_GITHUB_URL`; any other upstream is refused as not a GitHub project."
+
+[[step]]
+at = "daemon"
+ref = "internal/box.Capabilities.GitHubReadRepos"
+text = "Only when `grants.github_read` lists repositories: those the start record of this container lists too may be read. The project's own repository needs no record."
+
+[[step]]
+at = "daemon"
+ref = "internal/github.PlanRead"
+checks = ["internal/github.PlanRead", "internal/names.CheckRef"]
+text = "Now with the real repositories: only the fields of `pr.view`, a positive number, not both `--diff` and `--comments`, and a repository that is the project's or listed. A repository the box may not read is refused with its name and logged."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.readBudget.allow"
+text = "At most 120 reads a minute per project; reads refused above did not count."
+
+[[step]]
+from = "daemon"
+to = "state-dir"
+via = "file"
+label = "read durable/realms/<realm>/secrets/github-token"
+ref = "internal/github.HostToken"
+text = "The host's credential: the realm secret `github-token`, else what `gh auth token --hostname github.com` prints, run from `/` for at most 15 seconds. It must be one word of printable ASCII; without one the box is told what the user must run."
+
+[[step]]
+section = "GitHub"
+
+[[step]]
+at = "daemon"
+ref = "internal/github.Client.Read"
+text = "The plan becomes requests built on the API base, all of them GETs, with 150 seconds for the whole read. With `--comments` it is two: the pull request and its issue comments."
+
+[[step]]
+from = "daemon"
+to = "github"
+via = "stream"
+label = "GET /repos/<o>/<r>/pulls/12, …/issues/12/comments"
+ref = "internal/github.Client.do"
+text = "Each with `Authorization: Bearer <host credential>`, `X-GitHub-Api-Version` and devc's user agent. A redirect is followed only to https, and Go drops the credential when it leaves the API's host."
+
+[[step]]
+from = "github"
+to = "daemon"
+via = "reply"
+label = "200, JSON"
+external = true
+text = "GitHub's answers, whatever their status."
+
+[[step]]
+at = "daemon"
+ref = "internal/github.Client.Scrub"
+text = "Each body is read up to its cap (here about 2.5 MiB) and the client's own credential is replaced wherever it appears; errors are scrubbed the same way."
+
+[[step]]
+at = "daemon"
+ref = "internal/github.Client.combine"
+text = "The two documents are joined as received into `{\"pull_request\": …, \"comments\": …}`, which must be valid JSON. A failure of either is passed back as GitHub sent it."
+
+[[step]]
+from = "daemon"
+to = "box-tools"
+via = "reply"
+label = "{status, length, truncated, note}, then the body"
+ref = "internal/daemon.boxWorker.serveGitHub"
+text = "The log records project, operation, repository, path, status and size, never the credential. The answer is one line, then exactly `length` bytes, written with a two-minute deadline per write so a box that stops reading frees the stream."
+
+[[step]]
+section = "Back in the box"
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.GitHubRead"
+text = "The answer is decoded strictly; a length above 5 MiB and 4 KiB is refused, and exactly that many bytes are read."
+
+[[step]]
+at = "box-tools"
+ref = "internal/cli.formatPRView"
+unchecked = "ghRead calls the format function that the pr view command passes in, formatPRView(true) for --comments"
+text = "A non-2xx status prints GitHub's message and exits 1. Otherwise the command prints title, state, branches, URL, description and comments, every field made printable; `--json` would print GitHub's JSON with control characters escaped."

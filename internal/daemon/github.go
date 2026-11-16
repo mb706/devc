@@ -1,16 +1,17 @@
-package daemon
+// This file serves GitHub to boxes (work order C15). host.github is the
+// read-only facade: the box names an operation, github.PlanRead validates
+// it against the project's repository (its upstream as configured now) and
+// grants.github_read (in force at the box's start and now), and the daemon
+// performs the GET requests with the host's own credential, which never
+// leaves the daemon: the answer is GitHub's status and body, scrubbed of
+// the credential, on the stream that asked. host.github.token hands a box
+// the token of its project's mode, "token:<secret>" (stored) or "app"
+// (minted for the one repository with the permissions in force), when the
+// box was started with that mode, repository and App and the configuration
+// still says so (box.Capabilities, findings C1-02 and D2-02). Tokens are
+// never logged.
 
-// GitHub (work order C15). host.github is the read-only facade: the box
-// names an operation, github.PlanRead validates it against the project's
-// repository and grants.github_read (in force at the box's start and now),
-// and the daemon performs the GET requests with the host's own credential,
-// which never leaves the daemon: the answer is GitHub's status and body,
-// scrubbed of the credential, on the stream that asked. host.github.token
-// hands a box the token of its project's mode, "token:<secret>" (stored) or
-// "app" (minted for the one repository with the permissions in force),
-// when the box was started with that mode, repository and App and the
-// configuration still says so (box.Capabilities, findings C1-02 and
-// D2-02). Tokens are never logged.
+package daemon
 
 import (
 	"context"
@@ -53,6 +54,8 @@ func newReadBudget(n int) *readBudget {
 	return &readBudget{n: n, now: time.Now, seen: map[names.ProjectRef][]time.Time{}}
 }
 
+// allow records an action of ref and reports whether it is within the
+// budget; a refused action is not recorded.
 func (b *readBudget) allow(ref names.ProjectRef) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -89,7 +92,9 @@ func (d *Daemon) githubRepo(r *config.Resolved) (github.Repo, *proto.Error) {
 }
 
 // serveGitHub answers one host.github request on its stream: a response
-// line, then exactly the announced number of body bytes.
+// line, then exactly the announced number of body bytes. A read that is
+// malformed or names a repository the box may not read is refused before
+// it counts against the budget and before the credential is read.
 func (w *boxWorker) serveGitHub(ctx context.Context, st *yamux.Stream, m *proto.RPCMessage) {
 	raw := rawStream{st: st, stall: streamStall}
 	end := raw.guard(ctx)
@@ -168,7 +173,8 @@ func (w *boxWorker) serveGitHub(ctx context.Context, st *yamux.Stream, m *proto.
 }
 
 // githubToken serves host.github.token for the box of ref (container
-// containerID).
+// containerID). Every request counts against the budget, refused ones
+// too: the budget is checked first.
 func (d *Daemon) githubToken(ctx context.Context, ref names.ProjectRef, containerID string, params json.RawMessage) (any, error) {
 	var p proto.GitHubTokenParams
 	if err := proto.DecodeParams(params, &p); err != nil {

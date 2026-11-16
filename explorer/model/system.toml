@@ -126,6 +126,13 @@ kind = "service"
 summary = "A `[data.remotes.<name>]` of a project: a directory on an SSH host (a cluster, a NAS) or on this machine, which `devc data pull` reads and `devc data push` writes with rsync, never deleting there."
 
 [[actor]]
+id = "service-upstream"
+zone = "external"
+title = "Service upstreams"
+kind = "service"
+summary = "The web services a realm defines in `services/<name>/service.toml` (a wiki, an internal API): the daemon's service proxy sends boxes' allowed requests there with the credential added, and a cookie service's login container logs in there."
+
+[[actor]]
 id = "internet"
 zone = "external"
 title = "Internet hosts"
@@ -253,7 +260,14 @@ id = "desktop"
 zone = "aux"
 title = "Desktop sidecar"
 kind = "process"
-summary = "`devc gui up`: a container from the desktop image that joins the box's network and user namespaces and serves an X display with a web viewer ([[pkg:internal/gui]])."
+summary = "`devc gui up`: a container from the desktop image that joins the box's network and user namespaces and serves an X display with a web viewer ([[pkg:internal/gui]]). It does not run the devc binary: Xvnc, socat, websockify and a window manager, started by the image's `devc-desktop` script."
+
+[[actor]]
+id = "service-login"
+zone = "aux"
+title = "Login container"
+kind = "process"
+summary = "`devc service login` for a cookie service: a throwaway container from `auth.image` (by default the installer image) with the network on, every capability dropped and only a scratch directory mounted, which runs the service's login command and prints the cookies. It runs no devc code."
 
 # ----- actors: box
 
@@ -363,7 +377,7 @@ transport = "The daemon connects to the agent's socket (`<runtime>/<box-id>/agen
 carries = "The daemon's requests to the box ([[surface:box-agent]]): hello, live sessions, input to panes, listeners for exceptions and services."
 boundary = true
 checks = ["internal/daemon.DialBoxSocket", "internal/daemon.CheckPeer", "internal/proto.HelloReply.Validate", "internal/proto.DecodeResult", "internal/session.ParseLive"]
-concerns = ["box-channel", "box-init-and-agent", "input-and-receipts", "allowlist-proxy"]
+concerns = ["box-channel", "box-init-and-agent", "input-and-receipts", "allowlist-proxy", "service-logins"]
 
 [[channel]]
 id = "agent-local"
@@ -371,8 +385,8 @@ from = "box-tools"
 to = "box-agent"
 title = "Agent socket"
 transport = "The abstract socket `@devc-agent`, which only processes in the box's network namespace reach."
-carries = "Requests of in-box clients to the host, one JSON-RPC message first: requests, secrets, questions, hints, and git and gate streams."
-concerns = ["box-init-and-agent", "ssh-gate", "secrets"]
+carries = "Requests of in-box clients to the host, one JSON-RPC message first: requests, secrets, questions, hints, GitHub reads and tokens, and git and gate streams."
+concerns = ["box-init-and-agent", "ssh-gate", "secrets", "github"]
 
 [[channel]]
 id = "box-streams"
@@ -383,7 +397,7 @@ transport = "A new yamux stream of the box channel per in-box client; the agent 
 carries = "The box's requests to the host ([[surface:host-api]]). The daemon attributes each to the box by the channel it arrives on; nothing the box says selects a project."
 boundary = true
 checks = ["internal/daemon.muxGuard", "internal/proto.ParseMessage", "internal/proto.DecodeParams", "internal/requests.Validate"]
-concerns = ["box-channel", "box-init-and-agent", "requests-and-approval", "sessions-and-events", "git-ratchet", "allowlist-proxy", "ssh-gate", "secrets"]
+concerns = ["box-channel", "box-init-and-agent", "requests-and-approval", "sessions-and-events", "git-ratchet", "allowlist-proxy", "ssh-gate", "secrets", "github", "service-logins"]
 
 [[channel]]
 id = "spool-write"
@@ -670,7 +684,7 @@ title = "Upstream git"
 transport = "git over HTTPS or SSH with the host's own credentials."
 carries = "Fetches of the upstream into the relay and pushes of relay branches (devc pull, devc push, devc pr create, forwards)."
 boundary = true
-concerns = ["upstream"]
+concerns = ["upstream", "github"]
 
 [[channel]]
 id = "github-api"
@@ -678,8 +692,10 @@ from = "daemon"
 to = "github"
 title = "GitHub API"
 transport = "HTTPS to the REST API."
-carries = "The read-only facade's requests for boxes, built from validated parts only, and GitHub App installation tokens."
+carries = "The read-only facade's GET requests for boxes, built from validated parts only, with the host's credential; the App's JWT, its installation lookup, probe and mint of installation tokens."
 boundary = true
+checks = ["internal/github.PlanRead", "internal/github.ParseAPIPath", "internal/github.Client.checkRedirect", "internal/github.Client.Scrub", "internal/github.Minter.verify", "internal/github.Minter.mint"]
+concerns = ["github"]
 
 [[channel]]
 id = "gate-sshd"
@@ -728,7 +744,7 @@ to = "box-agent"
 title = "Proxy port"
 transport = "TCP to `127.0.0.1:3128` in a box of level allowlist (the proxy variables point there), and to the loopback ports of host exceptions and services."
 carries = "Proxy requests and relayed connections; the agent relays them unparsed on raw streams of the box channel."
-concerns = ["allowlist-proxy"]
+concerns = ["allowlist-proxy", "service-logins"]
 
 [[channel]]
 id = "proxy-upstream"
@@ -789,3 +805,93 @@ title = "Forward dial"
 transport = "The same nsenter command from `devc forward`, with the accepted connection's socket as standard input and output."
 carries = "One forwarded connection."
 concerns = ["forwards-and-local-urls"]
+
+[[channel]]
+id = "cli-github"
+from = "cli"
+to = "github"
+title = "GitHub API (CLI)"
+transport = "HTTPS to the REST API with the host's credential as a bearer token."
+carries = "`devc pr create`'s new pull request and `devc pr comment`'s comment, also when an approved request runs them."
+boundary = true
+concerns = ["github"]
+
+[[channel]]
+id = "git-credential"
+from = "box-git"
+to = "box-tools"
+title = "Credential helper"
+transport = "git runs `/opt/devc/bin/devc box git-credential get` for the GitHub host (`credential.<scope>.helper` in the box repository) with the URL's description on standard input."
+carries = "Protocol and host in; the token of the project's mode out, asked from the daemon each time."
+checks = ["internal/boxside.GitCredential"]
+concerns = ["github"]
+
+[[channel]]
+id = "box-github"
+from = "box-git"
+to = "github"
+title = "git with a token"
+transport = "git over HTTPS to the remote `github`, with the box's own network (the network level must let it reach the host)."
+carries = "Pushes and fetches of the token modes, authenticated with the token the credential helper printed; GitHub, not devc, decides what the token may do."
+boundary = true
+concerns = ["github"]
+
+[[channel]]
+id = "daemon-service"
+from = "daemon"
+to = "service-upstream"
+title = "Service upstream"
+transport = "HTTPS (plain HTTP only with `allow_insecure`) from the daemon with the host's trust store, never through a proxy, HTTP/2 where offered, no redirects followed."
+carries = "A box's request that a rule allows, with the box's credential headers removed and the service's credential added; the response, filtered before it reaches the box."
+boundary = true
+checks = ["internal/svclogin.modifyResponse", "internal/svclogin.scrubber.header"]
+concerns = ["service-logins"]
+
+[[channel]]
+id = "podman-login"
+from = "podman"
+to = "service-login"
+title = "Login run"
+transport = "`podman run --rm --cap-drop=ALL` with no new privileges and the toolbox's seccomp profile, the network on, a scratch directory at /login, no standard input, five minutes."
+carries = "The login command, the service directory's other files and the login secrets as files; the cookies as JSON on standard output."
+checks = ["internal/svclogin.ParseLoginOutput"]
+concerns = ["service-logins"]
+
+[[channel]]
+id = "login-upstream"
+from = "service-login"
+to = "service-upstream"
+title = "Login"
+transport = "Whatever the login command does, usually HTTPS form posts with curl."
+carries = "The login secrets, to the service's login page; its session cookies back."
+boundary = true
+concerns = ["service-logins"]
+
+[[channel]]
+id = "podman-desktop"
+from = "podman"
+to = "desktop"
+title = "Desktop run"
+transport = "`podman create` that joins the box's network and user namespaces, without capabilities, with a read-only root and one tmpfs; `podman exec` of `devc-desktop secrets` and `ready`."
+carries = "The X cookie and the VNC password, as a tar archive on standard input; whether the display's services own their sockets."
+concerns = ["desktop"]
+
+[[channel]]
+id = "box-display"
+from = "box-program"
+to = "desktop"
+title = "Display"
+transport = "TCP on the loopback interface the box and the sidecar share: X11 on 127.0.0.1:6001, VNC on 5901, the viewer on 6080."
+carries = "X clients' drawing and the display's contents and input; the cookie in /run/devc/display.xauth admits an X client."
+boundary = true
+concerns = ["desktop"]
+
+[[channel]]
+id = "dialer-desktop"
+from = "dialer"
+to = "desktop"
+title = "Viewer"
+transport = "TCP to 127.0.0.1:6080 in the box's network namespace, from the dial process of the viewer's forward."
+carries = "noVNC's page and its WebSocket to the VNC server, which asks for the password."
+boundary = true
+concerns = ["desktop"]

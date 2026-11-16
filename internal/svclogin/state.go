@@ -1,8 +1,9 @@
-package svclogin
+// This file holds the machine's login state of cookie services and the
+// request log of every service. Both live in host state that no box mounts;
+// state files are read without following symlinks and replaced whole by a
+// rename, and the log is appended to without following one.
 
-// The machine's login state of cookie services and the request log of
-// every service. Both live in host state that no box mounts; files are
-// opened without following symlinks and written whole.
+package svclogin
 
 import (
 	"bufio"

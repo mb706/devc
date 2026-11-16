@@ -1,3 +1,8 @@
+// This file holds the rules for the permissions of installation tokens
+// ([grants.github_token]): which repository permissions and levels exist,
+// the default, and the intersection of what a box was started with and
+// what the configuration says now.
+
 package github
 
 import (

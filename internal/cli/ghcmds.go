@@ -1,11 +1,12 @@
-package cli
+// This file holds the GitHub commands (work order C15): `devc gh …` in a
+// box reads through the host's facade; `devc box git-credential` is the
+// box's git credential helper in the token modes; `devc pr create|comment`
+// on the host publish a branch and open a pull request, or comment, with
+// the host's credential (also what approved pr and comment requests run);
+// the start hook gives the box repository its second remote and helper in
+// the token modes, and removes them in relay mode.
 
-// GitHub (work order C15): `devc gh …` in a box reads through the host's
-// facade; `devc box git-credential` is the box's git credential helper in
-// the token modes; `devc pr create|comment` on the host publish a branch
-// and open a pull request, or comment, with the host's credential (also
-// what approved pr and comment requests run); the start hook gives the box
-// repository its second remote and helper in the token modes.
+package cli
 
 import (
 	"bytes"
@@ -33,7 +34,9 @@ import (
 // --- in the box: devc gh ---
 
 // ghRead sends one read and prints the answer: raw with asJSON (and for
-// text answers), else through format.
+// text answers), else through format. The read is validated here first,
+// with a placeholder for the project's repository, so a mistake is a
+// usage error at once; the host validates it again with the real one.
 func (a *app) ghRead(cmd *cobra.Command, p proto.GitHubParams, asJSON bool, format func(io.Writer, []byte) error) error {
 	if err := requireBox(a.getenv); err != nil {
 		return err
@@ -520,6 +523,10 @@ func newPRCmd(a *app) *cobra.Command {
 	return group("pr", "Open pull requests and comment on GitHub", false, create, comment)
 }
 
+// prCreate is `devc pr create`, also what an approved pr request runs
+// (with --yes). It reads the host credential before anything is pushed,
+// so a missing credential publishes nothing, then publishes the branch as
+// devc push does and opens the pull request from it.
 func (a *app) prCreate(cmd *cobra.Command, args []string, o prCreateOptions) error {
 	if o.branch == "" {
 		return usageErrorf("--branch is required")
@@ -622,6 +629,8 @@ func (a *app) publishBranch(ctx context.Context, e *boxEnv, ref names.ProjectRef
 	return proto.Truncate(title, 256), base, nil
 }
 
+// prComment is `devc pr comment`, also what an approved comment request
+// runs: one comment with the host credential, nothing pushed.
 func (a *app) prComment(cmd *cobra.Command, args []string, body, bodyFile string) error {
 	text, err := a.readBody(body, bodyFile)
 	if err != nil {

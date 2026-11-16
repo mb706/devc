@@ -1,10 +1,11 @@
-package boxside
+// This file is the box side of GitHub (work order C15): `devc gh …` reads
+// through the host (host.github: one answer line, then the body), and, in
+// projects that grant a token, the launcher (at every start of a harness)
+// and the git credential helper `devc box git-credential` (whenever git
+// needs a credential) ask the host for it (host.github.token), so a fresh
+// token replaces one that expired. Nothing here stores a token.
 
-// The box side of GitHub (work order C15): `devc gh …` reads through the
-// host (host.github: one answer line, then the body), and, in projects that
-// grant a token, the launcher and the git credential helper `devc box
-// git-credential` ask the host for it each time (host.github.token), so a
-// fresh token replaces one that expired. Nothing here stores a token.
+package boxside
 
 import (
 	"bufio"

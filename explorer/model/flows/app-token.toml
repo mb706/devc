@@ -1,0 +1,192 @@
+id = "app-token"
+kind = "flow"
+title = "git push github with an App token"
+summary = "In a project with grants.github = \"app\": devc up records the grant and gives the box repository a remote github with devc's credential helper; when git pushes, the helper asks the daemon, which checks the start record, verifies the App's installation, mints a token for the one repository and hands it over; git pushes with it directly to GitHub."
+concern = "github"
+trigger = "devc up demo/hello (grants.github = \"app\"), then git push github fix-parser in the box"
+actors = ["github", "state-dir", "cli", "daemon", "box-git", "box-tools"]
+
+[[step]]
+section = "devc up records the grant"
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.afterStart"
+text = "Once box init reports ready (and, at level internet, the network check passed), `devc up` records what this start was given, then runs the start hooks."
+
+[[step]]
+at = "cli"
+ref = "internal/box.CapabilitiesOf"
+text = "The record holds `github = \"app\"`, the permissions of `[grants.github_token]` (default: contents and metadata read), the upstream, and the App ID and installation of the realm's `[github.app]`."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "local/boxes/<realm>/<project>/capabilities.json"
+ref = "internal/box.WriteCapabilities"
+text = "Written only for a start that succeeded, with the running container's ID; no box mounts it."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.githubHook.AfterStart"
+text = "A start hook; its failure is printed as a warning and the box runs on without the remote."
+
+[[step]]
+from = "cli"
+to = "box-git"
+via = "exec"
+label = "podman exec … git config remote.github.url, credential.https://github.com.helper"
+ref = "internal/gitx.Service.ConfigureGitHub"
+text = "In the box repository: the remote `github` at `https://github.com/<o>/<r>.git`, and for the GitHub host an empty helper entry, which drops the helpers of the box's global configuration, followed by `/opt/devc/bin/devc box git-credential`."
+
+[[step]]
+section = "git asks for a credential"
+
+[[step]]
+from = "box-git"
+to = "box-tools"
+via = "exec"
+label = "devc box git-credential get (protocol=https, host=github.com)"
+external = true
+text = "`git push github fix-parser` needs a credential for github.com and runs the helper the repository names, with the URL's description on standard input."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.GitCredential"
+unchecked = "git starts the helper as a new process; the command's run function hands its input to GitCredential"
+text = "At most 64 KiB of git's description is read. For `store` and `erase` the helper does nothing: no token is ever stored in the box."
+
+[[step]]
+from = "box-tools"
+to = "daemon"
+via = "rpc:host.github.token"
+label = "host.github.token {}"
+ref = "internal/boxside.FetchGitHubToken"
+unchecked = "GitCredential calls the fetch function its command passes in, which is FetchGitHubToken"
+text = "Through the agent on a new stream of the box channel, with 15 seconds for the answer. The box names nothing: the project is the channel's."
+detail = "The launcher asks the same way at every harness start and exports the answer as `GH_TOKEN` ([[internal/boxside.addGitHubToken]]); a session keeps the token it started with."
+
+[[step]]
+section = "The daemon decides"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.githubToken"
+checks = ["internal/proto.DecodeParams", "internal/daemon.resolvedOf"]
+text = "The budget comes first: 120 token requests a minute per project, refused ones included. Then the configuration is reloaded if it changed, must be free of problems for the project, and `grants.github` must be a token mode now."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.startedWith"
+checks = ["internal/box.ReadCapabilities"]
+text = "The capability record must exist and belong to the container of this channel."
+
+[[step]]
+at = "daemon"
+ref = "internal/box.Capabilities.GitHubToken"
+text = "The mode, the repository (the start's upstream and today's must name the same one) and the App ID and installation must be those of the start. The permissions are those granted then and now, each at the lower level; none left is a refusal that tells the box to have the box brought up again."
+
+[[step]]
+from = "daemon"
+to = "state-dir"
+via = "file"
+label = "read durable/realms/<realm>/secrets/<key_secret>"
+ref = "internal/secrets.FileStore.Get"
+text = "The App's private key, from the realm's store; when it is missing the box is told what the user must run."
+
+[[step]]
+section = "Minting"
+
+[[step]]
+at = "daemon"
+ref = "internal/github.Minter.Token"
+checks = ["internal/github.CheckPermissions", "internal/github.ParsePrivateKey"]
+text = "The permissions are checked again and the key parsed (PKCS #1 or #8) and fingerprinted before any cache is consulted. A token cached for this API, project, App, key, installation, repository and permissions is returned while it is more than five minutes from its expiry; asks for one key wait for each other."
+
+[[step]]
+at = "daemon"
+ref = "internal/github.AppJWT"
+text = "An RS256 JWT built with the standard library: `iat` a minute ago, `exp` in nine minutes, `iss` the App ID."
+
+[[step]]
+at = "daemon"
+ref = "internal/github.Minter.verify"
+text = "Skipped while a verification of this repository from the last 24 hours holds."
+
+[[step]]
+from = "daemon"
+to = "github"
+via = "stream"
+label = "GET /repos/<o>/<r>/installation (JWT)"
+ref = "internal/github.Client.Call"
+text = "The installation GitHub names must belong to the repository's owner, and must be the configured `installation_id` if one is set."
+
+[[step]]
+from = "daemon"
+to = "github"
+via = "stream"
+label = "POST /app/installations/<id>/access_tokens {repositories: [<r>], metadata: read}"
+ref = "internal/github.Minter.mint"
+text = "A probe token that can read only metadata, for the repository's name."
+
+[[step]]
+from = "daemon"
+to = "github"
+via = "stream"
+label = "GET /installation/repositories, DELETE /installation/token (probe)"
+ref = "internal/github.Minter.revoke"
+text = "The probe must see exactly one repository, whose full name is the project's; its ID is kept. Then the probe is revoked, best effort: it never left the daemon."
+
+[[step]]
+from = "daemon"
+to = "github"
+via = "stream"
+label = "POST /app/installations/<id>/access_tokens {repository_ids: [<id>], permissions}"
+ref = "internal/github.Minter.mint"
+text = "The token itself, for that repository ID only."
+
+[[step]]
+from = "github"
+to = "daemon"
+via = "reply"
+label = "{token, expires_at, repositories}"
+external = true
+text = "GitHub's answer."
+
+[[step]]
+at = "daemon"
+ref = "internal/github.Minter.mint"
+text = "A token that is not one printable word or has no expiry is refused; one whose answer lists other repositories than the ID is revoked and refused. A failed mint forgets the verification. A good token is cached."
+
+[[step]]
+from = "daemon"
+to = "box-tools"
+via = "reply"
+label = "{token, expires, username: x-access-token, protocol, host}"
+ref = "internal/daemon.Daemon.githubToken"
+text = "The daemon's log says that a token was delivered, with project, mode and repository, never the token."
+
+[[step]]
+section = "git pushes"
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.GitCredential"
+text = "The helper answers only when git asked about the protocol and host the token is for; otherwise it prints nothing and git goes on as it would. A refusal is printed for the user and answered `quit=1`, so git neither asks other helpers nor prompts."
+
+[[step]]
+from = "box-tools"
+to = "box-git"
+via = "reply"
+label = "username=x-access-token, password=<token>, password_expiry_utc"
+ref = "internal/boxside.GitCredential"
+text = "The expiry is given for minted tokens only. The helper keeps nothing: whenever git asks again, the daemon answers again, from its cache or with a new token."
+
+[[step]]
+from = "box-git"
+to = "github"
+via = "stream"
+label = "git push over HTTPS with the token"
+external = true
+text = "With the box's own network, so the network level must let it reach GitHub. What the push may do is decided by GitHub and the token's permissions; the relay's branch policy plays no part."

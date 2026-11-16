@@ -7,6 +7,11 @@
 // commands (ParseLoginOutput, Jar), the machine's login state (State) and
 // the request log (Log).
 //
+// Files: request.go holds the head check, the normal form of paths and the
+// rules; proxy.go the reverse proxy, the credential's normal form and the
+// scrubbing of responses; jar.go login output and jars; login.go the login
+// container; state.go the login state and the request log.
+//
 // Security rules: everything from a box is hostile input (README rule 2).
 // A request is checked on its raw bytes before net/http parses it, and
 // anything ambiguous is refused: absolute-form targets, "..", encoded

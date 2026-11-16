@@ -1,0 +1,168 @@
+id = "gui-up"
+kind = "flow"
+title = "devc gui up, then watching in a browser"
+summary = "Under the box lock, devc gui up checks the limits, replaces any old sidecar, ensures the image, draws a cookie and a password, creates a sidecar in the box's network and user namespaces, hands it the secrets, waits until its own processes listen, checks the box was not disturbed, gives the box the cookie and forwards the viewer; the browser then reaches noVNC through a dial process in the box's namespaces, and box programs draw with the cookie."
+concern = "desktop"
+trigger = "devc gui up demo/hello, then the printed address in a browser"
+actors = ["browser", "cli", "podman", "dialer", "desktop", "box-program"]
+
+[[step]]
+section = "Under the box lock"
+
+[[step]]
+at = "cli"
+ref = "internal/gui.Manager.Up"
+text = "`gui up` listens on 127.0.0.1 and port 6080 unless `--bind` or `--host-port` say otherwise; `--host-port` makes the port a must."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.WithRunningBox"
+text = "A configuration with problems is refused; then, under the box lock held until the end, the box is started if it does not run and must be ready. No other devc command can stop or restart it meanwhile."
+
+[[step]]
+at = "cli"
+ref = "internal/gui.Manager.up"
+checks = ["internal/gui.Manager.find"]
+text = "A container with the sidecar's name that devc did not create as this project's desktop stops here. A running sidecar of the box's current start is reused, or refused until `--restart` when [[internal/gui.Manager.outdated]] finds other limits, another image generation or no record; this flow follows a first start."
+
+[[step]]
+at = "cli"
+ref = "internal/gui.LimitArgs"
+text = "`[gui]` memory, pids and cpus become engine arguments; a limit whose cgroup controller is not delegated fails `gui up` before anything changes."
+
+[[step]]
+at = "cli"
+ref = "internal/gui.Manager.remove"
+text = "Whatever is left of an earlier desktop goes: its forward, the container, the box's display files and the record."
+
+[[step]]
+at = "cli"
+ref = "internal/toolbox.EnsureAuxImage"
+text = "`localhost/devc-aux/desktop` is built from the files embedded in devc when it is missing or was built from others (network needed). The generation it is labelled with must match this devc's build files."
+
+[[step]]
+at = "cli"
+ref = "internal/gui.NewSecrets"
+text = "A 16-byte X cookie and an 8-character VNC password of letters and digits, from the system's random source."
+
+[[step]]
+at = "cli"
+ref = "internal/gui.SidecarArgs"
+text = "The arguments are validated and built: the box's container ID for the network and user namespaces, UID 1000, no capabilities, no new privileges, the seccomp profile, a read-only root with one tmpfs, the limits, and labels with the box's start, the limits and the generation."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman create --network container:<box> --userns=container:<box> …"
+ref = "internal/engine.Podman.Create"
+text = "Podman refuses if a restriction cannot be applied, and so does `gui up`. The sidecar is then started."
+
+[[step]]
+from = "podman"
+to = "desktop"
+via = "exec"
+label = "devc-desktop run"
+external = true
+text = "The container's program waits up to 120 seconds for its secrets before it starts anything."
+
+[[step]]
+section = "Secrets and readiness"
+
+[[step]]
+from = "cli"
+to = "desktop"
+via = "exec"
+label = "podman exec -i … devc-desktop secrets < tar(xauthority, vncpasswd)"
+ref = "internal/gui.Manager.start"
+text = "The secrets travel only on standard input, never as arguments or environment. The script accepts one delivery and unpacks it into the sidecar's tmpfs, which the box cannot see."
+
+[[step]]
+at = "desktop"
+external = true
+label = "Xvnc, socat, websockify, matchbox"
+text = "Xvnc for display :1 with VNC authentication only on 127.0.0.1:5901 and X on its socket file; socat offers that socket on 127.0.0.1:6001 (64 connections at most); websockify serves noVNC on 127.0.0.1:6080 (16 handlers at most); the window manager. If any ends, the sidecar stops."
+
+[[step]]
+from = "cli"
+to = "desktop"
+via = "exec"
+label = "podman exec … devc-desktop ready"
+ref = "internal/gui.Manager.start"
+text = "Passes only when the X socket exists and Xvnc, socat and websockify each hold their listening socket, found by inode in `/proc/net/tcp`; a process of the box that took one of the ports first, or a process that ended, fails `gui up` within 45 seconds."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.CheckStart"
+text = "Joining must not have disturbed the box: the same container, main PID and start time, still ready, and at level internet still bound to its namespace with devc's rules. Otherwise the sidecar is stopped and kept for `podman logs`."
+
+[[step]]
+at = "cli"
+ref = "internal/gui.Manager.writeCookie"
+checks = ["internal/safefs.OpenDir"]
+text = "The Xauthority file goes into the box's runtime directory, which the box can write: opened by the host's path, created under a fresh name with `O_EXCL` beneath that descriptor (0600), renamed to `display.xauth`. Nothing the box planted is followed."
+
+[[step]]
+at = "cli"
+ref = "internal/boxside.DisplayEnv"
+text = "`display.env` with `DISPLAY=127.0.0.1:1` and `XAUTHORITY=/run/devc/display.xauth` goes into the host directory behind the box's read-only `/etc/devc`."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.cliForwards.Start"
+text = "The viewer's forward: a listener on the host (a free port if 6080 is taken and was not asked for; a warning if `--bind` is not a loopback address), the box's namespaces pinned once as a check, then the listener handed to a background `devc forward` process."
+
+[[step]]
+at = "cli"
+ref = "internal/gui.Manager.writeRecord"
+text = "`<runtime>/gui/<box-id>.json` (0600) keeps the container, the box's start, the password and the forward, so a second `gui up` prints the same address. The command prints `http://127.0.0.1:6080/vnc.html#autoconnect=1&resize=remote&password=…`."
+
+[[step]]
+section = "Watching"
+
+[[step]]
+from = "browser"
+to = "cli"
+via = "stream"
+label = "GET /vnc.html, WebSocket"
+external = true
+text = "The browser sends neither the fragment nor the password in it to the server; noVNC reads it from the address."
+
+[[step]]
+at = "cli"
+ref = "internal/netpolicy.Forwarder.relay"
+unchecked = "the background devc forward process, started by spawnForward with the listener, accepts each connection in Serve and relays it in a goroutine"
+text = "The forward process starts one dial process per connection, with the accepted socket as its standard input and output."
+
+[[step]]
+from = "cli"
+to = "dialer"
+via = "exec"
+label = "nsenter --user --net … devc box dial 127.0.0.1:6080"
+ref = "internal/netpolicy.Forwarder.relay"
+text = "nsenter enters the box's pinned user and network namespaces, not its mount namespace, and runs the host's own devc binary."
+
+[[step]]
+at = "dialer"
+ref = "internal/boxside.Dial"
+unchecked = "nsenter starts the host's devc binary as a new process in the box's user and network namespaces"
+text = "It connects to 127.0.0.1:6080 inside the shared namespace, where the sidecar's websockify listens, and copies bytes both ways."
+
+[[step]]
+from = "dialer"
+to = "desktop"
+via = "stream"
+label = "TCP 127.0.0.1:6080"
+ref = "internal/boxside.Dial"
+text = "noVNC's page, then its WebSocket, which websockify relays to the VNC server; the VNC server asks for the password."
+
+[[step]]
+section = "Programs in the box"
+
+[[step]]
+from = "box-program"
+to = "desktop"
+via = "stream"
+label = "X11 to 127.0.0.1:6001 with the cookie"
+external = true
+text = "Sessions and `devc sh` started from now on have `DISPLAY` and `XAUTHORITY` from `display.env`; any process in the box can read the cookie and use the display, and the user watches what it draws."
