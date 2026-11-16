@@ -17,9 +17,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // DefaultTimeout applies to Run when Cmd.Timeout is zero.
@@ -69,7 +72,23 @@ type Cmd struct {
 	// terminal) as controlling terminal, so it gets SIGWINCH when the
 	// terminal is resized (Interactive only).
 	Ctty bool
+	// KillGroup runs the command in a process group of its own (or the
+	// session that Setsid or Ctty make): ending it (the context, the
+	// timeout) signals the whole group, and once the command has exited,
+	// what is left of the group is killed and waited for before Run or
+	// Interactive returns, so nothing it started outlives it (finding
+	// E1-16: git receive-pack's index-pack kept writing into a quarantine
+	// that was being removed). Not for a command that must stay in the
+	// terminal's foreground group (prompts).
+	KillGroup bool
 }
+
+// ErrGroupLeft is returned (wrapped) when processes of a KillGroup
+// command's group were still there after they were killed and waited for.
+var ErrGroupLeft = errors.New("processes the command started did not end")
+
+// groupWait bounds the wait for a killed process group to be gone.
+var groupWait = 30 * time.Second
 
 // String renders the command for messages, with redaction applied.
 func (c Cmd) String() string {
@@ -223,8 +242,99 @@ func (Real) command(ctx context.Context, c Cmd) *exec.Cmd {
 	}
 	// Ask politely first; WaitDelay escalates to SIGKILL.
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	if c.KillGroup {
+		if cmd.SysProcAttr == nil {
+			cmd.SysProcAttr = &syscall.SysProcAttr{}
+		}
+		if !cmd.SysProcAttr.Setsid {
+			cmd.SysProcAttr.Setpgid = true
+		}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
+	}
 	cmd.WaitDelay = waitDelay
 	return cmd
+}
+
+// run starts cmd and waits for it. With KillGroup, the group is killed as
+// soon as its leader has exited and before the leader is reaped (so its
+// number cannot be taken by another process meanwhile), and waited for
+// after.
+func run(cmd *exec.Cmd, killGroup bool) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if !killGroup {
+		return cmd.Wait()
+	}
+	pid := cmd.Process.Pid
+	for {
+		// Wait for the leader to exit without reaping it.
+		var info unix.Siginfo
+		err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
+		if err != unix.EINTR {
+			break
+		}
+	}
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	err := cmd.Wait()
+	if gerr := awaitGroup(pid); gerr != nil && err == nil {
+		err = gerr
+	}
+	return err
+}
+
+// awaitGroup waits until no process of the group pgid runs any more.
+// Killed processes are reaped by their new parent; one that has not been
+// yet (a zombie: no memory, no open files) no longer counts, since a
+// parent that does not reap orphans (an init-less container) would keep
+// it for ever.
+func awaitGroup(pgid int) error {
+	deadline := time.Now().Add(groupWait)
+	for {
+		if !groupRuns(pgid) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("process group %d: %w", pgid, ErrGroupLeft)
+		}
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// groupRuns reports whether a process of group pgid runs (is not a
+// zombie). Without /proc it counts zombies too.
+func groupRuns(pgid int) bool {
+	if syscall.Kill(-pgid, 0) == syscall.ESRCH {
+		return false
+	}
+	des, err := os.ReadDir("/proc")
+	if err != nil {
+		return true
+	}
+	for _, de := range des {
+		if de.Name()[0] < '0' || de.Name()[0] > '9' {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + de.Name() + "/stat")
+		if err != nil {
+			continue
+		}
+		// pid (comm) state ppid pgrp …; comm may hold anything, so the
+		// fields are counted after its closing parenthesis.
+		i := bytes.LastIndexByte(b, ')')
+		if i < 0 {
+			continue
+		}
+		f := strings.Fields(string(b[i+1:]))
+		if len(f) < 3 || f[0] == "Z" || f[0] == "X" {
+			continue
+		}
+		if g, err := strconv.Atoi(f[2]); err == nil && g == pgid {
+			return true
+		}
+	}
+	return false
 }
 
 // Run implements Runner.
@@ -249,7 +359,7 @@ func (r Real) Run(ctx context.Context, c Cmd) (Result, error) {
 
 	slog.Debug("exec", "cmd", c.String(), "dir", c.WorkDir())
 	start := time.Now()
-	err := cmd.Run()
+	err := run(cmd, c.KillGroup)
 	res := Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Truncated: stdout.truncated || stderr.truncated, ExitCode: -1}
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode()
@@ -279,7 +389,7 @@ func (r Real) Interactive(ctx context.Context, c Cmd) (int, error) {
 		cmd.Stderr = c.Stderr
 	}
 	slog.Debug("exec interactive", "cmd", c.String(), "dir", c.WorkDir())
-	err := cmd.Run()
+	err := run(cmd, c.KillGroup)
 	code := -1
 	if cmd.ProcessState != nil {
 		code = cmd.ProcessState.ExitCode()
@@ -295,6 +405,9 @@ func (r Real) Interactive(ctx context.Context, c Cmd) (int, error) {
 func classify(ctx context.Context, c Cmd, res Result, err error, timeout time.Duration) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, ErrGroupLeft) {
+		return fmt.Errorf("%s: %w", c.String(), err)
 	}
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) && timeout > 0 {

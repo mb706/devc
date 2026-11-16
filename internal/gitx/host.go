@@ -200,6 +200,11 @@ func (h *Host) Cmd(c Call) (execx.Cmd, error) {
 	}
 	cmd.Env = append(cmd.Env, c.Env...)
 	cmd.Env = append(cmd.Env, "GIT_NO_REPLACE_OBJECTS=1")
+	// A background host (the daemon) ends what git started with git: an
+	// index-pack or pack-objects that outlived an ended fetch would go on
+	// writing into the relay (finding E1-16). Commands of the command line
+	// stay in the terminal's foreground group, which an interrupt ends.
+	cmd.KillGroup = h.Background
 	return cmd, nil
 }
 
@@ -254,7 +259,10 @@ func (h *Host) Serve(ctx context.Context, c Call, stdout, stderr io.Writer) (int
 	if err != nil {
 		return -1, err
 	}
-	cmd.Stdout, cmd.Stderr, cmd.Setsid = stdout, stderr, true
+	// The whole session ends with the service and is gone before Serve
+	// returns: the caller removes what an ended push left in the relay and
+	// releases the relay's lock only then (finding E1-16).
+	cmd.Stdout, cmd.Stderr, cmd.Setsid, cmd.KillGroup = stdout, stderr, true, true
 	return h.Runner.Interactive(ctx, cmd)
 }
 

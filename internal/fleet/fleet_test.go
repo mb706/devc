@@ -41,7 +41,10 @@ type testHub struct {
 	ca  *hub.CA
 }
 
-func startHub(t *testing.T) *testHub {
+func startHub(t *testing.T) *testHub { return startHubAt(t, nil) }
+
+// startHubAt starts a hub with the clock now (time.Now when nil).
+func startHubAt(t *testing.T, now func() time.Time) *testHub {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "hub")
 	if err := hub.Init(dir, "hub.test"); err != nil {
@@ -53,7 +56,7 @@ func startHub(t *testing.T) *testHub {
 	}
 	ready := make(chan string, 1)
 	s, err := hub.New(hub.Options{Dir: dir, BehindProxy: true, Listen: "127.0.0.1:0", Ready: func(a string) { ready <- a },
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: now})
 	if err != nil {
 		t.Fatal(err)
 	}

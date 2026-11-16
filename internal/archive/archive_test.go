@@ -156,3 +156,31 @@ func TestMatchGlob(t *testing.T) {
 		t.Error("ClassOf")
 	}
 }
+
+// TestFileNameRoom: a file's name leaves room for the suffixes the hub
+// appends (finding E1-02), and only shared harness state may be mutable
+// (finding E1-04).
+func TestFileNameRoom(t *testing.T) {
+	fits := "harness/codex/home/" + strings.Repeat("n", MaxFileName)
+	if err := ValidRel(fits); err != nil {
+		t.Errorf("a name of %d bytes: %v", MaxFileName, err)
+	}
+	if len(strings.Repeat("n", MaxFileName)+"~1000000~meta.tmp") != 255 {
+		t.Error("MaxFileName does not leave exactly the room the hub needs")
+	}
+	if err := ValidRel(fits + "n"); err == nil {
+		t.Error("a name one byte longer was accepted")
+	}
+	if _, err := ParsePath("files/" + fits + "n~2"); err == nil {
+		t.Error("ParsePath accepted it with a generation")
+	}
+	// Directories keep the component limit.
+	if err := ValidRel("harness/codex/" + strings.Repeat("d", 255) + "/f"); err != nil {
+		t.Errorf("a long directory name: %v", err)
+	}
+	for rel, want := range map[string]bool{"harness/codex/home/x": true, "journal/p/s.jsonl": false, "requests/p.jsonl": false, "gate-log.jsonl": false} {
+		if MutableAllowed(rel) != want {
+			t.Errorf("MutableAllowed(%q) = %v", rel, !want)
+		}
+	}
+}

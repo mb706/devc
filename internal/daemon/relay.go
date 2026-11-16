@@ -27,6 +27,7 @@ import (
 
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
+	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/gitx"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
@@ -396,28 +397,17 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 	if err := respond(st, m.ID, proto.GitReply{Service: p.Service}, nil); err != nil {
 		return
 	}
-	gctx, killGit := context.WithCancel(ctx)
-	defer killGit()
-	var watched chan string
+	var code int
+	var stderr string
 	if p.Service == gitx.ServiceReceivePack {
-		watched = make(chan string, 1)
-		go func() {
-			why := d.watchPush(gctx, relay, relayUsed, r.Git.RelayQuota)
-			if why != "" {
-				killGit()
-			}
-			watched <- why
-		}()
-	}
-	code, stderr, err := serveGitProcess(gctx, gs, call, raw, br, feed)
-	if watched != nil {
-		killGit()
-		if why := <-watched; why != "" {
+		var why string
+		code, stderr, why, err = d.runPush(ctx, gs, call, raw, br, feed, relay, relayUsed, r.Git.RelayQuota)
+		if why != "" {
 			d.log.Warn("a push was ended", "box", names.BoxName(ref), "reason", why)
 			stderr = "devc ended the push: " + why + "; " + stderr
 		}
-		// A push that was ended may leave its quarantine behind.
-		gitx.RemoveQuarantines(relay)
+	} else {
+		code, stderr, err = serveGitProcess(ctx, gs, call, raw, br, feed)
 	}
 	// git is gone: end both copies before the box lock is released.
 	end()
@@ -425,6 +415,37 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 	if report != "" {
 		d.pushed(ctx, e, ref, p.Session, report)
 	}
+}
+
+// runPush runs receive-pack under the push watchdog: a push that would
+// take the relay beyond its budget or the file system below its reserve
+// is ended. git runs in a process group that is killed and gone, with
+// index-pack and every hook, before runPush removes what an ended push
+// left in the relay and before the caller releases the relay's lock
+// (findings D1-05, E1-16). A group that could not be ended is logged and
+// its quarantine left: removing it under a writer would only unlink
+// files that still take space.
+func (d *Daemon) runPush(ctx context.Context, gs *gitx.Service, call gitx.Call, st io.Writer, br io.Reader, feed int64, relay string, used, quota int64) (int, string, string, error) {
+	gctx, killGit := context.WithCancel(ctx)
+	defer killGit()
+	watched := make(chan string, 1)
+	go func() {
+		why := d.watchPush(gctx, relay, used, quota)
+		if why != "" {
+			killGit()
+		}
+		watched <- why
+	}()
+	code, stderr, err := serveGitProcess(gctx, gs, call, st, br, feed)
+	killGit()
+	why := <-watched
+	if errors.Is(err, execx.ErrGroupLeft) {
+		d.log.Error("git processes of a push did not end; its quarantine is left in the relay", "relay", relay, "err", err)
+		return code, stderr, why, err
+	}
+	// A push that was ended may leave its quarantine behind.
+	gitx.RemoveQuarantines(relay)
+	return code, stderr, why, err
 }
 
 // serveGitProcess runs git with the stream as its standard input and

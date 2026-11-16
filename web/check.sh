@@ -402,6 +402,56 @@ checks = page.js("""(async () => {
     if (!store.state.sessions[k] || store.state.sessions[k].question.id !== 'q2') out.push('an older summary replaced a newer one');
     store.dropDetail('nomachine', 's0000000000000000000z');
     store.applyChange('session.removed', { machine: 'nomachine', session: 's0000000000000000000z' });
+
+    // Uncertainty is kept (E1-11): the first attempt's answer breaks off,
+    // the retry is refused outright (the machine went offline); the command
+    // stays pending under its ID. A retry of a pending command that is
+    // refused outright stays pending too; one the machine never received
+    // ('unsent') fails.
+    const ids2 = [];
+    let n = 0;
+    window.fetch = async (url, opts) => {
+      if (opts && opts.body) ids2.push(JSON.parse(opts.body).id);
+      n++;
+      if (n === 1) return new Response('{"command":', { status: 200 });
+      return new Response('{"error":"machine nomachine is offline"}', { status: 503 });
+    };
+    const rec2 = await store.run('nomachine', 'interrupt', { session: 's0000000000000000000z' }, { quiet: true, id: 'check-id-2' });
+    if (!rec2 || rec2.outcome !== 'unknown' || !store.state.pending['check-id-2'] || ids2.length !== 2 || ids2.some((i) => i !== 'check-id-2')) out.push('uncertainty lost after a refusal: ' + JSON.stringify({ rec2, ids2 }));
+    window.fetch = async () => new Response('{"error":"machine nomachine is offline"}', { status: 503 });
+    await store.retryPending('check-id-2');
+    if (!store.state.pending['check-id-2']) out.push('a refused retry of an uncertain command dropped it');
+    else {
+      store.state.pending['check-id-2'].outcome = 'unsent';
+      await store.retryPending('check-id-2');
+      if (store.state.pending['check-id-2']) out.push('a refused retry of an unsent command is still pending');
+      store.dismissPending('check-id-2');
+    }
+
+    // Paging back while live events keep coming (E1-13): the page is
+    // applied, the live events are counted, not appended.
+    const m3 = 'nomachine', s3 = 's0000000000000000000y', k3 = m3 + '/' + s3;
+    const evs = (a, b) => { const r = []; for (let i = a; i <= b; i++) r.push({ seq: i, type: 'note', data: { text: 'e' + i } }); return r; };
+    const d3 = tl.newDetail();
+    store.state.details[k3] = d3;
+    d3.buffer = []; tl.replace(d3, evs(2001, 3000)); d3.more = true;
+    let release;
+    window.fetch = (url) => new Promise((resolve) => { release = () => resolve(new Response(JSON.stringify({ session: { machine: m3, session: s3 }, events: evs(1801, 2000), more: true, stream_id: 1 }), { status: 200 })); });
+    const older2 = store.loadDetail(m3, s3, 2001);
+    for (let i = 3001; i <= 3050; i++) store.applyChange('event', { machine: m3, session: s3, event: { seq: i, type: 'note', data: { text: 'live' } } }, 0);
+    release();
+    await older2;
+    if (d3.events[0].seq !== 1801 || d3.events.length !== 1000 || d3.live || tl.newer(d3) !== 250) out.push('paging back under live events: ' + JSON.stringify({ first: d3.events[0].seq, n: d3.events.length, live: d3.live, newer: tl.newer(d3) }));
+    // Back to the latest (E1-14): an event that arrives while the latest
+    // events are read is merged.
+    window.fetch = (url) => new Promise((resolve) => { release = () => resolve(new Response(JSON.stringify({ session: { machine: m3, session: s3 }, events: evs(2751, 3050), more: true, stream_id: 2 }), { status: 200 })); });
+    const latest2 = store.loadDetail(m3, s3);
+    store.applyChange('event', { machine: m3, session: s3, event: { seq: 3051, type: 'note', data: { text: 'meanwhile' } } }, 0);
+    release();
+    await latest2;
+    if (!d3.live || tl.lastSeq(d3) !== 3051 || d3.loading) out.push('back to the latest lost an event: ' + JSON.stringify({ live: d3.live, last: tl.lastSeq(d3) }));
+    store.dropDetail(m3, s3);
+    store.applyChange('session.removed', { machine: m3, session: s3 });
   } finally {
     window.fetch = realFetch;
   }

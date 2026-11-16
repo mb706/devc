@@ -321,9 +321,17 @@ hub lacks:
   harness manifest's transcript globs) are uploaded as they grow, and every
   version of one is kept. Any other file there gets a new version for any
   change, at most one per `[sync] mutable_interval` (`config.toml`, default
-  6 hours), copied first so a version is one state of the file; the hub
-  keeps the newest three. Permission bits travel (an executable hook stays
-  executable; set-ID bits never do).
+  6 hours), copied first so a version is one state of the file (a file that
+  grows beyond `max_file_size` while it is copied is left out). The hub
+  keeps the newest three versions and, by its own clock, the version each
+  such file had at the start of each of the last 7 days and 4 weeks (the
+  hub's `[archive] keep_daily` and `keep_weekly`), so neither a box nor a
+  machine can replace every archived version of a file. Only shared
+  harness state can be versioned that way; the hub keeps every version of
+  journals and logs whatever a machine says, and a file keeps the kind it
+  was first archived as (after a manifest change, devc follows the hub).
+  Permission bits travel (an executable hook stays executable; set-ID bits
+  never do).
 
 Secrets never travel in the archive. A hub only ever adds: a machine can
 append to its own archive and read every machine's, never change or delete
@@ -334,6 +342,7 @@ connections and never hold up events or commands.
 devc sync status [--now]          # per hub and realm: what is behind, what was left out, the last error
 devc state pull work --from https://hub.example.org --list
 devc state pull work --from https://hub.example.org [--machine old-laptop] [--merge]
+devc state pull work --from https://hub.example.org --as-of 2026-11-02    # or --as-of 2026-11-02T08:00:00Z
 ```
 
 `devc state pull` restores one machine's archive of a realm (by default this
@@ -344,7 +353,18 @@ complete version; a newer one whose upload did not finish is reported. It
 refuses a realm that has durable state already, unless `--merge`, which
 adds only the files and refs that are missing (a ref that exists with
 another value is reported and kept). A realm is restored only under its own
-name (also by `devc state import`): its journals and logs name it inside. Sessions restored this way appear among this machine's sessions. A
+name (also by `devc state import`): its journals and logs name it inside. Sessions restored this way appear among this machine's sessions.
+
+With `--as-of <time>` (RFC 3339, or a date: the start of that day in UTC)
+each file is restored as the hub held it then: the newest version it
+completed at or before that time, by the hub's clock; a file whose first
+version is newer is left out. Use it to get back a database a box broke:
+the start of every one of the last 7 days and 4 weeks is kept. Journals and
+logs come from the version in use then, with what was appended to it since
+(they only grow). What has no versions is taken as it is now, and the
+command says so: relays and the context repository (their history is all
+there; refs are restored as they are now), and files archived before the
+hub recorded completion times. A
 hub that reports a full quota says so in `devc sync status` and
 `devc hub status`; uploads to it pause for ten minutes at a time until it
 has room.
@@ -496,7 +516,9 @@ when the relay would grow beyond `git.relay_quota` (default `20g`). The relay
 keeps a push's objects in the pack they came in, the daemon starts a push
 only with at least 1 GiB free on the state file system, and it ends a push
 while git writes it once the relay would exceed its budget or less than
-512 MiB would stay free (the daemon's log says why). Before serving a fetch, the daemon fetches the upstream into the
+512 MiB would stay free (the daemon's log says why). Ending a push ends
+every git process it started (index-pack, hooks) before the daemon removes
+what the push left and lets the next one in. Before serving a fetch, the daemon fetches the upstream into the
 relay (at most once a minute, 20 seconds at most, without prompts; turn it off
 with `git.fetch_through = false`), so `git fetch origin` brings new upstream
 commits as `origin/*` and `github/*` without `devc pull`. Without the daemon,
@@ -881,6 +903,10 @@ absolute URL; several requests on one connection are each decided):
    connects, so a name that resolves to a private address, or whose answer
    changes, reaches nothing;
 4. the decision goes to `durable/realms/<realm>/netlog/<project>.jsonl`.
+
+Resolving and connecting take a moment: the rules are checked again once
+the connection is made, before the box gets its answer or a byte it sent
+is passed on, so an exception that ends meanwhile lets nothing through.
 
 ```toml
 # realm.toml (projects add their own [network.allowlist] to it)

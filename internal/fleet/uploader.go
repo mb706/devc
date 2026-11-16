@@ -411,31 +411,54 @@ func statOf(fi os.FileInfo) SrcStat {
 }
 
 // newFileState starts the bookkeeping of a file this uploader has none
-// for: after the newest generation the hub holds of it (generations only
-// grow, and the hub may have dropped old ones), resuming that generation
-// when its bytes are this file's.
+// for: at the newest generation the hub holds of it (generations only
+// grow, and the hub may have dropped old ones; the upload then resumes it
+// when its bytes are this file's, or moves on), in the class the hub
+// holds for the file (finding E1-04: the hub keeps the class of a file's
+// first generation).
 func (u *Uploader) newFileState(ctx context.Context, pc *passCtx, cd candidate) (*FileState, error) {
 	fs := &FileState{Class: cd.class, Committed: -1}
 	idx, err := pc.ownIndex(ctx)
 	if err != nil {
 		return nil, err
 	}
-	gen := -1
-	var newest archive.Entry
+	gen, classGen := -1, -1
 	for _, e := range idx.Entries {
-		if ap, err := archive.ParsePath(e.Path); err == nil && ap.Kind == archive.KindFile && ap.Rel == cd.rel && ap.Gen > gen {
-			gen, newest = ap.Gen, e
+		ap, err := archive.ParsePath(e.Path)
+		if err != nil || ap.Kind != archive.KindFile || ap.Rel != cd.rel {
+			continue
+		}
+		gen = max(gen, ap.Gen)
+		if (e.Class == archive.ClassAppend || e.Class == archive.ClassMutable) && ap.Gen > classGen {
+			fs.Class, fs.Fixed, classGen = e.Class, true, ap.Gen
 		}
 	}
-	if gen < 0 {
-		return fs, nil
-	}
-	fs.Gen = gen
-	if newest.Class != cd.class && newest.Class != "" {
-		fs.Gen++
+	if gen >= 0 {
+		fs.Gen = gen
 	}
 	return fs, nil
 }
+
+// fixed reports whether the hub holds a class for the file: it said so,
+// or a generation of it was stored.
+func (fs *FileState) fixed() bool {
+	return fs.Fixed || fs.Sent > 0 || fs.Committed >= 0 || fs.Checked
+}
+
+// adoptClass follows the class the hub holds for a file (a 409 naming
+// it): the file is uploaded in that class from the next pass on, so a
+// manifest that changed cannot leave it stuck (finding E1-04).
+func (u *Uploader) adoptClass(pc *passCtx, cd candidate, fs *FileState, class string) {
+	u.Log.Info("archive: the hub keeps this file in another class; following it", "realm", pc.realm, "file", cd.rel, "class", class)
+	u.dropSnap(fs)
+	*fs = FileState{Class: class, Fixed: true, Gen: fs.Gen, Committed: -1}
+}
+
+// errSkipFile is a file the hub refuses as it is (400): it is counted as
+// skipped and the pass goes on with the other files.
+type errSkipFile struct{ reason string }
+
+func (e *errSkipFile) Error() string { return e.reason }
 
 // syncFile uploads what the hub lacks of one file and returns how many
 // bytes are still behind (waiting reports a changed mutable file that
@@ -462,17 +485,25 @@ func (u *Uploader) syncFile(ctx context.Context, pc *passCtx, cd candidate) (beh
 		}
 		pc.rs.Files[cd.rel] = fs
 	}
-	if fs.Class != cd.class {
-		// The manifest changed the file's class: a new generation records
-		// the new one.
-		u.Log.Info("archive: a file changed its class; uploading a new generation", "realm", pc.realm, "file", cd.rel, "class", cd.class)
-		u.dropSnap(fs)
-		*fs = FileState{Class: cd.class, Gen: fs.Gen + 1, Committed: -1, Regen: u.Now()}
+	if fs.Class != cd.class && !fs.fixed() {
+		// Nothing of the file is on the hub yet: the manifest decides. Once
+		// a generation is stored, the hub keeps its class.
+		fs.Class = cd.class
 	}
-	if cd.class == archive.ClassMutable {
-		return u.syncMutable(ctx, pc, cd, f, src, fs)
+	if fs.Class == archive.ClassMutable {
+		behind, waiting, err = u.syncMutable(ctx, pc, cd, f, src, fs)
+	} else {
+		behind, waiting, err = u.syncAppend(ctx, pc, cd, f, src, fs)
 	}
-	return u.syncAppend(ctx, pc, cd, f, src, fs)
+	var skip *errSkipFile
+	if errors.As(err, &skip) {
+		pc.status.Skipped++
+		if len(pc.status.SkippedSample) < 5 {
+			pc.status.SkippedSample = append(pc.status.SkippedSample, cd.rel+": "+proto.Printable(proto.Truncate(skip.reason, 200)))
+		}
+		return 0, false, nil
+	}
+	return behind, waiting, err
 }
 
 // syncAppend uploads an append-only file from the file itself.
@@ -507,7 +538,8 @@ func (u *Uploader) syncAppend(ctx context.Context, pc *passCtx, cd candidate, f 
 	} else if fs.Sent > 0 {
 		// Unchanged since the last pass and nothing more to send.
 		if fs.Committed != fs.Sent {
-			return u.commit(ctx, pc, cd, fs, fs.Sent, size)
+			behind, err := u.send(ctx, pc, cd, f, size, fs, h, nil)
+			return behind, false, err
 		}
 		return 0, false, nil
 	}
@@ -515,16 +547,14 @@ func (u *Uploader) syncAppend(ctx context.Context, pc *passCtx, cd candidate, f 
 		fs.Mode = src.Mode
 	}
 	fs.Ino, fs.MTime = src.Ino, src.MTime
-	behind, err := u.upload(ctx, pc, cd, f, size, fs, h)
-	if err != nil || behind > 0 {
-		return behind, false, err
-	}
 	// Complete at this length only if the file did not change while it
 	// was read (a rewrite during the pass is found by the next one).
-	if fi, err := f.Stat(); err != nil || statOf(fi) != src {
-		return 0, false, nil
+	unchanged := func() bool {
+		fi, err := f.Stat()
+		return err == nil && statOf(fi) == src
 	}
-	return u.commit(ctx, pc, cd, fs, fs.Sent, size)
+	behind, err := u.send(ctx, pc, cd, f, size, fs, h, unchanged)
+	return behind, false, err
 }
 
 // syncMutable uploads a mutable file through a snapshot: a new generation
@@ -542,29 +572,31 @@ func (u *Uploader) syncMutable(ctx context.Context, pc *passCtx, cd candidate, f
 		if started {
 			gen++
 		}
-		snap, err := u.snapshot(f, src)
+		snap, length, st, err := u.snapshot(f, src, cd.max)
+		if errors.Is(err, errTooLarge) {
+			pc.status.Skipped++
+			return 0, false, nil
+		}
 		if err != nil {
 			u.Log.Info("archive: no consistent copy of a changing file; trying again next pass", "realm", pc.realm, "file", cd.rel, "err", err)
 			return src.Size, false, nil
 		}
-		*fs = FileState{Class: fs.Class, Gen: gen, Committed: -1, Regen: u.Now(), Mode: src.Mode, Snap: snap, SnapSize: src.Size, Src: src}
+		// The generation is the accepted copy: its length and the source
+		// as it was copied (findings E1-01, E1-07).
+		*fs = FileState{Class: fs.Class, Fixed: fs.Fixed, Gen: gen, Committed: -1, Regen: u.Now(), Mode: st.Mode, Snap: snap, SnapSize: length, Src: st}
 	}
 	sf, err := os.OpenFile(fs.Snap, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		// The snapshot is gone: the generation is started again.
-		*fs = FileState{Class: fs.Class, Gen: fs.Gen + 1, Committed: -1}
+		*fs = FileState{Class: fs.Class, Fixed: fs.Fixed, Gen: fs.Gen + 1, Committed: -1}
 		return src.Size, false, nil
 	}
 	defer sf.Close()
-	behind, err := u.upload(ctx, pc, cd, sf, fs.SnapSize, fs, nil)
-	if err != nil || behind > 0 {
-		return behind, false, err
-	}
-	b, w, err := u.commit(ctx, pc, cd, fs, fs.SnapSize, fs.SnapSize)
-	if err == nil && fs.Committed == fs.SnapSize {
+	behind, err := u.send(ctx, pc, cd, sf, fs.SnapSize, fs, nil, nil)
+	if err == nil && behind == 0 && fs.Snap != "" && fs.Committed == fs.SnapSize {
 		u.dropSnap(fs)
 	}
-	return b, w, err
+	return behind, false, err
 }
 
 // mutableEvery is the least time between two generations of a mutable
@@ -576,39 +608,53 @@ func (u *Uploader) mutableEvery(pc *passCtx) time.Duration {
 	return pc.c.Global.MutableInterval()
 }
 
+// errTooLarge is a file above its size cap.
+var errTooLarge = errors.New("the file is larger than the archive's limit")
+
+// beforeCopy, when set, runs before each copy of a snapshot (tests change
+// the file there).
+var beforeCopy func(try int)
+
 // snapshot copies a mutable file (open as f, as it was at src) to a file
 // of the uploader's own; a copy during which the file changed is made
-// again, a few times.
-func (u *Uploader) snapshot(f *os.File, src SrcStat) (string, error) {
+// again, a few times. The size cap max is checked after every stat and
+// bounds every copy, so no copy writes more than max bytes (finding
+// E1-01). It returns the accepted copy, its length and the stat taken
+// with it (finding E1-07).
+func (u *Uploader) snapshot(f *os.File, src SrcStat, max int64) (string, int64, SrcStat, error) {
 	dir, err := u.store.snapDir()
 	if err != nil {
-		return "", err
+		return "", 0, SrcStat{}, err
 	}
 	for try := 0; try < 3; try++ {
+		if src.Size > max {
+			return "", 0, SrcStat{}, errTooLarge
+		}
+		if beforeCopy != nil {
+			beforeCopy(try)
+		}
 		out, err := os.CreateTemp(dir, "snap-")
 		if err != nil {
-			return "", err
+			return "", 0, SrcStat{}, err
 		}
-		n, err := io.Copy(out, io.NewSectionReader(f, 0, src.Size))
+		n, err := io.Copy(out, io.LimitReader(io.NewSectionReader(f, 0, src.Size), max))
 		if cerr := out.Close(); err == nil {
 			err = cerr
 		}
 		fi, serr := f.Stat()
 		if err == nil && serr == nil && n == src.Size && statOf(fi) == src {
-			return out.Name(), nil
+			return out.Name(), n, src, nil
 		}
 		os.Remove(out.Name())
 		if serr != nil {
-			return "", serr
-		}
-		if fi != nil {
-			src = statOf(fi)
+			return "", 0, SrcStat{}, serr
 		}
 		if err != nil {
-			return "", err
+			return "", 0, SrcStat{}, err
 		}
+		src = statOf(fi)
 	}
-	return "", errors.New("the file kept changing while it was copied")
+	return "", 0, SrcStat{}, errors.New("the file kept changing while it was copied")
 }
 
 func (u *Uploader) dropSnap(fs *FileState) {
@@ -616,6 +662,70 @@ func (u *Uploader) dropSnap(fs *FileState) {
 		_ = os.Remove(fs.Snap)
 		fs.Snap = ""
 	}
+}
+
+// send uploads r up to size and marks the generation complete. A
+// conflict at completion is reconciled with what the hub holds, moving to
+// a new generation when the stored one cannot represent the source, and
+// the upload goes on (finding E1-08), a few rounds at most. unchanged,
+// when set, says whether the source is still as it was read; a changed
+// one is completed by a later pass. h is as for upload.
+func (u *Uploader) send(ctx context.Context, pc *passCtx, cd candidate, r io.ReaderAt, size int64, fs *FileState, h hash.Hash, unchanged func() bool) (int64, error) {
+	for round := 0; ; round++ {
+		behind, err := u.upload(ctx, pc, cd, r, size, fs, h)
+		if err != nil || behind > 0 {
+			return behind, err
+		}
+		if unchanged != nil && !unchanged() {
+			return 0, nil
+		}
+		again, err := u.commit(ctx, pc, cd, r, fs, size)
+		if err != nil || !again {
+			if err != nil {
+				return size, err
+			}
+			return 0, nil
+		}
+		if round >= 3 {
+			return size, fmt.Errorf("%s: the hub keeps refusing to complete it", cd.rel)
+		}
+		if h != nil {
+			// The generation or the offset moved: hash its prefix again.
+			h.Reset()
+			if _, err := io.Copy(h, io.NewSectionReader(r, 0, fs.Sent)); err != nil {
+				return size, err
+			}
+			fs.Hash = ""
+			if fs.Sent > 0 {
+				fs.Hash = hex.EncodeToString(h.Sum(nil))
+			}
+		}
+	}
+}
+
+// fileRefusal handles a refusal of an upload or completion of a file
+// that is not about its offset: a class the hub holds is adopted, a
+// generation the hub will not take (older than one it holds, or one that
+// can no longer become complete) makes the next pass ask the hub's index
+// again, and a request the hub refuses as it is skips the file. It
+// returns whether the refusal was handled (the file waits for the next
+// pass).
+func (u *Uploader) fileRefusal(pc *passCtx, cd candidate, fs *FileState, he *HubError) (bool, error) {
+	switch {
+	case he.Status == http.StatusConflict && (he.Reply.Class == archive.ClassAppend || he.Reply.Class == archive.ClassMutable):
+		u.adoptClass(pc, cd, fs, he.Reply.Class)
+		return true, nil
+	case he.Status == http.StatusConflict && he.Reply.Length == nil:
+		u.Log.Info("archive: the hub will not take this generation; asking it again next pass", "realm", pc.realm, "file", cd.rel, "err", he.Error())
+		u.dropSnap(fs)
+		delete(pc.rs.Files, cd.rel)
+		return true, nil
+	case he.Status == http.StatusBadRequest:
+		u.dropSnap(fs)
+		*fs = FileState{Class: fs.Class, Fixed: fs.Fixed, Gen: fs.Gen, Committed: -1}
+		return true, &errSkipFile{reason: "the hub refuses it: " + he.Error()}
+	}
+	return false, nil
 }
 
 // upload sends r's bytes from fs.Sent to size; h, when set, holds the hash
@@ -648,9 +758,9 @@ func (u *Uploader) upload(ctx context.Context, pc *passCtx, cd candidate, r io.R
 					u.chunk /= 2
 					continue
 				}
-				if l, known, _ := he.Conflict(); known && conflicts < maxConflicts {
+				if l, known, complete := he.Conflict(); known && conflicts < maxConflicts {
 					conflicts++
-					if err := u.fileConflict(ctx, pc, cd.rel, r, fs, l, size); err != nil {
+					if err := u.fileConflict(ctx, pc, cd.rel, r, fs, l, complete, size); err != nil {
 						return size - fs.Sent, err
 					}
 					if h != nil {
@@ -664,10 +774,8 @@ func (u *Uploader) upload(ctx context.Context, pc *passCtx, cd candidate, r io.R
 					}
 					continue
 				}
-				if he.Status == http.StatusConflict {
-					// A generation the hub will not take (an older one than
-					// it holds): the next pass asks the hub's index again.
-					delete(pc.rs.Files, cd.rel)
+				if handled, err := u.fileRefusal(pc, cd, fs, he); handled {
+					return size, err
 				}
 			}
 			return size - fs.Sent, err
@@ -680,45 +788,57 @@ func (u *Uploader) upload(ctx context.Context, pc *passCtx, cd candidate, r io.R
 			h.Write(buf)
 			fs.Hash = hex.EncodeToString(h.Sum(nil))
 		}
-		fs.Sent, fs.Checked = reply.Length, true
+		fs.Sent, fs.Checked, fs.Fixed = reply.Length, true, true
 		u.store.maybeSave(u.state)
 	}
 	return 0, nil
 }
 
-// commit marks the generation complete at length on the hub (an empty
-// file is created that way, finding D1-20).
-func (u *Uploader) commit(ctx context.Context, pc *passCtx, cd candidate, fs *FileState, length, size int64) (int64, bool, error) {
+// commit marks the generation complete at fs.Sent on the hub (an empty
+// file is created that way, finding D1-20). A conflict is reconciled with
+// what the hub holds (fileConflict: resume, or a new generation when the
+// stored one cannot represent the source, finding E1-08); again then says
+// that the upload goes on.
+func (u *Uploader) commit(ctx context.Context, pc *passCtx, cd candidate, r io.ReaderAt, fs *FileState, size int64) (again bool, err error) {
+	length := fs.Sent
 	o := PutOptions{Final: true}
 	if length == 0 {
 		o.Class, o.Mode = fs.Class, fs.Mode
 	}
 	reply, err := pc.cl.Put(ctx, pc.realm, archive.FilePath(cd.rel, fs.Gen), length, nil, o)
-	if err != nil {
-		var he *HubError
-		if errors.As(err, &he) && he.Status == http.StatusConflict {
-			// The hub holds another length: the next pass starts from what
-			// its index says.
-			u.dropSnap(fs)
-			delete(pc.rs.Files, cd.rel)
+	if err == nil {
+		if reply.Complete && reply.Length == length {
+			fs.Committed, fs.Checked, fs.Fixed = length, true, true
 		}
-		return size, false, err
+		return false, nil
 	}
-	if reply.Complete && reply.Length == length {
-		fs.Committed, fs.Checked = length, true
+	var he *HubError
+	if !errors.As(err, &he) {
+		return false, err
 	}
-	return 0, false, nil
+	if l, known, complete := he.Conflict(); known {
+		if err := u.fileConflict(ctx, pc, cd.rel, r, fs, l, complete, size); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if handled, err := u.fileRefusal(pc, cd, fs, he); handled {
+		return false, err
+	}
+	return false, err
 }
 
 // fileConflict handles a hub that holds length bytes of the generation
-// being uploaded, not fs.Sent.
-func (u *Uploader) fileConflict(ctx context.Context, pc *passCtx, rel string, f io.ReaderAt, fs *FileState, length, size int64) error {
+// being uploaded, not fs.Sent (complete: the generation is complete and
+// takes no more bytes).
+func (u *Uploader) fileConflict(ctx context.Context, pc *passCtx, rel string, f io.ReaderAt, fs *FileState, length int64, complete bool, size int64) error {
 	next := func() {
-		*fs = FileState{Class: fs.Class, Gen: fs.Gen + 1, Committed: -1, Ino: fs.Ino, MTime: fs.MTime, Mode: fs.Mode, Regen: fs.Regen,
+		*fs = FileState{Class: fs.Class, Fixed: fs.Fixed, Gen: fs.Gen + 1, Committed: -1, Ino: fs.Ino, MTime: fs.MTime, Mode: fs.Mode, Regen: fs.Regen,
 			Snap: fs.Snap, SnapSize: fs.SnapSize, Src: fs.Src}
 	}
-	if length > size {
-		// The hub holds more than the file has: another content.
+	if length > size || (complete && length != size) {
+		// The hub holds more than the file has, or a complete generation of
+		// another length: another content.
 		next()
 		return nil
 	}

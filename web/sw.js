@@ -6,7 +6,7 @@
 // from the cache only when the hub cannot be reached; vendored files carry
 // their version in the path and come from the cache.
 
-const CACHE = 'devc-shell-3';
+const CACHE = 'devc-shell-4';
 
 // SHELL lists every file of the app; a Go test checks that it matches the
 // embedded files.

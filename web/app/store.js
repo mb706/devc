@@ -6,7 +6,7 @@
 
 import { useState, useEffect } from './lib.js';
 import * as api from './api.js';
-import { newDetail, append, replace, prepend, lastSeq, MAX_EVENTS } from './timeline.js';
+import { newDetail, append, replace, prepend, detach, lastSeq, MAX_EVENTS } from './timeline.js';
 
 const CACHE_KEY = 'devc.cache.v1';
 
@@ -188,10 +188,17 @@ export async function loadDetail(machine, sid, before = 0) {
     state.details[k] = d;
   }
   const token = ++reqSeq;
+  const req = d.req;
   if (before) {
     if (d.loading || d.older) return;
     d.older = true;
+    // Paging back detaches the window from the live end (findings D1-13,
+    // E1-13): live events are counted, not appended, so the window does
+    // not move while the page is read and the page always fits it.
+    detach(d);
   } else {
+    // The latest events, as when a session is opened: the stream's events
+    // are buffered meanwhile and merged by seq (finding E1-14).
     d.req = token;
     d.loading = true;
     d.buffer = [];
@@ -200,7 +207,7 @@ export async function loadDetail(machine, sid, before = 0) {
   d.error = '';
   d.ver++;
   changed();
-  const current = () => state.details[k] === d && (before ? d.events.length && d.events[0].seq === before : d.req === token);
+  const current = () => state.details[k] === d && (before ? d.req === req && d.events.length && d.events[0].seq === before : d.req === token);
   try {
     const q = before ? `?before=${before}&limit=200` : '?limit=300';
     const res = await api.get(`/api/sessions/${encodeURIComponent(machine)}/${encodeURIComponent(sid)}${q}`);
@@ -282,16 +289,19 @@ export function applyChange(kind, data, id = 0) {
       const k = key(data.machine, data.session);
       const d = state.details[k];
       if (!d) break;
-      if (!d.live) {
-        // The window shows older history: the live end moves on without
-        // it ("Back to the latest" reads it again).
-        settleOutbox(k, data.event);
-        break;
-      }
       if (d.loading) {
-        // Held back until the snapshot is in; bounded like the window.
+        // Held back until the latest events are in, also when the screen
+        // returns to them from older history (finding E1-14); bounded like
+        // the window.
         if (d.buffer.length < MAX_EVENTS) d.buffer.push(data.event);
         else d.reload = true;
+        break;
+      }
+      if (!d.live) {
+        // The window shows older history: the live end moves on without
+        // it, counted ("Back to the latest" reads it again).
+        if (data.event.seq > d.newest) d.newest = data.event.seq;
+        settleOutbox(k, data.event);
         break;
       }
       const last = lastSeq(d);
@@ -430,15 +440,18 @@ export async function resolvePending(machine = '') {
 }
 
 // retryPending sends a pending command again with its own ID: the machine
-// applies an ID once.
+// applies an ID once. Unless the machine said it never received the ID
+// ('unsent'), an earlier attempt may have taken effect: a definite refusal
+// of the retry leaves the command pending (finding E1-11).
 export async function retryPending(id) {
   const p = state.pending[id];
   if (!p) return;
+  const unsure = p.outcome !== 'unsent';
   p.outcome = 'unknown';
   if (p.type === 'send') setOutbox(key(p.machine, p.params.session), id, 'sending');
   changed();
   try {
-    const rec = await api.command(p.machine, p.type, p.params, p.wait, id);
+    const rec = await api.command(p.machine, p.type, p.params, p.wait, id, { unsure });
     if (rec.final) finish(p, rec);
     else {
       p.outcome = rec.outcome;
@@ -450,7 +463,11 @@ export async function retryPending(id) {
       delete state.pending[id];
       if (p.type === 'send') setOutbox(key(p.machine, p.params.session), id, 'failed');
       toast(e.message, 'error', 6000);
-    } else if (p.type === 'send') setOutbox(key(p.machine, p.params.session), id, 'unknown');
+    } else {
+      if (p.type === 'send') setOutbox(key(p.machine, p.params.session), id, 'unknown');
+      if (!state.pending[id]) addPending(p);
+      toast(`${p.label}: the outcome is still not known (${e.message}); the app asks the machine when it can`, 'warn', 6000);
+    }
   }
   changed();
 }

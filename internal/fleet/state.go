@@ -48,6 +48,8 @@ type RealmState struct {
 // new generation, at most one per mutable interval.
 type FileState struct {
 	Class string `json:"class"`
+	// Fixed: the hub holds this class for the file (finding E1-04).
+	Fixed bool   `json:"fixed,omitempty"`
 	Gen   int    `json:"gen"`
 	Sent  int64  `json:"sent"`
 	Ino   uint64 `json:"ino"`

@@ -557,19 +557,47 @@ Uploads need `X-Devc-Request: 1`. The archive is a ratchet:
   final, and then becomes visible without replacing anything.
 - A file is stored in generations (`files/<path>`, `files/<path>~1`, …),
   each with a record beside it (`<file>~meta`): its class and permission
-  bits, given by the machine when it created the generation, and the length
-  at which the machine last marked it complete (`final=1`; an empty body
-  with `final=1` stores an empty file). A restore uses the newest complete
-  generation. Generations only grow: one older than a stored one is refused.
-- The class comes from the harness manifests on the machine. Append-only
-  files (transcripts, and the host-written logs) keep every generation.
-  For a mutable file (anything else in shared harness state, such as a
-  database in a shared home) the machine uploads a new generation for any
-  change, at most one per `[sync] mutable_interval` (default 6 hours, in the
-  machine's `config.toml`), and the hub drops the generations older than
-  its newest three complete ones. That is the one thing the hub removes on
-  its own; a generation of an append-only file is never removed, whatever a
-  machine (or a box rewriting a transcript) does.
+  bits, given when the generation was created, the length at which the
+  machine last marked it complete (`final=1`; an empty body with `final=1`
+  stores an empty file), and when it first became complete, by the hub's
+  clock. A restore uses the newest complete generation. Generations only
+  grow: one older than a stored one is refused, and so is completing a
+  generation once a newer one is complete (completion times never decrease
+  with the generation number). A complete mutable generation takes no more
+  bytes.
+- Classes. The machine proposes a file's class from its harness manifests;
+  the hub decides. Only shared harness state may be mutable: journals,
+  request, network and gate logs, bundles and ref logs are append-only
+  whatever a request says (a `class=mutable` upload there is refused with
+  400). A file keeps the class of its first generation: a later generation
+  with another class is refused with 409, and the answer names the class to
+  use (the machine follows it). Append-only files (transcripts, and the
+  host-written logs) keep every generation.
+- Retention of mutable files (anything else in shared harness state, such
+  as a database in a shared home). The machine uploads a new generation for
+  any change, at most one per `[sync] mutable_interval` (default 6 hours,
+  in the machine's `config.toml`). When a generation of a mutable file
+  completes, and only once its record is on disk, the hub keeps the newest
+  three complete generations and, for every checkpoint, the newest
+  generation completed by then. Checkpoints are the starts of the last
+  `keep_daily` days and of the last `keep_weekly` weeks (UTC, weeks begin
+  on Monday), by the hub's clock; a machine cannot name a time. The other
+  complete generations of that file go, and so do incomplete ones older
+  than a complete one. So the state the file had at any checkpoint in the
+  window can be restored (`devc state pull --as-of`), however many
+  generations a box or a machine uploaded since: neither can empty the
+  archive. Generations without a recorded time are never dropped, and while
+  the hub's clock is behind a time it recorded for the file (the clock
+  stepped back), nothing is dropped until it catches up. That is the one
+  thing the hub removes on its own; a generation of an append-only file is
+  never removed, whatever a machine (or a box rewriting a transcript) does.
+- Names. The hub checks every name it will write for an upload (with the
+  suffixes it appends, against its file system's name limit) and counts the
+  new directories and the realm before creating anything; an upload that
+  fails removes what it created. Archive file names are at most 238 bytes
+  so that the suffixes fit in 255; a file system with a lower limit (some
+  take 251) refuses a little more, with 400, and the machine reports such a
+  file as skipped.
 
 Budgets (`[archive]` in `hub.toml`; defaults shown):
 
@@ -577,7 +605,7 @@ Budgets (`[archive]` in `hub.toml`; defaults shown):
 [archive]
 machine_quota = "50g"     # one machine's whole archive
 realm_quota = "20g"       # one machine's archive of one realm
-max_files = 200000        # files and bundles per machine
+max_files = 200000        # files, bundles and directories per machine
 max_request = "8m"        # one upload request (64k to 64m)
 max_realms = 100          # realms per machine (archive and secrets together)
 max_uploads = 8           # uploads (archive and secrets) in progress on the hub
@@ -585,12 +613,18 @@ machine_uploads = 2       # uploads in progress per machine
 max_downloads = 8         # reads (indexes, summaries, files, secrets) in progress on the hub
 machine_downloads = 2     # reads in progress per machine
 min_free = "2g"           # free space always left on the hub's file system
+keep_daily = 7            # retention of mutable files: the state at the start of each of the last 7 days (0 to 366)
+keep_weekly = 4           # … and of each of the last 4 weeks (0 to 520)
 ```
 
-Secrets bundles count against the machine's quotas, file limit and realms.
-Every archive and secrets request takes a place among the hub's and the
-calling machine's admission limits before the hub reads its body or lists
-anything, so one machine cannot take every place; a download that makes no
+The retention window costs space: a mutable file keeps up to
+`3 + keep_daily + keep_weekly` complete generations. Secrets bundles count
+against the machine's quotas, file limit and realms; directories count
+against `max_files` too. Every archive and secrets request takes a place
+among the hub's and the calling machine's admission limits before the hub
+reads its body or lists anything, both at once and without waiting for
+another request's work, so one machine cannot take every place; every
+answer (a file, an index, a summary, a secrets bundle) that makes no
 progress for 30 seconds is ended and frees its place. A reached quota is
 answered with 507 and a message saying which quota and what to do; the
 machine shows it in `devc sync status` and `devc hub status` and pauses its

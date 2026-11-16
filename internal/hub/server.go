@@ -61,6 +61,8 @@ type Options struct {
 	// DevNoAuth is the development mode (devmode.go): no certificates, no
 	// login, invented machines; loopback only, and only with DEVC_DEV=1.
 	DevNoAuth bool
+	// Now is the hub's clock (time.Now when nil; tests set it).
+	Now func() time.Time
 }
 
 // Server is a running hub.
@@ -260,7 +262,13 @@ func New(o Options) (*Server, error) {
 		st.Close()
 		return nil, fmt.Errorf("%s: %w", l.ConfigFile(), err)
 	}
+	if o.Now != nil {
+		s.now = o.Now
+	}
 	s.archive = newArchiveStore(l, lim)
+	// The archive keeps the hub's time (retention, completion times): the
+	// server's clock, which tests replace after New.
+	s.archive.now = func() time.Time { return s.now() }
 	s.buildMuxes()
 	s.notifier = newNotifier(s, cfg.Ntfy)
 	return s, nil

@@ -50,6 +50,13 @@ type ArchiveConfig struct {
 	// MinFree is the free space the archive always leaves on the hub's
 	// file system.
 	MinFree string `toml:"min_free"`
+	// KeepDaily and KeepWeekly are the retention window of mutable files
+	// (shared harness state): besides the newest three complete
+	// generations, the hub keeps the state each such file had at the start
+	// of each of the last keep_daily days and keep_weekly weeks (UTC,
+	// weeks begin on Monday), by its own clock (finding E1-04).
+	KeepDaily  *int `toml:"keep_daily"`
+	KeepWeekly *int `toml:"keep_weekly"`
 }
 
 // TerminalConfig governs the web app's terminal (work order C12): with

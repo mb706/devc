@@ -233,6 +233,7 @@ Boxes keep what they were started with. After upgrading to C19r2: restart every 
 - Git over `connect` uses protocol v0 (every visible ref is advertised); no partial clones.
 - Relays are never repacked (`gc.auto = 0`, every push its own pack since C19r1), bank refs and box tips are never pruned, deleted upstream tags are kept.
 - A bank applies at most 1000 branches and 1000 tags per run; the push watchdog measures every 200 ms and may overshoot the budget by that much.
+- Only the daemon's git commands run in a process group of their own that is ended with everything they started (C19r3); git run by a command-line command stays in the terminal's foreground group, which an interrupt ends, and is not waited for if devc itself is killed.
 - Old box agents break pushes whose receive-pack takes longer than a minute after the pack (until the box restarts).
 
 ### Data and sync
@@ -271,7 +272,7 @@ Boxes keep what they were started with. After upgrading to C19r2: restart every 
 - Rate limits count HTTP failures only (not TLS handshakes in direct mode); behind a proxy without `X-Real-IP` every client is one address; five wrong passwords lock a certificate's logins for 15 minutes.
 - Direct TLS serves HTTP/1.1 only; a slow browser loses the terminal stream after 512 queued messages; the terminal follows the window size every 5 s and lives at most 12 hours; a crashed daemon leaves the box's grouped tmux session until the box restarts; the terminal may show another window of the same box briefly when the observed one is killed.
 - Hand-over between hubs can notify twice rather than lose a notification.
-- Ended sessions older than 30 days are pruned and no longer listed; paging backwards relies on consecutive event numbers; a duplicate session ID in two projects of one machine (only from before C12r1) shows as the project learned first.
+- Ended sessions older than 30 days are pruned and no longer listed; paging backwards relies on consecutive event numbers, and once the screen pages back it stops following live events (it shows how many are newer) until **Back to the latest**; a duplicate session ID in two projects of one machine (only from before C12r1) shows as the project learned first.
 - The hub reads its CA key to sign enrolment requests; `set-password` keeps existing login sessions (it points to `devc hub sessions revoke --all`).
 - The terminal's styles need constructable stylesheets (Chrome 73, Firefox 101, Safari 16.4); `projects.list` asks every running box for its worktrees (slow with many); a session outside a worktree shows main's changes; a pending command is polled every 10 s while its machine is online.
 - The development mode (`--dev-no-auth`, only with `DEVC_DEV=1`, loopback) is a server without authentication while it runs.
@@ -310,7 +311,10 @@ Boxes keep what they were started with. After upgrading to C19r2: restart every 
 - Generations of append-only files are rate-limited to one per hour per file; mutable-file snapshots take up to `[sync] max_file_size` per file and hub while uploading.
 - Restores stage whole bundles and imports extract the whole export first (up to twice the archive's size on disk); the hub walks a machine's archive once per start to count usage.
 - Restored journals appear as sessions of the restoring machine; `--merge` keeps the local `main` of the context repository.
-- Archives from before C19r1 have no completion marks (restored as before); upload bookkeeping started over once with state version 2.
+- Generations without a record (archives from before C19r1) are restore candidates at their stored length, decided generation by generation; generations completed before C19r3 have no completion time, so retention never drops them and `state pull --as-of` takes such files as they are now. Upload bookkeeping started over once with state version 2.
+- A mutable file keeps up to `3 + keep_daily + keep_weekly` complete generations on each hub (space for the retention window). Retention follows the hub's clock: while it is behind a time it recorded for a file nothing of that file is dropped; a clock that ran far ahead and recorded future times pauses retention of those files until real time catches up.
+- `state pull --as-of` restores journals and logs from the generation in use at that time, with what was appended to it since (append-only generations keep no history of their length), and relays and the context repository as they are now.
+- File names longer than 238 bytes (less on a hub whose file system allows fewer than 255: 251 on fuse-overlayfs) are not archived: the box-side worker skips them, a hub refuses them with 400 and the uploader counts them as skipped.
 - Index pages read a whole directory even when the cursor skips most of it (admission-bounded).
 
 ### Configuration and tools

@@ -220,16 +220,31 @@ func newSecretFleetCmds(a *app) []*cobra.Command {
 	return []*cobra.Command{push, pull}
 }
 
+// parseAsOf reads the time of 'devc state pull --as-of': RFC 3339, or a
+// date meaning the start of that day in UTC.
+func parseAsOf(v string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t.UTC(), nil
+	}
+	if t, err := time.Parse("2006-01-02", v); err == nil {
+		return t.UTC(), nil
+	}
+	return time.Time{}, usageErrorf("--as-of %q is not a time: give RFC 3339 (2026-11-02T08:00:00Z) or a date (2026-11-02, the start of that day in UTC)", v)
+}
+
 func newStateCmd(a *app) *cobra.Command {
-	var from, machine string
+	var from, machine, asOf string
 	var list, merge bool
 	pull := &cobra.Command{
-		Use:   "pull <realm> --from <hub-url> [--machine <name>] [--list] [--merge]",
+		Use:   "pull <realm> --from <hub-url> [--machine <name>] [--list] [--merge] [--as-of <time>]",
 		Short: "Restore a realm's durable state from a hub's archive",
 		Long: "Download one machine's archive of the realm (default: this machine's, by the name the hub knows it by) " +
 			"into the local durable state: journals and logs as files, relays and the context repository from their " +
 			"bundles, shared harness state (never credential files). Refuses a realm that has durable state already " +
-			"unless --merge, which adds only files and refs that are missing. --list shows the archives on the hub.",
+			"unless --merge, which adds only files and refs that are missing. --list shows the archives on the hub. " +
+			"--as-of <time> (RFC 3339, or a date: the start of that day in UTC) restores every file as it was then: the " +
+			"newest generation the hub completed by that time; files whose first generation is newer are left out, and " +
+			"what has no generations (relays, the context repository) is taken as it is now.",
 		Args: exactArgs(1, "devc state pull <realm> --from <hub-url>"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if from == "" {
@@ -237,6 +252,14 @@ func newStateCmd(a *app) *cobra.Command {
 			}
 			if machine != "" && !names.Valid(machine) {
 				return usageErrorf("invalid machine name %q", machine)
+			}
+			var when time.Time
+			if asOf != "" {
+				t, err := parseAsOf(asOf)
+				if err != nil {
+					return err
+				}
+				when = t
 			}
 			c, probs, err := a.load()
 			if err != nil {
@@ -274,7 +297,7 @@ func newStateCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			r := &fleet.Restorer{Config: c, Git: host, Workers: w, Progress: a.stderr}
+			r := &fleet.Restorer{Config: c, Git: host, Workers: w, Progress: a.stderr, AsOf: when}
 			rep, err := r.Restore(ctx, realm, &fleet.HubSource{Client: cl, Machine: machine, Realm: realm}, merge)
 			if rep != nil {
 				a.printRestore(rep)
@@ -282,6 +305,7 @@ func newStateCmd(a *app) *cobra.Command {
 			return err
 		},
 	}
+	pull.Flags().StringVar(&asOf, "as-of", "", "restore the state at this time (RFC 3339, or a date: the start of that day in UTC)")
 	pull.Flags().StringVar(&from, "from", "", "hub URL (one this machine joined)")
 	pull.Flags().StringVar(&machine, "machine", "", "the machine whose archive to restore (default: this one)")
 	pull.Flags().BoolVar(&list, "list", false, "list the machines with an archive of the realm")
@@ -431,6 +455,18 @@ func (a *app) printRestore(rep *fleet.RestoreReport) {
 			break
 		}
 		fmt.Fprintf(a.stderr, "devc: %s\n", f)
+	}
+	if rep.AsOf != nil {
+		fmt.Fprintf(a.stderr, "devc: restored as of %s (by the hub's clock)\n", rep.AsOf.Format(time.RFC3339))
+		for _, c := range rep.AsOfCurrent {
+			fmt.Fprintf(a.stderr, "devc: taken as it is now: %s\n", c)
+		}
+		if n := len(rep.AsOfLater); n > 0 {
+			fmt.Fprintf(a.stderr, "devc: left out %d files whose first archived generation is newer (for example %s)\n", n, rep.AsOfLater[0])
+		}
+		if rep.AsOfGrown > 0 {
+			fmt.Fprintf(a.stderr, "devc: %d append-only files (journals, logs, transcripts) restored from the generation in use then, with what was appended to it since\n", rep.AsOfGrown)
+		}
 	}
 	ctx := "no context repository"
 	if rep.Context != nil {

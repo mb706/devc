@@ -12,8 +12,10 @@ import (
 //	    marks it complete at its length after the append (an empty body
 //	    with final creates an empty file); class (ClassAppend or
 //	    ClassMutable) and mode (permission bits) are recorded when the
-//	    generation is created. An empty body without final only reports
-//	    the stored length.
+//	    generation is created: mutable only below files/harness/, and a
+//	    file keeps the class of its first generation (409 naming it
+//	    otherwise). An empty body without final only reports the stored
+//	    length.
 //	GET /machine/archive-index
 //	    every machine's archives: ListReply
 //	GET /machine/archive-index/<machine>/<realm>[?after=<path>]
@@ -38,12 +40,16 @@ const RequestHeader = "X-Devc-Request"
 // (hub.toml [archive] max_request may lower it).
 const MaxChunk = 8 << 20
 
-// Classes of archived files (finding D1-14), decided on the machine by the
-// harness manifests and recorded with each generation. Every generation
-// of an append-only file (a transcript, a host-written log) is kept; a
-// mutable file (anything else in shared harness state) gets a new
-// generation for any change, and the hub keeps the newest KeepMutable
-// complete generations of it.
+// Classes of archived files (findings D1-14, E1-04). A machine proposes
+// the class when it uploads a file's first generation (from the harness
+// manifests); the hub refuses mutable outside shared harness state
+// (MutableAllowed) and keeps the class of a file's first generation for
+// all later ones. Every generation of an append-only file (a transcript,
+// a host-written log) is kept; a mutable file gets a new generation for
+// any change, and the hub keeps the newest KeepMutable complete
+// generations of it and, for every checkpoint of its retention window
+// (the starts of the last days and weeks, by the hub's clock), the newest
+// generation completed by then.
 const (
 	ClassAppend  = "append"
 	ClassMutable = "mutable"
@@ -66,12 +72,15 @@ type PutReply struct {
 
 // ErrorReply is the body of a refused request. Length is set when an
 // upload's offset differed from the stored length (409); Complete when the
-// bundle is complete already; Quota when an archive quota was reached
-// (507).
+// bundle, or the mutable file generation, is complete already (it takes
+// no more bytes); Class when a new file generation named another class
+// than the file has on the hub (409, the class to use); Quota when an
+// archive quota was reached (507).
 type ErrorReply struct {
 	Error    string `json:"error"`
 	Length   *int64 `json:"length,omitempty"`
 	Complete bool   `json:"complete,omitempty"`
+	Class    string `json:"class,omitempty"`
 	Quota    bool   `json:"quota,omitempty"`
 }
 
@@ -93,16 +102,20 @@ type ListReply struct {
 // false for a bundle whose upload did not finish; for a file generation
 // it says that the machine marked it complete, at Committed bytes
 // (finding D1-15: a generation still being uploaded is not used by a
-// restore). Class and Mode are what the machine recorded when the
-// generation was created.
+// restore). Class and Mode are what was recorded when the generation was
+// created; a generation without a record (an archive from before records
+// existed) has no Class. Completed is when the generation first became
+// complete, by the hub's clock (never decreasing with the generation
+// number of a file); a restore "as of" a time uses it.
 type Entry struct {
-	Path      string    `json:"path"`
-	Length    int64     `json:"length"`
-	Complete  bool      `json:"complete,omitempty"`
-	Committed *int64    `json:"committed,omitempty"`
-	Class     string    `json:"class,omitempty"`
-	Mode      uint32    `json:"mode,omitempty"`
-	Modified  time.Time `json:"modified"`
+	Path      string     `json:"path"`
+	Length    int64      `json:"length"`
+	Complete  bool       `json:"complete,omitempty"`
+	Committed *int64     `json:"committed,omitempty"`
+	Class     string     `json:"class,omitempty"`
+	Mode      uint32     `json:"mode,omitempty"`
+	Completed *time.Time `json:"completed,omitempty"`
+	Modified  time.Time  `json:"modified"`
 }
 
 // Index lists (a page of) one machine's archive of one realm, in the

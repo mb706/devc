@@ -67,6 +67,7 @@ func newDev(o Options) (*Server, error) {
 		cfg: &Config{Terminal: TerminalConfig{Control: true}}, devLogin: login}
 	s.initState()
 	s.archive = newArchiveStore(l, DefaultArchiveLimits)
+	s.archive.now = func() time.Time { return s.now() }
 	s.buildMuxes()
 	s.notifier = newNotifier(s, nil)
 	o.Log.Warn("development mode: no certificates, no login, invented machines; never expose this", "listen", o.Listen)

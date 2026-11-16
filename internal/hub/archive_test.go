@@ -211,6 +211,12 @@ func TestArchiveRatchet(t *testing.T) {
 	}
 }
 
+func readsInUse(a *archiveStore) int {
+	a.admMu.Lock()
+	defer a.admMu.Unlock()
+	return a.inUse[admRead]
+}
+
 func sha(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
@@ -224,7 +230,9 @@ func TestArchiveBudgets(t *testing.T) {
 	m2 := h.issue(RoleMachine, "m2")
 	p := newProxyServer(t, h)
 	a := p.archive
-	a.lim.MachineQuota, a.lim.RealmQuota, a.lim.MaxFiles, a.lim.MaxRequest = 100, 60, 3, 64
+	// Files and directories count together: a journal takes four
+	// directories (demo, files, journal, demo) and itself.
+	a.lim.MachineQuota, a.lim.RealmQuota, a.lim.MaxFiles, a.lim.MaxRequest = 100, 60, 9, 64
 	free := int64(1 << 40)
 	a.freeSpace = func(string) (int64, error) { return free, nil }
 	a.lim.MinFree = 1000
@@ -247,11 +255,16 @@ func TestArchiveBudgets(t *testing.T) {
 	if code, _, _ := put(p, m2, "demo", testJournal, 0, []byte("x"), false); code != 200 {
 		t.Error("m2 refused")
 	}
-	// The file limit.
+	// The file limit (files and directories): 5 so far, 6 with the gate
+	// log, 8 with the request log and its directory; the savepoint index
+	// would make 10.
 	put(p, m2, "demo", "files/gate-log.jsonl", 0, []byte("x"), false)
 	put(p, m2, "demo", "files/requests/demo.jsonl", 0, []byte("x"), false)
 	if code, er, _ := put(p, m2, "demo", "files/savepoints/demo.jsonl", 0, []byte("x"), false); code != 507 || !strings.Contains(er.Error, "max_files") {
 		t.Errorf("file limit: %d %+v", code, er)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "archive", "m2", "demo", "files", "savepoints")); err == nil {
+		t.Error("a refused upload created its directory")
 	}
 	// The disk reserve.
 	free = 1001
@@ -264,16 +277,20 @@ func TestArchiveBudgets(t *testing.T) {
 		t.Errorf("an oversized request: %d", code)
 	}
 	// Concurrent uploads of one machine.
-	m := a.machine("m2")
-	m.mu.Lock()
-	m.uploads = a.lim.MachineUploads
-	m.mu.Unlock()
+	var held []func()
+	for i := 0; i < a.lim.MachineUploads; i++ {
+		release, refusal := a.admit("m2", true)
+		if refusal != "" {
+			t.Fatal(refusal)
+		}
+		held = append(held, release)
+	}
 	if code, _, _ := put(p, m2, "demo", testJournal, 1, []byte("x"), false); code != 429 {
 		t.Errorf("uploads beyond the machine's limit: %d", code)
 	}
-	m.mu.Lock()
-	m.uploads = 0
-	m.mu.Unlock()
+	for _, r := range held {
+		r()
+	}
 
 	// A prune on the hub frees the quota (the server notices).
 	old := time.Now().Add(-48 * time.Hour)
@@ -460,21 +477,25 @@ func TestArchiveAdmission(t *testing.T) {
 		for _, r := range held {
 			r()
 		}
-		// Every global place is taken.
-		global := a.downloads
-		if upload {
-			global = a.uploads
+		// Every global place is taken (by other machines, one each).
+		held = nil
+		for i := 0; ; i++ {
+			release, refusal := a.admit(fmt.Sprintf("filler%d", i), upload)
+			if refusal != "" {
+				break
+			}
+			held = append(held, release)
 		}
-		for i := 0; i < cap(global); i++ {
-			global <- struct{}{}
+		if want := map[bool]int{true: a.lim.MaxUploads, false: a.lim.MaxDownloads}[upload]; len(held) != want {
+			t.Errorf("%s: %d global places, want %d", what, len(held), want)
 		}
 		for name, fn := range fns {
 			if code := fn(m1); code != 429 {
 				t.Errorf("%s with the hub full: %d", name, code)
 			}
 		}
-		for i := 0; i < cap(global); i++ {
-			<-global
+		for _, r := range held {
+			r()
 		}
 		for name, fn := range fns {
 			if code := fn(m1); code == 429 {
@@ -484,9 +505,11 @@ func TestArchiveAdmission(t *testing.T) {
 	}
 	check("reads", reads, false)
 	check("uploads", uploads, true)
-	if len(a.uploads) != 0 || len(a.downloads) != 0 {
-		t.Errorf("places left taken: %d uploads, %d reads", len(a.uploads), len(a.downloads))
+	a.admMu.Lock()
+	if a.inUse != [2]int{} || len(a.per) != 0 {
+		t.Errorf("places left taken: %v %v", a.inUse, a.per)
 	}
+	a.admMu.Unlock()
 }
 
 // TestArchiveDownloadStall: a reader that stops reading loses its download
@@ -499,7 +522,6 @@ func TestArchiveDownloadStall(t *testing.T) {
 	m1 := h.issue(RoleMachine, "m1")
 	p := newProxyServer(t, h)
 	p.archive.lim.MaxDownloads = 1
-	p.archive.downloads = make(chan struct{}, 1)
 	big := filepath.Join(h.dir, "archive", "m1", "demo", "files", "gate-log.jsonl")
 	os.MkdirAll(filepath.Dir(big), 0o700)
 	if err := os.WriteFile(big, bytes.Repeat([]byte("x"), 64<<20), 0o600); err != nil {
@@ -519,14 +541,14 @@ func TestArchiveDownloadStall(t *testing.T) {
 	// The download holds the only place while it is written, and gives it
 	// back once it stalls.
 	time.Sleep(100 * time.Millisecond)
-	if len(p.archive.downloads) != 1 {
+	if readsInUse(p.archive) != 1 {
 		t.Fatal("the download does not hold a place")
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for len(p.archive.downloads) != 0 && time.Now().Before(deadline) {
+	for readsInUse(p.archive) != 0 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if len(p.archive.downloads) != 0 {
+	if readsInUse(p.archive) != 0 {
 		t.Fatal("a stalled download kept its place")
 	}
 	if w := p.archiveReq(m1, "GET", archive.FilePrefix+"m1/demo/files/gate-log.jsonl?sha256=4", nil); w.Code != 200 {
@@ -682,9 +704,13 @@ func TestArchiveGenerations(t *testing.T) {
 	if _, err := p2.archive.put("m1", "demo", ap1, 0, []byte("x"), PutOptions{}); err == nil || !strings.Contains(err.Error(), "generation 3") {
 		t.Errorf("an older generation on a fresh hub: %v", err)
 	}
-	// Append-only generations are all kept, whatever follows.
+	// A file keeps the class of its first generation: mutable generations
+	// of an append-only file are refused, and the answer names the class
+	// (finding E1-04). Append-only generations are all kept.
 	for g := 4; g <= 9; g++ {
-		putq(fmt.Sprintf("%s~%d", tr, g), 0, []byte("x"), "&final=1&class=mutable")
+		if code, er, _ := putq(fmt.Sprintf("%s~%d", tr, g), 0, []byte("x"), "&final=1&class=mutable"); code != 409 || er.Class != archive.ClassAppend {
+			t.Errorf("a mutable generation %d of an append-only file: %d %+v", g, code, er)
+		}
 	}
 	es := entries()
 	for _, g := range []string{"", "~3"} {
@@ -693,7 +719,9 @@ func TestArchiveGenerations(t *testing.T) {
 		}
 	}
 	// Mutable generations: the newest three complete ones are kept, with
-	// newer incomplete ones; older ones go, with their records.
+	// newer incomplete ones; older ones go, with their records, and so
+	// does an incomplete one older than a complete one (all completed now:
+	// no checkpoint of the window holds any of them).
 	db := "files/harness/codex/home/state.db"
 	for g := 0; g <= 5; g++ {
 		path := db
@@ -707,7 +735,7 @@ func TestArchiveGenerations(t *testing.T) {
 	}
 	putq(db+"~6", 0, []byte("part"), "&class=mutable")
 	es = entries()
-	for g, keep := range map[string]bool{"": false, "~1": false, "~2": true, "~3": true, "~4": true, "~5": true, "~6": true} {
+	for g, keep := range map[string]bool{"": false, "~1": false, "~2": true, "~3": false, "~4": true, "~5": true, "~6": true} {
 		if _, ok := es[db+g]; ok != keep {
 			t.Errorf("mutable generation %q: kept %v, want %v", g, ok, keep)
 		}
@@ -717,12 +745,12 @@ func TestArchiveGenerations(t *testing.T) {
 	}
 	// The usage the hub keeps matches a fresh count.
 	m := p.archive.machine("m1")
-	m.mu.Lock()
+	m.umu.Lock()
 	kept := *m.usage
-	m.mu.Unlock()
+	m.umu.Unlock()
 	fresh, _ := countUsage(filepath.Join(h.dir, "archive", "m1"))
-	if kept.files != fresh.files || kept.bytes != fresh.bytes {
-		t.Errorf("usage %d files %d bytes, counted %d files %d bytes", kept.files, kept.bytes, fresh.files, fresh.bytes)
+	if kept.files != fresh.files || kept.bytes != fresh.bytes || kept.dirs != fresh.dirs {
+		t.Errorf("usage %d files %d dirs %d bytes, counted %d files %d dirs %d bytes", kept.files, kept.dirs, kept.bytes, fresh.files, fresh.dirs, fresh.bytes)
 	}
 }
 
@@ -743,18 +771,18 @@ func TestSecretsQuota(t *testing.T) {
 		t.Fatalf("push: %d %s", code, body)
 	}
 	m := a.machine("m1")
-	m.mu.Lock()
+	m.umu.Lock()
 	used := m.usage.bytes
-	files := m.usage.files
-	m.mu.Unlock()
-	if used == 0 || files != 1 {
-		t.Errorf("a secrets bundle is not counted: %d bytes, %d files", used, files)
+	files, dirs := m.usage.files, m.usage.dirs
+	m.umu.Unlock()
+	if used == 0 || files != 1 || dirs != 1 {
+		t.Errorf("a secrets bundle is not counted: %d bytes, %d files, %d directories", used, files, dirs)
 	}
 	a.lim.MachineQuota = used + 10
 	if code, body := push("demo"); code != 507 || !strings.Contains(body, "quota") {
 		t.Errorf("beyond the machine quota: %d %s", code, body)
 	}
-	a.lim.MachineQuota, a.lim.MaxFiles = 1<<40, 1
+	a.lim.MachineQuota, a.lim.MaxFiles = 1<<40, 2
 	if code, body := push("demo"); code != 507 || !strings.Contains(body, "max_files") {
 		t.Errorf("beyond the file limit: %d %s", code, body)
 	}

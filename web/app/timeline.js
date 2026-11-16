@@ -2,10 +2,11 @@
 // events and the entries the screen shows, kept up to date event by event.
 // A new event changes the last entry or adds one; it never rebuilds the
 // history. Live events beyond the window push the oldest out (they can be
-// paged in again); older pages are loaded on demand. Paging back beyond the
-// window's size moves the window: the newest events are dropped and the
-// window is no longer live until the screen returns to the latest events
-// (finding D1-13). A run of tool calls is bounded too (finding D1-09).
+// paged in again); older pages are loaded on demand. Paging back detaches
+// the window from the live end: live events are only counted until the
+// screen returns to the latest events, and a page beyond the window's size
+// moves the window back, dropping its newest events (findings D1-13,
+// E1-13). A run of tool calls is bounded too (finding D1-09).
 
 // MAX_EVENTS is the most events an open session keeps.
 export const MAX_EVENTS = 1000;
@@ -68,11 +69,22 @@ export function buildItems(events) {
 }
 
 // newDetail is an open session's timeline state.
-// live: the window ends at the session's newest event (false after paging
-// back beyond the window's size).
+// live: the window ends at the session's newest event and follows it
+// (false once the screen pages back: the window is detached from the live
+// end); newest: the newest seq seen while detached, for "N newer".
 export function newDetail() {
-  return { events: [], items: [], ver: 0, more: false, partial: false, loading: false, older: false, error: '', status: 0, req: 0, buffer: [], reload: false, live: true };
+  return { events: [], items: [], ver: 0, more: false, partial: false, loading: false, older: false, error: '', status: 0, req: 0, buffer: [], reload: false, live: true, newest: 0 };
 }
+
+// detach detaches the window from the live end: live events no longer
+// move it (findings D1-13, E1-13).
+export function detach(d) {
+  if (d.live) d.newest = lastSeq(d);
+  d.live = false;
+}
+
+// newer is how many events the session has after a detached window.
+export const newer = (d) => (d.live ? 0 : Math.max(0, d.newest - lastSeq(d)));
 
 // lastSeq is the seq of the newest event held (0: none).
 export const lastSeq = (d) => (d.events.length ? d.events[d.events.length - 1].seq : 0);
@@ -122,21 +134,21 @@ export function replace(d, events) {
   if (d.events.length > MAX_EVENTS) d.events.splice(0, d.events.length - MAX_EVENTS);
   d.items = buildItems(d.events);
   d.live = true;
+  d.newest = lastSeq(d);
   d.ver++;
   return ok;
 }
 
-// prepend adds an older page before the window. A window that would grow
-// beyond MAX_EVENTS moves back instead: its newest events are dropped and
-// it is no longer live (finding D1-13).
+// prepend adds an older page before the window, which is detached from
+// the live end (it is, from the moment the page is asked for). A window
+// that would grow beyond MAX_EVENTS moves back: its newest events are
+// dropped (findings D1-13, E1-13).
 export function prepend(d, events) {
+  detach(d);
   const first = d.events.length ? d.events[0].seq : Infinity;
   const older = events.filter((e) => e.seq < first);
   let all = [...older, ...d.events];
-  if (all.length > MAX_EVENTS) {
-    all = all.slice(0, MAX_EVENTS);
-    d.live = false;
-  }
+  if (all.length > MAX_EVENTS) all = all.slice(0, MAX_EVENTS);
   d.events = all;
   d.items = buildItems(d.events);
   d.ver++;

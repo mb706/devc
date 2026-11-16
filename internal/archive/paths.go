@@ -57,6 +57,12 @@ const (
 	maxComponents = 24
 	maxComponent  = 255
 	maxPathLen    = 1024
+	// MaxFileName bounds the last component of a file's path: the hub
+	// stores generation g of a file as <name>~<g> with a record
+	// <name>~<g>~meta, written through <name>~<g>~meta.tmp, and every one
+	// of those names must fit the 255 bytes a file system allows
+	// (finding E1-02). The longest suffix is "~1000000~meta.tmp".
+	MaxFileName = maxComponent - len("~1000000") - len("~meta.tmp")
 	// MaxGen bounds file generations.
 	MaxGen = 1_000_000
 	// MaxSeq bounds bundle sequence numbers.
@@ -147,6 +153,9 @@ func ValidRel(rel string) error {
 		if !ValidComponent(c) {
 			return fmt.Errorf("invalid path component %q", c)
 		}
+	}
+	if len(cs[len(cs)-1]) > MaxFileName {
+		return fmt.Errorf("file name longer than %d bytes", MaxFileName)
 	}
 	ok := false
 	switch cs[0] {
@@ -275,6 +284,12 @@ func matchParts(ps, cs []string) bool {
 	}
 	return len(cs) == 0
 }
+
+// MutableAllowed reports whether the file rel (below the realm's durable
+// directory) may be archived as mutable: only shared harness state may
+// (finding E1-04). Journals, request, network and gate logs are
+// append-only whatever a machine says, and so are bundles and ref logs.
+func MutableAllowed(rel string) bool { return strings.HasPrefix(rel, "harness/") }
 
 // ClassOf is the class of a file below a harness's state directory: append
 // when it matches one of the harness's transcript patterns

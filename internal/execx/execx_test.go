@@ -1,9 +1,15 @@
 package execx
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -196,5 +202,102 @@ func TestUnset(t *testing.T) {
 		Unset: []string{"DEVC_TEST_*"}, Env: []string{"EXTRA=added"}})
 	if err != nil || strings.TrimSpace(string(res.Stdout)) != "gone added" {
 		t.Errorf("%q %v", res.Stdout, err)
+	}
+}
+
+// running reports whether pid runs (exists and is not a zombie).
+func running(pid int) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	i := bytes.LastIndexByte(b, ')')
+	f := strings.Fields(string(b[i+1:]))
+	return len(f) > 0 && f[0] != "Z" && f[0] != "X"
+}
+
+func childPIDs(t *testing.T, file string) []int {
+	t.Helper()
+	b, _ := os.ReadFile(file)
+	var out []int
+	for _, l := range strings.Fields(string(b)) {
+		n, err := strconv.Atoi(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// TestKillGroup: a KillGroup command that is ended takes what it started
+// with it, and so does one that exits leaving children behind; both are
+// gone when Run and Interactive return (finding E1-16). Without the
+// option, the children survive (the control).
+func TestKillGroup(t *testing.T) {
+	script := `trap '' TERM; sleep 60 & echo $! >>"$1"; (trap '' TERM; sleep 60) & echo $! >>"$1"; echo started; wait`
+	for _, tc := range []struct {
+		name      string
+		killGroup bool
+		cancel    bool
+		setsid    bool
+	}{
+		{"ended", true, true, false},
+		{"ended, in its own session", true, true, true},
+		{"exited, leaving children", true, false, false},
+		{"without the option", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pids := filepath.Join(t.TempDir(), "pids")
+			s := script
+			if !tc.cancel {
+				s = `sleep 60 & echo $! >>"$1"; sleep 60 & echo $! >>"$1"; exec 1>&- 2>&-`
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			c := Cmd{Name: "sh", Args: []string{"-c", s, "sh", pids}, KillGroup: tc.killGroup, Setsid: tc.setsid, Timeout: time.Minute}
+			if tc.cancel {
+				go func() {
+					for i := 0; i < 500; i++ {
+						if len(childPIDs(t, pids)) == 2 {
+							break
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					cancel()
+				}()
+			}
+			start := time.Now()
+			_, _ = Real{}.Run(ctx, c)
+			kids := childPIDs(t, pids)
+			if len(kids) != 2 {
+				t.Fatalf("children %v", kids)
+			}
+			defer func() {
+				for _, k := range kids {
+					syscall.Kill(k, syscall.SIGKILL)
+				}
+			}()
+			for _, k := range kids {
+				if running(k) == tc.killGroup {
+					t.Errorf("child %d running: %v", k, running(k))
+				}
+			}
+			if tc.killGroup && time.Since(start) > 15*time.Second {
+				t.Errorf("Run took %s", time.Since(start))
+			}
+		})
+	}
+	// Interactive ends the group the same way.
+	pids := filepath.Join(t.TempDir(), "pids")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	Real{}.Interactive(ctx, Cmd{Name: "sh", Args: []string{"-c", script, "sh", pids}, KillGroup: true, Stdout: &out, Stderr: &out, Stdin: strings.NewReader("")})
+	for _, k := range childPIDs(t, pids) {
+		if running(k) {
+			syscall.Kill(k, syscall.SIGKILL)
+			t.Errorf("Interactive: child %d survived", k)
+		}
 	}
 }

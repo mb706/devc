@@ -66,10 +66,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // command sends a command and returns the machine's receipt. Failures
 // whose outcome is uncertain (network errors; the hub's 502, 503 and 504
-// that say so) are retried with the same ID, which the machine applies
-// once; after the last attempt the error is still marked uncertain, and
-// the caller keeps the ID to ask for the receipt later.
-export async function command(machine, type, params, wait = 0, id = newID()) {
+// that say so; answers that cannot be read) are retried with the same ID,
+// which the machine applies once. Uncertainty is kept (finding E1-11):
+// once the outcome of an attempt is unknown, only a receipt for the ID
+// settles it, so a later definite refusal (the machine went offline, say)
+// is raised as uncertain too, and the caller keeps the ID and parameters
+// to ask for the receipt later. unsure says that an earlier attempt with
+// this ID (a retry of a pending command) may have taken effect already.
+export async function command(machine, type, params, wait = 0, id = newID(), { unsure = false } = {}) {
   let last;
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
@@ -82,7 +86,13 @@ export async function command(machine, type, params, wait = 0, id = newID()) {
       return rec;
     } catch (e) {
       last = e;
-      if (!e.uncertain) throw e;
+      if (!e.uncertain) {
+        // A definite answer to this attempt says nothing of an earlier
+        // one whose outcome is unknown.
+        if (unsure) e.uncertain = true;
+        throw e;
+      }
+      unsure = true;
       if (attempt < 3) await sleep(800 * 2 ** attempt);
     }
   }

@@ -6,6 +6,7 @@
 import { html, useState, useEffect, useRef, Component } from './lib.js';
 import { state, useStore, key, loadDetail, dropDetail, markSeen, run, sendPrompt, decide, stale, retryPending, dismissPending } from './store.js';
 import { followSession } from './stream.js';
+import { newer } from './timeline.js';
 import { Icon, StateBadge, TopBar, Empty, ago, duration, useNow } from './ui.js';
 import { TerminalTab } from './terminal.js';
 import { ChangesTab } from './changes.js';
@@ -125,9 +126,11 @@ function Timeline({ s, d, k }) {
   let head = null;
   if (from > 0) head = html`<li class="tl-more"><button class="btn ghost small" onClick=${() => setShown(want + RENDER_STEP)}>Show earlier</button></li>`;
   else if (d.more) head = html`<li class="tl-more"><button class="btn ghost small" disabled=${d.loading || d.older} onClick=${() => loadDetail(s.machine, s.session, d.events[0] ? d.events[0].seq : 0)}>Load earlier</button></li>`;
-  // The window moved back through the history (finding D1-13): newer
-  // events are not shown until the screen returns to the latest.
-  const latest = d.live ? null : html`<li class="tl-more tl-latest"><span class="hint">Showing older events; newer ones are not shown.</span>
+  // The window is detached from the live end (findings D1-13, E1-13):
+  // newer events are counted, not shown, until the screen returns to the
+  // latest.
+  const n = newer(d);
+  const latest = d.live ? null : html`<li class="tl-more tl-latest"><span class="hint">${n > 0 ? `Showing older events; ${n} newer ${n === 1 ? 'event is' : 'events are'} not shown.` : 'Showing older events.'}</span>
     <button class="btn small" disabled=${d.loading} onClick=${() => { setShown(RENDER_STEP); loadDetail(s.machine, s.session); }}><${Icon} name="down" />Back to the latest</button></li>`;
   return html`<ol class="timeline" aria-label="Timeline">
     <li ref=${top} class="tl-top-marker" aria-hidden="true"></li>
