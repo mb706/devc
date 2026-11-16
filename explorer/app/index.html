@@ -1,0 +1,42 @@
+<!doctype html>
+<!-- Placeholder of the explorer app (work order X1): it proves that the data
+     loads from disk. X2 replaces it. Data files are classic scripts that call
+     explorerRegister; nothing is fetched. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>devc explorer</title>
+<style>
+  :root { color-scheme: light dark; --muted: #777; --kw: #a626a4; --str: #50a14f; --com: #8a8a8a; --num: #986801; --link: #2a6fdb; }
+  @media (prefers-color-scheme: dark) { :root { --kw: #c678dd; --str: #98c379; --com: #7f848e; --num: #d19a66; --link: #61afef; } }
+  body { font: 14px/1.45 system-ui, sans-serif; margin: 0; display: grid; grid-template-columns: 26rem 1fr; height: 100vh; }
+  nav { overflow: auto; border-right: 1px solid #8884; padding: 0.5rem 1rem; }
+  main { overflow: auto; padding: 0.5rem 1rem; }
+  h1 { font-size: 1.1rem; } .muted { color: var(--muted); font-size: 12px; }
+  .pkg { margin: 0.4rem 0; } .pkg code { font-weight: 600; } .pkg div { color: var(--muted); font-size: 12px; }
+  pre { font: 13px/1.5 ui-monospace, monospace; margin: 0; counter-reset: l; }
+  pre .ln { display: inline-block; width: 4em; color: var(--muted); text-align: right; margin-right: 1em; user-select: none; text-decoration: none; }
+  pre .hl { background: #fd03; }
+  .k1 { color: var(--kw); } .k2 { color: var(--str); } .k3 { color: var(--com); font-style: italic; } .k4 { color: var(--num); }
+  a.ref { color: inherit; text-decoration: underline dotted var(--link); } a.ref:hover { color: var(--link); }
+</style>
+</head>
+<body>
+<nav id="nav">Loading…</nav>
+<main id="main"></main>
+<script>
+// The registration function every data file calls.
+window.EXPLORER = { core: null, chunks: {}, docs: {}, waiting: {} };
+window.explorerRegister = function (kind, key, value) {
+  if (kind === "core") { EXPLORER.core = value; return; }
+  var store = kind === "chunk" ? EXPLORER.chunks : EXPLORER.docs;
+  store[key] = value;
+  (EXPLORER.waiting[kind + ":" + key] || []).forEach(function (f) { f(value); });
+  delete EXPLORER.waiting[kind + ":" + key];
+};
+</script>
+<script src="data/core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

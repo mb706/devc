@@ -333,6 +333,14 @@ After upgrading to C19r4: a desktop that runs from before is refused by `devc gu
 - `devc init <git-url>` was tested with a fake git only; `devc service install` against a temporary unit directory only.
 - `password_expiry_utc` is ignored by git before 2.41.
 
+### Explorer (X1)
+
+- Where code runs is an over-approximation of the call graph, and the graph misses calls through function values held in struct fields (`boxside.Input.Tmux`) or passed through interfaces of other modules: a handler is reached from the function that registers it, not from the code that dispatches to it. Flow steps connected only that way need `unchecked`.
+- The command tree is built with an empty configuration directory, so the harness commands are those of the built-in manifests.
+- Files excluded by build constraints (other architectures) are shown without links or symbols.
+- The placeholder app was checked in headless Chrome only; the app of X2 and X3 brings its own check, Firefox included.
+- The first `./dev explore` compiles the tool, which links most of devc (through `internal/cli`); only the cached build time (about 5 s) was measured.
+
 ## 6. Deferred work
 
 | Work | What it would take |

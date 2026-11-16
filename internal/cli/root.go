@@ -152,6 +152,21 @@ func Run() int {
 	return Main(os.Args[1:], os.Stdout, os.Stderr, os.Getenv)
 }
 
+// CommandTree returns devc's command tree for documentation: the code
+// explorer (explorer/tool) walks it to list the commands, their flags and
+// the functions they run. The tree is built as Main builds it, but nothing
+// runs: getenv is the whole environment, external commands are refused,
+// and the standard streams are empty. The harness commands come from the
+// configuration directory getenv names (DEVC_CONFIG_DIR); an empty one
+// gives the built-in harnesses only, and reads nothing of the user's.
+func CommandTree(getenv func(string) string) *cobra.Command {
+	unavailable := func() (string, error) { return "", errors.New("not available while documenting") }
+	no := func() bool { return false }
+	a := &app{stdout: io.Discard, stderr: io.Discard, stdin: strings.NewReader(""), getenv: getenv,
+		runner: execx.NewFake(), executable: unavailable, getwd: unavailable, isTerminal: no, stdoutIsTerminal: no}
+	return newRoot(a)
+}
+
 func newRoot(a *app) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "devc",

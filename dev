@@ -25,6 +25,9 @@ usage: ./dev <command> [args...]
   vet                go vet ./... (including integration-tagged files)
   fmt                gofmt -l -w on the tree
   tidy               go mod tidy
+  explore [args...]  build the code explorer into explorer/dist/ (explorer/README.md);
+                     --check validates the model only, --strict fails on warnings,
+                     query help and comments-only are tools for writing the model
   go [args...]       run an arbitrary go command in the toolchain container
   shell              interactive shell in the toolchain container
 
@@ -142,6 +145,11 @@ fmt)
 	;;
 tidy)
 	go_in_container mod tidy
+	;;
+explore)
+	# The tool prints where the site is; EXPLORER_HOST_ROOT lets it name the
+	# repository's path on the host rather than in the container.
+	run_in_container -e EXPLORER_HOST_ROOT="$REPO" -- go run ./explorer/tool "$@"
 	;;
 go)
 	go_in_container "$@"

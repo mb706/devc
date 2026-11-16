@@ -1,0 +1,335 @@
+# The static structure: layers (bottom to top), groups, and one entry per
+# package. A package imports only from its own layer or below (checked).
+
+layers = ["embedded", "foundation", "shared", "area", "assembly", "service", "entry", "test"]
+
+[layer.embedded]
+title = "Embedded files"
+summary = "Files compiled into the binary with `go:embed`: harness manifests and templates, the example configuration, the hub's web app."
+
+[layer.foundation]
+title = "Foundations"
+summary = "Mechanisms that know nothing of devc's policy: running commands, locks, safe reads of hostile files, archives, names, tmux command lines, the container engine."
+
+[layer.shared]
+title = "Shared vocabulary"
+summary = "What the processes exchange and where state lives: events and the JSON-RPC protocol, the host layout, the archive's wire types, the rules for requests."
+
+[layer.area]
+title = "Areas"
+summary = "Packages that each implement one area on their own: the configuration, the code that runs in a box, sessions, git, the network policy, secrets, GitHub, the toolbox, service logins."
+
+[layer.assembly]
+title = "Assembly"
+summary = "Packages that combine the areas into boxes and project-wide operations: a box's arguments and life cycle, harness delivery, the SSH gate, the context repository, the desktop, shares, data, the archive."
+
+[layer.service]
+title = "Services"
+summary = "The long-running processes: the machine daemon and the hub."
+
+[layer.entry]
+title = "Entry points"
+summary = "The command tree and the binary that dispatches on the name it was started under."
+
+[layer.test]
+title = "Tests"
+summary = "The integration tests, their harness, and stand-ins used by tests."
+
+[[group]]
+id = "config"
+title = "Configuration and layout"
+
+[[group]]
+id = "box"
+title = "Boxes"
+
+[[group]]
+id = "session"
+title = "Harnesses and sessions"
+
+[[group]]
+id = "git"
+title = "Git and shared trees"
+
+[[group]]
+id = "data"
+title = "Data"
+
+[[group]]
+id = "access"
+title = "Network and brokered access"
+
+[[group]]
+id = "protocol"
+title = "Protocol"
+
+[[group]]
+id = "machine"
+title = "Machine daemon"
+
+[[group]]
+id = "hub"
+title = "Hub and archive"
+
+[[group]]
+id = "base"
+title = "Utilities"
+
+[[group]]
+id = "cli"
+title = "Command line"
+
+[[group]]
+id = "test"
+title = "Tests"
+
+# --- embedded
+
+[package."assets"]
+layer = "embedded"
+group = "box"
+role = "Embeds the files shipped inside the binary: the built-in harness manifests and their templates, the built-in skills, the base seccomp profile, and the build files of the installer and desktop images."
+
+[package."examples"]
+layer = "embedded"
+group = "config"
+role = "Embeds the example configuration, which `devc init --example` writes to a new configuration directory and the tests copy."
+
+[package."web"]
+layer = "embedded"
+group = "hub"
+role = "Embeds the hub's web app: plain ES modules and CSS without a build step, icons, the manifest and service worker, and the vendored libraries."
+
+# --- foundation
+
+[package."internal/execx"]
+layer = "foundation"
+group = "base"
+role = "Runs external commands with a context, a timeout, capped output and redaction, behind an interface that tests replace with a fake."
+
+[package."internal/flock"]
+layer = "foundation"
+group = "base"
+role = "Takes advisory file locks (flock(2)) with a bounded wait."
+
+[package."internal/safefs"]
+layer = "foundation"
+group = "base"
+role = "Reads files from box-writable places beneath a directory descriptor with openat2, never following symlinks, and gives the helper container's workers the matching write operations."
+
+[package."internal/extract"]
+layer = "foundation"
+group = "data"
+role = "Unpacks untrusted archives (tar, gzip- or bzip2-compressed tar, zip) into a new, empty directory."
+
+[package."internal/names"]
+layer = "foundation"
+group = "config"
+role = "Validates every name that can end up in a path, a container name, a git ref or a label, and derives box names, box IDs and session IDs."
+
+[package."internal/tmux"]
+layer = "foundation"
+group = "session"
+role = "Builds every tmux command line devc uses: the in-box session start, the pane-died hook, the listing used for reconciliation, and the attach command run from the host."
+
+[package."internal/ptywrap"]
+layer = "foundation"
+group = "session"
+role = "The status wrapper: runs a harness on a pseudo-terminal of its own, answers its OSC 7501 status queries (which tmux does not answer) and takes its status reports out of the output."
+
+[package."internal/display"]
+layer = "foundation"
+group = "box"
+role = "The wire formats of the desktop sidecar: Xauthority files, the X11 connection setup, and the password file and challenge response of VNC authentication."
+
+[package."internal/version"]
+layer = "foundation"
+group = "base"
+role = "Holds the build identification that ./dev sets at link time."
+
+[package."internal/engine"]
+layer = "foundation"
+group = "box"
+role = "Wraps the container engine binary (Podman): every engine call goes through its Engine interface, which shells out through execx and parses JSON."
+
+# --- shared
+
+[package."internal/proto"]
+layer = "shared"
+group = "protocol"
+role = "Defines what boxes, the host, the daemon and the hub exchange: session events, the JSON-RPC 2.0 codec, and the views, commands, receipts and method parameters of the daemon's API and the box channel."
+
+[package."internal/wsconn"]
+layer = "shared"
+group = "protocol"
+role = "Carries the JSON-RPC codec of internal/proto over a WebSocket, one JSON object per text frame."
+
+[package."internal/paths"]
+layer = "shared"
+group = "config"
+role = "The only place that knows the host layout (configuration, state and runtime directories) and the fixed in-box paths."
+
+[package."internal/archive"]
+layer = "shared"
+group = "hub"
+role = "What the machine and the hub share about the archive of durable state: archived file names, the wire types of the archive and secrets endpoints, the format of encrypted secret bundles, and the exclusion of credential files."
+
+[package."internal/requests"]
+layer = "shared"
+group = "machine"
+role = "The rules for requests a box makes: strict validation, risk classes, who may decide them, and the per-project request log."
+
+# --- area
+
+[package."internal/config"]
+layer = "area"
+group = "config"
+role = "Loads, validates and answers questions about the configuration: config.toml, realms, projects, envs and harness manifests."
+
+[package."internal/netpolicy"]
+layer = "area"
+group = "access"
+role = "Decides how a box is connected to the network and enforces it from the host: engine arguments per level, the firewall rules of level internet, the canary, the port forwarder, the allowlist proxy, exceptions and the proxy log."
+
+[package."internal/secrets"]
+layer = "area"
+group = "access"
+role = "Stores per-realm secrets on the host and delivers the ones a box needs into its private tmpfs directory."
+
+[package."internal/github"]
+layer = "area"
+group = "access"
+role = "devc's side of GitHub: the repository an upstream names, the requests of the read-only facade, the host's own credential, and GitHub App installation tokens."
+
+[package."internal/toolbox"]
+layer = "area"
+group = "box"
+role = "Manages the toolbox, the read-only tree mounted at /opt/devc in every box: the devc binary, the helper container's root filesystem, the seccomp profile, a static tmux, and harness installations with their shims."
+
+[package."internal/boxside"]
+layer = "area"
+group = "box"
+role = "Everything the devc binary does inside a box, reached through the hidden `devc box …` commands and the harness shims: init and the box agent, the launcher, the hook receiver, session commands, and the git work that must happen in the box."
+
+[package."internal/session"]
+layer = "area"
+group = "session"
+role = "The host side of sessions: ingests the spool files a box writes into journals no box can reach, reconciles them with the sessions a box reports alive, and derives what `devc ps` and `devc ls` show."
+
+[package."internal/gitx"]
+layer = "area"
+group = "git"
+role = "Moves code between a project's box repository, its relay and its upstream: the relay, banking, pull, push, log and diff, project setup, and the host side of worktrees."
+
+[package."internal/svclogin"]
+layer = "area"
+group = "access"
+role = "The parts of service logins that do not depend on the daemon: the strict check of a box's request, the rules, the credential-adding reverse proxy, cookie jars, login state and the request log."
+
+[package."internal/hubnode"]
+layer = "area"
+group = "hub"
+role = "This machine's side of joining hubs: the client certificate, key and CA for each hub, and the hub list in config.toml."
+
+[package."internal/depsrc"]
+layer = "area"
+group = "data"
+role = "`devc src`: fetches the source of a dependency at the installed version into the realm's cache and prints the path."
+
+[package."internal/doctor"]
+layer = "area"
+group = "box"
+role = "Checks the host requirements and reports them; it never changes the host."
+
+[package."internal/service"]
+layer = "area"
+group = "base"
+role = "Installs devc's systemd user units."
+
+# --- assembly
+
+[package."internal/box"]
+layer = "assembly"
+group = "box"
+role = "Turns a project's resolved configuration into a box: the `podman create` arguments, the host directories behind its mounts, the files rendered for /etc/devc, image selection and building, and the lifecycle commands."
+
+[package."internal/harness"]
+layer = "assembly"
+group = "session"
+role = "Turns harness manifests into what a box needs: launch descriptions and seed files, the rendered baseline, the state mounts of the home strategy, the delivery of credentials and secrets, and logins."
+
+[package."internal/gate"]
+layer = "assembly"
+group = "access"
+role = "The host side of the SSH gate: master connections, the gate's host key and per-box keys, the sshd configuration for every box stream, the forced command, the read-only profile and the gate log."
+
+[package."internal/ctxrepo"]
+layer = "assembly"
+group = "git"
+role = "Keeps each realm's context repository: the notes and memory directories boxes mount, versioned in a bare git repository no box sees."
+
+[package."internal/gui"]
+layer = "assembly"
+group = "box"
+role = "Runs the desktop sidecar of a box: a second container from the auxiliary desktop image that joins the box's network and user namespaces and nothing else."
+
+[package."internal/shares"]
+layer = "assembly"
+group = "git"
+role = "Publishes directories from a project's relay as shares: read-only trees mounted at /opt/shares/<name> into the boxes that list them."
+
+[package."internal/data"]
+layer = "assembly"
+group = "data"
+role = "The host side of a project's data directory: zones and ownership, sealing, the trash, savepoints and restores, the box hooks of the data layout, pull and push with rsync, and the data manifest."
+
+[package."internal/fleet"]
+layer = "assembly"
+group = "hub"
+role = "The machine side of the archive of durable state: the client of a hub's archive and secrets endpoints, the daemon's upload pass, restore and export, and encrypted secrets between machines."
+
+# --- service
+
+[package."internal/daemon"]
+layer = "service"
+group = "machine"
+role = "The machine daemon: one user service per machine that keeps a channel to every running box, ingests session events, reconciles lost sessions, runs housekeeping, and serves a local JSON-RPC API on <runtime>/daemon.sock."
+
+[package."internal/hub"]
+layer = "service"
+group = "hub"
+role = "The hub server that machine daemons dial out to: a SQLite projection of every session, the inbox, a JSON API with server-sent events, ntfy notifications, the CA and registry of client certificates, and the archive."
+
+# --- entry
+
+[package."internal/cli"]
+layer = "entry"
+group = "cli"
+role = "Defines the devc command tree with cobra; commands parse arguments, call into the internal packages and format output."
+
+[package."cmd/devc"]
+layer = "entry"
+group = "cli"
+role = "The single devc binary: it runs the CLI, the git remote helper, a relay hook or a harness shim, depending on the name it was started under."
+
+# --- test
+
+[package."test/integration"]
+layer = "test"
+group = "test"
+role = "The integration tests (build tag integration), run on the host against real rootless Podman."
+
+[package."test/integration/itest"]
+layer = "test"
+group = "test"
+role = "The harness of the integration tests: a private devc environment built from the example configuration, and the devc binary run in it."
+
+[package."test/fakeharness"]
+layer = "test"
+group = "test"
+role = "fakeagent, a stand-in for a coding agent in tests."
+
+[package."internal/depsrc/depsrctest"]
+layer = "test"
+group = "test"
+role = "A stand-in for CRAN, PyPI, the npm registry and GitHub's API, for the tests of `devc src`."

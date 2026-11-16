@@ -1,0 +1,76 @@
+id = "box-channel"
+kind = "tour"
+title = "Reading the box channel"
+summary = "The connection between the daemon and a box's agent, in reading order: how each side makes sure of the other, how the daemon bounds what the box can make it hold, and how requests travel in both directions."
+concern = "sessions-and-events"
+actors = ["box-agent", "daemon"]
+
+[[step]]
+section = "The box listens"
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.RunAgent"
+text = "Box init starts the agent once the box is ready. The agent never returns an error and never panics: failures are logged to `/run/devc/agent.log` and retried, so nothing it does can end box init."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.acceptHost"
+checks = ["internal/boxside.HostPeer"]
+text = "The agent listens on `/run/devc/agent.sock`. A connection becomes the host's channel only when the kernel reports its peer with PID 0, a process outside the box's PID namespace, which no process in the box can be."
+
+[[step]]
+section = "The host connects"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.connect"
+text = "For every running box the daemon connects, checks, says hello and serves the channel until it closes; then it reconnects with backoff."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.DialBoxSocket"
+text = "The socket lies in a directory the box controls. It is opened with O_PATH and O_NOFOLLOW beneath a descriptor of that directory, must be a socket, and is connected through `/proc/self/fd/<n>`, so neither a symlink nor a rename can redirect the connection."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.CheckPeer"
+text = "The process that listens must belong to the box's container (its cgroup path names the container) and, when both namespaces can be read, share the PID namespace of the container's main process, whose PID comes from the engine."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.muxGuard"
+text = "Between the socket and yamux sits a guard that reads every frame header: it counts the streams the box opens and the control frames it sends per time window, and closes the whole connection when a budget is exceeded ([[finding:C1-03]], [[finding:C1-04]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/proto.HelloReply.Validate"
+text = "On the control stream the daemon calls `box.hello`. The reply is decoded strictly and validated, and must name this box's realm and project and the daemon's channel protocol version; otherwise the channel is refused."
+
+[[step]]
+section = "Requests"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.call"
+text = "Every other request of the daemon gets a stream of its own, so a slow operation never holds up the control stream; the result is decoded strictly."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.serveHost"
+text = "The agent serves the streams the host opens with its table of handlers ([[surface:box-agent]])."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.relay"
+text = "A program in the box connects to `@devc-agent`. The agent reads its first line, keeps the registration of a harness extension to itself, and relays everything else, unparsed, on a new stream to the host; without a host, a request is answered at once with \"host unavailable\"."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.acceptStreams"
+text = "The daemon accepts the box's streams up to a bound and serves each with the handlers of [[surface:host-api]]. A request is attributed to the box by the channel it arrives on; nothing in it selects a project."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveStream"
+text = "A `host.git` request takes the stream over for the relay service and a `host.gate` request for the SSH gate; anything else is JSON-RPC, decoded strictly."

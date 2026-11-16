@@ -3,12 +3,16 @@
 A local web app for understanding this codebase: diagrams of what runs where and what depends on what, explanations of each concern, step-by-step flows through the code, and a source browser that ties them together.
 
 ```sh
-./dev explore            # build explorer/dist/
+./dev explore            # build explorer/dist/ (about 3 s once the tool is compiled)
 xdg-open explorer/dist/index.html
 ./dev explore --check    # validate the model against the code, build nothing
+./dev explore --strict   # warnings fail too
+./dev explore --model <dir> --out <dir>   # another model, another output directory (both below the repository)
+./dev explore query help # questions about the code for people writing the model
+./dev explore comments-only [commit]      # did the Go code change only in its comments since HEAD?
 ```
 
-`explorer/dist/` is generated and ignored by git. It is a static site without a server and without network access: open `index.html` from disk.
+`explorer/dist/` is generated and ignored by git. It is a static site without a server and without network access: open `index.html` from disk. The explorer does not describe itself: the packages below `explorer/` are left out.
 
 ## How it is put together
 
@@ -53,9 +57,10 @@ Everything in the model points at code and at other model objects with one synta
 | `event:question` | A session event type. |
 | `config:project.network.level` | A configuration key. |
 | `env:DEVC_BOX` | An environment variable. |
-| `concern:network`, `flow:box-up`, `term:relay`, `actor:daemon`, `zone:box`, `channel:box-channel` | Objects of the model. |
-| `doc:specs-v2.md#13` | A heading of a document, by its number or its anchor. |
-| `finding:C1-05`, `chunk:C10a` | A review finding, a work order. |
+| `concern:network`, `flow:box-up`, `term:relay`, `actor:daemon`, `zone:box`, `channel:box-channel`, `surface:daemon-api`, `layer:foundation`, `group:git` | Objects of the model. |
+| `diagram:session-states`, `diagram:sessions/session-states` | A concern's diagram: bare in the text of the concern that has it (or when only one concern has one of that id), else with the concern's id. |
+| `doc:specs-v2.md#13`, `doc:specs-v2.md` | A heading of a document, by its number or its anchor; or the whole document. |
+| `finding:C1-05`, `chunk:C10a` | A review finding, a work order. A finding label that two reviews use keeps the plain label in the review whose name starts with its letter; in the other it is `<review>/<label>` (`finding:A/B1` is review A's B1, `finding:B1` review B's). |
 
 In TOML, a reference is a string. In Markdown, write `[[internal/box.Up]]` or `[[internal/box.Up|bringing a box up]]`.
 
@@ -99,7 +104,7 @@ checks = ["internal/proto.ParseSpoolLine"]   # where what arrives is validated
 concerns = ["channel"]
 ```
 
-An actor with `commands` or `entry` is devc code. The tool computes which functions can be reached from those entry points, which gives every package and function the set of actors it may run in.
+An actor with `commands` or `entry` is devc code. A command stands for itself and its subcommands, except those another actor names: `commands = ["devc"]` with `["devc daemon"]` on another actor gives every command to the first but `devc daemon` and its subcommands, and naming `devc daemon status` on the first takes that one back. The tool computes which functions can be reached from those entry points (for a command whose run function is a function literal, from what that literal mentions), which gives every package and function the set of actors it may run in. Name an `entry` only where no command leads there; an entry that builds the whole command tree (`cli.Main`) reaches everything.
 
 ### `packages.toml`: the static structure
 
@@ -142,6 +147,7 @@ related = ["channel"]
 [[invariant]]
 text = "A box at level internet never starts before its rules are in place."
 refs = ["internal/netpolicy.Bind"]             # where it is enforced
+tests = ["internal/netpolicy.TestBind"]        # optional: the tests that show it
 
 [[diagram]]                                    # optional; see Diagrams
 …
@@ -174,7 +180,7 @@ text = "…"
 [[step]]
 from = "cli"                            # something that passes between two actors
 to = "podman"
-via = "exec"                            # exec | rpc:<method> | http:<route> | event:<type> | file | signal | stream
+via = "exec"                            # exec | rpc:<method> | http:<route> | event:<type> | cmd:<command> | reply | file | signal | stream
 label = "podman create"
 ref = "internal/engine.Podman.Create"   # the code that sends
 text = "…"
@@ -191,6 +197,14 @@ text = "…"
 A step may carry `detail` (longer Markdown shown when the step is open) and `checks` (references to the code that validates what crossed a boundary).
 
 The build checks that consecutive steps of one actor are connected: there must be a path in the call graph from the earlier step's code to the later one's. For `via = "rpc:…"` the sending code must be among the method's callers and the next step's code among its handlers; likewise for routes, events and commands. A step that is connected in a way the tool cannot see says so: `unchecked = "started as a goroutine by the listener"`. The app shows the path it found between two steps.
+
+In detail:
+
+- A step's `ref` should be a function or method. A type, field or constant works as the later step too: it is reached when a function on the path uses it.
+- The path may start in the code of any earlier step of the same actor, not only the latest: a function returns to its caller, and an earlier step may have started the goroutine the later one runs in. The shortest path wins (among equals, from the latest step), and the connection says which step it starts from. Paths are at most 8 calls long; test code is never on them.
+- A message ends the receiver's thread of work and starts a new one: the receiver's next step must be reachable from what receives the message. `rpc:<method>`: from the method's handlers; the sending step's code must also be a caller of the method, call one, or be called by one with the method's name (`sender` in the data). `http:<route>`: from the route's handler. `event:<type>`: from the code that reads that type; the sender must write it. `cmd:<command>`: from the command's run function (a process started with that devc command). `reply`: the answer to an earlier call; the receiver continues in its own code.
+- `exec` to devc code, `file`, `signal` and `stream` cannot be followed: the receiver's next step needs `unchecked`, with the reason. An `external = true` step (a person, a program that is not devc) has no code and breaks the actor's chain.
+- Tours (`kind = "tour"`) are reading orders; their steps are not checked for connections. A tour's step may name only a `ref`, or an actor with `at`.
 
 ### `glossary.toml`
 
@@ -237,8 +251,30 @@ id = "daemon-api"
 kind = "rpc"                              # rpc | http | commands | events | config | env
 title = "Daemon API"
 summary = "…"
-handlers_in = ["internal/daemon.Daemon.handlers"]   # for rpc: the functions that register handlers
+consts = "pkg:internal/proto"             # rpc, events: the package whose string constants …
+prefix = "Method"                         # … with this prefix are the methods (event types)
+handlers_in = ["internal/daemon.Daemon.handlers"]   # rpc: the functions that register handlers
+listed_in = ["internal/daemon.hubMethods"]          # rpc, optional: an allowlist of the surface's methods
+
+[[surface]]
+id = "hub-routes"
+kind = "http"
+table = "internal/hub.routeTable"         # the function returning a slice literal of structs
+fields = { method = "method", path = "path", access = "access", xsite = "xsite", handler = "handle" }
+
+[[surface]]
+id = "config-project"
+kind = "config"
+root = "internal/config.Project"          # the struct type of the file
+key = "project"                           # the first part of its keys: config:project.network.level
+
+[[surface]]
+id = "env"
+kind = "env"
+pattern = "DEVC_[A-Z0-9_]+"               # names found in string literals and in the other files
 ```
+
+A method belongs to every rpc surface whose `handlers_in` registers a handler for it or whose `listed_in` lists it. Uses of a method's constant are sorted: a key of a map literal or of an index assignment, a `case` or a comparison registers a handler; an argument of a call or the value of a struct literal's field sends; anything else (a slice of allowed methods, the argument of a call that builds a handler being registered) only lists it. Event types are sorted the same way into readers, writers and other uses.
 
 ### `overview.md`
 
@@ -276,7 +312,7 @@ Every node and edge may carry a reference; clicking it opens the code.
 - Packages, files, line counts, package and file comments, imports.
 - Every declaration with its signature, doc comment and position; struct fields and interface methods.
 - Every use of a declaration: the links in the source view, "used by" lists, the call graph, and which types implement which interfaces. Tests are included.
-- The command tree, from the running CLI: names, help texts, flags, and the function each command runs.
+- The command tree, from the running CLI (built with an empty configuration directory, so the harness commands are those of the built-in manifests): names, help texts, flags, and the function each command runs.
 - RPC methods (the `Method…` constants of `internal/proto`) with the code that handles and the code that calls each.
 - The hub's routes with access level and handler.
 - Session event types with the code that writes and reads them.
@@ -300,8 +336,9 @@ The data contract between tool and app is the set of Go types in `explorer/tool/
 | A file that belongs to no concern | warning |
 | Two flow steps with no connection the tool can find | warning |
 | A package or multi-file package's file without a comment | warning |
+| A type error in the code | warning |
 
-Errors fail the build. `--strict` turns warnings into errors.
+A package comment counts for its own file. Errors fail the build. `--strict` turns warnings into errors.
 
 ## What the app shows
 

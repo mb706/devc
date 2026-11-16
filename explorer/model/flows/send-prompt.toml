@@ -1,0 +1,186 @@
+id = "send-prompt"
+kind = "flow"
+title = "devc send"
+summary = "A prompt typed into a live session from the host: the daemon stores a receipt first, types the text into the session's tmux pane through the box agent, and calls it delivered only when the harness's own prompt hook reports the same text."
+concern = "sessions-and-events"
+trigger = "devc send --wait demo/hello/<session> \"run the tests\""
+actors = ["user", "cli", "daemon", "box-agent", "tmux", "harness", "hook"]
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc send"
+label = "devc send --wait <session> <text>"
+external = true
+text = "The user names a live session (`<realm>/<project>/<id>`, a full ID, or a prefix) and gives the text, or `-` to read it from standard input."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.resolveSession"
+text = "The session argument becomes a project and a session ID: named in full, or looked up in the journals, which must hold it for exactly one project."
+
+[[step]]
+from = "cli"
+to = "daemon"
+via = "rpc:session.send"
+label = "session.send {id, session, ref, text, mode}"
+ref = "internal/cli.app.callCommand"
+text = "The CLI connects to `<runtime>/daemon.sock`, checks that this daemon serves the same configuration and state directories, and sends the command with an ID it generated (or `--id`, for a retry that must not act twice)."
+detail = "Mode `queue` (the default) waits until the session is at rest; `--steer` delivers at once. Without a daemon the command fails: typing into sessions is the daemon's job alone."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.apiSend"
+checks = ["internal/proto.DecodeParams", "internal/daemon.checkCommandID", "internal/daemon.checkSession", "internal/proto.CheckInputText"]
+text = "The parameters are decoded strictly and checked; the command is bound once to the session's project and ID, which a restart never resolves again."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.submit"
+text = "The receipt is stored as `accepted` before anything else happens. A command ID seen before returns its stored receipt and does nothing more."
+
+[[step]]
+from = "daemon"
+to = "cli"
+via = "reply"
+label = "receipt: accepted"
+ref = "internal/daemon.commander.submit"
+text = "The answer is a snapshot of the receipt taken before the command can run."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.printReceipt"
+text = "Without `--wait` the CLI prints `<id> accepted` and is done; the daemon delivers on its own."
+
+[[step]]
+section = "With --wait"
+
+[[step]]
+from = "cli"
+to = "daemon"
+via = "rpc:command.get"
+label = "command.get {id, wait: 60}"
+ref = "internal/cli.app.callCommand"
+text = "The CLI asks for the receipt again, waiting up to 60 seconds at a time, until it is final."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.apiCommandGet"
+text = "The daemon answers when the stored receipt becomes final or the wait runs out."
+
+[[step]]
+section = "Delivery, in the session's own line"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.execute"
+text = "Each session has one line of commands. A queued send waits until the session is at rest: idle, done or failed, with a state reported after the last prompt and no question pending. Then it takes the box's channel."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.paste.Send"
+text = "The manifest's input adapter delivers; every built-in manifest uses paste. It waits, for a bounded time, while someone is active in a terminal showing the session's window (`box.input.clients`), then stores `delivering`, so a restart never types the text twice."
+detail = "A manifest may name `mod` or `app-server`, which are not built yet and fall back to paste with a note in the receipt, or `extension` (pi, with a manifest of one's own), which hands the text to devc's extension in the harness while one is connected."
+
+[[step]]
+from = "daemon"
+to = "box-agent"
+via = "rpc:box.input.paste"
+label = "box.input.paste {session, text, submit}"
+ref = "internal/daemon.paste.Send"
+text = "The request goes on a stream of its own over the box channel."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Input.Paste"
+checks = ["internal/proto.CheckInputText", "internal/boxside.ValidKeyName"]
+text = "The agent finds the session's live pane, loads the text into a uniquely named tmux buffer through tmux's standard input, pastes it as one bracketed paste, waits 150 ms and sends the submit key."
+detail = "The text never becomes an argument or shell syntax: it reaches tmux on standard input (`load-buffer -`), and key names must match a strict pattern."
+
+[[step]]
+from = "box-agent"
+to = "tmux"
+via = "exec"
+label = "load-buffer -, paste-buffer, send-keys"
+ref = "internal/boxside.Input.Paste"
+text = "Each tmux command runs with an argument vector."
+
+[[step]]
+from = "tmux"
+to = "harness"
+via = "stream"
+label = "the text and the submit key"
+external = true
+text = "The pasted text and the submit key arrive in the harness's terminal."
+
+[[step]]
+from = "harness"
+to = "hook"
+via = "cmd:devc box hook"
+label = "devc box hook claude UserPromptSubmit"
+external = true
+text = "Submitting the prompt makes the harness run its prompt hook, with the prompt in the hook's JSON input on standard input."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.RunHook"
+text = "The hook receiver reads at most 1 MiB, maps the input to a `prompt` event (SHA-256 and length of the text, and its beginning) and a `state` event (working)."
+
+[[step]]
+at = "hook"
+ref = "internal/boxside.AppendEvents"
+text = "Each event is validated as the host will validate it, and both are appended to `/run/devc/spool/<session>.jsonl` in one write."
+
+[[step]]
+from = "hook"
+to = "daemon"
+via = "rpc:host.hint"
+label = "host.hint {session}"
+ref = "internal/boxside.SendHintTo"
+text = "A notification through the agent's in-box socket, which the agent relays to the host on a new stream, tells the daemon to look at the spool now rather than at its next poll."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.acceptStreams"
+text = "The notification only wakes the box's ingester; it carries nothing the daemon trusts."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.ingestLoop"
+unchecked = "acceptStreams wakes the ingester through a channel (boxWorker.wake); ingestLoop, a goroutine of its own, waits on it"
+text = "The box's ingester runs at once on a hint, otherwise every 2 s (every 250 ms while events arrive), and skips the run when no spool file changed."
+
+[[step]]
+at = "daemon"
+ref = "internal/session.Store.Ingest"
+checks = ["internal/safefs.OpenRoot", "internal/session.Store.Claim", "internal/proto.ParseSpoolLine"]
+text = "The spool is read beneath the box's runtime directory through safefs, from the offset reached last time. The session must belong to this project; each line is parsed strictly; valid events get the next `seq` and the host's time and are appended to the journal."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hub.poll"
+text = "The daemon's hub reads the journal's new lines, folds them into the session's view and hands them to subscribers."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.waitPrompt"
+text = "The paste adapter has been waiting since it typed: it re-checks at every change of a session view, and a `prompt` event with the text's hash means the harness took it."
+detail = "Without such an event, the submit key is sent once more; still nothing means `typed-not-submitted`. A harness without hooks gets `unknown`."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.finish"
+text = "The receipt becomes final: `delivered`. The text it carried is not kept."
+
+[[step]]
+from = "daemon"
+to = "cli"
+via = "reply"
+label = "receipt: delivered"
+ref = "internal/daemon.commander.get"
+text = "The waiting `command.get` returns the final receipt."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.printReceipt"
+text = "The CLI prints `<id> delivered`. Refused and typed-not-submitted end with exit status 1."

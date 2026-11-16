@@ -1,0 +1,128 @@
+# The tables of entry points. The tool extracts each table; a surface names
+# it, says where the tool finds it, and adds a sentence.
+
+# ----- JSON-RPC methods (the Method… constants of internal/proto)
+
+[[surface]]
+id = "daemon-api"
+kind = "rpc"
+title = "Daemon API"
+summary = "The daemon's methods on `<runtime>/daemon.sock`, which the CLI calls: views of boxes and sessions, event streams, commands with receipts, requests, the archive and hub status, the web app's projects, changes and terminals."
+consts = "pkg:internal/proto"
+prefix = "Method"
+handlers_in = ["internal/daemon.Daemon.handlers"]
+
+[[surface]]
+id = "box-agent"
+kind = "rpc"
+title = "Box agent"
+summary = "What the daemon asks a box's agent over the box channel (hello, live sessions, input to panes, listeners for exceptions and services), and the registration of a harness extension with the agent from inside the box."
+consts = "pkg:internal/proto"
+prefix = "Method"
+handlers_in = ["internal/boxside.Agent.serveHost", "internal/boxside.Agent.relay"]
+
+[[surface]]
+id = "host-api"
+kind = "rpc"
+title = "Box to host"
+summary = "What programs in a box ask the host, relayed by the agent on streams of the box channel: questions, requests, secrets, tokens, hints, and the git, gate, proxy, exception and service streams. The daemon answers for the box the channel belongs to."
+consts = "pkg:internal/proto"
+prefix = "Method"
+handlers_in = ["internal/daemon.boxWorker.acceptStreams", "internal/daemon.boxWorker.serveStream"]
+
+[[surface]]
+id = "hub-link"
+kind = "rpc"
+title = "Machine link"
+summary = "The methods on the WebSocket between a daemon and a hub: the hub may call only the daemon methods in the allowlist (some with the hub's origin attached), and the daemon introduces itself and learns its role."
+consts = "pkg:internal/proto"
+prefix = "Method"
+handlers_in = ["internal/daemon.Daemon.hubHandlers", "internal/hub.Server.serveLink"]
+listed_in = ["internal/daemon.hubMethods"]
+
+# ----- other tables
+
+[[surface]]
+id = "events"
+kind = "events"
+title = "Session events"
+summary = "The types of session events (the Type… constants of internal/proto): written to the spool by the box or appended by the host, kept in the journals, streamed to subscribers."
+consts = "pkg:internal/proto"
+prefix = "Type"
+
+[[surface]]
+id = "hub-routes"
+kind = "http"
+title = "Hub routes"
+summary = "Every HTTP route of the hub, with the access class and cross-site rule that the front enforces before the handler runs."
+table = "internal/hub.routeTable"
+fields = { method = "method", path = "path", access = "access", xsite = "xsite", handler = "handle" }
+
+[[surface]]
+id = "commands"
+kind = "commands"
+title = "Commands"
+summary = "devc's command tree, built from the code. Hidden commands are entry points of processes in a box, of auxiliary containers, and of helpers the daemon and git start."
+
+[[surface]]
+id = "config-global"
+kind = "config"
+title = "config.toml"
+summary = "The machine's settings: projects root, state directory, engine, default env, box limits, SELinux mode, secret delivery, hubs, the terminal, the router, the archive, the desktop's limits, the machine's name."
+root = "internal/config.Global"
+key = "config"
+
+[[surface]]
+id = "config-realm"
+kind = "config"
+title = "realm.toml"
+summary = "A realm's settings (`realms/<realm>/realm.toml`): git identity and branch prefix, network default and allowlist, SELinux level, harness authentication overrides, the archive, the GitHub App, shares."
+root = "internal/config.Realm"
+key = "realm"
+
+[[surface]]
+id = "config-project"
+kind = "config"
+title = "project.toml"
+summary = "A project's settings (`realms/<realm>/projects/<project>/project.toml`): upstream, image, harnesses, git policy, grants, data, network, capabilities, limits, mounts, requests, shares."
+root = "internal/config.Project"
+key = "project"
+
+[[surface]]
+id = "config-env"
+kind = "config"
+title = "env.toml"
+summary = "An env (`envs/<env>/`): an image recipe, with a Containerfile and/or env.toml."
+root = "internal/config.Env"
+key = "env"
+
+[[surface]]
+id = "config-harness"
+kind = "config"
+title = "Harness manifest"
+summary = "A harness plugin manifest, built in (`assets/harness/<id>.toml`) or the user's (`harness/<id>.toml`): installation, home strategy, authentication, baseline, launch, status, hooks, input, memory, transcripts."
+root = "internal/config.Harness"
+key = "harness"
+
+[[surface]]
+id = "config-service"
+kind = "config"
+title = "service.toml"
+summary = "A service boxes reach through the daemon (`realms/<realm>/services/<name>/service.toml`): upstream, local port, how the credential is added, allowed requests, limits."
+root = "internal/config.Service"
+key = "service"
+
+[[surface]]
+id = "config-hub"
+kind = "config"
+title = "hub.toml"
+summary = "A hub's settings, in the hub directory: public URL, ntfy, the terminal, archive limits."
+root = "internal/hub.Config"
+key = "hub"
+
+[[surface]]
+id = "env"
+kind = "env"
+title = "Environment variables"
+summary = "The `DEVC_…` variables named in the code: overrides of the roots, what the host sets in a box, what devc sets for its own child processes, and test settings."
+pattern = "DEVC_[A-Z0-9_]+"

@@ -1,0 +1,542 @@
+# Where code runs: zones (by trust), the actors in them, and the channels
+# between actors. An actor with commands or entry is devc code; a command
+# stands for itself and its subcommands unless another actor names a more
+# specific one.
+
+# ----- zones
+
+[[zone]]
+id = "device"
+title = "Your devices"
+trust = "device"
+summary = "The person using devc, at a terminal or in a browser."
+col = 1
+row = 1
+
+[[zone]]
+id = "hub"
+title = "Hub"
+trust = "hub"
+summary = "An always-on server that machines dial out to: it keeps a view of every session, notifies, and serves the web app. A machine trusts it only with the methods it allowlists."
+col = 1
+row = 2
+
+[[zone]]
+id = "external"
+title = "Outside services"
+trust = "external"
+summary = "Services on the internet that devc talks to on the user's behalf."
+col = 1
+row = 3
+
+[[zone]]
+id = "host"
+title = "Host"
+trust = "host"
+summary = "The user's machine outside any box: the CLI, the daemon and the processes they start. Policy lives here (configuration directory) and so does everything a box must not change (durable state)."
+col = 2
+row = 1
+rowspan = 2
+
+[[zone]]
+id = "aux"
+title = "Auxiliary containers"
+trust = "aux"
+summary = "Throwaway containers the host starts to work on box-writable trees (helper and context containers) and the desktop sidecar. They get only the mounts and capabilities their job needs."
+col = 2
+row = 3
+
+[[zone]]
+id = "box"
+title = "Box"
+trust = "untrusted"
+summary = "A project's container, `devc-<realm>-<project>`. Everything in it is under the agent's control, devc's own helpers included: the host treats whatever comes out of it as hostile input."
+col = 3
+row = 1
+rowspan = 3
+
+# ----- actors: devices
+
+[[actor]]
+id = "user"
+zone = "device"
+title = "User"
+kind = "person"
+summary = "Runs devc commands in a terminal on the host, and uses the hub's web app in a browser."
+
+[[actor]]
+id = "browser"
+zone = "device"
+title = "Browser"
+kind = "process"
+summary = "Runs the hub's web app (`web/`), with a device certificate issued by the hub's CA."
+
+# ----- actors: hub
+
+[[actor]]
+id = "hub"
+zone = "hub"
+title = "Hub server"
+kind = "process"
+summary = "`devc hub serve`: accepts machine links and the web app's requests, both only with client certificates from its CA ([[internal/hub.Server.gate]]), keeps a projection of every session, sends notifications."
+commands = ["devc hub serve"]
+
+[[actor]]
+id = "hub-db"
+zone = "hub"
+title = "Hub database"
+kind = "store"
+summary = "SQLite (pure Go): the certificate registry, the machines, the latest view of every session with its cursor, a bounded tail of events per session, pending requests, and a change log that event streams resume from."
+
+# ----- actors: outside services
+
+[[actor]]
+id = "github"
+zone = "external"
+title = "GitHub"
+kind = "service"
+summary = "Upstream repositories, and the REST API behind the read-only facade and GitHub App tokens ([[pkg:internal/github]])."
+
+[[actor]]
+id = "ntfy"
+zone = "external"
+title = "ntfy"
+kind = "service"
+summary = "The push notification service the hub posts to when a session needs the user."
+
+[[actor]]
+id = "ssh-hosts"
+zone = "external"
+title = "SSH hosts"
+kind = "service"
+summary = "Hosts a project is granted through the SSH gate; reached over the master connections `devc ssh login` keeps on the host."
+
+# ----- actors: host
+
+[[actor]]
+id = "cli"
+zone = "host"
+title = "CLI"
+kind = "process"
+summary = "Every `devc` command the user runs on the host. Commands are thin: they parse arguments, call into the internal packages and print. Most read the configuration and talk to Podman or to the daemon."
+commands = ["devc", "devc daemon status", "devc daemon stop"]
+
+[[actor]]
+id = "daemon"
+zone = "host"
+title = "Daemon"
+kind = "process"
+summary = "`devc daemon`, one per machine (in the foreground, or as the systemd user service `devc service install` sets up): a channel to every running box, continuous ingestion of session events, commands with receipts, the relay service, the SSH gate, the allowlist proxy, the links to hubs, and the local API on `<runtime>/daemon.sock`."
+commands = ["devc daemon"]
+
+[[actor]]
+id = "relay-hooks"
+zone = "host"
+title = "Relay hooks"
+kind = "process"
+summary = "devc started by git receive-pack under the hook names pre-receive, update and post-receive while a box pushes to its relay; started so, it runs `devc relay-hook <name>` ([[cmd/devc.shim.relayHook]]), which checks and records the push."
+commands = ["devc relay-hook"]
+
+[[actor]]
+id = "gate-exec"
+zone = "host"
+title = "Gate session"
+kind = "process"
+summary = "`devc gate-exec`, the forced command of the gate's sshd: runs one SSH session of a box over the host's master connection to a granted host."
+commands = ["devc gate-exec"]
+
+[[actor]]
+id = "podman"
+zone = "host"
+title = "Podman"
+kind = "service"
+summary = "Rootless Podman. Every call goes through [[pkg:internal/engine]] with an argument vector; it creates and runs boxes and the auxiliary containers, and runs `podman exec` into boxes."
+
+[[actor]]
+id = "host-git"
+zone = "host"
+title = "git (host)"
+kind = "process"
+summary = "git on the host, run only against relays and only through [[internal/gitx.Host]] (hardened environment, `/` as working directory, an empty hooks directory unless the relay hooks are wanted)."
+
+[[actor]]
+id = "sshd"
+zone = "host"
+title = "sshd (gate)"
+kind = "process"
+summary = "`sshd -i` started by the daemon for each gate stream of a box, with a generated configuration: one host key, the box's key, every forwarding off, a forced command."
+
+[[actor]]
+id = "config-dir"
+zone = "host"
+title = "Configuration directory"
+kind = "store"
+summary = "`~/.config/devc`: config.toml, realms, projects, envs, harness manifests, dotfiles. Policy comes only from here; no box can write it."
+
+[[actor]]
+id = "state-dir"
+zone = "host"
+title = "State directory"
+kind = "store"
+summary = "`~/.local/share/devc`: durable state (relays, journals, secrets, context, harness state) and local state (receipts, box files, archive bookkeeping), the toolbox and caches. Parts are mounted into boxes; the rest no box reaches."
+
+# ----- actors: auxiliary containers
+
+[[actor]]
+id = "helper"
+zone = "aux"
+title = "Helper container"
+kind = "process"
+summary = "`podman run --rm --network none` with the toolbox's helper root filesystem and only the target tree mounted: sealing, the trash, savepoints and restores, deletions, reading shared harness state for the archive."
+commands = ["devc box rm-worker", "devc box data-worker", "devc box archive-worker", "devc box statx-worker"]
+
+[[actor]]
+id = "context-worker"
+zone = "aux"
+title = "Context container"
+kind = "process"
+summary = "A throwaway container without network that walks a realm's context directory (notes and memory, which boxes write) and commits it to the context repository ([[pkg:internal/ctxrepo]])."
+commands = ["devc box context-worker"]
+
+[[actor]]
+id = "desktop"
+zone = "aux"
+title = "Desktop sidecar"
+kind = "process"
+summary = "`devc gui up`: a container from the desktop image that joins the box's network and user namespaces and serves an X display with a web viewer ([[pkg:internal/gui]])."
+
+# ----- actors: box
+
+[[actor]]
+id = "box-agent"
+zone = "box"
+title = "Box agent"
+kind = "process"
+summary = "`devc box init`, the container's main process: prepares the home, then runs the agent, which listens on `/run/devc/agent.sock` for the daemon and on the abstract socket `@devc-agent` for clients in the box, relays those to the host, and carries out the daemon's input to session panes."
+commands = ["devc box init"]
+
+[[actor]]
+id = "launcher"
+zone = "box"
+title = "Launcher"
+kind = "process"
+summary = "What a harness shim runs (`/opt/devc/shims/<bin>` links to devc) and what a session's tmux window starts: fetches the credential, sets the environment, registers the session, and executes the real harness."
+commands = ["devc box launch"]
+entry = ["cmd/devc.shim.launch"]
+
+[[actor]]
+id = "status-wrapper"
+zone = "box"
+title = "Status wrapper"
+kind = "process"
+summary = "`devc box pty`: runs a harness on a pseudo-terminal of its own to answer its OSC 7501 status queries, which tmux does not answer, and to take its status reports out of the output."
+commands = ["devc box pty"]
+
+[[actor]]
+id = "hook"
+zone = "box"
+title = "Hook receiver"
+kind = "process"
+summary = "`devc box hook <kind> <event>`, run by the harness's hooks: maps the hook's JSON input to events and appends them to the session's spool file. It never fails and never prints, except an answer to a question."
+commands = ["devc box hook"]
+
+[[actor]]
+id = "box-tools"
+zone = "box"
+title = "In-box commands"
+kind = "process"
+summary = "The other `devc box …` commands, run in the box by the host through `podman exec` (session start and stop, snapshots, worktrees, the repository report) or by programs in the box (requests and secrets the harness asks for, `devc gh`, `devc src`), and the git remote helper for `devc::` remotes."
+commands = ["devc box", "devc gh", "devc request", "devc src"]
+entry = ["cmd/devc.shim.remoteHelper"]
+
+[[actor]]
+id = "harness"
+zone = "box"
+title = "Harness"
+kind = "process"
+summary = "The coding agent (Claude Code, Codex, Cursor's CLI, OpenCode, pi), described by a manifest: installed in the toolbox, run in a session's tmux window."
+
+[[actor]]
+id = "tmux"
+zone = "box"
+title = "tmux"
+kind = "process"
+summary = "One tmux server per box, from the toolbox, with devc's configuration: one window per session, tagged with the session's ID. Every command line comes from [[pkg:internal/tmux]]."
+
+[[actor]]
+id = "spool"
+zone = "box"
+title = "Spool"
+kind = "store"
+summary = "`/run/devc/spool/<session>.jsonl`: the box's runtime directory, which is `<runtime>/<box-id>/` on the host. The box appends events here; the host reads them only through [[pkg:internal/safefs]]."
+
+# ----- channels
+
+[[channel]]
+id = "user-cli"
+from = "user"
+to = "cli"
+title = "Terminal"
+transport = "A shell on the host."
+carries = "devc commands and their output."
+
+[[channel]]
+id = "daemon-api"
+from = "cli"
+to = "daemon"
+title = "Daemon API"
+transport = "The Unix socket `<runtime>/daemon.sock` (mode 0600), JSON-RPC 2.0, one object per line."
+carries = "Views of boxes and sessions, event streams, commands with receipts, decisions on requests ([[surface:daemon-api]])."
+checks = ["internal/proto.DecodeParams"]
+concerns = ["sessions-and-events"]
+
+[[channel]]
+id = "box-channel"
+from = "daemon"
+to = "box-agent"
+title = "Box channel"
+transport = "The daemon connects to the agent's socket (`<runtime>/<box-id>/agent.sock`, `/run/devc/agent.sock` in the box), checks that the peer is a process of that box, and runs yamux over the connection: JSON-RPC on streams, each request on a stream of its own."
+carries = "The daemon's requests to the box ([[surface:box-agent]]): hello, live sessions, input to panes, listeners for exceptions and services."
+boundary = true
+checks = ["internal/daemon.CheckPeer", "internal/proto.HelloReply.Validate", "internal/proto.DecodeResult"]
+concerns = ["sessions-and-events"]
+
+[[channel]]
+id = "agent-local"
+from = "box-tools"
+to = "box-agent"
+title = "Agent socket"
+transport = "The abstract socket `@devc-agent`, which only processes in the box's network namespace reach."
+carries = "Requests of in-box clients to the host, one JSON-RPC message first: requests, secrets, questions, hints, and git, gate and proxy streams."
+
+[[channel]]
+id = "box-streams"
+from = "box-agent"
+to = "daemon"
+title = "Streams from the box"
+transport = "A new yamux stream of the box channel per in-box client; the agent relays its bytes without parsing them."
+carries = "The box's requests to the host ([[surface:host-api]]). The daemon attributes each to the box by the channel it arrives on; nothing the box says selects a project."
+boundary = true
+checks = ["internal/proto.ParseMessage", "internal/proto.DecodeParams", "internal/requests.Validate"]
+concerns = ["sessions-and-events"]
+
+[[channel]]
+id = "spool-write"
+from = "hook"
+to = "spool"
+title = "Spool append"
+transport = "One `write` per hook call to the session's spool file, opened with O_APPEND and O_NOFOLLOW."
+carries = "Session events, one JSON object per line, without seq."
+concerns = ["sessions-and-events"]
+
+[[channel]]
+id = "spool-read"
+from = "spool"
+to = "daemon"
+title = "Ingestion"
+transport = "The host reads the spool beneath the box's runtime directory through safefs: no symlinks, regular files only, from the offset reached last time."
+carries = "Session events, which become journal lines with seq and the host's time."
+boundary = true
+checks = ["internal/proto.ParseSpoolLine", "internal/session.Store.Claim"]
+concerns = ["sessions-and-events"]
+
+[[channel]]
+id = "cli-podman"
+from = "cli"
+to = "podman"
+title = "Engine commands (CLI)"
+transport = "The podman binary, run with argument vectors from `/`; JSON output parsed."
+carries = "Creating, starting and stopping boxes, `podman exec` into them, throwaway containers."
+
+[[channel]]
+id = "daemon-podman"
+from = "daemon"
+to = "podman"
+title = "Engine commands (daemon)"
+transport = "The podman binary, run with argument vectors from `/`; JSON output parsed."
+carries = "Which boxes run, the main PID of a box for the peer check, throwaway containers."
+
+[[channel]]
+id = "podman-exec"
+from = "podman"
+to = "box-tools"
+title = "podman exec"
+transport = "`podman exec` as the box user with an argument vector."
+carries = "In-box commands the host runs (session start, stop and listing, snapshots, worktrees, the repository report); their output comes back to the host."
+boundary = true
+checks = ["internal/session.ParseLive"]
+
+[[channel]]
+id = "podman-helper"
+from = "podman"
+to = "helper"
+title = "Helper run"
+transport = "`podman run --rm --network none` with the helper root filesystem as a throwaway overlay, only the target tree mounted and only the capabilities the worker needs."
+carries = "One worker request (often JSON on stdin); a report back."
+
+[[channel]]
+id = "podman-context"
+from = "podman"
+to = "context-worker"
+title = "Context run"
+transport = "`podman run --rm --network none` from the installer image with every capability dropped, the context directory and the toolbox mounted."
+carries = "A context repository operation (commit, diff, log, bundle, restore)."
+
+[[channel]]
+id = "agent-tmux"
+from = "box-agent"
+to = "tmux"
+title = "Pane input"
+transport = "tmux command lines with argument vectors; pasted text on tmux's standard input, never as an argument."
+carries = "The daemon's input: a bracketed paste and the submit key, named keys, the list of clients watching a window."
+concerns = ["sessions-and-events"]
+
+[[channel]]
+id = "tools-tmux"
+from = "box-tools"
+to = "tmux"
+title = "Session windows"
+transport = "tmux command lines with argument vectors."
+carries = "A new window per session (running the launcher), tagged with the session's ID; listing and killing windows."
+
+[[channel]]
+id = "tmux-launcher"
+from = "tmux"
+to = "launcher"
+title = "Window command"
+transport = "The window's command, `/opt/devc/bin/devc box launch <harness> -- …`."
+carries = "The harness to start and its arguments."
+
+[[channel]]
+id = "launcher-harness"
+from = "launcher"
+to = "harness"
+title = "exec"
+transport = "The launcher replaces itself with the real harness binary, or with the status wrapper around it when the manifest says the harness reports its status through OSC 7501 and there is a terminal."
+carries = "The environment of the session (`DEVC_SESSION`), the credential, the settings."
+
+[[channel]]
+id = "tmux-harness"
+from = "tmux"
+to = "harness"
+title = "Terminal"
+transport = "The pseudo-terminal of the session's pane."
+carries = "Keys and pasted text in; the harness's screen out."
+concerns = ["sessions-and-events"]
+
+[[channel]]
+id = "harness-hook"
+from = "harness"
+to = "hook"
+title = "Hooks"
+transport = "The harness runs `devc box hook <kind> <event>` with its hook input as JSON on standard input (at most 1 MiB is read)."
+carries = "What the harness reports: session start, prompts, questions, permission prompts, the final message, the end."
+concerns = ["sessions-and-events"]
+
+[[channel]]
+id = "hub-link"
+from = "daemon"
+to = "hub"
+title = "Machine link"
+transport = "A WebSocket the daemon dials to each hub in config.toml, over TLS with the machine certificate `devc join` stored; JSON-RPC, one object per text frame ([[pkg:internal/wsconn]])."
+carries = "The hub calls the daemon's allowlisted methods (views, events, session commands, low-risk decisions); the daemon calls hub.hello and hub.role ([[surface:hub-link]])."
+boundary = true
+checks = ["internal/daemon.Daemon.hubHandlers", "internal/proto.ValidateData"]
+
+[[channel]]
+id = "hub-db-write"
+from = "hub"
+to = "hub-db"
+title = "Database"
+transport = "SQLite in the hub directory."
+carries = "The registry, session views and event tails, pending requests, the change log."
+
+[[channel]]
+id = "web-api"
+from = "browser"
+to = "hub"
+title = "Web API"
+transport = "HTTPS with a device certificate and a login session bound to it; JSON, server-sent events, a WebSocket for the terminal."
+carries = "The inbox, sessions, commands, decisions, the terminal ([[surface:hub-routes]])."
+boundary = true
+checks = ["internal/hub.Server.gate", "internal/hub.Server.guard"]
+
+[[channel]]
+id = "user-browser"
+from = "user"
+to = "browser"
+title = "Web app"
+transport = "The browser's window."
+carries = "What the user reads and does in the web app."
+
+[[channel]]
+id = "hub-ntfy"
+from = "hub"
+to = "ntfy"
+title = "Notifications"
+transport = "HTTPS requests to the configured ntfy server."
+carries = "A short message when a session needs the user, with action buttons that carry single-use tokens."
+boundary = true
+
+[[channel]]
+id = "relay-service"
+from = "daemon"
+to = "host-git"
+title = "Relay service"
+transport = "git upload-pack or receive-pack on the project's relay, with the box's host.git stream as standard input and output."
+carries = "Fetches and pushes of the box's git remote helper; the project is the one the channel is bound to."
+boundary = true
+checks = ["internal/daemon.boxWorker.serveGit"]
+
+[[channel]]
+id = "git-hooks"
+from = "host-git"
+to = "relay-hooks"
+title = "Relay hooks"
+transport = "receive-pack runs the relay's pre-receive, update and post-receive hooks, which are links to devc."
+carries = "The refs a push wants to update."
+
+[[channel]]
+id = "github-git"
+from = "host-git"
+to = "github"
+title = "Upstream git"
+transport = "git over HTTPS or SSH with the host's own credentials."
+carries = "Fetches of the upstream into the relay and pushes of relay branches (devc pull, devc push, devc pr create)."
+boundary = true
+
+[[channel]]
+id = "github-api"
+from = "daemon"
+to = "github"
+title = "GitHub API"
+transport = "HTTPS to the REST API."
+carries = "The read-only facade's requests for boxes, built from validated parts only, and GitHub App installation tokens."
+boundary = true
+
+[[channel]]
+id = "gate-sshd"
+from = "daemon"
+to = "sshd"
+title = "Gate stream"
+transport = "`sshd -i` with a box's host.gate stream as standard input and output."
+carries = "One SSH connection of a box to a granted host."
+boundary = true
+checks = ["internal/daemon.boxWorker.serveGate"]
+
+[[channel]]
+id = "sshd-gate-exec"
+from = "sshd"
+to = "gate-exec"
+title = "Forced command"
+transport = "sshd's ForceCommand, `devc gate-exec <host>`, with the box's original command in the environment."
+carries = "The command the box asked to run."
+
+[[channel]]
+id = "gate-ssh"
+from = "gate-exec"
+to = "ssh-hosts"
+title = "Master connection"
+transport = "`ssh -S <master> -o ControlMaster=no <host>` over the connection `devc ssh login` keeps in `<runtime>/gate`."
+carries = "One SSH session."
+boundary = true
