@@ -33,6 +33,7 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | Review D + C19r | done | f1b7e15 |
 | Review E (verification of the last fixes) + C19r3, C19r4 | done | c336d39 |
 | Closing check F + C19r5 | done | 0e79147 |
+| X1 Explorer: the tool (extraction, model, checks) | in progress | |
 
 ## Resuming
 
