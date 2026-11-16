@@ -115,7 +115,7 @@ role = "Takes advisory file locks (flock(2)) with a bounded wait."
 [package."internal/safefs"]
 layer = "foundation"
 group = "base"
-role = "Reads files from box-writable places beneath a directory descriptor with openat2, never following symlinks, and gives the helper container's workers the matching write operations."
+role = "Reads files from box-writable places beneath a directory descriptor with openat2, never following symlinks, and provides the matching write operations for the helper container's workers and for host code that writes into such trees."
 
 [package."internal/extract"]
 layer = "foundation"
@@ -184,7 +184,7 @@ role = "The rules for requests a box makes: strict validation, risk classes, who
 [package."internal/config"]
 layer = "area"
 group = "config"
-role = "Loads, validates and answers questions about the configuration: config.toml, realms, projects, envs and harness manifests."
+role = "Loads, validates and answers questions about the configuration: config.toml, realms, projects, services, envs and harness manifests."
 
 [package."internal/netpolicy"]
 layer = "area"
@@ -239,12 +239,12 @@ role = "`devc src`: fetches the source of a dependency at the installed version 
 [package."internal/doctor"]
 layer = "area"
 group = "box"
-role = "Checks the host requirements and reports them; it never changes the host."
+role = "Checks the host requirements and reports them with hints, collecting the fixes that need root into one script for the user to run."
 
 [package."internal/service"]
 layer = "area"
 group = "base"
-role = "Installs devc's systemd user units."
+role = "Installs devc's systemd user units: the daemon's service, or the banking timer on machines without a daemon."
 
 # --- assembly
 

@@ -1,3 +1,7 @@
+// This file checks every key of the configuration after it is loaded;
+// problems are collected, never fatal, so `devc config check` can list
+// them all at once.
+
 package config
 
 import (
@@ -224,6 +228,7 @@ func (k checker) noDuplicates(key string, vs []string) {
 
 func idx(key string, i int) string { return fmt.Sprintf("%s[%d]", key, i) }
 
+// validateGlobal checks config.toml.
 func validateGlobal(c *Config, ps *problems) {
 	g := &c.Global
 	k := checker{file: c.Paths.ConfigFile(), ps: ps}
@@ -315,6 +320,9 @@ func (k checker) netAllowlist(key string, a NetAllowlist) {
 	k.noDuplicates(key+".presets", a.Presets)
 }
 
+// validateHarness checks a manifest. It also fills two defaults that depend
+// on other keys or on the position in a list: display (the id) and a
+// seed's when ("missing").
 func validateHarness(h *Harness, ps *problems) {
 	k := checker{file: h.File, ps: ps}
 	k.name("id", names.KindHarness, h.ID)
@@ -599,6 +607,8 @@ func reservedBaselineDir(d string) bool {
 	return false
 }
 
+// validateEnv checks an env: a Containerfile or a base image, valid build
+// argument names.
 func validateEnv(e *Env, ps *problems) {
 	k := checker{file: e.File, ps: ps}
 	if !e.HasContainerfile && e.Base == "" {
@@ -614,6 +624,8 @@ func validateEnv(e *Env, ps *problems) {
 	}
 }
 
+// validateRealm checks realm.toml, including its per-harness overrides of
+// the login method, which must suit the manifest they override.
 func validateRealm(c *Config, r *Realm, ps *problems) {
 	k := checker{file: r.File, ps: ps}
 	k.enum("network.default", r.Network.Default, networkLevels)
@@ -659,6 +671,9 @@ func validateRealm(c *Config, r *Realm, ps *problems) {
 	}
 }
 
+// validateProject checks project.toml, including that the env or image,
+// the harnesses, the mounted projects and the granted services it names
+// exist.
 func validateProject(c *Config, p *Project, ps *problems) {
 	k := checker{file: p.File, ps: ps}
 

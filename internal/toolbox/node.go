@@ -1,3 +1,5 @@
+// This file installs the pinned Node.js release into the toolbox.
+
 package toolbox
 
 import (

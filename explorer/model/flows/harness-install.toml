@@ -1,0 +1,165 @@
+id = "harness-install"
+kind = "flow"
+title = "devc harness install"
+summary = "A harness's vendor installer runs in a throwaway container that sees only a new version directory of the toolbox; a second container without network checks the result, and only then does `current` switch and running boxes learn of the new version."
+concern = "toolbox-and-harnesses"
+trigger = "devc harness install claude"
+actors = ["user", "cli", "state-dir", "podman", "installer", "vendors", "launcher"]
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc harness install"
+label = "devc harness install claude"
+external = true
+text = "The user names a harness by its id, optionally with `--version`. The id must pass the name rules before the command runs."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.toolEnv"
+text = "The configuration is loaded and the toolbox synced first: every auxiliary container runs with the toolbox's seccomp profile, so it must be in place."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.manifestFor"
+checks = ["internal/names.Check", "internal/config.Config.HarnessProblems"]
+text = "The manifest must have no problems. A user manifest of this id that failed to load blocks the install: devc never falls back to the built-in manifest of the same id."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.ensureNeeds"
+text = "Toolbox components the manifest needs (`install.needs`; today only Node.js, for pi) are installed first, from a pinned and checksummed download."
+
+[[step]]
+at = "cli"
+ref = "internal/toolbox.Installer.Install"
+checks = ["internal/toolbox.versionRE", "internal/toolbox.HasVersionPlaceholder"]
+text = "A requested version must look like a version, and the manifest must be able to hand it to its installer (`{version}` in `install.args` or `install.env`). Then the harness's own lock is taken, so two installs of one harness never overlap."
+detail = "Method `none` installs nothing (the image provides the executable) and only creates the shim; method `local` copies `install.path` from the host into the version directory instead of running a container."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman build devc-aux/installer"
+ref = "internal/toolbox.EnsureAuxImage"
+text = "The installer image is built from the Containerfile embedded in devc when it is missing or its `devc.aux.hash` label names other build files."
+
+[[step]]
+at = "cli"
+ref = "internal/toolbox.Installer.newStamp"
+text = "A new version directory `harness/<id>/v/<stamp>/` is named after the current UTC time. If the installer or the check below fails, the directory is deleted again and `current` is untouched."
+
+[[step]]
+section = "The vendor's installer"
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run installer: bash -c <script> <url> <args>"
+ref = "internal/engine.Podman.RunStream"
+text = "The installer container gets the version directory read-write at its in-box path, `/opt/devc/harness/<id>/v/<stamp>`, with `HOME` inside it, and read-only the toolbox components it needs; nothing else of the host. The script is a constant; the URL and the arguments arrive as positional parameters."
+detail = "The container runs with no new privileges, the box seccomp profile, `--http-proxy=false`, empty tmpfs mounts at /home, /opt and /tmp, and at most 30 minutes. It runs as the image's root, which rootless Podman maps to the host user, with Podman's default capabilities and network: vendor installers expect both."
+
+[[step]]
+from = "podman"
+to = "installer"
+via = "exec"
+label = "start the container"
+external = true
+text = "Podman starts the throwaway container (`--rm`)."
+
+[[step]]
+from = "installer"
+to = "vendors"
+via = "stream"
+label = "curl --proto =https <install.url>"
+external = true
+text = "The script downloads the vendor's install script over HTTPS only and runs it with bash. Whatever the vendor's script downloads and writes lands below `HOME`, inside the version directory."
+
+[[step]]
+at = "installer"
+external = true
+label = "chmod -R a+rX"
+text = "After the vendor's script, the installation is made readable for every user, because in-box root without capabilities maps to another UID and must still run it."
+
+[[step]]
+from = "podman"
+to = "cli"
+via = "reply"
+label = "exit status"
+external = true
+text = "A non-zero exit status ends the install with an error, and the version directory is removed."
+
+[[step]]
+section = "Check and publish"
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run --network none: devc-check <exe> --version"
+ref = "internal/engine.Podman.Run"
+text = "A second container, without network and with the version directory read-only, checks that `install.exe` exists and is an executable file and runs it with `install.version_cmd`. The first line of its output becomes the recorded version."
+
+[[step]]
+at = "cli"
+ref = "internal/toolbox.Toolbox.publish"
+text = "`installed.json` is written first and the `current` link switched last, under a lock that readers take shared, so the two always agree for them. If the switch fails, the previous metadata is put back."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "harness/<id>/history.jsonl"
+ref = "internal/toolbox.Toolbox.appendHistory"
+text = "The switch is recorded with its time; `devc harness gc` uses the history to tell which versions a running box may still start."
+
+[[step]]
+at = "cli"
+ref = "internal/toolbox.Toolbox.EnsureShim"
+text = "`shims/<bin>` becomes a link to `../bin/devc`. The name is checked again, so a shim can never take one of devc's own names (`devc`, `devc-*`, `git-remote-devc`)."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "installed claude: <version> (<stamp>)"
+ref = "internal/toolbox.Installed"
+text = "The CLI prints the version the check reported and the stamp of the new directory, from the record it just published, and goes on to the boxes."
+
+[[step]]
+section = "Boxes that use the harness"
+
+[[step]]
+at = "cli"
+ref = "internal/harness.BoxHooks.RefreshLaunches"
+text = "Every project that lists the harness and already has a launch description gets a new one. Projects with configuration problems are skipped with a warning; their boxes keep the version they name."
+
+[[step]]
+at = "cli"
+ref = "internal/harness.BoxHooks.refreshOne"
+text = "Under the box's lock, the description is built again from the configuration, now naming the executable in the new version directory, and validated."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "local/boxes/<realm>/<project>/etc/harness/<id>.json"
+ref = "internal/harness.writeDescription"
+text = "The description is written by rename into the directory the box sees, read-only, as `/etc/devc`."
+
+[[step]]
+from = "state-dir"
+to = "launcher"
+via = "file"
+label = "/etc/devc/harness/<id>.json"
+external = true
+text = "A running box sees the new file at once through its read-only mount."
+
+[[step]]
+at = "launcher"
+ref = "internal/boxside.FindByBin"
+unchecked = "a later process in the box: the shim started under the harness's name reads the description through the /etc/devc mount"
+text = "The next time the harness is started in the box, the launcher finds the description by its `bin` and runs the new version. Sessions already running keep the version directory they started from, which gc keeps."

@@ -1,3 +1,6 @@
+// This file builds the static tmux of the toolbox in a throwaway Alpine
+// container.
+
 package toolbox
 
 import (

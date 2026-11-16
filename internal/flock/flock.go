@@ -1,10 +1,13 @@
 // Package flock takes advisory file locks (flock(2)) with a bounded wait.
-// devc uses them to serialise operations on one box, on one harness
-// installation and on the toolbox, across concurrent devc processes.
+// devc uses them where two devc processes could act on the same thing at
+// once: a box's life cycle, a harness's publication, a realm's context
+// repository, the ingestion of a box's spool, a share, a data remote, a
+// service login, the SSH gate's host key, the archive's upload state, and
+// to let only one daemon run per runtime directory.
 //
-// Security rules: lock files live only in devc's own state directory; they
-// are opened without following a symlink in the last component and hold no
-// data.
+// Security rules: lock files live only in devc's own state and runtime
+// directories; they are opened without following a symlink in the last
+// component and hold no data.
 package flock
 
 import (

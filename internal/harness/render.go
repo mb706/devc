@@ -2,7 +2,10 @@
 // launch descriptions and seed files under /etc/devc/harness, the rendered
 // baseline (settings and instructions) mounted read-only at the manifest's
 // baseline directory, the state mounts of the home strategy, the delivery
-// of credentials and granted secrets, and logins.
+// of credentials and granted secrets, and logins. render.go renders
+// templates, settings, instructions and seeds; box.go connects harnesses
+// to a box's life cycle and builds launch descriptions; login.go runs
+// logins.
 //
 // Security rules: everything rendered comes from the configuration
 // directory, the embedded templates and devc itself (README rule 1); the

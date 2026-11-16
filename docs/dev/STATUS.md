@@ -35,7 +35,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | Closing check F + C19r5 | done | 0e79147 |
 | X1 Explorer: the tool (extraction, model, checks) | done | 5680f03 |
 | X2 Explorer: the app, shell and code views | done | ed0e2f5 |
-| X3 Explorer: the app, views of the model | in progress | |
+| X3 Explorer: the app, views of the model | done | 279209e |
+| X4 Explorer content: foundations, configuration, toolbox, harnesses, host setup | in progress | |
 
 ## Resuming
 
@@ -1223,3 +1224,16 @@ The four confirmed findings of the closing check (`docs/dev/reviews/F1-review.md
 7. The temporary large model lived under `bin/` (git-ignored), not in a `/tmp` directory: `--model` must be below the repository, the only directory the toolchain container mounts.
 
 **How to check.** `explorer/check.sh [dir]` now also visits the overview, runtime (with an actor, a channel and a flow filter), concerns (index, page, diagram), flows (index, player, tour), state, glossary, documents, a document, the findings, and the inspector views of a flow, concern, term and finding, in both themes (138 screenshots), and asserts: pressing j/k steps through a flow and the diagram, step panel, URL and inspector follow; a reference in a concern's text opens the inspector; the concern page shows all its diagrams; the runtime map draws a connector for every channel (all routed) and a gate on every boundary channel, in about 100 ms; hovering a `[[term:…]]` shows its definition; the findings table lists where a finding is cited and a citation opens the code at its line; a flow step's declaration carries a margin mark and its symbol panel lists the backlinks; search finds a concern; the largest document renders in under 100 ms. Result: all pass on the model and on the large temporary model (40 concerns, 60 flows, a 40-step and a ten-actor flow, a 15-node diagram, a concern three times as long, 100 terms). `./dev test ./explorer/tool/` passes.
+
+### X4 Explorer content: foundations, configuration, toolbox, harnesses, host setup
+
+**Model written** (`explorer/model/`):
+
+- Concerns (order 10–14): `configuration` (diagram of the configuration tree and the types it loads into), `host-foundations`, `toolbox-and-harnesses` (diagram of what the toolbox holds and who sees it; state machine of a harness version), `host-setup`, `command-line`. Every non-test file of the area belongs to one of them; 33 invariants with their code and tests.
+- Flows: `harness-install`, `harness-login`, `doctor-fix`, all connected by the tool (four `unchecked` steps: the next launch in a box, the token typed on the CLI's terminal, a later `devc up`, the launcher reading the delivered file). Tours: `config-load`, `safe-read`, `binary-dispatch`.
+- `system.toml`: actors `installer` (aux zone) and `vendors` (external), channels `podman-installer` and `installer-vendors`.
+- `layout.toml`: the configuration, state and runtime trees down to the level of `internal/paths` (and the toolbox's parts), the harness mounts (baseline, private and shared state, per-box state); the envs entry corrected (devc writes more than `root-log.jsonl` in the configuration directory, at the user's command).
+- `glossary.toml`: 13 terms (configuration, state and runtime directory, projects root, env, harness manifest, grant, baseline, launch description, home strategy, harness version, installer container, configuration problem).
+- `packages.toml`: roles of `internal/safefs`, `internal/config`, `internal/doctor` and `internal/service` corrected.
+
+**Comments** (40 Go files, comments only, `./dev explore comments-only` clean): package comments with file overviews for cli, config, names, paths, execx, harness, doctor; file comments for every file of the area that lacked one; about 35 doc comments on unexported functions the pages point at. Corrected: `cmd/devc` (relay hooks were missing), `flock` (lock files also in the runtime directory; what it serialises), `safefs` and `safefs.Dir` (host code uses Dir too), `doctor` ("never changes the host"), `extract` (its other users), `paths.Paths.EnvRootLog` ("the only file devc writes" in the configuration directory), `config.Env`, `config.Config.ProblemsFor` (granted services), `cli.app.serviceManager` (not only the timer), `cli.CommandTree` (no longer names the explorer).

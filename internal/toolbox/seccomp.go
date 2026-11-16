@@ -1,3 +1,6 @@
+// This file derives the box seccomp profile from Podman's default profile;
+// the changes and their reasons are described below the imports.
+
 package toolbox
 
 import (

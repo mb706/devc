@@ -1,8 +1,10 @@
-package config
+// This file holds the types of config.toml, realm.toml, project.toml,
+// env.toml and the harness manifests. The structs mirror the TOML files one
+// to one. Fields tagged toml:"-" are filled in by the loader. Defaults are
+// set by the default* functions before decoding, so a key absent from a
+// file keeps its default.
 
-// The structs below mirror the TOML files one to one. Fields tagged
-// toml:"-" are filled in by the loader. Defaults are set by the default*
-// functions before decoding, so a key absent from a file keeps its default.
+package config
 
 // Global is config.toml.
 type Global struct {
@@ -363,8 +365,8 @@ func defaultProject() Project {
 }
 
 // Env is envs/<env>/: a Containerfile and/or env.toml. `devc root` appends
-// to root-log.jsonl beside them rather than editing env.toml, so files the
-// user writes are never rewritten by devc.
+// to root-log.jsonl beside them rather than editing env.toml, so the user's
+// recipe is never rewritten by devc.
 type Env struct {
 	Name             string `toml:"-" json:"name"`
 	Dir              string `toml:"-" json:"dir"`

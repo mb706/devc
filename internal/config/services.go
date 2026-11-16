@@ -1,11 +1,11 @@
-package config
-
 // Service definitions (work order C18): realms/<realm>/services/<name>/
 // service.toml describes a service that boxes of the realm's projects reach
 // through the daemon, which holds the credential and adds it on the way
 // out. A project gets a service with grants.services. Everything here is
 // policy from the configuration directory (README rule 1); the daemon
 // enforces it on every request.
+
+package config
 
 import (
 	"crypto/sha256"

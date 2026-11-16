@@ -1,3 +1,7 @@
+// This file answers questions about a loaded configuration: entities by
+// name, the project a command-line argument means, the problems that block
+// a project or a harness, and a project's merged settings.
+
 package config
 
 import (
@@ -158,8 +162,9 @@ func (c *Config) ResolveProject(arg, cwd string) (names.ProjectRef, error) {
 }
 
 // ProblemsFor returns the problems that affect a project: those in
-// config.toml, its realm, its own definition, its env and its harness
-// manifests. Commands that act on a project refuse to run while any exist.
+// config.toml, its realm, its own definition, its env, its harness
+// manifests and the services it is granted. Commands that act on a project
+// refuse to run while any exist.
 func (c *Config) ProblemsFor(ref names.ProjectRef) []Problem {
 	files := map[string]bool{
 		c.Paths.ConfigFile():         true,

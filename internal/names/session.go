@@ -1,3 +1,5 @@
+// This file generates, validates and decodes session IDs.
+
 package names
 
 import (

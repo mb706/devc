@@ -1,3 +1,7 @@
+// This file holds the helpers and the validation of a project's [grants]
+// (SSH hosts and their read-only profile, GitHub modes, secrets) and of a
+// realm's [github] table.
+
 package config
 
 import (

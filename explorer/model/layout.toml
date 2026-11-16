@@ -21,10 +21,52 @@ writer = "user"
 ref = "internal/paths.Paths.RealmDir"
 
 [[tree.entry]]
+path = "realms/<realm>/realm.toml"
+text = "The realm's settings ([[surface:config-realm]]); required, may be empty. `devc realm add` writes a new one at the user's command."
+writer = "user"
+ref = "internal/paths.Paths.RealmFile"
+
+[[tree.entry]]
+path = "realms/<realm>/instructions.md"
+text = "Added to the instructions of every harness in the realm's boxes."
+writer = "user"
+ref = "internal/paths.Paths.RealmInstructions"
+
+[[tree.entry]]
+path = "realms/<realm>/projects/<project>/project.toml"
+text = "A project's settings ([[surface:config-project]]); required, may be empty. `devc project add` and `adopt` write a new one at the user's command, never over an existing one."
+writer = "user"
+ref = "internal/paths.Paths.ProjectFile"
+
+[[tree.entry]]
+path = "realms/<realm>/services/<name>/service.toml"
+text = "A service boxes of the realm reach through the daemon ([[surface:config-service]]); the directory also holds the files its login needs."
+writer = "user"
+ref = "internal/paths.Paths.ServiceFile"
+
+[[tree.entry]]
 path = "envs/<env>"
-text = "An image recipe: a Containerfile and/or `env.toml`. `devc root` appends the commands it ran to `root-log.jsonl` here, the only file devc writes in this directory."
+text = "An image recipe: a Containerfile and/or `env.toml`. The directory is the build context of the env's image."
 writer = "user"
 ref = "internal/paths.Paths.EnvDir"
+
+[[tree.entry]]
+path = "envs/<env>/Containerfile"
+text = "Built into `localhost/devc-env/<env>:latest`."
+writer = "user"
+ref = "internal/paths.Paths.EnvContainerfile"
+
+[[tree.entry]]
+path = "envs/<env>/env.toml"
+text = "A description, a base image (for an env without a Containerfile) and build arguments ([[surface:config-env]])."
+writer = "user"
+ref = "internal/paths.Paths.EnvFile"
+
+[[tree.entry]]
+path = "envs/<env>/root-log.jsonl"
+text = "`devc root` appends each command it ran in a box of this env, one JSON object per line, rather than editing the recipe. The only file devc writes in this directory on its own."
+writer = "host"
+ref = "internal/paths.Paths.EnvRootLog"
 
 [[tree.entry]]
 path = "harness/<id>.toml"
@@ -34,9 +76,15 @@ ref = "internal/paths.Paths.UserHarnessFile"
 
 [[tree.entry]]
 path = "baseline/<harness>"
-text = "The user's baseline settings for a harness, merged into what devc renders for every box; `baseline/instructions.md` is added to every harness's instructions."
+text = "The user's baseline for a harness: `settings.json` or `settings.toml`, under the keys devc requires, and `instructions.md`."
 writer = "user"
 ref = "internal/paths.Paths.BaselineDir"
+
+[[tree.entry]]
+path = "baseline/instructions.md"
+text = "Added to the instructions of every harness in every box."
+writer = "user"
+ref = "internal/paths.Paths.BaselineInstructions"
 
 [[tree.entry]]
 path = "dotfiles"
@@ -57,6 +105,84 @@ writer = "both"
 ref = "internal/paths.Paths.DurableRealmDir"
 
 [[tree.entry]]
+path = "durable/realms/<realm>/harness/<harness>"
+text = "The realm's shared harness state: subdirectories of a private home (`home.shared`), or with strategy `shared` the whole home (`home/`) and further directories (`also/<dir>`). Mounted into the realm's boxes, so box-writable; a `shared-home` login writes the credential here."
+writer = "both"
+ref = "internal/paths.Paths.HarnessStateDir"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/context"
+text = "The realm's context tree: `notes/<project>` and `memory/<group>`, which boxes write, and `data/<project>/manifest.jsonl`, which no box mounts. The context repository versions it."
+writer = "both"
+ref = "internal/paths.Paths.ContextDir"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/context/notes/<project>"
+text = "A project's notes, mounted at /ctx/notes."
+writer = "both"
+ref = "internal/paths.Paths.NotesDir"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/context/memory/<group>"
+text = "The memory of a memory group, mounted at /ctx/memory."
+writer = "both"
+ref = "internal/paths.Paths.MemoryDir"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/context/data/<project>/manifest.jsonl"
+text = "A project's data manifest; written by the host only, through safefs, because the rest of the context tree is box-written."
+writer = "host"
+ref = "internal/paths.Paths.ManifestFile"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/relay/<project>.git"
+text = "The project's relay, a bare repository the box reaches only through the daemon's relay service."
+writer = "host"
+ref = "internal/paths.Paths.RelayRepo"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/journal/<project>/<session>.jsonl"
+text = "A session's journal: validated events with the host's sequence numbers and times."
+writer = "host"
+ref = "internal/paths.Paths.JournalFile"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/secrets/<name>"
+text = "A realm secret, mode 0600 in a 0700 directory: harness tokens stored by `devc login`, secrets set with `devc secret set`."
+writer = "host"
+ref = "internal/paths.Paths.SecretsDir"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/requests/<project>.jsonl"
+text = "The project's request log."
+writer = "host"
+ref = "internal/paths.Paths.RequestsFile"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/netlog/<project>.jsonl"
+text = "The allowlist proxy's log of a project."
+writer = "host"
+ref = "internal/paths.Paths.NetLogFile"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/gate-log.jsonl"
+text = "The commands the realm's boxes ran through the SSH gate."
+writer = "host"
+ref = "internal/paths.Paths.GateLog"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/savepoints/<project>.jsonl"
+text = "The index of a project's savepoints."
+writer = "host"
+ref = "internal/paths.Paths.SavepointIndex"
+
+[[tree.entry]]
+path = "durable/realms/<realm>/service-log/<name>.jsonl"
+text = "The requests boxes made to a service: time, box, method, path and status, never headers or bodies."
+writer = "host"
+ref = "internal/paths.Paths.ServiceLogFile"
+
+[[tree.entry]]
 path = "durable/session-owners"
 text = "One file per session ID naming the project whose journal first recorded it, so a box cannot claim another project's session."
 writer = "host"
@@ -69,16 +195,88 @@ writer = "host"
 ref = "internal/paths.Paths.NodeDir"
 
 [[tree.entry]]
+path = "durable/node/hubs/<hub-id>"
+text = "The credentials for one hub; the ID is 16 hex characters derived from the hub's URL."
+writer = "host"
+ref = "internal/paths.Paths.NodeHubDir"
+
+[[tree.entry]]
 path = "durable/shares"
 text = "Published shares, one directory per share with its versions; mounted read-only into the boxes that list them. `durable/share-log/` records their sources."
 writer = "host"
 ref = "internal/paths.Paths.SharesDir"
 
 [[tree.entry]]
+path = "durable/shares/<name>"
+text = "One share: its versions and the `current` link."
+writer = "host"
+ref = "internal/paths.Paths.ShareDir"
+
+[[tree.entry]]
+path = "durable/shares/.staging"
+text = "Where a version is extracted before it is renamed into place; never mounted."
+writer = "host"
+ref = "internal/paths.Paths.ShareStagingDir"
+
+[[tree.entry]]
+path = "durable/share-log/<name>.jsonl"
+text = "The published versions of a share with their sources, kept apart from the share, which boxes of other realms see."
+writer = "host"
+ref = "internal/paths.Paths.ShareLogFile"
+
+[[tree.entry]]
 path = "local/boxes/<realm>/<project>"
 text = "A box's files on this machine: its home (mounted at /home/dev, box-writable), what is rendered for /etc/devc, baselines, the capability record, network exceptions, the box lock."
 writer = "both"
 ref = "internal/paths.Paths.BoxLocalDir"
+
+[[tree.entry]]
+path = "local/boxes/<realm>/<project>/home"
+text = "The box user's home, mounted at /home/dev."
+writer = "both"
+ref = "internal/paths.Paths.BoxHomeDir"
+
+[[tree.entry]]
+path = "local/boxes/<realm>/<project>/etc"
+text = "Rendered for the box and mounted read-only at /etc/devc: `box.json`, the tmux configuration, the dotfiles, and `harness/<id>.json` launch descriptions with their seeds."
+writer = "host"
+ref = "internal/paths.Paths.BoxEtcDir"
+
+[[tree.entry]]
+path = "local/boxes/<realm>/<project>/baseline/<harness>"
+text = "A harness's rendered settings and instructions, mounted read-only at the manifest's baseline directory."
+writer = "host"
+ref = "internal/paths.Paths.BoxBaselineDir"
+
+[[tree.entry]]
+path = "local/boxes/<realm>/<project>/harness/<harness>"
+text = "The per-box subdirectories (`home.per_box`) of a harness whose home the realm shares; box-writable."
+writer = "both"
+ref = "internal/paths.Paths.BoxHarnessDir"
+
+[[tree.entry]]
+path = "local/boxes/<realm>/<project>/shares"
+text = "Rendered for the box's /opt/shares: one link per share."
+writer = "host"
+ref = "internal/paths.Paths.BoxSharesDir"
+
+[[tree.entry]]
+path = "local/boxes/<realm>/<project>/lock"
+text = "Serialises the lifecycle operations of one box across devc processes; beside the home, so no box reaches it."
+writer = "host"
+ref = "internal/paths.Paths.BoxLockFile"
+
+[[tree.entry]]
+path = "local/boxes/<realm>/<project>/capabilities.json"
+text = "The secrets and SSH grants in force at the box's last successful start."
+writer = "host"
+ref = "internal/paths.Paths.BoxCapabilitiesFile"
+
+[[tree.entry]]
+path = "local/boxes/<realm>/<project>/net-exceptions.json"
+text = "The network exceptions granted to the project's box, kept across down and up."
+writer = "host"
+ref = "internal/paths.Paths.BoxNetExceptionsFile"
 
 [[tree.entry]]
 path = "local/receipts"
@@ -93,10 +291,28 @@ writer = "host"
 ref = "internal/paths.Paths.ArchiveDir"
 
 [[tree.entry]]
+path = "local/archive/<hub-id>"
+text = "The upload state of one hub and the bundles waiting for it."
+writer = "host"
+ref = "internal/paths.Paths.ArchiveHubDir"
+
+[[tree.entry]]
 path = "local/gate"
 text = "The SSH gate's host key and the public keys of boxes."
 writer = "host"
 ref = "internal/paths.Paths.GateDir"
+
+[[tree.entry]]
+path = "local/gate/host_ed25519"
+text = "The private host key of the gate's sshd; `host_ed25519.pub` beside it."
+writer = "host"
+ref = "internal/paths.Paths.GateHostKey"
+
+[[tree.entry]]
+path = "local/gate/keys/<box-id>.pub"
+text = "A box's public key with the options `restrict,pty`; the private key exists only in the box's secrets directory."
+writer = "host"
+ref = "internal/paths.Paths.GateBoxKey"
 
 [[tree.entry]]
 path = "local/git"
@@ -105,10 +321,52 @@ writer = "host"
 ref = "internal/paths.Paths.RelayHooksDir"
 
 [[tree.entry]]
+path = "local/git/no-hooks"
+text = "An empty directory, every host git command's `core.hooksPath`, so no hook runs on the host."
+writer = "host"
+ref = "internal/paths.Paths.NoHooksDir"
+
+[[tree.entry]]
+path = "local/git/relay-hooks"
+text = "Links to devc named pre-receive, update and post-receive, used only by the receive-pack the daemon runs for a box's push."
+writer = "host"
+ref = "internal/paths.Paths.RelayHooksDir"
+
+[[tree.entry]]
+path = "local/tmp"
+text = "Short-lived host directories, such as the temporary home of a login container."
+writer = "host"
+ref = "internal/paths.Paths.TmpDir"
+
+[[tree.entry]]
+path = "local/context-<realm>.lock"
+text = "Serialises the context worker and manifest appends of a realm."
+writer = "host"
+ref = "internal/paths.Paths.ContextLockFile"
+
+[[tree.entry]]
+path = "local/locks/sync/<realm>/<project>/<remote>.lock"
+text = "Serialises the data pulls and pushes of a project with one remote; one path component per name, so names with hyphens never share a lock."
+writer = "host"
+ref = "internal/paths.Paths.SyncLockFile"
+
+[[tree.entry]]
+path = "local/services/<realm>/<name>.json"
+text = "Whether a cookie service needs a login on this machine; `<name>.lock` beside it serialises logins."
+writer = "host"
+ref = "internal/paths.Paths.ServiceStateFile"
+
+[[tree.entry]]
 path = "local/savepoints"
 text = "Restic repositories of savepoints."
 writer = "host"
 ref = "internal/paths.Paths.SavepointsDir"
+
+[[tree.entry]]
+path = "local/savepoints/<realm>/<project>/restic"
+text = "The restic repository of a project's savepoints."
+writer = "host"
+ref = "internal/paths.Paths.ResticRepo"
 
 [[tree.entry]]
 path = "local/staging/<realm>/<project>"
@@ -118,15 +376,105 @@ ref = "internal/paths.Paths.SyncStagingDir"
 
 [[tree.entry]]
 path = "toolbox"
-text = "The toolbox, mounted read-only at /opt/devc in every box."
+text = "The toolbox, mounted read-only at /opt/devc in every box. Everything in it is world-readable."
 writer = "host"
 ref = "internal/paths.Paths.ToolboxDir"
+
+[[tree.entry]]
+path = "toolbox/devc/<build>/devc"
+text = "One copy of the devc binary per build (`<version>-<sha256[:12]>`); `devc/current` names the one in use."
+writer = "host"
+ref = "internal/toolbox.BuildID"
+
+[[tree.entry]]
+path = "toolbox/bin"
+text = "`devc` and `git-remote-devc` (links to the current build) and `tmux`: the stable entry points, `/opt/devc/bin` in boxes."
+writer = "host"
+ref = "internal/toolbox.Toolbox.BinDir"
+
+[[tree.entry]]
+path = "toolbox/shims/<bin>"
+text = "A link to `../bin/devc` per installed harness; started under that name in a box, devc runs the launcher."
+writer = "host"
+ref = "internal/toolbox.Toolbox.EnsureShim"
+
+[[tree.entry]]
+path = "toolbox/helper-rootfs/bin/devc"
+text = "The helper container's whole root filesystem: a hard link to (or copy of) the current binary and nothing else."
+writer = "host"
+ref = "internal/toolbox.Toolbox.HelperRootfs"
+
+[[tree.entry]]
+path = "toolbox/seccomp.json"
+text = "The box seccomp profile, derived from Podman's default; boxes and auxiliary containers run with it."
+writer = "host"
+ref = "internal/toolbox.Toolbox.SeccompPath"
+
+[[tree.entry]]
+path = "toolbox/harness/<id>/v/<stamp>"
+text = "One installation of a harness, named by its UTC time; the installer container's `HOME` is `<stamp>/home`."
+writer = "host"
+ref = "internal/toolbox.Toolbox.HarnessDir"
+
+[[tree.entry]]
+path = "toolbox/harness/<id>/current"
+text = "A link to the version new launch descriptions name; `installed.json` describes it and `history.jsonl` records when each version became current."
+writer = "host"
+ref = "internal/toolbox.Toolbox.ReadInstalled"
+
+[[tree.entry]]
+path = "toolbox/tmux/<version>/tmux"
+text = "The static tmux, with `tmux/current` and `terminfo/` beside it."
+writer = "host"
+ref = "internal/toolbox.Toolbox.TmuxDir"
+
+[[tree.entry]]
+path = "toolbox/node/<version>"
+text = "The pinned Node.js, for harnesses whose manifest needs it."
+writer = "host"
+ref = "internal/toolbox.Toolbox.NodeDir"
+
+[[tree.entry]]
+path = "toolbox/restic/<version>/restic"
+text = "The pinned restic of the restic savepoint driver."
+writer = "host"
+ref = "internal/toolbox.Toolbox.ResticDir"
+
+[[tree.entry]]
+path = "toolbox/skills/<name>"
+text = "The built-in skills, rewritten at every sync."
+writer = "host"
+ref = "internal/toolbox.Toolbox.SkillsDir"
 
 [[tree.entry]]
 path = "cache/realms/<realm>"
 text = "A realm's package cache (mounted at /home/dev/.cache) and dependency sources (mounted at /src), shared by its boxes and box-writable."
 writer = "both"
 ref = "internal/paths.Paths.RealmSrcCacheDir"
+
+[[tree.entry]]
+path = "cache/realms/<realm>/pkg"
+text = "The realm's package cache, mounted at /home/dev/.cache."
+writer = "both"
+ref = "internal/paths.Paths.RealmPkgCacheDir"
+
+[[tree.entry]]
+path = "cache/realms/<realm>/src"
+text = "Dependency sources fetched by `devc src`, mounted at /src."
+writer = "both"
+ref = "internal/paths.Paths.RealmSrcCacheDir"
+
+[[tree.entry]]
+path = "cache/restic/<realm>/<project>"
+text = "restic's cache for a project's savepoint repository."
+writer = "host"
+ref = "internal/paths.Paths.ResticCache"
+
+[[tree.entry]]
+path = "cache/aux/installer"
+text = "The build context of the installer image: the Containerfile embedded in devc."
+writer = "host"
+ref = "internal/toolbox.EnsureAuxImage"
 
 [[tree]]
 id = "runtime"
@@ -145,6 +493,12 @@ path = "<box-id>"
 text = "A box's runtime directory, mounted at /run/devc and box-writable: `spool/` with the session event files, the agent's socket `agent.sock`, its log. The box ID is the first 12 hex characters of the SHA-256 of `<realm>/<project>`."
 writer = "both"
 ref = "internal/paths.Paths.BoxRuntimeDir"
+
+[[tree.entry]]
+path = "<box-id>/spool"
+text = "The session event files the box appends to; the host reads them only through safefs."
+writer = "box"
+ref = "internal/paths.Paths.SpoolDir"
 
 [[tree.entry]]
 path = "<box-id>-secrets"
@@ -230,6 +584,34 @@ target = "/run/devc"
 mode = "rw"
 text = "The box's runtime directory: the spool and the agent's socket."
 ref = "internal/paths.Paths.BoxRuntimeDir"
+
+[[mount]]
+source = "<state>/local/boxes/<realm>/<project>/baseline/<harness>"
+target = "<the manifest's baseline directory>"
+mode = "ro"
+text = "A harness's rendered settings and instructions, mounted over the image (for Claude Code at /etc/claude-code)."
+ref = "internal/harness.BoxHooks.Contribute"
+
+[[mount]]
+source = "<state>/durable/realms/<realm>/harness/<harness>/<sub>"
+target = "/home/dev/<home.dir>/<sub>"
+mode = "rw"
+text = "Strategy `private`: each `home.shared` subdirectory comes from realm state (for Claude Code, `projects`, the transcripts)."
+ref = "internal/harness.BoxHooks.Contribute"
+
+[[mount]]
+source = "<state>/durable/realms/<realm>/harness/<harness>/home"
+target = "/home/dev/<home.dir>"
+mode = "rw"
+text = "Strategy `shared`: the whole harness home is the realm's, credential included; `also/<dir>` is mounted at `/home/dev/<dir>` the same way."
+ref = "internal/harness.BoxHooks.Contribute"
+
+[[mount]]
+source = "<state>/local/boxes/<realm>/<project>/harness/<harness>/<sub>"
+target = "/home/dev/<home.dir>/<sub>"
+mode = "rw"
+text = "Strategy `shared`: a `home.per_box` subdirectory stays this box's own."
+ref = "internal/harness.BoxHooks.Contribute"
 
 [[mount]]
 source = "<runtime>/<box-id>-secrets"

@@ -105,6 +105,13 @@ kind = "service"
 summary = "The push notification service the hub posts to when a session needs the user."
 
 [[actor]]
+id = "vendors"
+zone = "external"
+title = "Vendors"
+kind = "service"
+summary = "Harness vendors: the sites a manifest's `install.url` names: the installer container fetches the vendor's install script from there over HTTPS and runs it; what the script downloads is the vendor's business."
+
+[[actor]]
 id = "ssh-hosts"
 zone = "external"
 title = "SSH hosts"
@@ -197,6 +204,13 @@ title = "Context container"
 kind = "process"
 summary = "A throwaway container without network that walks a realm's context directory (notes and memory, which boxes write) and commits it to the context repository ([[pkg:internal/ctxrepo]])."
 commands = ["devc box context-worker"]
+
+[[actor]]
+id = "installer"
+zone = "aux"
+title = "Installer"
+kind = "process"
+summary = "A throwaway container from `localhost/devc-aux/installer` (Debian with bash, curl and git) that runs a harness's vendor installer, the check of what it installed, and vendor login and status commands. It runs no devc code."
 
 [[actor]]
 id = "desktop"
@@ -381,6 +395,23 @@ to = "context-worker"
 title = "Context run"
 transport = "`podman run --rm --network none` from the installer image with every capability dropped, the context directory and the toolbox mounted."
 carries = "A context repository operation (commit, diff, log, bundle, restore)."
+
+[[channel]]
+id = "podman-installer"
+from = "podman"
+to = "installer"
+title = "Installer run"
+transport = "`podman run --rm` from the installer image with no new privileges, the box seccomp profile and `--http-proxy=false`, empty tmpfs mounts at /home, /opt and /tmp, and only what the job needs mounted."
+carries = "A vendor installer with its version directory mounted read-write (network on), the check of the result (network none, read-only), or a vendor login or status command with the toolbox read-only and a temporary home."
+
+[[channel]]
+id = "installer-vendors"
+from = "installer"
+to = "vendors"
+title = "Vendor downloads"
+transport = "curl with `--proto =https --tlsv1.2` for the install script; the script's own downloads."
+carries = "The vendor's install script and what it fetches; a vendor login's traffic."
+boundary = true
 
 [[channel]]
 id = "agent-tmux"

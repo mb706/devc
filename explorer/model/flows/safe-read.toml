@@ -1,0 +1,96 @@
+id = "safe-read"
+kind = "tour"
+title = "Reading beneath a box-writable directory"
+summary = "How host code opens a file in a directory a box controls (a spool, a context tree, an export) so that no symlink, `..`, FIFO, device or oversized file can redirect or stall it, and how it creates directories in such places. The CLI is the example; the daemon runs the same code."
+concern = "host-foundations"
+actors = ["cli"]
+
+[[step]]
+section = "A trusted root"
+
+[[step]]
+at = "cli"
+ref = "internal/paths.Paths.BoxRuntimeDir"
+text = "It starts with a path the host builds itself from validated names: here the box's runtime directory, `<runtime>/<box-id>`. Everything below it is the box's; the path up to it is not."
+
+[[step]]
+at = "cli"
+ref = "internal/session.Store.Ingest"
+text = "A typical caller: ingestion opens the runtime directory as a root, lists `spool` beneath it and reads each file from an offset."
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.OpenRoot"
+text = "The root is opened as an `O_PATH` directory descriptor with `O_NOFOLLOW`, so its last component cannot be a symlink. A probe call fails at once on a kernel without `openat2` (Linux before 5.6): there is no fallback to path-based opens."
+
+[[step]]
+section = "Resolving a name"
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.checkRel"
+text = "The relative name is refused when it is empty, absolute, contains NUL or has a `..` component, which RESOLVE_BENEATH alone would allow while it stays inside."
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.Root.openat2"
+text = "The kernel resolves the name beneath the root's descriptor with RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS and RESOLVE_NO_MAGICLINKS: any symlink on the way, or an escape, fails the open. EAGAIN from a concurrent rename is retried."
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.describe"
+text = "The kernel's ELOOP and EXDEV become messages a user can read: a symlink was refused, or the path escapes the root."
+
+[[step]]
+section = "Reading"
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.Root.Open"
+text = "A file is opened read-only with `O_NOFOLLOW` and `O_NONBLOCK`, then checked with `fstat` on the open descriptor: anything but a regular file (a FIFO, a socket, a device, a directory) is refused. `O_NONBLOCK` keeps a FIFO from blocking the open before that check."
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.Root.ReadFile"
+text = "Whole files are read with a cap the caller chooses; a file that grows past the cap between `fstat` and the read is still refused."
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.Root.ReadFrom"
+text = "Append-only files are tailed: at most `max` bytes from an offset. A file now shorter than the offset was truncated or replaced, and says so (`ErrShrunk`)."
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.Root.List"
+text = "Directories are listed by parsing `getdents64` directly, with a cap on the number of entries. The standard library would fall back to a path-based `lstat` for entries of unknown type; here such entries are examined with `fstatat` relative to the directory's descriptor."
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.Root.RemoveFile"
+text = "Removing works the same way: the parent is resolved beneath the root, and the entry is checked and unlinked relative to the parent's descriptor. If the box swaps the entry in between, only the entry itself goes, never what it points to."
+
+[[step]]
+section = "Creating directories"
+
+[[step]]
+at = "cli"
+ref = "internal/paths.EnsureBeneath"
+text = "When host code creates directories in the state directory, which holds box-writable trees (homes, harness state), the root comes from a flag, the environment or config.toml and may be a symlink; below it, nothing may be."
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.Root.MkdirAll"
+text = "Each component is opened on its own relative to its parent's descriptor and created with `mkdirat`, which never follows a symlink; a symlink or any other non-directory on the way is refused."
+
+[[step]]
+section = "Writing in such trees"
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.Dir"
+text = "The write side works one path component at a time relative to a directory descriptor, never following a symlink: a symlink in the tree is an object to re-own, move or delete as itself. The helper container's workers use it, and so do the safe extractor and a few host writers."
+
+[[step]]
+at = "cli"
+ref = "internal/safefs.Dir.OpenFile"
+text = "Files are opened with `O_NOFOLLOW` and `O_NONBLOCK` added and checked to be regular files, like reads."

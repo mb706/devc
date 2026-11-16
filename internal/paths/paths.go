@@ -1,5 +1,6 @@
 // Package paths is the only place that knows the host layout of spec section
-// 5 and the fixed in-box paths of plan 3.1.
+// 5 and the fixed in-box paths of plan 3.1: paths.go resolves the roots and
+// names every host path, inbox.go holds the paths and IDs inside a box.
 //
 // Security rules: getters accept only names that have already passed
 // internal/names (rule 4); an unvalidated name reaching a getter is a
@@ -223,7 +224,9 @@ func (p *Paths) EnvFile(env string) string { return filepath.Join(p.EnvDir(env),
 
 // EnvRootLog is where `devc root` appends the commands run in boxes of an
 // env, one JSON object per line. It is the only file devc writes below the
-// config directory.
+// config directory on its own; the others it writes there (init, realm
+// add, project add and adopt, join and leave) are written at the user's
+// command.
 func (p *Paths) EnvRootLog(env string) string { return filepath.Join(p.EnvDir(env), "root-log.jsonl") }
 func (p *Paths) RealmsDir() string            { return filepath.Join(p.configDir, "realms") }
 func (p *Paths) RealmDir(realm string) string {
@@ -605,6 +608,9 @@ func (p *Paths) SpoolDir(boxID string) (string, error) {
 	return filepath.Join(d, "spool"), nil
 }
 
+// must returns name if it passes the rule for kind and panics otherwise:
+// an unvalidated name reaching a getter is a programming error, and a
+// panic is better than a path outside the layout.
 func must(kind, name string) string {
 	if !names.ValidKind(kind, name) {
 		panic(fmt.Sprintf("paths: unvalidated %s name %q", kind, name))

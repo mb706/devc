@@ -1,3 +1,7 @@
+// This file connects harnesses to the box life cycle: the mounts of the
+// home strategy, the rendered baselines, launch descriptions and seeds,
+// and the delivery of credentials and granted secrets.
+
 package harness
 
 import (
@@ -371,6 +375,10 @@ func cleanBaselines(p *paths.Paths, ref names.ProjectRef, ms []*config.Harness) 
 	return nil
 }
 
+// renderBaseline writes a harness's settings, instructions and baseline
+// files into the box's baseline directory, which the box mounts read-only
+// at the manifest's baseline directory, and removes files from earlier
+// renderings that are no longer produced.
 func (h *BoxHooks) renderBaseline(p *paths.Paths, ref names.ProjectRef, r *config.Resolved, m *config.Harness) error {
 	if BaselineDir(m) == "" {
 		return nil
@@ -417,6 +425,9 @@ func (h *BoxHooks) renderBaseline(p *paths.Paths, ref names.ProjectRef, r *confi
 	return prune(dir, keep)
 }
 
+// writeLaunch writes the seeds of a harness into a fresh directory that
+// replaces the old one whole, then the validated launch description, so a
+// description never names seeds that are not in place yet.
 func (h *BoxHooks) writeLaunch(etc string, r *config.Resolved, m *config.Harness, rh config.ResolvedHarness, exe string, pathDirs []string) error {
 	l := Describe(r, m, rh, exe)
 	l.Path = pathDirs

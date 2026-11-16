@@ -1,6 +1,10 @@
 // Package names validates every name that can end up in a path, a container
 // name, a git ref or a label, and derives box names, box IDs and session IDs.
 //
+// names.go holds the name rules, project references and box names and
+// IDs; ref.go the rules for git branch and tag names; session.go session
+// IDs.
+//
 // It carries security rule 4 of docs/dev/README.md: realm, project, env,
 // worktree, harness and session names must be validated here before use.
 package names

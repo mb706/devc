@@ -394,3 +394,17 @@ After upgrading to C19r4: a desktop that runs from before is refused by `devc gu
 | The project screen's ports and data | The web app's project screen shows sessions, worktrees and requests; ports and data need an API |
 | Measured limits | The hub's and the channel's budgets (refresh size, resync queue, held events, stream budgets, notification retries) are choices; measure real hubs and harnesses and tune |
 | `devc doctor` polish and `init`/`join` polish | Plan section 4; not done |
+
+## 7. Suspected defects found while writing the explorer
+
+The authors of the explorer's content read the code area by area and reported what looked wrong. Nothing here has been confirmed by a test, and nothing was changed: those chunks touch comments only. Each entry names where to look.
+
+### Foundations, toolbox, harnesses (X4)
+
+1. **Logins never build the installer image.** `internal/harness.LoginRunner` uses the installer image without ensuring it exists or is current: a login fails if the image was removed, and after a devc upgrade it runs in the old image.
+2. **`devc login status` prints the vendor command's output unfiltered**, although that command runs on realm state that boxes can write. Other box-originated text is escaped for terminals.
+3. **The toolbox lock has no time limit** (`internal/toolbox.lock`), so `devc harness gc` waits for as long as an install runs (up to 30 minutes).
+4. **`KillFuseOverlayfs` signals process IDs after the processes have exited**, so a reused ID could be hit.
+5. **A failed `EnsureShim` after publishing** makes `harness install` report an error although `current` has already switched to the new version.
+6. `STATUS.md` section C03 says Codex logs in with an environment token; the code uses the shared home.
+

@@ -1,3 +1,6 @@
+// This file defines `devc toolbox sync|ls|install` and `devc env
+// ls|build`, and installs the pinned toolbox components harnesses need.
+
 package cli
 
 import (

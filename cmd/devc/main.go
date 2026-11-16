@@ -1,7 +1,13 @@
 // Command devc is the single devc binary. It dispatches on the name it was
-// invoked under: "devc" runs the CLI; "git-remote-devc" is the git remote
-// helper for devc:: remotes in boxes; any other name is a harness shim in a
-// box (/opt/devc/shims/<bin> links to devc) and runs the launcher.
+// invoked under: "devc" (and "devc-*") runs the CLI; "git-remote-devc" is
+// the git remote helper for devc:: remotes in boxes; pre-receive, update
+// and post-receive with DEVC_RELAY_PROJECT set are the relay service's
+// hooks; any other name is a harness shim in a box (/opt/devc/shims/<bin>
+// links to devc) and runs the launcher.
+//
+// Security rules: a shim acts only inside a box (DEVC_BOX=1), and the names
+// that select the CLI or the remote helper can never be a harness's shim
+// name (internal/config refuses such manifests).
 package main
 
 import (
@@ -20,6 +26,7 @@ func main() {
 	os.Exit(dispatch(filepath.Base(os.Args[0]), os.Args[1:], shim{root: "/", stderr: os.Stderr}))
 }
 
+// role is what the binary does, decided by route from its name.
 type role int
 
 const (
@@ -28,6 +35,9 @@ const (
 	roleShim
 )
 
+// route maps the base name of argv[0] to a role; the relay hooks are told
+// apart from shims later, by dispatch, because they also need the
+// environment.
 func route(name string) role {
 	switch {
 	case name == "devc" || strings.HasPrefix(name, "devc-"):
@@ -54,6 +64,7 @@ func relayHook(name string, getenv func(string) string) bool {
 	return (name == "pre-receive" || name == "update" || name == "post-receive") && getenv("DEVC_RELAY_PROJECT") != ""
 }
 
+// dispatch runs the role the name selects and returns the exit status.
 func dispatch(name string, args []string, l launcher) int {
 	switch route(name) {
 	case roleCLI:
@@ -86,6 +97,9 @@ func (s shim) relayHook(name string, args []string) int {
 	return cli.Main(append([]string{"relay-hook", name}, args...), os.Stdout, os.Stderr, os.Getenv)
 }
 
+// launch finds the launch description whose bin is name and execs the
+// harness through the launcher. It returns only on failure: 127 when there
+// is no such harness here, 126 when the launcher could not exec it.
 func (s shim) launch(name string, args []string) int {
 	if os.Getenv("DEVC_BOX") != "1" {
 		fmt.Fprintf(s.stderr, "devc: invoked as %q: harness shims work only inside a devc box\n", name)

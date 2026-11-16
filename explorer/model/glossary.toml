@@ -110,3 +110,106 @@ title = "Helper container"
 text = "A throwaway container (`podman run --rm --network none`) whose root filesystem is the toolbox's helper tree behind an overlay, with only the target tree mounted and only the capabilities the job needs. Its workers do what host code must not do in box-writable trees: change owners and modes, copy, move, delete."
 refs = ["internal/engine.RunOptions"]
 see = ["toolbox"]
+
+[[term]]
+id = "configuration-directory"
+title = "Configuration directory"
+aka = ["config directory", "configuration"]
+text = "`~/.config/devc`, or what `--config-dir` or `DEVC_CONFIG_DIR` name: config.toml, realms with their projects and services, envs, harness manifests, baselines, dotfiles. The only source of policy; no box can write it, and the user may keep it in git."
+refs = ["internal/paths.Paths.ConfigDir", "internal/config.Load"]
+see = ["state-directory", "problem"]
+
+[[term]]
+id = "state-directory"
+title = "State directory"
+aka = ["<state>"]
+text = "`~/.local/share/devc`, or what `--state-dir`, `DEVC_STATE_DIR` or `state_dir` in config.toml name: `durable/` (state worth keeping and archiving), `local/` (this machine's), `cache/` and the toolbox. Parts of it are mounted into boxes and so box-writable."
+refs = ["internal/paths.Paths.StateDir"]
+see = ["runtime-directory", "toolbox"]
+
+[[term]]
+id = "runtime-directory"
+title = "Runtime directory"
+aka = ["<runtime>"]
+text = "`$XDG_RUNTIME_DIR/devc`, or `DEVC_RUNTIME_DIR`: the daemon's socket, each box's runtime directory `<box-id>/` (mounted at /run/devc, box-writable) and its secrets directory `<box-id>-secrets/` beside it. Secrets are delivered there only when it is memory-backed."
+refs = ["internal/paths.Paths.RuntimeDir", "internal/paths.Paths.BoxRuntimeDir"]
+see = ["state-directory", "spool"]
+
+[[term]]
+id = "projects-root"
+title = "Projects root"
+aka = ["projects_root"]
+text = "The directory that holds the project directories, `<projects root>/<realm>/<project>`; `projects_root` in config.toml, by default `~/devc`. The root itself is the host's; everything below a project directory is box-writable."
+refs = ["internal/paths.Paths.ProjectsRoot", "internal/paths.Paths.HostProjectDir"]
+see = ["project"]
+
+[[term]]
+id = "env"
+title = "Env"
+aka = ["image recipe"]
+text = "An image recipe in `envs/<env>/`: a Containerfile, built into `localhost/devc-env/<env>:latest`, or a base image named in `env.toml`. A project names an env or an image; without either it gets `default_env` from config.toml."
+refs = ["internal/config.Env", "internal/paths.Paths.EnvDir"]
+see = ["project"]
+
+[[term]]
+id = "manifest"
+title = "Harness manifest"
+aka = ["manifest", "plugin manifest"]
+text = "The TOML description of a harness: installation, home and state, login, baseline, launch, hooks, input. Five are built into devc; a file `harness/<id>.toml` in the configuration directory replaces the built-in one of that id, even when it fails to load."
+refs = ["internal/config.Harness", "internal/config.Config.loadHarnesses"]
+see = ["harness", "baseline"]
+
+[[term]]
+id = "grant"
+title = "Grant"
+aka = ["grants"]
+text = "What a project's box may use beyond itself, listed under `[grants]` in project.toml: realm secrets, SSH hosts (fully or with a read-only profile), a GitHub mode and repositories to read, and services of the realm."
+refs = ["internal/config.Grants"]
+see = ["project"]
+
+[[term]]
+id = "baseline"
+title = "Baseline"
+text = "The settings and instructions devc renders for a harness in every box: the user's `baseline/<id>/settings.json` (or `.toml`) with the keys the manifest's template requires merged over it, and the instructions (the generated sandbox description, then the user's and the realm's). Mounted read-only at the manifest's baseline directory."
+refs = ["internal/harness.Settings", "internal/harness.Instructions", "internal/harness.BoxHooks.renderBaseline"]
+see = ["manifest"]
+
+[[term]]
+id = "launch-description"
+title = "Launch description"
+aka = ["description"]
+text = "`/etc/devc/harness/<id>.json`, written by the host for every installed harness of a box: the executable in a concrete version directory, arguments, environment, the credential's file and variable, home strategy, seeds, secrets, hooks and input settings. The in-box launcher runs a harness from it."
+refs = ["internal/harness.Describe", "internal/boxside.Launch"]
+see = ["shim", "harness-version"]
+
+[[term]]
+id = "home-strategy"
+title = "Home strategy"
+aka = ["home.strategy"]
+text = "How a harness's state is kept. `private`: the home is the box's own, and only the subdirectories in `home.shared` come from realm state. `shared`: the whole harness home is the realm's, mounted into every box of the realm, with `home.per_box` subdirectories kept per box."
+refs = ["internal/config.HarnessHome", "internal/harness.BoxHooks.Contribute"]
+see = ["manifest", "realm"]
+
+[[term]]
+id = "harness-version"
+title = "Harness version"
+aka = ["version directory", "stamp"]
+text = "One installation of a harness in the toolbox, `harness/<id>/v/<stamp>/`, named by its UTC time. `current` points at the latest installation that passed its check; launch descriptions name the concrete directory, so a session keeps its version, and `devc harness gc` removes versions nothing may use."
+refs = ["internal/toolbox.Installer.Install", "internal/toolbox.Toolbox.GC"]
+see = ["toolbox", "launch-description"]
+
+[[term]]
+id = "installer-container"
+title = "Installer container"
+aka = ["installer image"]
+text = "A throwaway container from `localhost/devc-aux/installer`, an image devc builds from a Containerfile embedded in it. Harness installers, their checks and vendor logins run in such containers, with no new privileges, the box seccomp profile and only what the job needs mounted."
+refs = ["internal/toolbox.InstallerImage", "internal/toolbox.EnsureInstallerImage"]
+see = ["helper-container", "toolbox"]
+
+[[term]]
+id = "problem"
+title = "Configuration problem"
+aka = ["problem"]
+text = "An error found while loading the configuration, with its file and key. Loading never stops at one; `devc config check` lists them all, and a box is not created, started or changed while a problem touches its project, realm, env, manifests or granted services."
+refs = ["internal/config.Problem", "internal/config.Config.ProblemsFor"]
+see = ["configuration-directory"]

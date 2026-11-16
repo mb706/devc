@@ -1,6 +1,7 @@
 // Package execx runs external commands (podman, git, nft, nsenter, ssh) with
 // a context, a timeout, capped output capture and redaction, behind an
-// interface that tests replace with Fake.
+// interface that tests replace with Fake. execx.go holds the Runner, the
+// real implementation and process-group handling; fake.go the Fake.
 //
 // Security rules: commands are always argument vectors, never shell strings
 // (README rule 3); values listed in Cmd.Redact are replaced in errors and

@@ -1,3 +1,6 @@
+// This file holds the machine name of the data manifest and the check of
+// data remotes.
+
 package config
 
 import (

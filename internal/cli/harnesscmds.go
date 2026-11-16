@@ -1,3 +1,7 @@
+// This file defines the harness commands (ls, install, gc, update), the
+// tmux build, per-realm secrets and harness logins, and the hidden prompt
+// they use for tokens.
+
 package cli
 
 import (
@@ -66,6 +70,8 @@ func (e *toolEnv) auxSecurityOpts() []string {
 	return e.tb.AuxSecurityOpts(disable)
 }
 
+// installer returns the harness installer of the toolbox, with the
+// installer image built from devc's own cache directory.
 func (a *app) installer(e *toolEnv) *toolbox.Installer {
 	return &toolbox.Installer{
 		Toolbox: e.tb, Engine: e.eng, SecurityOpts: e.auxSecurityOpts(),
@@ -153,6 +159,8 @@ type harnessRow struct {
 	Problem   string     `json:"problem,omitempty"`
 }
 
+// newHarnessCmds returns `devc harness ls|install|gc` and the top-level
+// `devc update`.
 func newHarnessCmds(a *app) []*cobra.Command {
 	var lsJSON bool
 	ls := &cobra.Command{
@@ -443,6 +451,8 @@ func readHidden(fd int, prompt string, w io.Writer) ([]byte, error) {
 	return line, nil
 }
 
+// realmArg checks a realm argument: a valid name (else a usage error) and
+// a configured realm.
 func (a *app) realmArg(c *config.Config, realm string) error {
 	if err := names.Check(names.KindRealm, realm); err != nil {
 		return &usageError{msg: err.Error()}
@@ -453,6 +463,8 @@ func (a *app) realmArg(c *config.Config, realm string) error {
 	return nil
 }
 
+// exactArgs is an argument validator whose error is a usage error that
+// shows the usage line.
 func exactArgs(n int, usage string) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
 		if len(args) != n {
@@ -540,6 +552,8 @@ func newSecretCmd(a *app) *cobra.Command {
 	return group("secret", "Manage per-realm secrets", false, append([]*cobra.Command{set, ls, rm}, newSecretFleetCmds(a)...)...)
 }
 
+// loginRunner returns the runner of login and status containers; the
+// host's TERM is passed on so the vendor's login screen draws correctly.
 func (a *app) loginRunner(e *toolEnv) *harness.LoginRunner {
 	return &harness.LoginRunner{Config: e.cfg, Toolbox: e.tb, Engine: e.eng, SecurityOpts: e.auxSecurityOpts(),
 		Term: a.getenv("TERM"), TTY: a.isTerminal(), Out: a.stderr}

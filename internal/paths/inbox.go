@@ -1,3 +1,5 @@
+// This file holds the fixed identity and paths inside every box.
+
 package paths
 
 import (

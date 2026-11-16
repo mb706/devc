@@ -1,0 +1,92 @@
+id = "binary-dispatch"
+kind = "tour"
+title = "One binary, four roles"
+summary = "How the single devc binary decides what it is from the name it was started under (the CLI, git's remote helper, a relay hook or a harness shim), how the CLI assembles its command tree, and how it reports errors and exit codes."
+concern = "command-line"
+actors = ["cli", "launcher", "box-tools", "relay-hooks"]
+
+[[step]]
+section = "The name decides"
+
+[[step]]
+ref = "cmd/devc.main"
+text = "The process looks only at the last component of `argv[0]`; the whole decision happens before any flag is parsed."
+
+[[step]]
+ref = "cmd/devc.route"
+text = "`devc` and any `devc-…` (release names such as `devc-linux-amd64`) run the CLI; `git-remote-devc` is git's remote helper; every other name is something else devc can be."
+
+[[step]]
+ref = "cmd/devc.dispatch"
+text = "Among the other names, `pre-receive`, `update` and `post-receive` with `DEVC_RELAY_PROJECT` set are a relay hook; the rest is a harness shim."
+
+[[step]]
+at = "cli"
+ref = "internal/toolbox.Toolbox.Sync"
+text = "Where the names come from: the toolbox links `bin/devc` and `bin/git-remote-devc` to the current build, and `EnsureShim` links `shims/<bin>` to `bin/devc` for every installed harness. The relay hooks directory holds links named after the hooks."
+
+[[step]]
+section = "The roles that are not the CLI"
+
+[[step]]
+at = "launcher"
+ref = "cmd/devc.shim.launch"
+text = "A shim works only inside a box (`DEVC_BOX=1`). It looks the name up among the `bin` fields of the launch descriptions in `/etc/devc/harness` and hands over to the launcher, which execs the real harness and returns only on failure (exit status 126; 127 when there is no such harness)."
+
+[[step]]
+at = "launcher"
+ref = "internal/boxside.FindByBin"
+text = "A name that is not a valid name, or that no description claims, finds nothing."
+
+[[step]]
+at = "box-tools"
+ref = "cmd/devc.shim.remoteHelper"
+text = "git runs `git-remote-devc` in a box for `devc::` URLs; it speaks git's remote-helper protocol on standard input and output, through the daemon when one is connected."
+
+[[step]]
+at = "relay-hooks"
+ref = "cmd/devc.shim.relayHook"
+text = "A relay hook re-enters the CLI as `devc relay-hook <name>`, so the hooks are ordinary commands with the CLI's conventions."
+
+[[step]]
+section = "The CLI"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.Main"
+text = "The CLI's entry: an `app` carries the global flags, the standard streams, the environment and the command runner to every command, so tests can run the whole tree with fakes."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.newRoot"
+text = "The tree is assembled in one place: the global flags (`--config-dir`, `--state-dir`, `-v`), every command group, and last one command per harness."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.harnessRunCmds"
+text = "`devc claude`, `devc codex`, …: the manifests are loaded before cobra parses the arguments (the `--config-dir` flag is found by scanning them), so every devc command on the host reads the configuration directory. A harness whose `bin` collides with a devc command is skipped; in a box nothing is registered."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.groupRun"
+text = "A group command without a subcommand shows its help; with an unknown one it is a usage error."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.main"
+text = "Errors become exit statuses: 2 for usage errors (bad flags, wrong argument counts), 1 for failures, or the status a command chose after printing its own output."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.errText"
+text = "Every error message passes through a filter that makes it safe for a terminal, because errors can carry output of commands that ran in a box."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.writeJSON"
+text = "`--json` output is indented JSON with DEL and the C1 control characters escaped too, which `encoding/json` leaves raw."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.CommandTree"
+text = "The same tree, built without running anything, for tools that document the commands."

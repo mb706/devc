@@ -1,5 +1,13 @@
 // Package config loads, validates and answers questions about the devc
-// configuration: config.toml, realms, projects, envs and harness manifests.
+// configuration: config.toml, realms, projects, services, envs and harness
+// manifests.
+//
+// load.go reads every file and collects problems; schema.go, services.go
+// and grants.go hold the types of the files; validate.go (with the
+// validators in grants.go and services.go) checks every key; lookup.go
+// answers questions (a project by reference, the problems that block it,
+// its merged settings); remotes.go and secretfiles.go hold helpers for
+// data remotes and for the archive's view of harness state.
 //
 // Security rules: policy comes only from the config directory (README rule
 // 1); nothing here reads from a project directory, a box home or any other
@@ -248,6 +256,10 @@ func subdirs(dir string, ps *problems) []string {
 	return out
 }
 
+// loadHarnesses loads the built-in manifests, then the user's: a file
+// harness/<id>.toml replaces the built-in manifest of that id even when it
+// fails to load, so a broken user manifest blocks its id instead of the
+// built-in one quietly taking its place.
 func (c *Config) loadHarnesses(ps *problems) {
 	builtin, _ := fs.Glob(assets.Harness, "harness/*.toml")
 	for _, name := range builtin {
@@ -313,6 +325,8 @@ func (c *Config) loadHarnesses(ps *problems) {
 	}
 }
 
+// loadEnvs loads envs/<env>/; an env needs a Containerfile, an env.toml
+// with a base image, or both (checked by validateEnv).
 func (c *Config) loadEnvs(ps *problems) {
 	envsDir := c.Paths.EnvsDir()
 	for _, name := range subdirs(envsDir, ps) {
@@ -338,6 +352,8 @@ func (c *Config) loadEnvs(ps *problems) {
 	}
 }
 
+// loadRealms loads every realm directory with its projects and services. A
+// realm directory without realm.toml is a problem and is skipped whole.
 func (c *Config) loadRealms(ps *problems) {
 	realmsDir := c.Paths.RealmsDir()
 	for _, name := range subdirs(realmsDir, ps) {
@@ -363,6 +379,8 @@ func (c *Config) loadRealms(ps *problems) {
 	}
 }
 
+// loadProjects loads the projects of a realm; a mount without a mode is
+// read-only.
 func (c *Config) loadProjects(realm string, ps *problems) {
 	dir := c.Paths.ProjectDefsDir(realm)
 	for _, name := range subdirs(dir, ps) {

@@ -1,3 +1,6 @@
+// This file runs vendor login and status commands in throwaway containers
+// and applies a realm's override of a harness's login method.
+
 package harness
 
 import (

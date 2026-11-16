@@ -1,3 +1,6 @@
+// This file implements Dir, the write side: operations on single path
+// components relative to a directory descriptor.
+
 package safefs
 
 import (
@@ -13,8 +16,9 @@ import (
 )
 
 // Dir is an open directory for the write-side operations of the helper
-// container's workers (plan 3.3): re-owning, changing modes, creating,
-// renaming and deleting below a box-writable tree. Every operation takes a
+// container's workers (plan 3.3), and of host code that writes into a tree
+// it does not trust: re-owning, changing modes, creating, renaming and
+// deleting below a box-writable tree. Every operation takes a
 // single path component and acts relative to the directory's descriptor
 // without following a symlink, so a tree can be walked descriptor by
 // descriptor and nothing reached through a symlink is ever touched: a

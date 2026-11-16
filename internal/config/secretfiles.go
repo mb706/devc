@@ -1,3 +1,7 @@
+// This file maps a manifest's credential files and transcript globs to
+// paths in the realm's harness state, and turns the size and time settings
+// of the archive into numbers.
+
 package config
 
 import (

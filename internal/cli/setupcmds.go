@@ -1,3 +1,7 @@
+// This file defines `devc init`, which sets up the configuration directory
+// of a new machine, and `devc cursor` and `devc code`, which attach a
+// desktop editor to a box.
+
 package cli
 
 import (
@@ -143,6 +147,9 @@ const editorLong = "Start the box if needed and open %s attached to it, at the m
 	"extensions, terminals and tasks run with your rights there). Attach only to boxes whose code you trust as much " +
 	"as code on your desktop."
 
+// newEditorCmd returns `devc <bin>` for an editor with VS Code's attach
+// convention; it warns at every use, because the editor's server in the
+// box can act on the host through the editor.
 func newEditorCmd(a *app, bin, display string) *cobra.Command {
 	return &cobra.Command{
 		Use:   bin + " [<realm>/<project>]",

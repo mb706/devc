@@ -1,0 +1,116 @@
+id = "config-load"
+kind = "tour"
+title = "From a project reference to its configuration"
+summary = "How a command finds the configuration directory, loads and validates every file in it, turns a `realm/project` argument (or the current directory) into a checked reference, refuses to act on a project with problems, and merges project, realm and global settings."
+concern = "configuration"
+actors = ["cli"]
+
+[[step]]
+section = "Where the configuration is"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.paths"
+text = "Every command starts here: the flags `--config-dir` and `--state-dir` and the process environment go to the layout resolver."
+
+[[step]]
+at = "cli"
+ref = "internal/paths.Resolve"
+text = "Each root is decided in the order flag, environment variable (`DEVC_CONFIG_DIR`, `DEVC_STATE_DIR`, `DEVC_RUNTIME_DIR`), default. A missing `XDG_RUNTIME_DIR` is not an error yet; only code that needs the runtime directory fails."
+
+[[step]]
+section = "Loading"
+
+[[step]]
+at = "cli"
+ref = "internal/config.Load"
+text = "One call reads everything: config.toml, the harness manifests, the envs, the realms with their projects and services. It never stops at the first problem; it returns the configuration together with the list of problems."
+
+[[step]]
+at = "cli"
+ref = "internal/config.readOptional"
+text = "Every file must be a regular file of at most 1 MiB. A missing optional file is no problem; an unreadable one is."
+
+[[step]]
+at = "cli"
+ref = "internal/config.decode"
+text = "TOML is decoded into a struct that already holds the defaults, so an absent key keeps its default. Syntax and type errors are reported with the key; unknown keys are problems too, but the rest of the file is still used and checked."
+
+[[step]]
+at = "cli"
+ref = "internal/config.defaultProject"
+text = "The defaults of a project, for one: `harnesses = [\"claude\"]`, `grants.github = \"relay\"`, three request kinds approved automatically, data in `data/`. A realm's default network level is `internet`."
+
+[[step]]
+at = "cli"
+ref = "internal/paths.Paths.WithGlobal"
+text = "config.toml may move the projects root and the state directory, but `state_dir` applies only when neither a flag nor the environment fixed the state root."
+
+[[step]]
+at = "cli"
+ref = "internal/config.Config.loadHarnesses"
+text = "The built-in manifests come from the binary; a file `harness/<id>.toml` replaces the built-in manifest of that id, even when the file fails to load, so a broken user manifest never silently becomes the built-in one."
+
+[[step]]
+at = "cli"
+ref = "internal/config.subdirs"
+text = "Realms, projects, services and envs are directories. Their names are checked against the name rules before anything is built from them; hidden entries and plain files are skipped."
+
+[[step]]
+at = "cli"
+ref = "internal/config.Config.loadRealms"
+text = "A realm directory needs a realm.toml and a project directory a project.toml (both may be empty); without one the entity is left out and a problem recorded."
+
+[[step]]
+section = "Validation"
+
+[[step]]
+at = "cli"
+ref = "internal/config.validateProject"
+text = "Every key is checked: names, enumerations, sizes, branch names and globs, that the env or image and the harnesses exist, that grants and mounts name things of the same realm. Values that later become command arguments cannot start with `-`."
+
+[[step]]
+at = "cli"
+ref = "internal/config.checkUpstream"
+text = "One rule as an example: an upstream may not be a `<transport>::` URL (git's `ext::` would run a command) and must use https, http, ssh, git or file, or the scp form."
+
+[[step]]
+at = "cli"
+ref = "internal/config.validateHarness"
+text = "A manifest's shim name may not be one of devc's own names; its installer URL must be https; its home directories may not nest; its baseline must live in one dedicated directory, since that directory is mounted over the image."
+
+[[step]]
+section = "Which project, and may devc act on it"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.resolveRef"
+text = "Commands that take an optional project pass their argument and the current directory on."
+
+[[step]]
+at = "cli"
+ref = "internal/config.Config.ResolveProject"
+text = "`realm/project` must name a configured project; a bare name must be unique across realms; without an argument the current directory must lie in `<projects root>/<realm>/<project>`. Only the path is compared: nothing below the project directory is opened."
+
+[[step]]
+at = "cli"
+ref = "internal/names.Parse"
+text = "The two parts of a reference are checked separately: a realm is 1 to 32 lower-case letters and digits, a project follows the general name rule."
+
+[[step]]
+at = "cli"
+ref = "internal/config.Config.ProblemsFor"
+text = "The problems that concern one project: those of config.toml, its realm, its own file, its env, its harness manifests and the services it is granted."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.checkProblems"
+text = "No box is created, started or changed while that list is not empty; the git, data, network and relay commands check it the same way. `devc config show` only prints the problems as warnings."
+
+[[step]]
+section = "The merged view"
+
+[[step]]
+at = "cli"
+ref = "internal/config.Config.Resolved"
+text = "The project's effective settings: project over realm over global for each key, the realm's and the project's allowlists and shares joined, the realm's override of a harness's authentication applied, the box name and box ID derived. `devc config show <project>` prints it."

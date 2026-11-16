@@ -266,6 +266,9 @@ func (t *Toolbox) List() (Info, error) {
 	return in, nil
 }
 
+// mkdirs creates directories with mode 0755 and corrects the mode of
+// existing ones, because boxes must be able to read everything in the
+// toolbox.
 func mkdirs(dirs ...string) error {
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -289,6 +292,10 @@ func mkdirs(dirs ...string) error {
 	return nil
 }
 
+// lock takes an exclusive flock on path and waits for it without a time
+// limit. It serialises Sync, the installs and gc of one harness, and the
+// tmux build; an install or a build holds it for as long as its container
+// runs (up to 30 minutes).
 func lock(path string) (func(), error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|unix.O_CLOEXEC, 0o600)
 	if err != nil {

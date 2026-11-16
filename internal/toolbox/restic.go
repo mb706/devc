@@ -1,3 +1,6 @@
+// This file installs the pinned restic release into the toolbox, and holds
+// the checksummed download cache that the Node.js install uses too.
+
 package toolbox
 
 import (

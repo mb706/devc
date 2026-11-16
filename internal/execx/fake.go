@@ -1,3 +1,5 @@
+// This file implements Fake, the Runner of unit tests.
+
 package execx
 
 import (

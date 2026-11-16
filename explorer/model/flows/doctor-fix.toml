@@ -1,0 +1,131 @@
+id = "doctor-fix"
+kind = "flow"
+title = "devc doctor --fix"
+summary = "What `devc doctor --fix` does itself (directories and the toolbox, all without root), what its checks look at, and how everything that needs root ends up in one printed script the user reviews and runs."
+concern = "host-setup"
+trigger = "devc doctor --fix"
+actors = ["user", "cli", "state-dir", "podman", "helper"]
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc doctor"
+label = "devc doctor --fix"
+external = true
+text = "Without `--fix` the command only checks. With it, devc first does what needs no root, then checks, then prints the rest."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.load"
+text = "The configuration supplies the directories and the engine binary. Problems in it are only a warning here: the host can be checked before the configuration is right."
+
+[[step]]
+section = "What --fix does itself"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.doctorFix"
+text = "The fixes that need no root run before the checks, so the checks see their result."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "state and runtime directories (0700)"
+ref = "internal/paths.Paths.Ensure"
+text = "The state directory and the runtime directory are created with mode 0700, every component below the root without following a symlink; the projects root is created with mode 0755. A missing `XDG_RUNTIME_DIR` is only a warning here."
+
+[[step]]
+at = "cli"
+ref = "internal/toolbox.Toolbox.Sync"
+text = "The toolbox is synced: this devc binary under its build ID, the helper root filesystem, the box seccomp profile and the built-in skills. The overlay-statx check below needs the helper root filesystem."
+
+[[step]]
+section = "The checks"
+
+[[step]]
+at = "cli"
+ref = "internal/doctor.NewHost"
+text = "The checks get the host as an object: the command runner, the engine, the user and UID, the projects root and state directory, and the helper root filesystem with the auxiliary containers' security options."
+
+[[step]]
+at = "cli"
+ref = "internal/doctor.Run"
+text = "Fifteen checks run in a fixed order, each with a status (ok, warn, fail, skip), a detail, a hint and, where root can fix the problem, the shell commands that would."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman version, podman info"
+ref = "internal/engine.Podman.Info"
+text = "The engine is asked once for its version and its view of the host (rootless, ID mappings, network backend, storage driver, delegated cgroup controllers); several checks share the answer."
+
+[[step]]
+at = "cli"
+ref = "internal/doctor.checkSubIDs"
+text = "One check for many: subordinate IDs are read from /etc/subuid and /etc/subgid, and the engine's actual mapping counts too. Too few, and the check fails with a `usermod` command for root."
+
+[[step]]
+at = "cli"
+ref = "internal/doctor.checkOverlayStatx"
+text = "The overlay-statx check looks for a fuse-overlayfs bug that makes programs hang in boxes. It is skipped while the toolbox has no helper root filesystem."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman create --rootfs helper-rootfs:O … devc box statx-worker"
+ref = "internal/engine.Podman.Create"
+text = "A probe container is created from the helper root filesystem behind a throwaway overlay, without network or capabilities, under a random name, and started."
+
+[[step]]
+from = "podman"
+to = "helper"
+via = "cmd:devc box statx-worker"
+label = "devc box statx-worker"
+external = true
+text = "The container runs devc's statx worker."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.StatxBirth"
+text = "The worker asks `statx()` for the birth time of `/bin/devc`, a file on the overlay's lower layer. On an affected host the call never returns."
+
+[[step]]
+at = "cli"
+ref = "internal/doctor.cleanupProbe"
+text = "The CLI polls the container every 200 ms: an exit within 10 seconds is ok, a longer wait fails the check. The probe is removed in every case; a worker stuck in the call survives SIGKILL, so the fuse-overlayfs process serving that container is ended first."
+
+[[step]]
+at = "cli"
+ref = "internal/doctor.ReflinkProbe"
+text = "For the projects root (or its nearest existing parent), a temporary file is cloned with FICLONE to learn whether savepoints can be instant reflink copies; the probe's files are removed again."
+
+[[step]]
+section = "The output"
+
+[[step]]
+at = "cli"
+ref = "internal/doctor.WriteTable"
+text = "A table of all checks, then the hint of every check that needs attention."
+
+[[step]]
+at = "cli"
+ref = "internal/doctor.RootScript"
+text = "The root commands of every check that warns or fails are collected into one `#!/bin/sh` script with `set -e`, each block headed by its check. User names and paths in the commands are quoted for the shell."
+detail = "Checks that contribute root commands: subids (`usermod --add-subuids …`), linger (`loginctl enable-linger`), selinux (`semanage fcontext`, `restorecon`), apparmor-userns (a profile for the engine binary) and cgroups (a systemd drop-in that delegates controllers)."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "the table and the root script"
+ref = "internal/doctor.RootScript"
+text = "The CLI prints the script with the request to review it and run it with `sudo sh`, or says that nothing needs root. The exit status is 1 when any check failed."
+
+[[step]]
+at = "user"
+external = true
+label = "sudo sh <script>"
+text = "The user reviews the script and runs it as root. devc itself never runs a privileged command."

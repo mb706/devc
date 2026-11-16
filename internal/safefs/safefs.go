@@ -8,11 +8,13 @@
 // with a size cap. There is deliberately no fallback to path-based opens: if
 // openat2 is unavailable, every operation fails.
 //
-// Dir (dir.go) adds the write-side operations the helper container's
-// workers need on such trees (re-owning, modes, mkdir, rename, delete): each
-// takes a single path component relative to an open directory descriptor
-// and never follows a symlink, so a tree is walked descriptor by descriptor
-// and a symlink in it is only ever acted on as the link itself.
+// Dir (dir.go) adds the write-side operations on such trees (re-owning,
+// modes, mkdir, rename, delete) that the helper container's workers need,
+// and that host code uses where it writes into a tree it does not trust
+// (the archive extractor, fleet restores, the data manifest): each takes a
+// single path component relative to an open directory descriptor and never
+// follows a symlink, so a tree is walked descriptor by descriptor and a
+// symlink in it is only ever acted on as the link itself.
 package safefs
 
 import (
@@ -98,6 +100,8 @@ func checkRel(rel string) error {
 	return nil
 }
 
+// openat2 resolves rel beneath the root with the package's resolve flags,
+// after checkRel; EINTR and EAGAIN (a concurrent rename) are retried.
 func (r *Root) openat2(rel string, flags int) (int, error) {
 	if err := checkRel(rel); err != nil {
 		return -1, &fs.PathError{Op: "safefs: open", Path: r.join(rel), Err: err}
@@ -134,7 +138,10 @@ func (r *Root) join(rel string) string {
 	return path.Join(r.name, rel)
 }
 
-// Open opens rel for reading. The result must be a regular file.
+// Open opens rel for reading. The result must be a regular file, checked
+// on the open descriptor, so a swap after the check changes nothing.
+// O_NONBLOCK lets the open of a planted FIFO return at once instead of
+// waiting for a writer; the type check then refuses it.
 func (r *Root) Open(rel string) (*os.File, error) {
 	fd, err := r.openat2(rel, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK)
 	if err != nil {

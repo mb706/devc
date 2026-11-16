@@ -1,0 +1,143 @@
+id = "harness-login"
+kind = "flow"
+title = "devc login"
+summary = "A harness is logged in once per realm: the vendor's login command runs in a throwaway container with a temporary home, the token it prints becomes a realm secret (or the vendor writes its credential into the realm's shared harness state), and the next `devc up` hands it to the boxes."
+concern = "toolbox-and-harnesses"
+trigger = "devc login demo claude"
+actors = ["user", "cli", "state-dir", "podman", "installer", "vendors", "launcher"]
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc login"
+label = "devc login demo claude"
+external = true
+text = "The user names a realm and a harness. A login belongs to the realm: every box of the realm that lists the harness uses it."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.toolEnv"
+text = "The configuration is loaded and the toolbox synced: the login container mounts the toolbox and runs the installed harness from it."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.realmArg"
+checks = ["internal/names.Check"]
+text = "The realm must be a valid name and a configured realm."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.manifestFor"
+checks = ["internal/config.Config.HarnessProblems"]
+text = "The harness's manifest must load without problems."
+
+[[step]]
+at = "cli"
+ref = "internal/harness.EffectiveAuth"
+text = "The realm may override the manifest's method and secret name (`[harness.<id>]` in realm.toml). Everything below follows the effective method: `api-key` only asks for the key, and `none` needs no login."
+
+[[step]]
+section = "env-token (Claude Code)"
+
+[[step]]
+at = "cli"
+ref = "internal/harness.LoginRunner.Interactive"
+text = "A private temporary home is created below `local/tmp/` and removed when the login ends, so the vendor's files from the login stay behind nowhere."
+
+[[step]]
+at = "cli"
+ref = "internal/harness.LoginRunner.options"
+text = "The container gets the toolbox read-only at /opt/devc and the temporary home at /home/dev, the manifest's environment, and the host's `TERM`. A command whose first word is the harness's `bin` runs the real executable. No secret is passed in."
+detail = "A harness whose method is `none` in `install` (provided by the project image) cannot log in here: it is not in the toolbox. A harness that is not installed is refused with the command that installs it."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run -i -t installer: claude setup-token"
+ref = "internal/engine.Podman.RunStream"
+text = "The container is attached to the user's terminal (`-i`, `-t` when there is one, no detach keys), with network, from the installer image and with the options every auxiliary container gets."
+
+[[step]]
+from = "podman"
+to = "installer"
+via = "exec"
+label = "start the container"
+external = true
+text = "Podman starts the throwaway container."
+
+[[step]]
+from = "installer"
+to = "vendors"
+via = "stream"
+label = "the vendor's login"
+external = true
+text = "The vendor's command runs its own login flow, typically a link to open in a browser. devc does not see or parse it."
+
+[[step]]
+from = "installer"
+to = "user"
+via = "stream"
+label = "a token on the screen"
+external = true
+text = "Claude Code's `setup-token` prints a long-lived token, which the user copies."
+
+[[step]]
+from = "user"
+to = "cli"
+via = "stream"
+label = "the token (hidden)"
+external = true
+text = "When the container has exited, the CLI asks for the token. With `--token-stdin` the container is skipped and the token comes from standard input, for scripts."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.readHidden"
+unchecked = "the token arrives on the CLI's own terminal; the login command reads it through readValue once the container has exited"
+text = "Echo is switched off while the token is typed and restored afterwards, also on Ctrl-C. At most 64 KiB is read; the value is never printed."
+
+[[step]]
+at = "cli"
+ref = "internal/secrets.FileStore.Set"
+checks = ["internal/names.Check"]
+text = "The secret's name is the manifest's `auth.secret` or the realm's override (`claude-token` for Claude Code), checked again; an empty or oversized value is refused."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "durable/realms/<realm>/secrets/<name>"
+ref = "internal/secrets.writeFile"
+text = "The value is written to a new temporary file in the realm's 0700 secrets directory and renamed into place with mode 0600. The CLI says that `devc up` delivers it."
+
+[[step]]
+section = "shared-home (Codex, pi, Cursor)"
+
+[[step]]
+at = "cli"
+ref = "internal/harness.AlsoStateDir"
+text = "With `shared-home`, the realm's shared harness home (`durable/realms/<realm>/harness/<id>/home`, and the `home.also` directories) is mounted in the login container at the harness's home, so the vendor writes its own credential file straight into realm state. `--token-stdin` is refused."
+detail = "Those directories are also mounted into every box of the realm that lists the harness (strategy `shared`), so the boxes find the credential where the vendor's program expects it, and can change it."
+
+[[step]]
+section = "At the next devc up"
+
+[[step]]
+at = "cli"
+ref = "internal/harness.BoxHooks.deliverSecrets"
+unchecked = "a later `devc up`, another CLI process, reads the stored secret"
+text = "`devc up` reads the credential of every installed token harness of the project, together with the granted secrets. A missing credential is a warning naming `devc login`, not an error."
+
+[[step]]
+from = "cli"
+to = "launcher"
+via = "file"
+label = "<runtime>/<box-id>-secrets/<name>"
+ref = "internal/secrets.Deliver"
+text = "The values are written as 0400 files into the box's secrets directory, which must be memory-backed and is mounted read-only at `/run/devc-secrets`. With `secrets.delivery = \"daemon\"` nothing is written there and the launcher asks the daemon instead."
+
+[[step]]
+at = "launcher"
+ref = "internal/boxside.PrepareLaunch"
+unchecked = "the launcher runs when the harness starts in the box and reads the file through the read-only /run/devc-secrets mount"
+text = "When the harness starts, the launcher reads the file and exports it under the manifest's `auth.env` (`CLAUDE_CODE_OAUTH_TOKEN` for Claude Code) for the harness it executes."

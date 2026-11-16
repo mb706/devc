@@ -1,3 +1,5 @@
+// This file copies the built-in skills from the binary into the toolbox.
+
 package toolbox
 
 import (

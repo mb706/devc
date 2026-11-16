@@ -1,3 +1,6 @@
+// This file implements the overlay-statx check, which runs a probe
+// container and cleans up after it even when the probe hangs.
+
 package doctor
 
 import (

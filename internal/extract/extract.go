@@ -2,7 +2,8 @@
 // bzip2-compressed tar, zip) into a new, empty directory (work order C16).
 // It is the security boundary of shares, which put text in front of agents
 // possibly in another realm, and of downloaded dependency sources: what an
-// archive holds is hostile input.
+// archive holds is hostile input. The toolbox's Node.js release and the
+// exports that fleet reads back are unpacked with it too.
 //
 // Rules, whatever the archive says:
 //

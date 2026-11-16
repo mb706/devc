@@ -1,3 +1,7 @@
+// This file installs harnesses into the toolbox in throwaway containers,
+// publishes them, creates their shims and collects old versions; the
+// layout is described below the imports.
+
 package toolbox
 
 import (

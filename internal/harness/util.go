@@ -1,3 +1,5 @@
+// This file holds the package's helpers for writing files.
+
 package harness
 
 import (

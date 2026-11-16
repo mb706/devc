@@ -1,3 +1,6 @@
+// This file probes the filesystem of the projects root: its type, and
+// whether it can clone files (reflinks) for instant savepoints.
+
 package doctor
 
 import (

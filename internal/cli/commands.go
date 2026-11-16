@@ -1,3 +1,6 @@
+// This file defines version, doctor, config, realm ls and project ls, and
+// the helpers for tables and JSON output that listings share.
+
 package cli
 
 import (
@@ -327,6 +330,8 @@ func newProjectCmd(a *app) *cobra.Command {
 	return group("project", "Manage projects", false, append([]*cobra.Command{ls}, newProjectGitCmds(a)...)...)
 }
 
+// table starts an aligned table with its header line; the caller writes
+// tab-separated rows and flushes.
 func table(w io.Writer, headers ...string) *tabwriter.Writer {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, strings.Join(headers, "\t"))
@@ -345,6 +350,8 @@ func writeJSON(w io.Writer, v any) error {
 	return err
 }
 
+// escapeControls escapes DEL and the C1 control characters of JSON text as
+// \u escapes; the JSON stays valid and decodes to the same strings.
 func escapeControls(b []byte) []byte {
 	var out bytes.Buffer
 	for len(b) > 0 {

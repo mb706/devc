@@ -1,3 +1,6 @@
+// This file defines `devc service install|uninstall|status`, which manage
+// devc's systemd user units.
+
 package cli
 
 import (
@@ -14,7 +17,9 @@ import (
 	"github.com/mb706/devc/internal/service"
 )
 
-// serviceManager returns the manager of the banking timer's units.
+// serviceManager returns the manager of devc's systemd user units (the
+// daemon's or the banking timer's). DEVC_SYSTEMD_USER_DIR replaces the
+// unit directory, so tests never touch the real one.
 func (a *app) serviceManager() (*service.Manager, error) {
 	dir := a.getenv("DEVC_SYSTEMD_USER_DIR")
 	if dir == "" {

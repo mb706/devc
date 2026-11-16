@@ -1,5 +1,12 @@
 // Package doctor checks the host requirements of spec section 16 and
-// reports them; it never changes the host. Fixes are printed as hints.
+// reports them. It changes nothing on the host that outlasts a check: the
+// reflink probe's files and the overlay-statx probe container are removed
+// again. Fixes are printed as hints, and those that need root as commands
+// that RootScript collects into one script; `devc doctor --fix` (in
+// internal/cli) does the fixes that need no root.
+//
+// doctor.go holds the checks and the output; fs.go the filesystem probes;
+// statx.go the overlay-statx probe, which runs in a container.
 //
 // Security rules: nothing here runs a privileged command (README rule 6
 // applies to the callers: a failed check is reported, not worked around).
@@ -267,6 +274,8 @@ func subIDCount(content, user string, uid int) int {
 	return total
 }
 
+// checkSubIDs needs at least 65,536 subordinate UIDs and GIDs for the
+// user, from /etc/subuid and /etc/subgid or from the engine's mapping.
 func checkSubIDs(_ context.Context, h *Host, es *engineState) Check {
 	c := Check{ID: "subids", Title: "subordinate UIDs and GIDs"}
 	counts := map[string]int{}
@@ -615,6 +624,9 @@ func checkProjectsFS(_ context.Context, h *Host, _ *engineState) Check {
 	return c
 }
 
+// checkCgroups warns unless the memory and pids controllers are delegated
+// to the user: without them the boxes' memory and PID limits cannot be
+// applied.
 func checkCgroups(_ context.Context, h *Host, es *engineState) Check {
 	c := Check{ID: "cgroups", Title: "cgroup v2 delegation"}
 	hint := "delegate controllers to user sessions:\n" +

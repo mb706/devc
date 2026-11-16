@@ -1,9 +1,19 @@
 // Package cli defines the devc command tree with cobra. Commands are thin:
 // they parse arguments, call into the internal packages and format output.
 //
+// root.go builds the tree and holds what every command shares: the app,
+// usage errors and exit statuses, and the error filter. The other files are
+// named after the commands they define, for example setupcmds.go (init,
+// the editor commands), toolcmds.go (toolbox, env), harnesscmds.go
+// (harness, update, toolbox build, secret, login), servicecmds.go (the
+// systemd units) and commands.go (version, doctor, config, realm and
+// project ls); inbox.go and inboxgit.go hold the hidden `devc box`
+// commands that run in boxes and helper containers.
+//
 // Security rules: configuration is loaded only from the config directory
-// (README rule 1); errors are printed without secrets (rule 5). Exit codes:
-// 0 success, 1 failure, 2 usage error.
+// (README rule 1); errors are printed without secrets (rule 5) and made
+// safe for a terminal, since they can carry output of commands that ran in
+// a box (rule 2). Exit codes: 0 success, 1 failure, 2 usage error.
 package cli
 
 import (
@@ -60,6 +70,7 @@ type app struct {
 	args []string
 }
 
+// paths resolves the layout from the global flags and the environment.
 func (a *app) paths() (*paths.Paths, error) {
 	return paths.Resolve(paths.Options{
 		ConfigDir: a.configDir,
@@ -152,13 +163,13 @@ func Run() int {
 	return Main(os.Args[1:], os.Stdout, os.Stderr, os.Getenv)
 }
 
-// CommandTree returns devc's command tree for documentation: the code
-// explorer (explorer/tool) walks it to list the commands, their flags and
-// the functions they run. The tree is built as Main builds it, but nothing
-// runs: getenv is the whole environment, external commands are refused,
-// and the standard streams are empty. The harness commands come from the
-// configuration directory getenv names (DEVC_CONFIG_DIR); an empty one
-// gives the built-in harnesses only, and reads nothing of the user's.
+// CommandTree returns devc's command tree for tools that document it: the
+// commands, their flags and the functions they run. The tree is built as
+// Main builds it, but nothing runs: getenv is the whole environment,
+// external commands are refused, and the standard streams are empty. The
+// harness commands come from the configuration directory getenv names
+// (DEVC_CONFIG_DIR); an empty one gives the built-in harnesses only, and
+// reads nothing of the user's.
 func CommandTree(getenv func(string) string) *cobra.Command {
 	unavailable := func() (string, error) { return "", errors.New("not available while documenting") }
 	no := func() bool { return false }
@@ -167,6 +178,9 @@ func CommandTree(getenv func(string) string) *cobra.Command {
 	return newRoot(a)
 }
 
+// newRoot assembles the whole command tree: the global flags, every
+// command group, and last one command per harness manifest, so that a
+// harness whose bin collides with a devc command or alias is left out.
 func newRoot(a *app) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "devc",
@@ -255,12 +269,15 @@ func groupRun(cmd *cobra.Command, args []string) error {
 	return cmd.Help()
 }
 
+// group makes a command that only holds subcommands.
 func group(use, short string, hidden bool, subs ...*cobra.Command) *cobra.Command {
 	c := &cobra.Command{Use: use, Short: short, Hidden: hidden, Args: cobra.ArbitraryArgs, RunE: groupRun}
 	c.AddCommand(subs...)
 	return c
 }
 
+// noArgs and maxArgs are argument validators whose errors are usage
+// errors (exit status 2), unlike cobra's own.
 func noArgs(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		return usageErrorf("%q takes no arguments, got %q", cmd.CommandPath(), args[0])

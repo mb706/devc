@@ -1,3 +1,5 @@
+// This file checks git branch and tag names that come from users or boxes.
+
 package names
 
 import (
