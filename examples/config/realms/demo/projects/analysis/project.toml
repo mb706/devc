@@ -22,6 +22,8 @@ secrets = []
 github = "relay"               # what the box holds for GitHub: relay (nothing; git goes through the relay) | none (the same) |
                                # app (short-lived tokens of the realm's [github.app]) | token:<secret-name> (a stored token)
 github_read = []               # further repositories "owner/repo" that `devc gh` in the box may read besides the project's own
+services = []                  # services of the realm (realms/<realm>/services/<name>/service.toml) the box reaches through the daemon,
+                               # which adds the credential; see examples/services
 
 # [grants.github_token]        # mode app only: the token's permissions (default contents and metadata read; workflows is refused)
 # permissions = { contents = "write", pull_requests = "write", issues = "read" }

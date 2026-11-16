@@ -155,21 +155,27 @@ func (w *boxWorker) serveStream(ctx context.Context, st *yamux.Stream, handlers 
 	}
 	_ = st.SetReadDeadline(time.Time{})
 	m, kind, perr := proto.ParseMessage(line)
-	if perr == nil && kind == proto.KindRequest && (m.Method == proto.MethodHostProxy || m.Method == proto.MethodHostDial) {
+	if perr == nil && kind == proto.KindRequest && (m.Method == proto.MethodHostProxy || m.Method == proto.MethodHostDial || m.Method == proto.MethodHostService) {
 		select {
 		case w.relays <- struct{}{}:
 		default:
-			if m.Method == proto.MethodHostProxy {
-				refuseBusy(st)
-			} else {
+			switch m.Method {
+			case proto.MethodHostProxy:
+				refuseBusy(st, "devc proxy")
+			case proto.MethodHostService:
+				refuseBusy(st, "devc service")
+			default:
 				rawStream{st: st}.abort()
 			}
 			return
 		}
 		defer func() { <-w.relays }()
-		if m.Method == proto.MethodHostProxy {
+		switch m.Method {
+		case proto.MethodHostProxy:
 			w.serveProxy(ctx, st, br, m)
-		} else {
+		case proto.MethodHostService:
+			w.serveService(ctx, st, br, m)
+		default:
 			w.serveDial(ctx, st, br, m)
 		}
 		return

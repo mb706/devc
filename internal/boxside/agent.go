@@ -91,9 +91,11 @@ type Agent struct {
 	// per window (netrelay.go).
 	relays  chan struct{}
 	limiter *relayLimiter
-	// listeners are the host-exception ports (box.listen).
+	// listeners are the host-exception ports (box.listen); services the
+	// service ports by name (box.services, work order C18).
 	lmu       sync.Mutex
 	listeners map[int]net.Listener
+	services  map[string]serviceListener
 	// ext are the harness extensions by session (extension.go).
 	ext extensions
 }
@@ -126,7 +128,7 @@ func RunAgent(ctx context.Context, o AgentOptions) {
 		o.MaxRelays = DefaultMaxRelays
 	}
 	a := &Agent{o: o, relays: make(chan struct{}, o.MaxRelays), limiter: &relayLimiter{now: time.Now, max: relayOpens},
-		listeners: map[int]net.Listener{}}
+		listeners: map[int]net.Listener{}, services: map[string]serviceListener{}}
 	var wg sync.WaitGroup
 	wg.Add(2)
 	a.goSafe("host listener", func() { defer wg.Done(); a.hostLoop(ctx) })
@@ -307,6 +309,8 @@ func (a *Agent) serveHost(ctx context.Context, s *yamux.Session) {
 		proto.MethodBoxPaste:    a.inputHandler(proto.MethodBoxPaste),
 		proto.MethodBoxKeys:     a.inputHandler(proto.MethodBoxKeys),
 		proto.MethodBoxListen:   a.handleListen(ctx),
+		// Work order C18.
+		proto.MethodBoxServices: a.handleServices(ctx),
 		// Work order C16.
 		proto.MethodBoxSubmit:    a.handleSubmit,
 		proto.MethodBoxExtension: a.handleExtension,

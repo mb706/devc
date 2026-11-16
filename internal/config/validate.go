@@ -733,6 +733,17 @@ func validateProject(c *Config, p *Project, ps *problems) {
 		app = realm.GitHub.App
 	}
 	validateGitHub(k, p.Grants, app)
+	// Secrets the project's harnesses receive as their credential.
+	var harnessSecrets []string
+	for _, h := range p.Harnesses {
+		if m, ok := c.harnesses[h]; ok && m.Auth.Secret != "" {
+			harnessSecrets = append(harnessSecrets, m.Auth.Secret)
+		}
+		if realm, ok := c.realms[p.Realm]; ok && realm.Harness[h].Secret != "" {
+			harnessSecrets = append(harnessSecrets, realm.Harness[h].Secret)
+		}
+	}
+	validateServiceGrants(c, k, p, harnessSecrets)
 
 	validateData(k, &p.Data)
 	k.shares("shares", p.Shares)

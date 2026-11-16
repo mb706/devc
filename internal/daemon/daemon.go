@@ -23,6 +23,9 @@
 // paths. Beside each hub link an uploader keeps the hub's archive of the
 // durable state current (archive.go, internal/fleet), reading box-writable
 // harness state only through a helper-container listing and safefs.
+// Services (services.go, internal/svclogin) hold credentials that never
+// enter a box: a box's request is checked on its raw bytes and against the
+// service's rules before the daemon forwards it with the credential added.
 package daemon
 
 import (
@@ -35,6 +38,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -141,6 +145,9 @@ type Options struct {
 	ArchiveInterval  time.Duration
 	ArchiveScanEvery time.Duration
 	ArchiveWorkers   func(*config.Config, engine.Engine) fleet.Workers
+	// ServiceTransport reaches the upstreams of services (default: a
+	// transport with the host's trust store); tests replace it.
+	ServiceTransport http.RoundTripper
 }
 
 // env is one loaded configuration and what is built from it.
@@ -198,6 +205,9 @@ type Daemon struct {
 	// scanner lists the shared harness state for the archive uploaders of
 	// all hubs (archive.go).
 	scanner *fleet.HarnessScanner
+
+	// svc serves the services' streams (services.go).
+	svc *serviceManager
 }
 
 // boxInfo is what the last box-watch pass saw of a configured project.
@@ -281,6 +291,7 @@ func New(o Options) (*Daemon, error) {
 	d.hubs = newHubManager(d)
 	d.term = newTermManager(d)
 	d.turns = newTurnBanker(d, o.TurnBankInterval)
+	d.svc = newServiceManager(d)
 	d.hub.onTurnEnd = d.turns.turnEnded
 	return d, nil
 }
@@ -352,6 +363,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.requests.expireAll(d.ctx)
 	d.requests.start()
 	d.startRouter()
+	d.svc.start()
 	d.log.Info("daemon started", "version", d.version, "instance", d.instance, "socket", sock)
 	d.goSafe("api", func() { d.serveAPI(ln) })
 	d.goSafe("watch", d.watchLoop)
@@ -366,6 +378,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if d.router != nil {
 		d.router.stop()
 	}
+	d.svc.stop()
 	d.hub.closeAll(context.Background())
 	d.term.closeAll()
 	d.mu.Lock()
@@ -418,6 +431,9 @@ func configStamp(dir string) string {
 	glob("realms/*/projects")
 	glob("realms/*/projects/*")
 	glob("realms/*/projects/*/project.toml")
+	glob("realms/*/services")
+	glob("realms/*/services/*")
+	glob("realms/*/services/*/service.toml")
 	glob("harness/*.toml")
 	glob("envs/*")
 	glob("envs/*/env.toml")

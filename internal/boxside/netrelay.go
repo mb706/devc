@@ -198,7 +198,8 @@ func (a *Agent) setListeners(ctx context.Context, ports []int) proto.ListenReply
 	return reply
 }
 
-// closeListeners closes every host-exception listener (the agent ends).
+// closeListeners closes every host-exception and service listener (the
+// agent ends).
 func (a *Agent) closeListeners() {
 	a.lmu.Lock()
 	defer a.lmu.Unlock()
@@ -206,4 +207,65 @@ func (a *Agent) closeListeners() {
 		ln.Close()
 		delete(a.listeners, p)
 	}
+	for n, sl := range a.services {
+		sl.ln.Close()
+		delete(a.services, n)
+	}
+}
+
+// serviceListener serves one service (work order C18): connections to its
+// loopback port become host.service streams naming it. The agent holds no
+// policy here either: which services a box may use, and what they allow,
+// the daemon decides for every request.
+type serviceListener struct {
+	port int
+	ln   net.Listener
+}
+
+// handleServices serves box.services: the agent serves exactly the given
+// services, each on its port.
+func (a *Agent) handleServices(ctx context.Context) proto.Handler {
+	return func(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
+		var p proto.ServicesParams
+		if err := proto.DecodeParams(params, &p); err != nil {
+			return nil, err
+		}
+		if err := p.Validate(); err != nil {
+			return nil, proto.Errorf(proto.CodeInvalidParams, "%s", err.Error())
+		}
+		return a.setServices(ctx, p.Services), nil
+	}
+}
+
+// setServices opens and closes service listeners to match list.
+func (a *Agent) setServices(ctx context.Context, list []proto.ServicePort) proto.ListenReply {
+	want := map[string]int{}
+	for _, s := range list {
+		want[s.Name] = s.Port
+	}
+	a.lmu.Lock()
+	defer a.lmu.Unlock()
+	for n, sl := range a.services {
+		if port, ok := want[n]; !ok || port != sl.port {
+			sl.ln.Close()
+			delete(a.services, n)
+			a.logf("stopped serving the service %s on 127.0.0.1:%d", n, sl.port)
+		}
+	}
+	reply := proto.ListenReply{}
+	for _, s := range list {
+		if _, ok := a.services[s.Name]; ok {
+			continue
+		}
+		ln, err := net.Listen("tcp4", "127.0.0.1:"+strconv.Itoa(s.Port))
+		if err != nil {
+			reply.Failed = append(reply.Failed, proto.ListenFailure{Port: s.Port, Error: proto.Truncate(fmt.Sprint(err), 200)})
+			continue
+		}
+		a.services[s.Name] = serviceListener{port: s.Port, ln: ln}
+		a.logf("serving the service %s on 127.0.0.1:%d", s.Name, s.Port)
+		name := s.Name
+		a.goSafe("service listener", func() { a.acceptRelays(ctx, ln, proto.MethodHostService, proto.ServiceStreamParams{Name: name}) })
+	}
+	return reply
 }

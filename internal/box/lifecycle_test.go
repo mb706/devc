@@ -305,6 +305,53 @@ func TestCapabilities(t *testing.T) {
 	}
 }
 
+// TestServiceCapabilities: a service is in force while it is granted now
+// and was at the start, with an unchanged definition (work order C18).
+func TestServiceCapabilities(t *testing.T) {
+	svc := func(name string, port int, path string) config.Service {
+		return config.Service{Name: name, Realm: "demo", Port: port, Upstream: "https://" + name + ".example",
+			Auth: config.ServiceAuth{Kind: "header", Header: "Authorization", ValueSecret: "T"}, Allow: []config.ServiceRule{{Methods: []string{"GET"}, Path: path}}}
+	}
+	res := func(list ...config.Service) *config.Resolved {
+		r := &config.Resolved{Realm: "demo", Project: "hello", Services: list}
+		for _, s := range list {
+			r.Grants.Services = append(r.Grants.Services, s.Name)
+		}
+		return r
+	}
+	c := CapabilitiesOf(res(svc("wiki", 8601, "/api/"), svc("intranet", 8602, "/")), "cid", time.Now())
+	if len(c.Services) != 2 || c.Services[0].Name != "wiki" || c.Services[0].Port != 8601 || c.Services[0].Fingerprint == "" {
+		t.Fatalf("record: %+v", c.Services)
+	}
+	if s, err := c.Service(res(svc("wiki", 8601, "/api/")), "wiki"); err != nil || s.Name != "wiki" {
+		t.Errorf("unchanged: %v %v", s, err)
+	}
+	for _, tc := range []struct {
+		now  *config.Resolved
+		name string
+		want string
+	}{
+		{res(svc("intranet", 8602, "/")), "wiki", "not granted"},
+		{res(svc("wiki", 8601, "/admin/")), "wiki", "changed after this box started"},
+		{res(svc("wiki", 8611, "/api/")), "wiki", "changed after this box started"},
+		{res(svc("wiki", 8601, "/api/"), svc("new", 8603, "/")), "new", "granted after this box started"},
+		{&config.Resolved{Realm: "demo", Project: "hello", Grants: config.Grants{Services: []string{"wiki"}}}, "wiki", "no usable definition"},
+	} {
+		if _, err := c.Service(tc.now, tc.name); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want …%s…", tc.name, err, tc.want)
+		}
+	}
+	ports := c.ServicePorts(res(svc("wiki", 8601, "/api/"), svc("intranet", 8602, "/other/"), svc("new", 8603, "/")))
+	if len(ports) != 1 || ports[0].Name != "wiki" {
+		t.Errorf("ports in force: %+v", ports)
+	}
+	// A record from before service logins has none.
+	old := &Capabilities{V: 1, ContainerID: "cid"}
+	if _, err := old.Service(res(svc("wiki", 8601, "/api/")), "wiki"); err == nil {
+		t.Error("a record without services allowed one")
+	}
+}
+
 // TestGitHubCapabilities: token modes and grants.github_read follow the
 // start record (work order C15).
 func TestGitHubCapabilities(t *testing.T) {

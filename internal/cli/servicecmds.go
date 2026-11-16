@@ -121,11 +121,20 @@ func newServiceCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
+	var statusJSON bool
 	status := &cobra.Command{
-		Use:   "status",
-		Short: "Show what is installed and whether it runs",
-		Args:  noArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Use:   "status [<realm> <name>]",
+		Short: "Show what is installed and whether it runs; with a realm and a name, a service's login state",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 0 && len(args) != 2 {
+				return usageErrorf("usage: devc service status (the units) or devc service status <realm> <name> (a service)")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				return a.serviceStatusCmd(args, statusJSON)
+			}
 			m, err := a.serviceManager()
 			if err != nil {
 				return err
@@ -146,7 +155,9 @@ func newServiceCmd(a *app) *cobra.Command {
 			return err
 		},
 	}
-	return group("service", "Manage devc's systemd user units (the daemon, or the banking timer)", false, install, uninstall, status)
+	status.Flags().BoolVar(&statusJSON, "json", false, "print JSON (a service's status)")
+	return group("service", "Manage devc's systemd user units, and the services boxes reach through the daemon (service logins)", false,
+		append([]*cobra.Command{install, uninstall, status}, newServiceLoginCmds(a)...)...)
 }
 
 func currentUserName(a *app) string {

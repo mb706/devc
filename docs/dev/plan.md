@@ -39,6 +39,7 @@ internal/
   depsrc/            devc src in a box: dependency-source specs, installed versions, registry downloads (C16)
   archive/           archive names, hub wire types, sealed secrets, credential-file exclusion (C17)
   fleet/             machine side of the archive: uploads, restore, export, secrets between machines (C17)
+  svclogin/          service logins: request checks, rules, credential-adding reverse proxy, cookie jars, login container (C18)
   daemon/            machine daemon: API, box channels, relay service, gate, forwards   (phase 2)
   hub/               hub server: listeners, projections, inbox, ntfy, web app           (phase 2)
   selinux/ apparmor/ host integration helpers
@@ -47,6 +48,7 @@ web/                 hub web app sources, embedded into the binary              
 test/integration/    integration tests and the escape suite
 test/fakeharness/    a stand-in agent for tests
 examples/config/     a complete example configuration, used by tests
+examples/services/   a worked example of a cookie service with a form login (C18)
 legacy/              v1, moved here at the end of phase 1
 ```
 
@@ -203,7 +205,7 @@ Model: the box sees the relay as `origin`. Refs in the relay are in spec section
 | Chunk | Scope |
 |---|---|
 | C17 Fleet | State sync to hubs, `state export`, secret distribution, second-hub behaviour end to end, `init` and `join` polish. |
-| C18 Service logins | Service containers: stored credentials, login hook, authenticated filtered reverse proxy for boxes. |
+| C18 Service logins | Services in the daemon (no service containers): stored credentials, login command in a throwaway container, authenticated filtered reverse proxy for boxes over the box channel. |
 | C19 GUI | On-demand Xvnc and noVNC sidecar sharing a box's network namespace; browser debugging-port helper. |
 | **Review D** | covers phases 3 and 4; then fix chunk C19r and final documentation. |
 

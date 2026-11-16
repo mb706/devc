@@ -242,6 +242,19 @@ func (p *Paths) ProjectFile(r names.ProjectRef) string {
 	return filepath.Join(p.ProjectDefDir(r), "project.toml")
 }
 
+// ServiceDefsDir holds a realm's service definitions (work order C18), one
+// directory per service with its service.toml and the files its login
+// command needs.
+func (p *Paths) ServiceDefsDir(realm string) string {
+	return filepath.Join(p.RealmDir(realm), "services")
+}
+func (p *Paths) ServiceDefDir(realm, name string) string {
+	return filepath.Join(p.ServiceDefsDir(realm), must(names.KindService, name))
+}
+func (p *Paths) ServiceFile(realm, name string) string {
+	return filepath.Join(p.ServiceDefDir(realm, name), "service.toml")
+}
+
 // --- State ---
 
 func (p *Paths) StateDir() string   { return p.stateDir }
@@ -486,6 +499,24 @@ func (p *Paths) ShareStagingDir() string { return filepath.Join(p.SharesDir(), "
 // realms see.
 func (p *Paths) ShareLogFile(name string) string {
 	return filepath.Join(p.DurableDir(), "share-log", must(names.KindShare, name)+".jsonl")
+}
+
+// ServiceLogFile is the log of the requests boxes made to a service (work
+// order C18): time, box, method, path and status, never headers or bodies.
+func (p *Paths) ServiceLogFile(realm, name string) string {
+	return filepath.Join(p.DurableRealmDir(realm), "service-log", must(names.KindService, name)+".jsonl")
+}
+
+// ServiceStateDir holds the machine's login state of each cookie service
+// (whether it needs a login) and the locks that serialise logins.
+func (p *Paths) ServiceStateDir(realm string) string {
+	return filepath.Join(p.LocalDir(), "services", must(names.KindRealm, realm))
+}
+func (p *Paths) ServiceStateFile(realm, name string) string {
+	return filepath.Join(p.ServiceStateDir(realm), must(names.KindService, name)+".json")
+}
+func (p *Paths) ServiceLockFile(realm, name string) string {
+	return filepath.Join(p.ServiceStateDir(realm), must(names.KindService, name)+".lock")
 }
 
 // BoxSharesDir is rendered for a box's /opt/shares.

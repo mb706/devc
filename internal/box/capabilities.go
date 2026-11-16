@@ -62,6 +62,16 @@ type Capabilities struct {
 	GitHub            string            `json:"github,omitempty"`
 	GitHubPermissions map[string]string `json:"github_permissions,omitempty"`
 	GitHubRead        []string          `json:"github_read,omitempty"`
+	// Services are the services of grants.services (work order C18), each
+	// with the port and the fingerprint of its definition at the start.
+	Services []ServiceCap `json:"services,omitempty"`
+}
+
+// ServiceCap is one service a box was started with.
+type ServiceCap struct {
+	Name        string `json:"name"`
+	Port        int    `json:"port"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // GrantedSecrets lists the secrets a project may receive: its granted
@@ -87,6 +97,10 @@ func CapabilitiesOf(r *config.Resolved, containerID string, now time.Time) Capab
 		GitHub: r.Grants.GitHub, GitHubRead: slices.Clone(r.Grants.GitHubRead)}
 	if r.Grants.GitHub == config.GitHubModeApp {
 		c.GitHubPermissions = r.Grants.GitHubPermissions()
+	}
+	for i := range r.Services {
+		s := &r.Services[i]
+		c.Services = append(c.Services, ServiceCap{Name: s.Name, Port: s.Port, Fingerprint: s.Fingerprint()})
 	}
 	if r.Network == netpolicy.Allowlist {
 		// Validated with the configuration; an entry that does not parse
@@ -252,6 +266,47 @@ func (c *Capabilities) GitHubReadRepos(r *config.Resolved) []string {
 	for _, s := range r.Grants.GitHubRead {
 		if slices.ContainsFunc(c.GitHubRead, func(o string) bool { return strings.EqualFold(o, s) }) {
 			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Service is the definition of a service in force for the box (work order
+// C18): granted now and at its start, with the definition unchanged since
+// (same fingerprint, so the same upstream, port, credential and rules).
+// The error says what is missing, for the box's message.
+func (c *Capabilities) Service(r *config.Resolved, name string) (*config.Service, error) {
+	if !slices.Contains(r.Grants.Services, name) {
+		return nil, fmt.Errorf("the service %s is not granted to %s/%s", name, r.Realm, r.Project)
+	}
+	var cur *config.Service
+	for i := range r.Services {
+		if r.Services[i].Name == name {
+			cur = &r.Services[i]
+		}
+	}
+	if cur == nil {
+		return nil, fmt.Errorf("the service %s has no usable definition", name)
+	}
+	for _, sc := range c.Services {
+		if sc.Name != name {
+			continue
+		}
+		if sc.Fingerprint != cur.Fingerprint() || sc.Port != cur.Port {
+			return nil, fmt.Errorf("the definition of service %s changed after this box started; ask the user to bring the box up again ('devc down %s/%s' and 'devc up %s/%s')", name, r.Realm, r.Project, r.Realm, r.Project)
+		}
+		return cur, nil
+	}
+	return nil, fmt.Errorf("the service %s was granted after this box started; ask the user to bring the box up again ('devc down %s/%s' and 'devc up %s/%s')", name, r.Realm, r.Project, r.Realm, r.Project)
+}
+
+// ServicePorts lists the services in force for the box (Service), with
+// their ports, in the order of the record.
+func (c *Capabilities) ServicePorts(r *config.Resolved) []ServiceCap {
+	var out []ServiceCap
+	for _, sc := range c.Services {
+		if s, err := c.Service(r, sc.Name); err == nil {
+			out = append(out, ServiceCap{Name: s.Name, Port: s.Port, Fingerprint: sc.Fingerprint})
 		}
 	}
 	return out

@@ -506,7 +506,7 @@ Checked by `devc doctor`; `--fix` prints or applies the root commands.
 3. **Workflow.** The `allowlist` level and network exceptions; data sync and manifest; GitHub read facade and host commands; optional App tokens; published skills; dependency-source helper.
 4. **Later.**
    - *Second hub.*
-   - *Service logins*: for services that offer only a password login, a separate container holds the password, performs the login, and exposes an authenticated, filtered proxy to boxes.
+   - *Service logins* (built in C18): for services that offer only a password login, or a token the agent should not hold, the machine daemon holds the credential and exposes an authenticated, filtered reverse proxy to granted boxes on a loopback port in the box, relayed over the box channel; cookie logins run in a throwaway container. See `docs/guide.md`, "Service logins".
    - GUI sidecar.
    - Not planned for now: VM-backed realms (waiting for a machine with KVM), and remote approval of high-risk requests (undecided; see `docs/dev/plan.md` section 5).
 

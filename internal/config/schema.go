@@ -256,6 +256,9 @@ type Grants struct {
 	GitHub      string              `toml:"github" json:"github"`
 	GitHubRead  []string            `toml:"github_read" json:"github_read"`
 	GitHubToken *GitHubToken        `toml:"github_token" json:"github_token,omitempty"`
+	// Services names services of the project's realm (work order C18):
+	// the box reaches each through the daemon, which adds the credential.
+	Services []string `toml:"services" json:"services"`
 }
 
 // GitHubToken is [grants.github_token]: the permissions of the

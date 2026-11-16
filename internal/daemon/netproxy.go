@@ -184,9 +184,10 @@ func (w *boxWorker) serveProxy(ctx context.Context, st *yamux.Stream, br *bufio.
 	px.Serve(ctx, conn)
 }
 
-// refuseBusy answers a proxy stream that found no free relay place.
-func refuseBusy(st *yamux.Stream) {
-	const body = "devc proxy: too many connections at once from this box\n"
+// refuseBusy answers a proxy or service stream that found no free relay
+// place.
+func refuseBusy(st *yamux.Stream, who string) {
+	body := who + ": too many connections at once from this box\n"
 	_ = st.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_, _ = fmt.Fprintf(st, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
 	rawStream{st: st}.abort()

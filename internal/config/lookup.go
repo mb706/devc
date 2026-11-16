@@ -180,6 +180,13 @@ func (c *Config) ProblemsFor(ref names.ProjectRef) []Problem {
 				files[f] = true
 			}
 		}
+		// A granted service whose definition has problems blocks the
+		// project (work order C18): it must not be served half-checked.
+		for _, s := range p.Grants.Services {
+			if names.Valid(s) {
+				dirs = append(dirs, c.Paths.ServiceDefDir(ref.Realm, s))
+			}
+		}
 	}
 	var out []Problem
 	for _, pr := range c.Problems {
@@ -264,6 +271,11 @@ type Resolved struct {
 	SecretsDelivery string `toml:"secrets_delivery" json:"secrets_delivery"`
 	// GitHubApp is the realm's [github.app] (work order C15).
 	GitHubApp *GitHubApp `toml:"github_app,omitempty" json:"github_app,omitempty"`
+	// Services are the definitions of the granted services that loaded
+	// (work order C18), in the order of grants.services. The TOML view
+	// leaves them out (grants.services names them; a definition's name is
+	// not a key of its file).
+	Services []Service `toml:"-" json:"services"`
 }
 
 type ResolvedHarness struct {
@@ -340,7 +352,7 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 			RelayQuota:   sizeOr(p.Git.RelayQuota, DefaultRelayQuota),
 		},
 		Grants: Grants{SSH: nonNil(p.Grants.SSH), SSHAllow: cloneLists(p.Grants.SSHAllow), Secrets: nonNil(p.Grants.Secrets), GitHub: p.Grants.GitHub,
-			GitHubRead: nonNil(p.Grants.GitHubRead), GitHubToken: p.Grants.GitHubToken},
+			GitHubRead: nonNil(p.Grants.GitHubRead), GitHubToken: p.Grants.GitHubToken, Services: nonNil(p.Grants.Services)},
 		GitHubApp: realm.GitHub.App,
 		Data: ResolvedData{
 			Enabled:    len(p.Data.Inputs)+len(p.Data.Work)+len(p.Data.Sealed) > 0,
@@ -379,6 +391,12 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 	}
 	if r.Mounts == nil {
 		r.Mounts = []Mount{}
+	}
+	r.Services = []Service{}
+	for _, name := range p.Grants.Services {
+		if s, ok := c.services[serviceKey(ref.Realm, name)]; ok {
+			r.Services = append(r.Services, *s)
+		}
 	}
 	r.Harnesses = []ResolvedHarness{}
 	for _, id := range p.Harnesses {

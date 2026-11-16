@@ -24,6 +24,7 @@ const (
 	KindRemote   = "remote"
 	KindGroup    = "memory group"
 	KindShare    = "share"
+	KindService  = "service"
 )
 
 // MaxLen is the longest valid name.

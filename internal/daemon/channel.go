@@ -62,6 +62,11 @@ type boxWorker struct {
 	dials     map[*dialRelay]bool
 	netPorts  []int
 	netSynced bool
+	// svcPorts are the services the agent last took (box.services);
+	// svcUnsupported is set for an agent that does not know the method.
+	svcPorts       []proto.ServicePort
+	svcSynced      bool
+	svcUnsupported bool
 }
 
 func (d *Daemon) startWorker(ref names.ProjectRef, containerID string) *boxWorker {
@@ -247,6 +252,8 @@ func (w *boxWorker) connect(ctx context.Context) error {
 	w.d.goSafe("streams "+w.ref.String(), func() { w.acceptStreams(ctx, sess) })
 	// Host exceptions: the agent's listeners follow the record (C13).
 	w.d.goSafe("net "+w.ref.String(), func() { w.netLoop(ctx, sess) })
+	// Services: the agent's listeners follow what is in force (C18).
+	w.d.goSafe("services "+w.ref.String(), func() { w.serviceLoop(ctx, sess) })
 	select {
 	case <-ctx.Done():
 	case <-sess.CloseChan():

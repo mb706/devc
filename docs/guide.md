@@ -7,7 +7,7 @@ reference for each command is `devc <command> --help`; host preparation is in
 Contents: [Concepts](#concepts) · [Configuration and state](#configuration-and-state) ·
 [Boxes](#boxes) · [Sessions](#sessions) · [Git](#git-relay-bank-pull-push) ·
 [Data](#data-zones-sealing-savepoints) · [Network](#network-levels-exceptions-and-port-forwarding) ·
-[Logins and secrets](#logins-and-secrets) · [Shares](#shares-skills-and-reference-material-for-boxes) ·
+[Logins and secrets](#logins-and-secrets) · [Service logins](#service-logins) · [Shares](#shares-skills-and-reference-material-for-boxes) ·
 [Dependency sources](#dependency-sources-devc-src) · [Notes and memory](#notes-and-memory) ·
 [Editors](#editors) · [What is protected](#what-is-protected-and-what-is-not)
 
@@ -1092,6 +1092,129 @@ own copy of the pi manifest saying `input.adapter = "extension"`, pi loads
 it and the daemon hands messages to pi's API instead of typing them; while
 no extension is connected it types them as before, and the receipt says so.
 
+## Service logins
+
+Some services have no tokens an agent could hold, only a login with a
+password, or a token you do not want inside a box. A **service** gives
+boxes an authenticated, filtered way to use such a thing without the
+credential ever entering a box: the daemon holds the credential and proxies
+the box's requests, adding it on the way out.
+
+```toml
+# realms/demo/services/wiki/service.toml
+upstream = "https://wiki.example.org"   # scheme and host; plain http needs allow_insecure = true
+port = 8601                             # loopback port in granted boxes (above 1024, unique in the realm)
+
+[auth]
+kind = "header"                         # header | cookie
+header = "Authorization"
+value_secret = "WIKI_TOKEN"             # realm secret; may hold a whole header value ("Bearer …")
+
+[[allow]]                               # first match wins; everything else is refused
+methods = ["GET", "HEAD"]
+path = "/api/"                          # prefix at segment boundaries
+
+[limits]
+max_body = "10m"                        # each body, request and response
+timeout = "60s"                         # the whole exchange
+```
+
+```toml
+# project.toml
+[grants]
+services = ["wiki"]
+```
+
+```sh
+devc secret set demo WIKI_TOKEN
+devc service ls [realm] [--json]
+devc service status demo wiki [--json]  # exit 1 while it needs a login or its secret
+devc service log demo wiki [-n 50] [--json]
+```
+
+In a granted box the agent listens on `127.0.0.1:8601`, and programs use
+`http://127.0.0.1:8601/…` (the sandbox description lists each service, its
+address and its rules). Every connection is relayed over the box channel to
+the daemon, which decides everything:
+
+- The service must be **in force for the box**: granted when the box
+  started and now, with a definition whose upstream, port, credential and
+  rules have not changed since. A new grant or a changed definition needs
+  `devc down` and `devc up`; removing a grant applies at once. Services work
+  at every network level, `none` included (they are an explicit grant), and
+  only while the daemon runs.
+- The request is checked on its raw bytes first. Refused with 400: anything
+  but `METHOD /path HTTP/1.1` (no absolute URLs, no `CONNECT`), `.` or `..`
+  segments (also before a `;`), empty segments, encoded `/`, `\` or `%`, a
+  `Host` other than `127.0.0.1:<port>` or `localhost:<port>`, duplicated or
+  conflicting `Content-Length` and `Transfer-Encoding`, obsolete line
+  folding, bare line feeds; protocol upgrades (WebSocket) are refused with
+  403. One request per connection.
+- The **rules** compare the method and the normalised path (encoded letters,
+  digits and `-._~` decoded). A request no rule allows gets 403 with the rule
+  that would be needed, so the agent can ask you for it. Methods are the
+  standard ones (no `CONNECT`, `TRACE`); `HEAD` is allowed only where
+  listed.
+- The daemon forwards over TLS with the host's trust store (`SSL_CERT_FILE`
+  and `SSL_CERT_DIR` apply), never through a proxy, with `Host` set to the
+  upstream's. It removes the box's `Authorization`, `Cookie`, `Proxy-*`,
+  `Forwarded`, `X-Forwarded-*` and `Via` headers and the credential header
+  before adding the credential; `Origin` and `Referer` of the local address
+  become the upstream's.
+- On the way back `Set-Cookie`, `Proxy-*` and hop-by-hop headers are
+  dropped, `Location` headers that point at the upstream are rewritten to
+  the local address, 1xx responses and trailers never pass, and every header
+  is scrubbed of the credential (the value and its parts of 8 characters or
+  more). Bodies pass through within `max_body`.
+- Each request is logged to `durable/realms/<realm>/service-log/<name>.jsonl`:
+  time, box, method, path (without the query) and status. Headers and bodies
+  are never logged.
+
+**Cookie services** (`kind = "cookie"`) need a login:
+
+```toml
+[auth]
+kind = "cookie"
+login = ["bash", "login.sh"]            # prints the cookies as JSON
+secrets = ["INTRANET_USER", "INTRANET_PASSWORD"]
+login_path = "/login"                   # a redirect there means the session expired
+refresh = "12h"                         # how long a login is trusted
+auto = false                            # log in again by itself
+# image = "…"                           # default: devc's installer image (bash, curl)
+```
+
+`devc service login demo intranet` runs the login command in a throwaway
+container: the network on, nothing mounted but a scratch directory at
+`/login` (the working directory) with the other files of the service's
+directory and the secrets of `auth.secrets` in `/login/secrets/`. The
+command prints a JSON array of cookies (`name`, `value`, `domain`, `path`,
+`expiry` in Unix seconds, 0 for none) and nothing else on standard output;
+devc refuses anything else, cookies for other hosts, more than 64 cookies
+or values over 4 KiB. The jar is stored as the realm secret
+`_jar.<service>` with the time of the login (it cannot be granted to a box,
+nor can the login secrets of a service the project uses).
+`examples/services/` has a worked example (a form login with curl) and notes
+on what a browser-driven login would need.
+
+When the jar is older than `refresh`, its cookies have expired, or the
+upstream answers 401 or redirects to `login_path`, the service **needs a
+login**: boxes get 503 with what to tell you, the live sessions of the box
+get a note (once per need), and `devc service ls` and `status` say so. The
+daemon logs in by itself only with `auto = true`: once at a time per service
+(requests that arrive meanwhile wait for it) and at most once a minute,
+through `devc service login` as a child process. Leave `auto` off for
+accounts that lock after failed logins.
+
+**Limits.** The proxy keeps the credential out of headers, logs and error
+messages, not out of bodies: an upstream endpoint that reflects request
+headers in its body (an "echo" or debug endpoint, some error pages) can still
+show the credential to the box, so rules should not allow such endpoints.
+Allowed requests act with your account: keep rules narrow (read-only where
+possible). A login with a second factor cannot run unattended; a TOTP seed
+stored beside the password collapses both factors into one secret. Many
+services forbid automated access or sharing credentials with tools: check
+the proxied service's terms of use before setting one up.
+
 ## Shares: skills and reference material for boxes
 
 A share is a directory you publish from a project and mount read-only into
@@ -1286,6 +1409,9 @@ everything that matters outside it, but it is not a virtual machine.
   daemon with requests it builds itself (GET only, the project's repositories
   only), and pull requests and comments a box asks for wait for your
   approval on this machine.
+- Credentials of services (`grants.services`) stay in the daemon: a box gets
+  only the requests the service's rules allow, with the credential added on
+  the way out and scrubbed from the headers that come back.
 - At level `internet`, the box cannot reach the host, the LAN or other private
   addresses, and a box whose rules are missing does not start. At level
   `allowlist`, it has no network interface at all; the host's proxy decides
@@ -1320,6 +1446,10 @@ everything that matters outside it, but it is not a virtual machine.
   on the host. Pages served at local URLs of different projects share the
   parent name `localhost`, so a box's page could set cookies for another
   box's local URL.
+- **Services** act with your account for every request their rules allow,
+  and an upstream endpoint that reflects request headers in its body can
+  show the credential to the box: keep rules narrow (see
+  [Service logins](#service-logins)).
 - **The allowlist** limits where connections go, not what they carry: an
   allowed host that relays (a paste site, a cloud storage API, a server that
   answers for many names) can receive anything the box can read.

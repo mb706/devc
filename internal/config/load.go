@@ -62,8 +62,11 @@ type Config struct {
 	Global   Global
 	Problems []Problem
 
-	realms    map[string]*Realm
-	projects  map[names.ProjectRef]*Project
+	realms   map[string]*Realm
+	projects map[names.ProjectRef]*Project
+	// services are the services of every realm by "<realm>/<name>" (work
+	// order C18).
+	services  map[string]*Service
 	envs      map[string]*Env
 	harnesses map[string]*Harness
 	// overrides maps a harness id to the file in <config>/harness that
@@ -90,6 +93,7 @@ func Load(p *paths.Paths) (*Config, []Problem) {
 		Paths:     p,
 		realms:    map[string]*Realm{},
 		projects:  map[names.ProjectRef]*Project{},
+		services:  map[string]*Service{},
 		envs:      map[string]*Env{},
 		harnesses: map[string]*Harness{},
 		overrides: map[string]string{},
@@ -130,6 +134,7 @@ func Load(p *paths.Paths) (*Config, []Problem) {
 	}
 	for _, r := range c.Realms() {
 		validateRealm(c, r, &ps)
+		validateServices(c, r.Name, &ps)
 	}
 	for _, pr := range c.Projects("") {
 		validateProject(c, pr, &ps)
@@ -354,6 +359,7 @@ func (c *Config) loadRealms(ps *problems) {
 		}
 		c.realms[name] = &r
 		c.loadProjects(name, ps)
+		c.loadServices(name, ps)
 	}
 }
 

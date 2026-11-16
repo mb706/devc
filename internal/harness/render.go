@@ -76,6 +76,18 @@ type Data struct {
 	// Shares are the shares the project's box mounts (work order C16),
 	// besides the built-in dep-source.
 	Shares []string
+	// Services are the granted services (work order C18).
+	Services []ServiceFacts
+}
+
+// ServiceFacts describes one granted service: its base URL in the box and
+// what its rules allow ("GET, HEAD /api/").
+type ServiceFacts struct {
+	Name  string
+	URL   string
+	Allow []string
+	// Cookie is set for services that need a login on the host.
+	Cookie bool
 }
 
 // GitHubFacts describes what a box can do with GitHub.
@@ -163,6 +175,13 @@ func NewData(r *config.Resolved, m *config.Harness) Data {
 			f.Repo = repo.String()
 		}
 		d.GitHub = f
+	}
+	for _, sv := range r.Services {
+		f := ServiceFacts{Name: sv.Name, URL: sv.BaseURL() + "/", Cookie: sv.Auth.Kind == config.ServiceAuthCookie}
+		for _, rule := range sv.Allow {
+			f.Allow = append(f.Allow, strings.Join(rule.Methods, ", ")+" "+rule.Path)
+		}
+		d.Services = append(d.Services, f)
 	}
 	if r.Data.Enabled {
 		join := func(ps []string) []string {

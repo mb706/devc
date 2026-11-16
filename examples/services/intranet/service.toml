@@ -1,0 +1,48 @@
+# A service with a password login (devc service login), worked example of
+# work order C18. Copy this directory to
+#   ~/.config/devc/realms/<realm>/services/intranet/
+# and adapt it. Boxes of projects with grants.services = ["intranet"]
+# reach it at http://127.0.0.1:8602/ without ever holding the password or
+# the session cookie.
+
+# The scheme and host the daemon talks to (https; plain http needs
+# allow_insecure = true).
+upstream = "https://intranet.example.org"
+# The loopback port in granted boxes; above 1024 and unique in the realm.
+port = 8602
+
+[auth]
+kind = "cookie"
+# The login command runs in a throwaway container with the network on and
+# nothing mounted but a scratch directory (/login, the working directory)
+# that holds the other files of this directory (login.sh, an optional
+# ca.pem) and the secrets below in /login/secrets/. It prints the cookies as
+# JSON on standard output.
+login = ["bash", "login.sh"]
+# Realm secrets the login needs: devc secret set <realm> INTRANET_USER
+secrets = ["INTRANET_USER", "INTRANET_PASSWORD"]
+# The login form; a redirect there from the upstream means the session
+# expired.
+login_path = "/login"
+# How long a login is trusted (also cookies that never expire).
+refresh = "12h"
+# Log in again by itself when the session expires (once at a time, at most
+# once a minute). Leave it off for accounts that lock after failed logins.
+auto = false
+# image = "localhost/my-login-image:latest"   # default: devc's installer image (bash, curl)
+
+# Rules: first match wins, everything else is refused with 403. Paths are
+# prefixes at segment boundaries ("/wiki/" allows /wiki/a, not /wikix).
+# Never allow an endpoint that reflects request headers in its body: it
+# would show the session cookie to the box.
+[[allow]]
+methods = ["GET", "HEAD"]
+path = "/wiki/"
+
+[[allow]]
+methods = ["GET"]
+path = "/api/search"
+
+[limits]
+max_body = "10m"
+timeout = "60s"

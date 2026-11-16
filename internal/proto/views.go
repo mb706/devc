@@ -62,6 +62,12 @@ const (
 	// Host to box, work order C13: the loopback ports on which the agent
 	// relays connections to the host (host exceptions).
 	MethodBoxListen = "box.listen"
+	// Work order C18, service logins: box.services (host to box) names the
+	// services the agent serves on loopback ports, and each connection
+	// there becomes a host.service stream (box to host) carrying raw HTTP
+	// after its first line, which the daemon proxies to the service.
+	MethodBoxServices = "box.services"
+	MethodHostService = "host.service"
 
 	// Commands (work order C09).
 	MethodSessionSend      = "session.send"
@@ -771,6 +777,47 @@ type ListenFailure struct {
 // ListenReply reports the ports that failed.
 type ListenReply struct {
 	Failed []ListenFailure `json:"failed,omitempty"`
+}
+
+// ServiceStreamParams open a stream to a service (host.service); the HTTP
+// request follows the first line.
+type ServiceStreamParams struct {
+	Name string `json:"name"`
+}
+
+// ServicePort is one service the agent serves: connections to
+// 127.0.0.1:Port become host.service streams for Name.
+type ServicePort struct {
+	Name string `json:"name"`
+	Port int    `json:"port"`
+}
+
+// MaxServices bounds the services of one box.services.
+const MaxServices = 64
+
+// ServicesParams are all the services the box agent should serve; others
+// are closed (box.services).
+type ServicesParams struct {
+	Services []ServicePort `json:"services"`
+}
+
+// Validate checks names and ports: valid names, ports above 1024, each
+// once.
+func (p ServicesParams) Validate() error {
+	if len(p.Services) > MaxServices {
+		return errors.New("too many services")
+	}
+	seen, ports := map[string]bool{}, map[int]bool{}
+	for _, s := range p.Services {
+		if !names.Valid(s.Name) || seen[s.Name] {
+			return errors.New("invalid or repeated service name")
+		}
+		if s.Port <= 1024 || s.Port > 65535 || ports[s.Port] {
+			return errors.New("invalid or repeated service port")
+		}
+		seen[s.Name], ports[s.Port] = true, true
+	}
+	return nil
 }
 
 // NetSyncParams name the project whose exceptions changed (net.sync).

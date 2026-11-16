@@ -422,3 +422,16 @@ Other checks and deferred work:
 | **`--merge` into the context repository** keeps the local `main`; the archived history is fetched but only reported when `main` differs (no merge commit) | merging notes and memory of two machines, if wanted |
 | **Hub-side checks of bundles**: the hub stores bundles without looking inside; a hostile machine can archive garbage under its own name (bounded by its quota), which a restore then refuses at `git fetch` (fsck) | nothing |
 | **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/fleet/ ./internal/hub/ ./internal/daemon/` in the toolchain image with cgo |
+
+### From C18
+
+| Item | Needs |
+|---|---|
+| **No real service was contacted.** The proxy, the login and the example's `login.sh` ran only against the test upstream (Go's TLS server, which speaks HTTP/2). Real login forms (CSRF tokens, redirects through an identity provider), other servers' framing and HTTP/2 implementations were not tried | a real intranet or wiki behind a password |
+| **The cookie integration test reaches the upstream through the host's private LAN address** from the login container (rootless Podman with slirp4netns here). With pasta networking the container may share the host's address, so that address can mean the container itself; the test skips only when the host has no private address | a run on a pasta host; `host.containers.internal` if needed |
+| **Body reflection**: an upstream endpoint that echoes request headers in its body shows the credential to the box (documented; only headers are scrubbed) | nothing, or a body scrubber for small text responses if wanted |
+| **Second factors and browser logins** are not supported by devc itself: the login runs without standard input, and no browser is shipped (notes in `examples/services/README.md`) | a user-built `auth.image` with a browser |
+| **No hub notification** when a service needs a login: the note lands in the live sessions of the box that met the need (none when it has no live session), the daemon's log and `devc service ls` | an inbox item or ntfy message, if wanted |
+| **SELinux**: the login container bind-mounts a scratch directory below `local/tmp` like the harness logins (no relabel; `label=disable` only in mode `disable`); not run on an SELinux host | a run on Fedora |
+| **Existing boxes**: a box started before C18 has no services in its capability record and an agent without `box.services` | a restart per box that gets a service |
+| **The race detector was not run** on the new code (`./dev` builds with CGO off) | `go test -race ./internal/svclogin/ ./internal/daemon/ ./internal/boxside/` in the toolchain image with cgo |

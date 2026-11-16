@@ -691,3 +691,25 @@ func TestNetworkSentence(t *testing.T) {
 		t.Errorf("none: %q", d.NetworkSentence)
 	}
 }
+
+// TestServicesInDescription: granted services are listed with their local
+// address and rules (work order C18).
+func TestServicesInDescription(t *testing.T) {
+	e := setup(t, nil)
+	r := e.resolved(t, "demo/hello")
+	r.Services = []config.Service{{Name: "wiki", Port: 8601, Auth: config.ServiceAuth{Kind: "header"},
+		Allow: []config.ServiceRule{{Methods: []string{"GET", "HEAD"}, Path: "/api/"}, {Methods: []string{"POST"}, Path: "/api/search"}}}}
+	text, err := Instructions(e.cfg, r, e.manifest(t, "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"`wiki` is at http://127.0.0.1:8601/", "GET, HEAD /api/; POST /api/search", "devc service login", "never holds their credentials"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the description lacks %q:\n%s", want, text)
+		}
+	}
+	r.Services = nil
+	if text, _ := Instructions(e.cfg, r, e.manifest(t, "claude")); strings.Contains(text, "Services:") {
+		t.Error("services described without any")
+	}
+}
