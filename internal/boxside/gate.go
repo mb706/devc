@@ -1,11 +1,11 @@
-package boxside
-
 // The box side of the SSH gate (work order C10b section 3). The generated
 // /etc/devc/ssh_config gives every granted host a ProxyCommand,
 // `devc box gate-connect <host>`, which opens a host.gate stream through
 // the box agent and relays ssh's bytes; the stream ends at the gate's
 // sshd on the host. The box never holds a credential for the remote host
 // and never sees the master connection.
+
+package boxside
 
 import (
 	"bufio"

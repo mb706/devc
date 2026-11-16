@@ -29,6 +29,17 @@
 // inside the box's user and network namespaces only, entered through
 // descriptors pinned when the forward starts; it never enters the box's
 // mount namespace, so nothing from the box is executed.
+//
+// Files: netpolicy.go holds the levels and their engine arguments;
+// rules.go renders the rules of level internet and reads the engine's
+// resolver and hosts files; install.go installs and verifies the rules in
+// a box's namespace; binding.go ties readiness to one start; resolvers.go
+// computes the resolvers the host trusts and the backend's ways to the
+// host; canary.go holds the sentinel check and the outside check;
+// allowlist.go and presets.go parse allowlist entries; proxy.go is the
+// allowlist proxy and netlog.go its log; exceptions.go keeps network
+// exceptions and renders their set elements; forward.go and registry.go
+// are `devc forward` and its records.
 package netpolicy
 
 import (
@@ -44,7 +55,9 @@ const (
 	Open      = "open"
 )
 
-// Names of the nftables objects. C13 builds on them: keep them stable.
+// Names of the nftables objects. Keep them stable: a running box keeps the
+// table it was started with, and Verify and ApplyExceptions find it by
+// these names.
 const (
 	// Table is the inet table holding devc's rules in a box's namespace.
 	Table = "devc"

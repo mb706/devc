@@ -1,3 +1,7 @@
+// This file makes the gate's keys with ssh-keygen: the host key of the
+// gate's sshd, once per machine, and a new key pair for every start of a
+// box with a grant.
+
 package gate
 
 import (
@@ -81,6 +85,8 @@ func parsePublicKey(line string) (string, error) {
 	return f[0] + " " + f[1], nil
 }
 
+// readSmall reads a key file without following a symlink, refusing
+// anything but a regular file of at most maxKeyFile bytes.
 func readSmall(p string) ([]byte, error) {
 	f, err := os.OpenFile(p, os.O_RDONLY|noFollow, 0)
 	if err != nil {

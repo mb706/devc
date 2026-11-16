@@ -1,3 +1,7 @@
+// This file holds the two checks of level internet that are made with
+// connections: the sentinel box init connects to before it reports ready,
+// and the canary, the host's check from outside after a start.
+
 package netpolicy
 
 import (

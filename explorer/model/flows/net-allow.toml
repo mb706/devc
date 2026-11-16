@@ -1,0 +1,160 @@
+id = "net-allow"
+kind = "flow"
+title = "A network exception, from grant to expiry"
+summary = "`devc net allow` on the host: the target is checked against the box's level, the exception recorded under the box lock and applied, as timed kernel set elements at level internet, by the proxy at level allowlist, or by agent listeners for `host:<port>`; and how each kind ends."
+concern = "allowlist-proxy"
+trigger = "devc net allow nas.lan:5432 demo/hello --for 30m"
+actors = ["user", "cli", "state-dir", "podman", "daemon", "box-agent"]
+
+[[step]]
+section = "Granting"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc net allow"
+label = "devc net allow nas.lan:5432 demo/hello --for 30m"
+external = true
+text = "The user, or the daemon carrying out a `net` request the user approved on this machine, which adds `--request <id>` ([[flow:request-approve]])."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.netAllow"
+checks = ["internal/netpolicy.ParseTarget", "internal/netpolicy.ParseFor", "internal/proto.ValidRequestID"]
+text = "The target must be `<IPv4-or-name>:<port>`, `lan` or `host:<port>`; addresses that are unspecified, loopback, multicast or broadcast and IP literals posing as names are refused. The duration is one second to 30 days (two hours by default), or `forever`."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.netEnv"
+checks = ["internal/config.Config.ProblemsFor"]
+text = "The project's configuration must be free of problems."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.RunningLevel"
+text = "The level is the running box's, from its capability record when that belongs to the running container, else the configured one. It decides which kinds are allowed: `lan` only at internet, addresses only at internet, names at internet or allowlist, nothing but `host:<port>` at none and open."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.resolveIPv4"
+text = "At level internet a name is resolved now, on the host, to at most 16 IPv4 addresses; the kernel will know only those addresses."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.Lock"
+text = "The box lock: no start, stop or other exception change of this box runs meanwhile."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "local/boxes/<realm>/<project>/net-exceptions.json"
+ref = "internal/netpolicy.WriteExceptions"
+checks = ["internal/netpolicy.ReadExceptions"]
+text = "The record is read strictly, the exception added with a new ID (`x` and six hex digits), its end and its origin (`cli` or `request <id>`), and written back by rename (0600). Expired exceptions are dropped; more than 256 is refused."
+
+[[step]]
+section = "Level internet: into the kernel"
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.SyncExceptions"
+text = "For a running box of level internet the host first checks that the box is still the start whose namespace devc filtered and that its table is there ([[internal/box.Manager.verifyRunning]])."
+
+[[step]]
+at = "cli"
+ref = "internal/netpolicy.ExceptionScript"
+text = "The script flushes `allow4` and `lan4` and adds every element in force with the whole seconds it has left: `<address> . 5432 timeout 1800s` for each address, the four LAN ranges for `lan`."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman unshare nsenter --net=<ns> nft -f -"
+ref = "internal/netpolicy.Installer.ApplyExceptions"
+text = "Applied in one transaction, so a change never leaves a valid exception out for a moment. Neither the namespace nor the main process changes, so the binding stays valid."
+
+[[step]]
+at = "podman"
+external = true
+label = "elements with timeouts"
+text = "The kernel now accepts TCP and UDP from the box to those addresses on port 5432, before the rules that reject private ranges."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "allowed nas.lan:5432 until … (exception x1a2b3c)"
+ref = "internal/cli.app.netAllow"
+text = "If applying failed, the exception is removed from the record again and the command fails. An exception without expiry is printed in capitals, with a warning."
+
+[[step]]
+section = "Level allowlist and host:<port>: through the daemon"
+
+[[step]]
+from = "cli"
+to = "daemon"
+via = "rpc:net.sync"
+label = "net.sync {ref}"
+ref = "internal/cli.app.applyExceptions"
+text = "At level allowlist a name needs nothing installed: the proxy reads the record for every request. The call only has the daemon check open connections now. For `host:<port>` the daemon must apply it."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.apiNetSync"
+checks = ["internal/names.Parse", "internal/daemon.resolvedOf"]
+text = "Only the local socket offers `net.sync`, not a hub; the project must be configured and free of problems."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.syncNet"
+text = "Open proxy connections are checked against the policy now; relays of `host.dial` whose port is no longer allowed are ended; when the host ports changed, the agent gets the new list."
+
+[[step]]
+from = "daemon"
+to = "box-agent"
+via = "rpc:box.listen"
+label = "box.listen {ports}"
+ref = "internal/daemon.boxWorker.syncNet"
+text = "Within 30 seconds; ports the agent cannot open come back as warnings."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.setListeners"
+checks = ["internal/proto.ListenParams.Validate"]
+text = "The agent listens on exactly those ports on `127.0.0.1`; each connection there becomes a `host.dial` stream, which the daemon connects to the host's loopback only while the record allows the port ([[internal/daemon.boxWorker.serveDial]])."
+
+[[step]]
+section = "Expiry"
+
+[[step]]
+at = "podman"
+external = true
+label = "timeout passes"
+text = "After 30 minutes the kernel drops the elements by itself. Every outgoing packet passes the chain, so connections already open to that address fail too."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.netLoop"
+unchecked = "the worker's network loop, started when the channel connected, ticks every five seconds"
+text = "Every five seconds each connected box's worker compares the record, at the current time, with what the agent listens on."
+
+[[step]]
+at = "daemon"
+ref = "internal/netpolicy.Proxy.watch"
+unchecked = "each open proxy connection runs its own watch goroutine, started when the connection was made"
+text = "At level allowlist each open tunnel is checked again when the earliest exception in force ends and every five seconds; one no longer allowed is closed and the closing logged."
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc net ls"
+label = "devc net ls"
+external = true
+text = "Later the user lists the exceptions of every project, or of one."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.activeExceptions"
+text = "Only exceptions in force are listed, with their remaining time; the next write of the record drops expired ones. `devc net revoke <id>` removes one under the box lock and applies the record at once."
+detail = "The record survives `devc down` and `up`: after every start the start hook applies what is still valid ([[internal/box.NetExceptionHook]]). `devc rm` removes it."

@@ -1,3 +1,7 @@
+// This file is what a box with an SSH grant gets (its client configuration,
+// the gate's host key, a key of its own) and how the gate takes part in the
+// box life cycle.
+
 package gate
 
 import (

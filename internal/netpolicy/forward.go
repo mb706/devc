@@ -1,3 +1,8 @@
+// This file relays connections into a box's network namespace for `devc
+// forward` and the daemon's router: the box's namespaces are pinned once,
+// and each connection gets a dial process of the host's devc binary in
+// them.
+
 package netpolicy
 
 import (

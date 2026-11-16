@@ -189,12 +189,12 @@ role = "Loads, validates and answers questions about the configuration: config.t
 [package."internal/netpolicy"]
 layer = "area"
 group = "access"
-role = "Decides how a box is connected to the network and enforces it from the host: engine arguments per level, the firewall rules of level internet, the canary, the port forwarder, the allowlist proxy, exceptions and the proxy log."
+role = "Decides how a box is connected to the network and enforces it from the host: engine arguments per level, the firewall rules of level internet with their binding to one start, the trusted resolvers, the sentinel and the canary, the port forwarder, the allowlist proxy and its log, and network exceptions."
 
 [package."internal/secrets"]
 layer = "area"
 group = "access"
-role = "Stores per-realm secrets on the host and delivers the ones a box needs into its private tmpfs directory."
+role = "Stores per-realm secrets on the host and writes the ones a box is given into its secrets directory, refusing storage that is not memory-backed."
 
 [package."internal/github"]
 layer = "area"
@@ -261,7 +261,7 @@ role = "Turns harness manifests into what a box needs: launch descriptions and s
 [package."internal/gate"]
 layer = "assembly"
 group = "access"
-role = "The host side of the SSH gate: master connections, the gate's host key and per-box keys, the sshd configuration for every box stream, the forced command, the read-only profile and the gate log."
+role = "The host side of the SSH gate: master connections, the gate's host key and per-box keys, the configuration and forced command of the sshd started for every box stream, `devc gate-exec`, the read-only profile and the gate log."
 
 [package."internal/ctxrepo"]
 layer = "assembly"

@@ -1,3 +1,8 @@
+// This file is the box's part of the network levels: the check box init
+// runs at level internet before it reports ready, the canary the host runs
+// after a start, and the dial process that `devc forward` and the router
+// start in the box's namespaces.
+
 package boxside
 
 import (

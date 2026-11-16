@@ -1,11 +1,11 @@
-package cli
-
 // devc net (work order C13 section 2): network exceptions and the
 // allowlist proxy's log. Exceptions are created here only: by the user,
 // or by the daemon carrying out an approved `net` request with this same
 // command (--request names it). The record lives in the state directory,
 // out of every box's reach; LAN exceptions go into the box's namespace
 // from the host, host exceptions are served by the daemon.
+
+package cli
 
 import (
 	"context"
@@ -30,6 +30,7 @@ import (
 // lifecycle command for a while).
 const netTimeout = 15 * time.Minute
 
+// newNetCmd is `devc net`: allow, ls, revoke and log.
 func newNetCmd(a *app) *cobra.Command {
 	var allowFor, requestID string
 	allow := &cobra.Command{
@@ -137,6 +138,10 @@ func resolveIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
 	return out, nil
 }
 
+// netAllow is `devc net allow`: it checks the target against the box's
+// level (the running box's, else the configured one), records the
+// exception under the box lock and applies it to the running box; one that
+// cannot be applied is removed from the record again.
 func (a *app) netAllow(parent context.Context, target string, refArgs []string, forStr, requestID string) error {
 	t, err := netpolicy.ParseTarget(target)
 	if err != nil {
@@ -373,6 +378,8 @@ func (a *app) netList(args []string, asJSON bool) error {
 	return nil
 }
 
+// netRevoke is `devc net revoke`: it removes the exception from its
+// project's record under the box lock and brings the running box in line.
 func (a *app) netRevoke(parent context.Context, id string) error {
 	if !netpolicy.ValidExceptionID(id) {
 		return usageErrorf("%q is not an exception ID (see 'devc net ls')", id)

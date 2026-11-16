@@ -1,3 +1,8 @@
+// This file binds the readiness of a box of level internet to the one start
+// whose namespace the host filtered: the record the host writes, the
+// host's and box init's ways of computing it, and the /proc reads behind
+// them.
+
 package netpolicy
 
 import (
@@ -31,9 +36,10 @@ const BindingVersion = 1
 // init refuses to report ready unless its own namespace, its PID 1 and the
 // boot match. A plain `podman start` creates a new namespace and a new
 // main process: the engine hands out namespace inode numbers again after a
-// restart (seen on this host: the same number four times in a row), so the
-// inode alone would not do, but the start time of PID 1 within the same
-// boot is unique to one start. The box cannot write the record.
+// restart (seen on the development host: the same number four times in a
+// row), so the inode alone would not do, but the start time of PID 1
+// within the same boot is unique to one start. The box cannot write the
+// record.
 type Binding struct {
 	V int `json:"v"`
 	// NetNS is the inode number of the network namespace.
@@ -50,6 +56,8 @@ func (b Binding) Equal(o Binding) bool {
 	return b.V == o.V && b.NetNS == o.NetNS && b.PID1Start == o.PID1Start && b.BootID == o.BootID
 }
 
+// valid refuses a record that could match by accident: another format, or
+// a zero inode, start time or boot ID.
 func (b Binding) valid() error {
 	if b.V != BindingVersion || b.NetNS == 0 || b.PID1Start == 0 || !validBootID(b.BootID) {
 		return errors.New("the network binding record is incomplete")
@@ -234,6 +242,7 @@ func (h hostProc) StartTime(pid int) (uint64, error) { return h.fs.StartTime(str
 func (h hostProc) NetNS(pid int) (uint64, error)     { return h.fs.NSInode(strconv.Itoa(pid), "net") }
 func (h hostProc) BootID() (string, error)           { return h.fs.BootID() }
 
+// proc is the host's /proc unless a test replaced it.
 func (in *Installer) proc() HostProc {
 	if in.Proc != nil {
 		return in.Proc
@@ -325,6 +334,8 @@ func CheckBinding(path string, fs ProcFS) error {
 	return nil
 }
 
+// notBound explains a missing or unreadable record to the user, who most
+// likely started the box with a plain `podman start`.
 func notBound(err error) error {
 	if errors.Is(err, os.ErrNotExist) {
 		return errors.New("devc has not bound this box's network rules to this start (no record)")

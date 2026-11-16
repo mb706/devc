@@ -166,13 +166,13 @@ ref = "internal/paths.Paths.RequestsFile"
 
 [[tree.entry]]
 path = "durable/realms/<realm>/netlog/<project>.jsonl"
-text = "The allowlist proxy's log of a project."
+text = "The allowlist proxy's log of a project: every decision, refusals and closings included (0600). Past 4 MiB it moves to `<project>.jsonl.1`, replacing the previous one."
 writer = "host"
 ref = "internal/paths.Paths.NetLogFile"
 
 [[tree.entry]]
 path = "durable/realms/<realm>/gate-log.jsonl"
-text = "The commands the realm's boxes ran through the SSH gate."
+text = "One line per SSH gate session of the realm's boxes, run or refused, with the command up to 4 KiB (0600, appended under a lock). Never rotated."
 writer = "host"
 ref = "internal/paths.Paths.GateLog"
 
@@ -280,7 +280,7 @@ ref = "internal/paths.Paths.BoxCapabilitiesFile"
 
 [[tree.entry]]
 path = "local/boxes/<realm>/<project>/net-exceptions.json"
-text = "The network exceptions granted to the project's box, kept across down and up."
+text = "The network exceptions granted to the project's box (0600, at most 256, expired ones dropped at each write), kept across down and up; `devc rm` removes it. Only `devc net allow` and `revoke` write it."
 writer = "host"
 ref = "internal/paths.Paths.BoxNetExceptionsFile"
 
@@ -316,7 +316,7 @@ ref = "internal/paths.Paths.ArchiveHubDir"
 
 [[tree.entry]]
 path = "local/gate"
-text = "The SSH gate's host key and the public keys of boxes."
+text = "The SSH gate's host key and the public keys of boxes, with the lock under which the host key is made."
 writer = "host"
 ref = "internal/paths.Paths.GateDir"
 
@@ -556,15 +556,45 @@ ref = "internal/boxside.StatusDir"
 
 [[tree.entry]]
 path = "<box-id>-secrets"
-text = "The secrets delivered to a box, mounted read-only at /run/devc-secrets: a sibling of the runtime directory, not inside it."
+text = "The secrets delivered to a box before its start (directory 0700, files 0400), mounted read-only at /run/devc-secrets: a sibling of the runtime directory, not inside it. With `secrets.delivery = \"daemon\"` only the SSH gate's key `gate_key`. Removed when the box stops."
 writer = "host"
 ref = "internal/paths.Paths.BoxSecretsDir"
 
 [[tree.entry]]
 path = "gate"
-text = "The SSH master connections of `devc ssh login` and the configuration of running gate sshd processes; never mounted into a box."
+text = "The SSH master connections of `devc ssh login` and the configuration of running gate sshd processes; never mounted into a box. Box keys are generated here, and only when it is memory-backed (or `DEVC_ALLOW_PERSISTENT_SECRETS=1`)."
 writer = "host"
 ref = "internal/paths.Paths.GateRuntimeDir"
+
+[[tree.entry]]
+path = "gate/m-<hash>.sock"
+text = "The control socket of the master connection to one host, named by the first 16 hex characters of the SHA-256 of the alias; through it a client can run sessions and ask for forwards with the user's connection."
+writer = "host"
+ref = "internal/gate.SocketPath"
+
+[[tree.entry]]
+path = "gate/m-<hash>.host"
+text = "The alias the socket beside it belongs to, for `devc ssh ls`."
+writer = "host"
+ref = "internal/gate.HostFile"
+
+[[tree.entry]]
+path = "gate/sshd-<box-id>-<random>.conf"
+text = "The configuration of one gate sshd (0600), written for one box stream and removed when sshd exits."
+writer = "host"
+ref = "internal/gate.Server.Prepare"
+
+[[tree.entry]]
+path = "forwards/<id>.json"
+text = "The record of a running `devc forward` (0600): project, box port, host address and port, the process and, for a foreground forward, its start time. Stale records are removed when listed; the router routes ports that have one."
+writer = "host"
+ref = "internal/netpolicy.Registry"
+
+[[tree.entry]]
+path = "forwards/<id>.log"
+text = "The messages of a detached forward."
+writer = "host"
+ref = "internal/netpolicy.Registry.LogFile"
 
 # ----- the mounts of a box (internal/box.BuildSpec, plus what the
 # harness, data and shares contributors add)

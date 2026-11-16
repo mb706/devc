@@ -21,6 +21,14 @@
 // option. Box-supplied text is logged truncated and is never interpreted
 // on the host. The per-box private key is generated on the runtime tmpfs
 // and exists afterwards only in the box's secrets directory (rule 5).
+//
+// Files: gate.go holds the fixed names and the master sockets' paths;
+// client.go the host's ssh commands (login, check, exit, the multiplexing
+// client); keys.go the host key and the per-box keys; sshd.go the
+// configuration and command of the gate's sshd and its forced command;
+// exec.go the body of `devc gate-exec`; filter.go the read-only profile;
+// log.go the gate log; box.go what a box with a grant gets and how the
+// gate joins the box life cycle.
 package gate
 
 import (

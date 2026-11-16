@@ -1,3 +1,5 @@
+// This file holds the built-in allowlist presets.
+
 package netpolicy
 
 // Presets are the built-in allowlist presets (work order C13 section 1),

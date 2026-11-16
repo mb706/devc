@@ -556,3 +556,142 @@ title = "Context repository"
 text = "A realm's bare repository `durable/realms/<realm>/context/.git` that versions the notes and memory boxes write (`context/notes/<project>`, `context/memory/<group>`). Only the context worker, in a container without network, runs git on it; no box sees it."
 refs = ["internal/ctxrepo.Repo", "internal/boxside.ContextWorker"]
 see = ["snapshot"]
+
+[[term]]
+id = "network-level"
+title = "Network level"
+aka = ["level"]
+text = "What a box's network allows, set by a project's `network.level` or the realm's `network.default`: `none` (no network), `allowlist` (listed names through the daemon's proxy), `internet` (public IPv4 only, rules installed by the host; the default) or `open` (the engine's network as it is)."
+refs = ["internal/netpolicy.BoxArgs"]
+see = ["allowlist-proxy", "network-binding", "network-exception"]
+
+[[term]]
+id = "network-binding"
+title = "Network binding"
+aka = ["binding record", "netns.json"]
+text = "`/etc/devc/netns.json`, written by the host after it installed and verified the rules of level internet and before `podman start`: the network namespace's inode, the start time of the box's main process and the boot ID. Box init reports ready only if they match its own, and the host checks them again before it uses a running box."
+refs = ["internal/netpolicy.Binding", "internal/netpolicy.CheckBinding", "internal/box.Manager.verifyRunning"]
+see = ["sentinel", "readiness-marker"]
+
+[[term]]
+id = "sentinel"
+title = "Sentinel"
+text = "TCP to `192.0.2.1:9`, which devc's rules answer with a reset. Box init connects to it before it reports ready: \"connection refused\" proves the rules are loaded, since without them that address times out or is unreachable."
+refs = ["internal/netpolicy.CheckSentinel", "internal/netpolicy.SentinelAddr"]
+see = ["network-binding", "canary"]
+
+[[term]]
+id = "canary"
+title = "Canary"
+text = "The host's check from outside after a box of level internet became ready: a listener on all the host's IPv4 addresses while `devc box net-canary` tries to reach them and the host aliases from inside. A connection seen by either side fails the start."
+refs = ["internal/box.Manager.checkNetwork", "internal/netpolicy.EvaluateCanary"]
+see = ["sentinel"]
+
+[[term]]
+id = "trusted-resolver"
+title = "Trusted resolver"
+text = "A nameserver a box of level internet may reach on port 53: one the host computed from its own resolv.conf, systemd-resolved's upstream file or the network backend's inspect data. A nameserver only the box's resolv.conf names gets no exception."
+refs = ["internal/netpolicy.TrustedResolvers"]
+see = ["network-level"]
+
+[[term]]
+id = "allowlist"
+title = "Allowlist"
+aka = ["preset"]
+text = "The names a box of level allowlist may reach: `[network.allowlist]` `domains` (a name or `*.suffix`, with an optional port, else 80 and 443) and built-in `presets`, of realm and project together. It is a capability of the box's start: growing it needs the box to be brought up again."
+refs = ["internal/netpolicy.Expand", "internal/netpolicy.Presets", "internal/box.Capabilities.ProxyAllowlist"]
+see = ["allowlist-proxy"]
+
+[[term]]
+id = "allowlist-proxy"
+title = "Allowlist proxy"
+text = "The HTTP proxy in the daemon for boxes of level allowlist: the box agent relays every connection to `127.0.0.1:3128` over the box channel; the daemon allows only listed names, resolves them itself, connects only to public IPv4 addresses and logs every decision."
+refs = ["internal/netpolicy.Proxy", "internal/daemon.boxWorker.serveProxy"]
+see = ["allowlist", "proxy-log", "network-exception"]
+
+[[term]]
+id = "network-exception"
+title = "Network exception"
+aka = ["exception"]
+text = "A destination opened for a box for a while from the host only, by `devc net allow` (also for an approved `net` request): an address or name and port, `lan`, or `host:<port>` for a service on the host's loopback. Kept in `net-exceptions.json`, applied as timed nftables set elements at level internet, by the proxy at level allowlist, by agent listeners for `host:<port>`."
+refs = ["internal/netpolicy.Exception", "internal/cli.app.netAllow", "internal/netpolicy.ExceptionScript"]
+see = ["network-level", "allowlist-proxy"]
+
+[[term]]
+id = "proxy-log"
+title = "Proxy log"
+aka = ["netlog"]
+text = "`durable/realms/<realm>/netlog/<project>.jsonl`: every decision of the allowlist proxy for the project's box, refusals and closings included. It moves to `.1` past 4 MiB; `devc net log` shows it."
+refs = ["internal/netpolicy.NetLog"]
+see = ["allowlist-proxy"]
+
+[[term]]
+id = "port-forward"
+title = "Port forward"
+aka = ["devc forward"]
+text = "`devc forward <port>`: a listener on the host whose connections each get a dial process, the host's devc binary in the box's pinned user and network namespaces, connecting to `127.0.0.1:<port>` in the box. Works at every network level; ends when the box stops or restarts."
+refs = ["internal/netpolicy.Forwarder", "internal/netpolicy.Pin", "internal/cli.app.forward"]
+see = ["local-url"]
+
+[[term]]
+id = "local-url"
+title = "Local URL"
+aka = ["router"]
+text = "`http://<port>.<project>.<realm>.localhost:7480/`, served by the daemon's router for ports in a project's `box.ports` or forwarded at the moment, through the same dial process as a port forward. Cross-origin browser requests are refused."
+refs = ["internal/daemon.router.ServeHTTP", "internal/daemon.crossOrigin"]
+see = ["port-forward"]
+
+[[term]]
+id = "ssh-gate"
+title = "SSH gate"
+aka = ["gate"]
+text = "How a box uses a granted SSH host without a credential: its ssh connects through `devc box gate-connect` and the box channel to an `sshd -i` the daemon starts for that connection, whose forced command `devc gate-exec` runs the session over the master connection the user keeps on the host."
+refs = ["internal/daemon.boxWorker.serveGate", "internal/gate.Exec.Run"]
+see = ["master-connection", "gate-key", "read-only-profile", "gate-log"]
+
+[[term]]
+id = "master-connection"
+title = "Master connection"
+aka = ["master", "devc ssh login"]
+text = "An SSH connection `devc ssh login <host>` opens on the host with the user's own keys, agent, password or second factor, and keeps in the background on a control socket in `<runtime>/gate`. Gate sessions run over it without authenticating; it ends after `--ttl` without use or with `devc ssh close`."
+refs = ["internal/gate.Client.LoginCmd", "internal/gate.SocketPath"]
+see = ["ssh-gate"]
+
+[[term]]
+id = "gate-key"
+title = "Gate key"
+aka = ["box key", "gate_key"]
+text = "The key pair a box with an SSH grant gets at every start: the private half as the secret `gate_key` in `/run/devc-secrets`, the public half as `local/gate/keys/<box-id>.pub` with `restrict,pty`. It opens only the gate's sshd for that box, and only until the box's next start."
+refs = ["internal/gate.Keys.NewBoxKey", "internal/gate.BoxHooks.BoxSecrets"]
+see = ["ssh-gate"]
+
+[[term]]
+id = "read-only-profile"
+title = "Read-only profile"
+aka = [":ro"]
+text = "An SSH grant written `<host>:ro`: no shell, no sftp, and only commands whose first word `[grants.ssh_allow]` lists, without shell metacharacters. A convenience, not a boundary: an allowed command that runs programs can do anything the account can."
+refs = ["internal/gate.CheckReadOnly", "internal/gate.ReadOnlyNote"]
+see = ["ssh-gate"]
+
+[[term]]
+id = "gate-log"
+title = "Gate log"
+text = "`durable/realms/<realm>/gate-log.jsonl`: one line per gate session of the realm's boxes, run or refused, with box, host, mode, the command up to 4 KiB, exit status and duration. Never rotated."
+refs = ["internal/gate.AppendLog", "internal/gate.Entry"]
+see = ["ssh-gate"]
+
+[[term]]
+id = "realm-secret"
+title = "Realm secret"
+aka = ["secret"]
+text = "A value stored on the host in `durable/realms/<realm>/secrets/<name>` (0600) with `devc secret set` or `devc login`, given to the boxes of projects whose `grants.secrets` name it (and to token harnesses). The agent can read what its box is given."
+refs = ["internal/secrets.FileStore", "internal/box.GrantedSecrets"]
+see = ["secret-delivery", "grant"]
+
+[[term]]
+id = "secret-delivery"
+title = "Secret delivery"
+aka = ["delivery files", "delivery daemon"]
+text = "How a box receives its secrets, `secrets.delivery` in config.toml: `files` (the default) writes them before every start into the box's memory-backed secrets directory, mounted read-only at `/run/devc-secrets`; `daemon` writes nothing and the launcher asks the daemon with `host.secret` at each launch."
+refs = ["internal/harness.BoxHooks.deliverSecrets", "internal/secrets.Deliver", "internal/daemon.Daemon.secret"]
+see = ["realm-secret"]

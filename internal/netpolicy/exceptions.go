@@ -1,5 +1,3 @@
-package netpolicy
-
 // Network exceptions (work order C13 section 2). An exception is granted
 // while a box runs, from the host only: by `devc net allow` or by an
 // approved `net` request, which the daemon carries out through the same
@@ -19,6 +17,8 @@ package netpolicy
 //   - KindHost at every level: the box agent listens on 127.0.0.1:<port>
 //     and relays to the same port on the host's loopback, which the daemon
 //     dials only while the exception is in force.
+
+package netpolicy
 
 import (
 	"bytes"
@@ -50,8 +50,8 @@ const (
 
 // Limits of exceptions.
 const (
-	// MinExceptionFor and MaxExceptionFor bound a timed exception; longer
-	// ones are "forever".
+	// MinExceptionFor and MaxExceptionFor bound a timed exception; one
+	// without expiry must be asked for as "forever".
 	MinExceptionFor = time.Second
 	MaxExceptionFor = 30 * 24 * time.Hour
 	// DefaultExceptionFor is the duration without --for.
@@ -214,6 +214,9 @@ func (x *Exception) TargetString() string {
 	return Target{Kind: x.Kind, Host: x.Host, Port: x.Port}.String()
 }
 
+// validate checks one exception as read from or written to the record:
+// the fields of its kind only, and an address target that lists exactly
+// its own address.
 func (x *Exception) validate() error {
 	switch {
 	case !ValidExceptionID(x.ID):

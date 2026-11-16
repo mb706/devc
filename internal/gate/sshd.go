@@ -1,3 +1,7 @@
+// This file renders what the daemon needs to start the gate's sshd for one
+// box stream: the forced command, quoted for the user's login shell, and
+// the sshd configuration with every forwarding switched off.
+
 package gate
 
 import (

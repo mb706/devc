@@ -1,5 +1,3 @@
-package netpolicy
-
 // The allowlist proxy (work order C13 section 1). A box of level allowlist
 // has no network interface besides loopback; its agent relays every
 // connection to 127.0.0.1:3128 as opaque bytes over the box channel, and
@@ -38,6 +36,8 @@ package netpolicy
 // head is bounded in size and time like the client's request head
 // (finding D1-02); the bound counts every byte a head consumes, also those
 // already buffered after the previous head (finding E1-15).
+
+package netpolicy
 
 import (
 	"bufio"
@@ -196,6 +196,8 @@ func (p *Proxy) dial(ctx context.Context, ap netip.AddrPort) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp4", ap.String())
 }
 
+// resolve looks up a name's IPv4 addresses on the host, within
+// proxyResolveTime; the box's own resolver plays no part.
 func (p *Proxy) resolve(ctx context.Context, host string) ([]netip.Addr, error) {
 	ctx, cancel := context.WithTimeout(ctx, proxyResolveTime)
 	defer cancel()
@@ -506,6 +508,9 @@ func (p *Proxy) connect(ctx context.Context, c ClientConn, cr *clientReader, br 
 var hopHeaders = []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
 	"Te", "Trailer", "Upgrade"}
 
+// removeHop drops the hop-by-hop headers and every header the Connection
+// header names, so neither side can pass the proxy its own connection
+// handling or proxy credentials.
 func removeHop(h http.Header) {
 	for _, f := range h.Values("Connection") {
 		for _, name := range strings.Split(f, ",") {
@@ -644,6 +649,8 @@ func (p *Proxy) plain(ctx context.Context, c ClientConn, br *bufio.Reader, cw cl
 	return !resp.Close, up
 }
 
+// policy returns the rules in force; a proxy without a Policy function
+// refuses everything.
 func (p *Proxy) policy() (ProxyPolicy, error) {
 	if p.Policy == nil {
 		return ProxyPolicy{}, errors.New("no allowlist is in force")

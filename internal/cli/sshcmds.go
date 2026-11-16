@@ -1,3 +1,7 @@
+// This file implements `devc ssh login`, `ls` and `close`, which keep the
+// master connections of the SSH gate, and the gate's two hidden ends:
+// `devc gate-exec` on the host and `devc box gate-connect` in a box.
+
 package cli
 
 import (
@@ -69,6 +73,8 @@ func removeStaleSocket(sock string) error {
 	return os.Remove(sock)
 }
 
+// newSSHCmd is `devc ssh`: login, ls and close of the gate's master
+// connections.
 func newSSHCmd(a *app) *cobra.Command {
 	var ttl time.Duration
 	login := &cobra.Command{

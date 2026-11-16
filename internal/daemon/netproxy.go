@@ -1,5 +1,3 @@
-package daemon
-
 // The daemon's network services (work order C13). A box of level
 // allowlist reaches the network only through host.proxy streams, which
 // the daemon serves with netpolicy.Proxy: it refuses by default, resolves
@@ -21,6 +19,8 @@ package daemon
 //     channel offers no way to create one: a box can only ask, with
 //     host.request, and a network request is high risk, so only the local
 //     socket can approve it.
+
+package daemon
 
 import (
 	"bufio"
@@ -47,8 +47,8 @@ import (
 
 // Limits of the network services.
 const (
-	// maxRelayStreams bounds the raw relay streams (proxy and host
-	// exceptions) of one box at once; the box agent keeps to the same.
+	// maxRelayStreams bounds the raw relay streams (proxy, host exceptions
+	// and services) of one box at once; the box agent keeps to the same.
 	maxRelayStreams = boxside.DefaultMaxRelays
 	// netSyncEvery is how often a connected box's listeners are compared
 	// with its exception record (expiry, changes made without net.sync).
@@ -109,6 +109,9 @@ type hostAddrCache struct {
 	list  func() ([]netip.Addr, error)
 }
 
+// contains reports whether a is one of the host's addresses, listing them
+// again when the cache is older than hostAddrsEvery. A failed listing
+// keeps the previous list.
 func (h *hostAddrCache) contains(a netip.Addr) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()

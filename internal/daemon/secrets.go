@@ -1,5 +1,3 @@
-package daemon
-
 // On-demand secrets (work order C10a section 3). With secrets.delivery =
 // "daemon" nothing is written into a box; its launcher asks host.secret
 // for the harness credential and each granted secret. The daemon answers
@@ -7,6 +5,8 @@ package daemon
 // grants.secrets and the secrets of its token harnesses) now and was
 // granted when its box was started (box.Capabilities, finding C1-02).
 // Values travel in the response body only and are never logged.
+
+package daemon
 
 import (
 	"context"

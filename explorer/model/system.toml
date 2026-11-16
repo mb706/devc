@@ -69,7 +69,7 @@ id = "browser"
 zone = "device"
 title = "Browser"
 kind = "process"
-summary = "Runs the hub's web app (`web/`), with a device certificate issued by the hub's CA."
+summary = "Runs the hub's web app (`web/`), with a device certificate issued by the hub's CA; on the host it also opens boxes' local URLs, which the daemon's router serves."
 
 # ----- actors: hub
 
@@ -117,6 +117,13 @@ zone = "external"
 title = "SSH hosts"
 kind = "service"
 summary = "Hosts a project is granted through the SSH gate; reached over the master connections `devc ssh login` keeps on the host."
+
+[[actor]]
+id = "internet"
+zone = "external"
+title = "Internet hosts"
+kind = "service"
+summary = "Any host on the internet a box reaches: directly at levels internet and open, through the daemon's allowlist proxy at level allowlist."
 
 # ----- actors: host
 
@@ -186,6 +193,14 @@ zone = "host"
 title = "State directory"
 kind = "store"
 summary = "`~/.local/share/devc`: durable state (relays, journals, secrets, context, harness state) and local state (receipts, box files, archive bookkeeping), the toolbox and caches. Parts are mounted into boxes; the rest no box reaches."
+
+[[actor]]
+id = "dialer"
+zone = "host"
+title = "Namespace dialer"
+kind = "process"
+summary = "`devc box dial`: the host's own devc binary, started with nsenter in a box's pinned user and network namespaces but the host's mount namespace, relaying one connection of `devc forward` or the router to a port on the box's loopback."
+commands = ["devc box dial"]
 
 # ----- actors: auxiliary containers
 
@@ -278,6 +293,13 @@ kind = "process"
 summary = "The coding agent (Claude Code, Codex, Cursor's CLI, OpenCode, pi), described by a manifest: installed in the toolbox, run in a session's tmux window or, started through its shim from a shell, in that shell's terminal."
 
 [[actor]]
+id = "box-program"
+zone = "box"
+title = "Box program"
+kind = "process"
+summary = "Any program in the box that is not devc's: what the harness or the user runs there, such as ssh, curl, a package manager or a web server. It runs no devc code."
+
+[[actor]]
 id = "tmux"
 zone = "box"
 title = "tmux"
@@ -320,7 +342,7 @@ transport = "The daemon connects to the agent's socket (`<runtime>/<box-id>/agen
 carries = "The daemon's requests to the box ([[surface:box-agent]]): hello, live sessions, input to panes, listeners for exceptions and services."
 boundary = true
 checks = ["internal/daemon.DialBoxSocket", "internal/daemon.CheckPeer", "internal/proto.HelloReply.Validate", "internal/proto.DecodeResult", "internal/session.ParseLive"]
-concerns = ["box-channel", "box-init-and-agent", "input-and-receipts"]
+concerns = ["box-channel", "box-init-and-agent", "input-and-receipts", "allowlist-proxy"]
 
 [[channel]]
 id = "agent-local"
@@ -328,8 +350,8 @@ from = "box-tools"
 to = "box-agent"
 title = "Agent socket"
 transport = "The abstract socket `@devc-agent`, which only processes in the box's network namespace reach."
-carries = "Requests of in-box clients to the host, one JSON-RPC message first: requests, secrets, questions, hints, and git, gate and proxy streams."
-concerns = ["box-init-and-agent"]
+carries = "Requests of in-box clients to the host, one JSON-RPC message first: requests, secrets, questions, hints, and git and gate streams."
+concerns = ["box-init-and-agent", "ssh-gate", "secrets"]
 
 [[channel]]
 id = "box-streams"
@@ -340,7 +362,7 @@ transport = "A new yamux stream of the box channel per in-box client; the agent 
 carries = "The box's requests to the host ([[surface:host-api]]). The daemon attributes each to the box by the channel it arrives on; nothing the box says selects a project."
 boundary = true
 checks = ["internal/daemon.muxGuard", "internal/proto.ParseMessage", "internal/proto.DecodeParams", "internal/requests.Validate"]
-concerns = ["box-channel", "box-init-and-agent", "requests-and-approval", "sessions-and-events", "git-ratchet"]
+concerns = ["box-channel", "box-init-and-agent", "requests-and-approval", "sessions-and-events", "git-ratchet", "allowlist-proxy", "ssh-gate", "secrets"]
 
 [[channel]]
 id = "spool-write"
@@ -605,21 +627,103 @@ title = "Gate stream"
 transport = "`sshd -i` with a box's host.gate stream as standard input and output."
 carries = "One SSH connection of a box to a granted host."
 boundary = true
-checks = ["internal/daemon.boxWorker.serveGate"]
+checks = ["internal/daemon.boxWorker.serveGate", "internal/config.ValidHostAlias", "internal/box.Capabilities.SSHGrant", "internal/gate.ServerConfig.Render"]
+concerns = ["ssh-gate"]
 
 [[channel]]
 id = "sshd-gate-exec"
 from = "sshd"
 to = "gate-exec"
 title = "Forced command"
-transport = "sshd's ForceCommand, `devc gate-exec <host>`, with the box's original command in the environment."
-carries = "The command the box asked to run."
+transport = "sshd's ForceCommand, `devc … gate-exec --box <box-id> --host <host> --runtime-dir <dir>` run by the user's login shell, with the box's command in `SSH_ORIGINAL_COMMAND`."
+carries = "The command the box asked to run, or an interactive shell or sftp."
+checks = ["internal/gate.Exec.Run", "internal/gate.CheckReadOnly"]
+concerns = ["ssh-gate"]
 
 [[channel]]
 id = "gate-ssh"
 from = "gate-exec"
 to = "ssh-hosts"
 title = "Master connection"
-transport = "`ssh -S <master> -o ControlMaster=no <host>` over the connection `devc ssh login` keeps in `<runtime>/gate`."
-carries = "One SSH session."
+transport = "`ssh -S <master> -o ControlMaster=no -o ProxyCommand=false <host>` over the connection `devc ssh login` keeps in `<runtime>/gate`; without the master it fails instead of connecting."
+carries = "One SSH session, with every forwarding off."
 boundary = true
+concerns = ["ssh-gate"]
+
+[[channel]]
+id = "program-gate"
+from = "box-program"
+to = "box-tools"
+title = "ProxyCommand"
+transport = "The box's ssh starts `/opt/devc/bin/devc box gate-connect <host>` for a granted host, as the generated SSH configuration says, and speaks SSH on its standard input and output."
+carries = "The box's SSH connection, which gate-connect relays over a host.gate stream."
+concerns = ["ssh-gate"]
+
+[[channel]]
+id = "program-proxy"
+from = "box-program"
+to = "box-agent"
+title = "Proxy port"
+transport = "TCP to `127.0.0.1:3128` in a box of level allowlist (the proxy variables point there), and to the loopback ports of host exceptions and services."
+carries = "Proxy requests and relayed connections; the agent relays them unparsed on raw streams of the box channel."
+concerns = ["allowlist-proxy"]
+
+[[channel]]
+id = "proxy-upstream"
+from = "daemon"
+to = "internet"
+title = "Proxy upstream"
+transport = "TCP from the daemon to a public IPv4 address the proxy resolved itself, checked again on the socket it connects."
+carries = "A box's CONNECT tunnel or plain HTTP request to an allowed name."
+boundary = true
+checks = ["internal/netpolicy.Proxy.check", "internal/netpolicy.Proxy.CheckAddr", "internal/netpolicy.Proxy.watch"]
+concerns = ["allowlist-proxy"]
+
+[[channel]]
+id = "box-internet"
+from = "box-program"
+to = "internet"
+title = "Box network"
+transport = "The engine's network (slirp4netns or pasta) at levels internet and open; at level internet every outgoing packet passes devc's output chain in the box's namespace."
+carries = "Whatever the box sends: at level internet no IPv6, nothing to private ranges or the host but its exceptions and trusted resolvers."
+boundary = true
+checks = ["internal/netpolicy.Rules", "internal/box.Manager.checkNetwork"]
+concerns = ["network-levels"]
+
+[[channel]]
+id = "browser-router"
+from = "browser"
+to = "daemon"
+title = "Local URLs"
+transport = "HTTP to the router on `router.listen` (default `127.0.0.1:7480`), host names `<port>.<project>.<realm>.localhost`."
+carries = "Requests to a server in a box, WebSockets included."
+checks = ["internal/daemon.ParseLocalHost", "internal/daemon.crossOrigin", "internal/daemon.match"]
+concerns = ["forwards-and-local-urls"]
+
+[[channel]]
+id = "dialer-box"
+from = "dialer"
+to = "box-program"
+title = "Box loopback"
+transport = "TCP to `127.0.0.1:<port>` inside the box's network namespace, from the dial process."
+carries = "One forwarded or routed connection."
+boundary = true
+concerns = ["forwards-and-local-urls"]
+
+[[channel]]
+id = "daemon-dialer"
+from = "daemon"
+to = "dialer"
+title = "Router dial"
+transport = "`nsenter --user=/proc/self/fd/3 --net=/proc/self/fd/4 --preserve-credentials <devc> box dial 127.0.0.1:<port>`, one end of a socket pair as standard input and output."
+carries = "One connection of the router to a box port."
+concerns = ["forwards-and-local-urls"]
+
+[[channel]]
+id = "cli-dialer"
+from = "cli"
+to = "dialer"
+title = "Forward dial"
+transport = "The same nsenter command from `devc forward`, with the accepted connection's socket as standard input and output."
+carries = "One forwarded connection."
+concerns = ["forwards-and-local-urls"]

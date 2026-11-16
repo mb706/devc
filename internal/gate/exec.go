@@ -1,3 +1,7 @@
+// This file is `devc gate-exec`, the forced command of the gate's sshd: it
+// checks the grant again and runs the box's session over the master
+// connection.
+
 package gate
 
 import (

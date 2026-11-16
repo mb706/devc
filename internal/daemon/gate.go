@@ -1,5 +1,3 @@
-package daemon
-
 // The SSH gate (work order C10b section 2): a host.gate stream from a box
 // becomes `sshd -i` with the stream as standard input and output. The
 // project, and so the grant and the key sshd accepts, is the one the
@@ -8,6 +6,8 @@ package daemon
 // everything, has every kind of forwarding switched off, and the master
 // connection's control socket stays in <runtime>/gate, which no box can
 // reach.
+
+package daemon
 
 import (
 	"bufio"

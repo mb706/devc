@@ -1,3 +1,7 @@
+// This file parses and matches the entries of a box's allowlist: host
+// names, "*.suffix" patterns and ports, with IP literals refused in every
+// form.
+
 package netpolicy
 
 import (

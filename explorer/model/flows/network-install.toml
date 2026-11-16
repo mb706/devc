@@ -1,0 +1,209 @@
+id = "network-install"
+kind = "flow"
+title = "Installing the rules of level internet"
+summary = "`devc up` of a box at level internet, from `podman init` to rules checked from both sides: the host installs and verifies them in the new network namespace, binds readiness to this start, starts the box, box init checks the binding and the sentinel, and the host's canary checks from outside."
+concern = "network-levels"
+trigger = "devc up demo/hello (level internet)"
+actors = ["user", "cli", "state-dir", "podman", "box-agent", "box-tools"]
+
+[[step]]
+section = "Before the start"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc up"
+label = "devc up demo/hello"
+external = true
+text = "The project's level is internet, the default. [[flow:box-up]] shows the rest of `up`; this flow follows the network."
+
+[[step]]
+at = "cli"
+ref = "internal/netpolicy.BoxArgs"
+text = "The level decides the box's definition: the engine's default network, `--sysctl net.ipv6.conf.all.disable_ipv6=1` and the same for `default`, and the mark that rules must be installed between init and start."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.publish"
+text = "Among the files written before a start, the binding record and the capability record of any earlier start are removed, and so is the readiness marker: nothing from that start can vouch for this one."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman create <arguments>"
+ref = "internal/engine.Podman.Create"
+text = "The container is created; nothing runs yet. A stopped box skips this and is started again through the same steps below."
+
+[[step]]
+section = "Between init and start"
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman init"
+ref = "internal/box.Manager.startBox"
+text = "`podman init` creates the container's namespaces, a fresh network namespace among them, and runs no process of the box. A container left initialised by an interrupted start skips this."
+
+[[step]]
+at = "cli"
+ref = "internal/netpolicy.TrustedResolvers"
+text = "The resolvers the box may reach on port 53 are computed on the host: its own nameservers, systemd-resolved's upstream servers behind a loopback stub, and the backend's built-in resolver from the inspect data."
+
+[[step]]
+at = "cli"
+ref = "internal/netpolicy.Gather"
+checks = ["internal/netpolicy.ReadEngineFile", "internal/netpolicy.ParseResolvConf"]
+text = "The namespace's path comes from the inspect data; the box's resolv.conf and hosts file are read now, before any box process could rewrite them: without following a symlink, regular files of at most 64 KiB, parsed strictly."
+detail = "Of the box's nameservers only trusted ones are kept; `up` warns about the others and, when none is left, that DNS will not work. The hosts file's address for `host.containers.internal` and the backend's ways to the host (slirp4netns's gateway, pasta's mapped address, named networks' gateways) join the addresses to reject."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman unshare nsenter --net=<ns> nft -f -"
+ref = "internal/netpolicy.Installer.Install"
+text = "The rules from [[internal/netpolicy.Rules]] go on standard input, never into an argument. `podman unshare` enters the engine's user namespace, `nsenter` the box's network namespace."
+detail = "nsenter and nft are found also in the sbin directories; missing ones fail the start with the package to install. The host's own IPv4 addresses are listed at this moment."
+
+[[step]]
+at = "podman"
+external = true
+label = "nft loads table inet devc"
+text = "nft replaces any table `inet devc` and loads the new one in one transaction: the sets `allow4` and `lan4`, and the output chain."
+
+[[step]]
+at = "cli"
+ref = "internal/netpolicy.Installer.Verify"
+text = "`nft list table inet devc` in the same namespace must show the set `allow4`, the chain `output` and the sentinel address; otherwise the start fails and the container is removed again."
+
+[[step]]
+at = "cli"
+ref = "internal/netpolicy.Installer.Bind"
+text = "The binding: the namespace's inode (by `podman unshare stat -L`), the start time of the box's main process and the boot ID. Where the host can read the main process's own namespace, it must be the same one."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "local/boxes/<realm>/<project>/etc/netns.json"
+ref = "internal/netpolicy.WriteBinding"
+text = "The record is written by rename into the box's generated `/etc/devc`, which the box mounts read-only."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman start"
+ref = "internal/engine.Podman.Start"
+text = "Only now does the box's first process start."
+
+[[step]]
+section = "Box init checks its own start"
+
+[[step]]
+from = "podman"
+to = "box-agent"
+via = "cmd:devc box init"
+label = "PID 1 runs /opt/devc/bin/devc box init"
+external = true
+text = "devc's init is the entrypoint whatever the image says ([[flow:box-init]])."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.NetworkCheck"
+text = "Before anything else, box init removes an old readiness marker and, at level internet or when `box.json` cannot be read, runs the network check."
+
+[[step]]
+at = "box-agent"
+ref = "internal/netpolicy.CheckBinding"
+checks = ["internal/netpolicy.ParseBinding"]
+text = "`/etc/devc/netns.json`, read without following a symlink and decoded strictly, must equal the box's own network namespace inode, the start time of its PID 1 and the boot ID. A plain `podman start` fails here, and the box stops."
+
+[[step]]
+at = "box-agent"
+ref = "internal/netpolicy.CheckSentinel"
+text = "TCP to `192.0.2.1:9` must be refused within five seconds: only devc's reset rule answers so. A timeout or an unreachable network ends init and the box."
+
+[[step]]
+from = "box-agent"
+to = "cli"
+via = "file"
+label = "/run/devc/ready"
+ref = "internal/boxside.writeReady"
+text = "After preparing the home, box init writes its readiness marker into the runtime directory."
+
+[[step]]
+section = "The host checks from outside"
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.afterStart"
+unchecked = "the host polls for the readiness marker that box init writes into the shared runtime directory"
+text = "The host has run the identity fix and polls for the marker every 100 ms, at most 20 seconds."
+
+[[step]]
+at = "cli"
+ref = "internal/netpolicy.OpenCanary"
+text = "A listener on `0.0.0.0` and a free port counts every connection it accepts."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman exec … devc box net-canary --port <p> <addresses>"
+ref = "internal/box.Manager.checkNetwork"
+text = "The box is asked to connect to that port on each of the host's IPv4 addresses and on the host aliases learnt before the start, three seconds each, within a minute."
+
+[[step]]
+from = "podman"
+to = "box-tools"
+via = "cmd:devc box net-canary"
+label = "devc box net-canary"
+external = true
+text = "Podman runs the command in the box as the box user, from `/`."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.NetCanary"
+checks = ["internal/cli.requireBox"]
+text = "Every address is tried at once; each outcome is classified (connected, refused, unreachable, timeout, error) and printed as JSON. Exit status 1 means something connected."
+
+[[step]]
+from = "box-tools"
+to = "cli"
+via = "reply"
+label = "JSON probes, exit status"
+ref = "internal/boxside.NetCanary"
+text = "The report comes back as the command's output."
+
+[[step]]
+at = "cli"
+ref = "internal/netpolicy.EvaluateCanary"
+checks = ["internal/netpolicy.EvaluateCanary"]
+text = "The listener's count must be zero, and the report, decoded strictly and at most 64 KiB, must name every address and show no connection. Either signal fails the start, and the container is removed again."
+
+[[step]]
+section = "Ready"
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "capabilities.json"
+ref = "internal/box.WriteCapabilities"
+text = "The capability record names level internet; `devc net allow` and the daemon read the level from it."
+
+[[step]]
+at = "cli"
+ref = "internal/box.NetExceptionHook.AfterStart"
+text = "Exceptions still valid go back into the sets, after the canary, which therefore always tested the rules alone ([[flow:net-allow]]). A failure here is a warning."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "devc: devc-demo-hello is ready"
+ref = "internal/box.Manager.printf"
+text = "Any later `up`, `sh`, `run`, `root`, session or forward first checks the binding and the table from the host ([[internal/box.Manager.verifyRunning]]) and restarts a box that fails."

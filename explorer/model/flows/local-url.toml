@@ -1,0 +1,103 @@
+id = "local-url"
+kind = "flow"
+title = "Opening a box's local URL"
+summary = "A browser on the host opens `http://3000.hello.demo.localhost:7480/`: the daemon's router parses the name, refuses cross-origin requests, routes only a listed or forwarded port of a running box, and reaches the server through a dial process of the host's devc binary in the box's pinned namespaces."
+concern = "forwards-and-local-urls"
+trigger = "http://3000.hello.demo.localhost:7480/ in a browser on the host"
+actors = ["browser", "daemon", "dialer", "box-program"]
+
+[[step]]
+section = "The router decides"
+
+[[step]]
+from = "browser"
+to = "daemon"
+via = "stream"
+label = "GET / Host: 3000.hello.demo.localhost:7480"
+external = true
+text = "The browser connects to the router, which the daemon runs on `router.listen` (default `127.0.0.1:7480`) from its start; the URL's name arrives in the Host header."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.router.ServeHTTP"
+unchecked = "net/http's server, started by startRouter, calls ServeHTTP for each request"
+text = "The server allows ten seconds and 64 KiB for the request head. Each request is decided on its own."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.ParseLocalHost"
+checks = ["internal/daemon.ParseLocalHost", "internal/netpolicy.ParsePort"]
+text = "The Host must be `<port>.<project>.<realm>.localhost` with an optional port, in any case; the realm is the last label, because realm names have no dots. Anything else is `404` with the URL's form."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.crossOrigin"
+checks = ["internal/daemon.crossOrigin"]
+text = "A WebSocket upgrade or a method other than GET and HEAD must carry no `Origin` or exactly `http://<this host>`; a request marked `Sec-Fetch-Site: cross-site` passes only as a top-level GET navigation. Otherwise `403`."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.match"
+checks = ["internal/names.ProjectRef.Validate", "internal/daemon.resolvedOf"]
+text = "The configuration is reloaded if it changed. The labels must name a configured project, `hello` in realm `demo`, with valid names and no configuration problems (`404`)."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.router.forwarded"
+text = "Port 3000 must be in the project's `box.ports`, or a `devc forward` of that port must be running, by its record in `<runtime>/forwards` (`404` saying how to allow it). The box must be running in the daemon's box table (`502`), and one of 128 places must be free (`503`)."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.router.dial"
+unchecked = "the reverse proxy's net/http transport calls the router's dial function, set when the router started"
+text = "A reverse proxy keeps the browser's Host and sets `X-Forwarded-*`; its transport dials a route key naming the container and the port, which only the router's own dial function understands."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.router.pin"
+text = "The box's namespaces are pinned once per container ID and start time, and pinned anew when either changed."
+
+[[step]]
+at = "daemon"
+ref = "internal/netpolicy.Pin"
+text = "`/proc/<pid>/ns/user` and `/proc/<pid>/ns/net` of the box's main process are opened between two engine reports with the same PID and start time and two equal reads of that PID's start time, so they belong to this box, not to a process that took over its PID."
+
+[[step]]
+section = "Into the box's network"
+
+[[step]]
+from = "daemon"
+to = "dialer"
+via = "exec"
+label = "nsenter --user=fd/3 --net=fd/4 --preserve-credentials devc box dial 127.0.0.1:3000"
+ref = "internal/netpolicy.Forwarder.Dial"
+text = "One end of a new socket pair becomes the process's standard input and output; the pinned namespaces are descriptors 3 and 4; the environment is `DEVC_BOX=1` only, the working directory `/`."
+
+[[step]]
+at = "dialer"
+ref = "internal/boxside.Dial"
+unchecked = "nsenter starts the host's devc binary as a new process in the box's user and network namespaces"
+checks = ["internal/boxside.Dial"]
+text = "The host's devc binary, now in the box's user and network namespaces but the host's mount namespace: it reads nothing of the box and runs nothing it names. The address must be an IP and port."
+
+[[step]]
+from = "dialer"
+to = "box-program"
+via = "stream"
+label = "TCP 127.0.0.1:3000 (the box's loopback)"
+ref = "internal/boxside.Dial"
+text = "Within ten seconds; a server bound only to the box's loopback is reached too. Bytes are relayed both ways, half-closes passed on."
+
+[[step]]
+at = "box-program"
+external = true
+label = "the server answers"
+text = "The server in the box sees the local URL as Host, like any server behind a reverse proxy."
+
+[[step]]
+from = "daemon"
+to = "browser"
+via = "reply"
+label = "the box's answer"
+ref = "internal/daemon.router.ServeHTTP"
+text = "WebSocket upgrades pass through. Nothing answering on the port is `502` with a hint to listen on `127.0.0.1:3000` in the box. When the daemon sees the box stop or replaced, it drops the pin."

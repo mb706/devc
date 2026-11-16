@@ -1,3 +1,7 @@
+// This file installs the rules of level internet into a box's network
+// namespace from the host, verifies them, and applies network exceptions
+// to a running box, always through `podman unshare nsenter --net=<ns> nft`.
+
 package netpolicy
 
 import (
@@ -48,6 +52,8 @@ type Installer struct {
 	Proc HostProc
 }
 
+// tools finds nsenter and nft (also in the sbin directories a user's PATH
+// often lacks) and names the package to install when one is missing.
 func (in *Installer) tools() (nsenter, nft string, err error) {
 	look := in.LookPath
 	if look == nil {
@@ -104,6 +110,9 @@ func Gather(ci *engine.ContainerInfo, trusted []netip.Addr) (Facts, error) {
 	return f, nil
 }
 
+// checkNamespace refuses a namespace path from the engine that is not
+// clean and absolute or that holds a NUL or a newline, before it becomes
+// nsenter's --net argument.
 func checkNamespace(ns string) error {
 	if ns == "" {
 		return fmt.Errorf("the engine reports no network namespace for the box")
@@ -194,6 +203,7 @@ func (in *Installer) ApplyExceptions(ctx context.Context, namespace string, list
 	return nil
 }
 
+// tail is the end of a command's standard error for an error message.
 func tail(res execx.Result) string {
 	s := strings.TrimSpace(string(res.Stderr))
 	if s == "" {

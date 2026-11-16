@@ -1,3 +1,7 @@
+// This file builds the host's ssh commands of the gate: the master
+// connection of `devc ssh login`, its check and exit, and the
+// multiplexing client gate-exec runs over it.
+
 package gate
 
 import (
@@ -47,8 +51,9 @@ func (c *Client) base() []string {
 func controlPath(sock string) string { return strings.ReplaceAll(sock, "%", "%%") }
 
 // LoginCmd is `devc ssh login`: a master connection that stays in the
-// background for ttl after the first session ends. It runs attached to the
-// user's terminal, so password and second-factor prompts work.
+// background once its first command (`true`) has ended, until no session
+// has used it for ttl (ControlPersist). It runs attached to the user's
+// terminal, so password and second-factor prompts work.
 func (c *Client) LoginCmd(sock, host string, ttl time.Duration) (execx.Cmd, error) {
 	if err := CheckHost(host); err != nil {
 		return execx.Cmd{}, err

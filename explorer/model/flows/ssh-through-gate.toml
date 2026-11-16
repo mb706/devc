@@ -1,0 +1,174 @@
+id = "ssh-through-gate"
+kind = "flow"
+title = "ssh from a box through the gate"
+summary = "`ssh build1 make test` in a box with a grant: the box's ssh reaches the daemon through gate-connect and the agent, the daemon checks the grant and starts `sshd -i` for this box's key alone, sshd's forced command `devc gate-exec` checks again and runs the command over the master connection the user keeps on the host, and logs it."
+concern = "ssh-gate"
+trigger = "ssh build1 make test (in a box whose project grants build1)"
+actors = ["ssh-hosts", "gate-exec", "sshd", "daemon", "box-tools", "box-program"]
+
+[[step]]
+section = "In the box"
+
+[[step]]
+at = "box-program"
+external = true
+label = "ssh build1 make test"
+text = "The box's ssh finds a block for `build1` in `/etc/devc/ssh_config`, which `~/.ssh/config` includes first (and which is also mounted at `/etc/ssh/ssh_config.d/50-devc.conf`): the host user's name, the key `/run/devc-secrets/gate_key`, the host key alias `devc-gate` with its known-hosts file, and a ProxyCommand."
+
+[[step]]
+from = "box-program"
+to = "box-tools"
+via = "exec"
+label = "ProxyCommand: devc box gate-connect build1"
+external = true
+text = "ssh starts devc's helper and speaks SSH on its standard input and output."
+
+[[step]]
+at = "box-tools"
+ref = "internal/boxside.GateConnect"
+unchecked = "ssh starts the ProxyCommand as a process; the gate-connect command calls GateConnect"
+checks = ["internal/cli.requireBox"]
+text = "Only in a box; the alias must look like one. Every problem is one line on standard error, which ssh shows, and exit status 255, ssh's own for a failed connection."
+
+[[step]]
+from = "box-tools"
+to = "daemon"
+via = "rpc:host.gate"
+label = "@devc-agent → stream: host.gate {host: build1}"
+ref = "internal/boxside.GateConnect"
+text = "The request goes to the agent's abstract socket, which relays it unparsed on a new stream of the box channel ([[flow:box-git-push]] shows the agent's part). gate-connect waits 30 seconds for the answer; without a connected daemon it says so."
+
+[[step]]
+section = "The daemon checks"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveGate"
+checks = ["internal/proto.DecodeParams", "internal/config.ValidHostAlias", "internal/daemon.resolvedOf", "internal/config.Grants.SSHGrantFor", "internal/daemon.Daemon.startedWith", "internal/box.Capabilities.SSHGrant"]
+text = "The project is the channel's. The alias must be valid, the configuration free of problems, `build1` in `grants.ssh` now and in the capability record of the running container; a host granted after the start is refused."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.gateServer"
+text = "sshd must be installed (the service need not run); it is looked for in PATH and the sbin directories."
+
+[[step]]
+at = "daemon"
+ref = "internal/gate.Server.Prepare"
+text = "The gate's host key and this box's public key must exist (else: restart the box). A configuration for this box and host is written to `<runtime>/gate/sshd-<box-id>-<random>.conf`, created exclusively, 0600."
+
+[[step]]
+at = "daemon"
+ref = "internal/gate.ExecTarget.Command"
+text = "The forced command names devc's executable, the daemon's directories, the box ID and the host, all from the daemon. sshd runs it through the user's login shell, so each word is single-quoted and words with quotes, backslashes, `!`, `%` or control characters are refused."
+
+[[step]]
+at = "daemon"
+ref = "internal/gate.ServerConfig.Render"
+text = "Public-key authentication with this box's key file only, no PAM, every kind of forwarding off, the user's rc and environment files ignored, a terminal on request, sftp as a marker, the forced command for everything."
+
+[[step]]
+from = "daemon"
+to = "box-tools"
+via = "reply"
+label = "{host: build1}"
+ref = "internal/daemon.respond"
+text = "From now on the stream carries SSH; gate-connect copies bytes both ways."
+
+[[step]]
+from = "daemon"
+to = "sshd"
+via = "exec"
+label = "sshd -i -e -f <conf>"
+ref = "internal/daemon.runGateSSHD"
+text = "sshd serves this one connection on its standard input and output, in a session of its own, as the user; the stream is fed through a pipe of the daemon's own, and a write that stalls for two minutes ends it."
+
+[[step]]
+section = "sshd and the forced command"
+
+[[step]]
+from = "box-program"
+to = "sshd"
+via = "stream"
+label = "SSH: host key devc-gate, user key gate_key"
+external = true
+text = "The box's ssh accepts only the gate's host key; sshd accepts only the box's key, whose entry carries `restrict,pty`. The key pair is new since the box's last start."
+
+[[step]]
+from = "sshd"
+to = "gate-exec"
+via = "cmd:devc gate-exec"
+label = "ForceCommand, SSH_ORIGINAL_COMMAND='make test'"
+external = true
+text = "Whatever the box asked for, sshd runs the forced command, with the box's request in the environment."
+
+[[step]]
+at = "gate-exec"
+ref = "internal/gate.Exec.Run"
+checks = ["internal/names.ValidBoxID", "internal/gate.ValidHost"]
+text = "gate-exec loads the configuration from the directories in its arguments and finds the project by the box ID. `make test` is a command; an empty request would be a shell, the sftp marker sftp."
+
+[[step]]
+at = "gate-exec"
+ref = "internal/box.Capabilities.SSHGrant"
+checks = ["internal/config.Config.ProblemsFor", "internal/config.Grants.SSHGrantFor", "internal/box.ReadCapabilities"]
+text = "Checked again, on the configuration as it is now: no problems, `build1` still granted, and granted at the start. Read-only if either grant is, with the allowed commands of both."
+
+[[step]]
+at = "gate-exec"
+ref = "internal/gate.CheckReadOnly"
+checks = ["internal/gate.CheckReadOnly"]
+text = "Only for `build1:ro`: no shell, no sftp, and the command's first word must be listed in `[grants.ssh_allow]`, with no shell metacharacters or control characters. A refusal exits 1 and is logged."
+
+[[step]]
+at = "gate-exec"
+ref = "internal/gate.Client.Check"
+text = "`ssh -O check` on `<runtime>/gate/m-<hash>.sock` (ten seconds) must find the master that `devc ssh login build1` started; otherwise exit 255 with the advice to ask the user for that login."
+
+[[step]]
+at = "gate-exec"
+ref = "internal/gate.Client.ExecArgs"
+text = "A multiplexing client only: `-S <socket> -o ControlMaster=no -o ProxyCommand=false -o BatchMode=yes`, every forwarding and the escape character off, `-tt` only when the box's client asked for a terminal, then `build1 -- 'make test'`, the box's text as one argument."
+
+[[step]]
+from = "gate-exec"
+to = "ssh-hosts"
+via = "exec"
+label = "ssh -S <socket> … build1 -- 'make test'"
+ref = "internal/gate.Exec.Run"
+text = "The session runs over the master's connection, with sshd's standard input, output and error. If the master died meanwhile, `ProxyCommand=false` makes it fail instead of logging in anew with the user's keys."
+
+[[step]]
+at = "ssh-hosts"
+external = true
+label = "make test runs"
+text = "The remote host runs the command as the user's account; it sees an ordinary session of the user's connection."
+
+[[step]]
+from = "ssh-hosts"
+to = "gate-exec"
+via = "reply"
+label = "exit status"
+external = true
+text = "The remote command's status becomes gate-exec's; SIGHUP or SIGTERM from sshd ends the session through its context."
+
+[[step]]
+at = "gate-exec"
+ref = "internal/gate.AppendLog"
+text = "One line in `durable/realms/<realm>/gate-log.jsonl`: time, box, project, host, mode, terminal, the command up to 4 KiB, exit status, duration."
+
+[[step]]
+section = "After"
+
+[[step]]
+from = "sshd"
+to = "box-program"
+via = "reply"
+label = "output, exit status"
+external = true
+text = "The box's ssh prints the output and exits with the remote status, as with a direct connection."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveGate"
+text = "When sshd has exited, the daemon removes its configuration file, ends the stream in both directions and logs the session with sshd's messages."

@@ -1,5 +1,7 @@
-// Package secrets stores per-realm secrets on the host and delivers the
-// ones a box needs into its private tmpfs directory.
+// Package secrets stores per-realm secrets on the host and writes those a
+// box is given into its secrets directory, which must be memory-backed.
+// Its callers decide what a box is given: the harness hooks and the SSH
+// gate before a start, the daemon on demand.
 //
 // Security rules: values never appear in argument lists, environment dumps
 // or logs (README rule 5); they are written only to 0600 files in the
@@ -49,6 +51,7 @@ func NewFileStore(p *paths.Paths) *FileStore { return &FileStore{Paths: p} }
 
 var _ Store = (*FileStore)(nil)
 
+// check validates the realm and secret names before they become a path.
 func check(realm, name string) error {
 	if err := names.Check(names.KindRealm, realm); err != nil {
 		return err
@@ -217,10 +220,11 @@ func CheckMemoryFS(dir string) error {
 }
 
 // Deliver makes dir hold exactly the given secrets as 0400 files (dir 0700),
-// replacing each file by rename so that a running box, which mounts the
-// directory itself, sees the new values. Anything else in dir is removed.
-// Unless allowPersistent is set, it refuses to write any secret when dir is
-// not memory-backed.
+// each written to a new file and renamed into place; anything else in dir
+// is removed. The box mounts the directory, not the files, so it sees what
+// the last delivery left there; devc delivers only before a start. Unless
+// allowPersistent is set, it refuses to write any secret when dir is not
+// memory-backed.
 func Deliver(p *paths.Paths, dir string, values map[string][]byte, allowPersistent bool) error {
 	if err := p.Ensure(dir); err != nil {
 		return err

@@ -1,3 +1,5 @@
+// This file appends to a realm's gate log, one line per gate session.
+
 package gate
 
 import (
@@ -47,7 +49,8 @@ func Truncate(s string, n int) string {
 
 // AppendLog appends an entry to the realm's gate log
 // (durable/realms/<realm>/gate-log.jsonl, 0600). Concurrent gate
-// sessions append whole lines under an exclusive lock.
+// sessions append whole lines under an exclusive lock. Nothing rotates or
+// bounds the log.
 func AppendLog(p *paths.Paths, realm string, e Entry) error {
 	file := p.GateLog(realm)
 	if err := p.Ensure(filepath.Dir(file)); err != nil {

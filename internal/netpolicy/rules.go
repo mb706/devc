@@ -1,3 +1,7 @@
+// This file renders the nftables rules of level internet and reads what
+// they are built from: the engine's resolv.conf and hosts file of a box and
+// the host's own addresses.
+
 package netpolicy
 
 import (
@@ -17,8 +21,10 @@ import (
 )
 
 // PrivateRanges are the IPv4 destinations a box of level internet may not
-// reach (except its resolvers on port 53): "this network", private, carrier
-// grade NAT, loopback, link-local, multicast and reserved.
+// reach unless a rule before theirs accepts them (an exception, a trusted
+// resolver on port 53, the LAN exception set): "this network", private,
+// carrier grade NAT, loopback, link-local, multicast and reserved. The
+// allowlist proxy never connects to them either.
 var PrivateRanges = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("10.0.0.0/8"),

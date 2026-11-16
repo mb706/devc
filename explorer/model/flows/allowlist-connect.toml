@@ -1,0 +1,133 @@
+id = "allowlist-connect"
+kind = "flow"
+title = "A request through the allowlist proxy"
+summary = "A program in a box of level allowlist opens an HTTPS connection: the agent relays it unparsed to the daemon, whose proxy checks the request head, the name, the policy of this start, the resolved addresses and the connected socket, checks the policy once more, logs, and relays the tunnel while it stays allowed."
+concern = "allowlist-proxy"
+trigger = "pip download requests (in a box at level allowlist)"
+actors = ["internet", "state-dir", "daemon", "box-agent", "box-program"]
+
+[[step]]
+section = "In the box"
+
+[[step]]
+from = "box-program"
+to = "box-agent"
+via = "stream"
+label = "TCP 127.0.0.1:3128: CONNECT pypi.org:443"
+external = true
+text = "The box has only loopback. pip, like most tools, reads `HTTPS_PROXY=http://127.0.0.1:3128` and sends `CONNECT pypi.org:443` there; a tool that ignores the proxy variables has no network."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Agent.relayTCP"
+unchecked = "the connection is accepted by the agent's proxy listener (proxyLoop, acceptRelays), which starts relayTCP for it"
+text = "The agent holds no policy. It needs one of its 64 relay places and room among 512 new relay streams per ten seconds, and a connected host; otherwise it closes the connection at once."
+
+[[step]]
+from = "box-agent"
+to = "daemon"
+via = "stream"
+label = "yamux stream: host.proxy, then the bytes"
+ref = "internal/boxside.Agent.relayTCP"
+text = "A new stream of the box channel starts with one request line naming `host.proxy`; after it the agent copies bytes both ways, unparsed, passing half-closes on."
+
+[[step]]
+section = "The daemon decides"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveStream"
+unchecked = "the stream is accepted by acceptStreams, which starts serveStream for it"
+checks = ["internal/proto.ParseMessage"]
+text = "The first line must arrive within 30 seconds. A `host.proxy` stream needs one of 64 relay places of this box, kept apart from the 32 request places; without one the box gets `503`."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveProxy"
+checks = ["internal/proto.DecodeParams"]
+text = "A proxy is built for this box: its policy is computed per request from the channel's project and container, it forbids the host's own addresses (listed again every ten seconds), and its decisions go to the project's log."
+
+[[step]]
+at = "daemon"
+ref = "internal/netpolicy.Proxy.Serve"
+text = "The request head must arrive within 30 seconds and fit 64 KiB (`431`), and parse (`400`). A CONNECT request is a tunnel; a plain one would be served by [[internal/netpolicy.Proxy.plain]]."
+
+[[step]]
+at = "daemon"
+ref = "internal/netpolicy.Proxy.connect"
+checks = ["internal/netpolicy.ParsePort"]
+text = "CONNECT must name `host:port` with a port from 1 to 65535 (`400`)."
+
+[[step]]
+at = "daemon"
+ref = "internal/netpolicy.NormalizeHost"
+checks = ["internal/netpolicy.NormalizeHost"]
+text = "The host must be a name: an IP literal in any form, a numeric last label included, is refused (`403`) and never resolved; other malformed names get `400`. The name is lower-cased without a trailing dot."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.proxyPolicy"
+checks = ["internal/daemon.resolvedOf", "internal/daemon.Daemon.startedWith", "internal/box.Capabilities.ProxyAllowlist"]
+text = "The policy of this moment: a configuration without problems, a capability record of this container, level allowlist in the record and in the configuration, the entries both the start and the configuration list, and the names of exceptions in force. Anything missing refuses (`403`)."
+
+[[step]]
+at = "daemon"
+ref = "internal/netpolicy.ProxyPolicy.Allows"
+text = "`pypi.org` on port 443 must match an entry (a name, or `*.suffix` below it; 80 and 443 unless the entry names a port) or an exception. Otherwise `403`, with the hint to ask with `devc request net pypi.org:443`."
+
+[[step]]
+at = "daemon"
+ref = "internal/netpolicy.Proxy.resolve"
+text = "The daemon resolves the name itself, IPv4 only, within ten seconds (`502` on failure). The box's resolver plays no part."
+
+[[step]]
+at = "daemon"
+ref = "internal/netpolicy.Proxy.CheckAddr"
+checks = ["internal/netpolicy.Private"]
+text = "Every address that is not IPv4, lies in a private range or is one of the host's own is dropped; with none left, `403`. At most eight remain."
+
+[[step]]
+from = "daemon"
+to = "internet"
+via = "stream"
+label = "TCP connect <address>:443"
+ref = "internal/netpolicy.Proxy.dial"
+text = "The addresses are tried in turn, ten seconds each. The dialer's control function sees the address of the socket being connected and checks it again, so an answer that changed since cannot reach the LAN or the host."
+
+[[step]]
+at = "daemon"
+ref = "internal/netpolicy.Proxy.watch"
+text = "The connection is registered with the worker's open connections and the policy is checked once more, synchronously, before anything is acknowledged or forwarded: resolving and dialling take time, and an exception may have ended meanwhile."
+detail = "From then on the watch checks again every five seconds, when the earliest exception in force ends, and whenever the worker asks (its five-second loop and `net.sync` after `devc net allow` or `revoke`). A destination no longer allowed, or a policy that cannot be read, closes both sides and logs why."
+
+[[step]]
+from = "daemon"
+to = "state-dir"
+via = "file"
+label = "durable/realms/<realm>/netlog/<project>.jsonl"
+ref = "internal/netpolicy.NetLog.Append"
+text = "The decision is logged: time, method, host, port, allowed, why, the address connected. Box-supplied text is cut to 255 printable bytes; past 4 MiB the log moves to `.1`. Every refusal above is logged the same way."
+
+[[step]]
+from = "daemon"
+to = "box-program"
+via = "reply"
+label = "HTTP/1.1 200 Connection established"
+ref = "internal/netpolicy.Proxy.connect"
+text = "The answer travels back through the stream and the agent."
+
+[[step]]
+section = "The tunnel"
+
+[[step]]
+from = "box-program"
+to = "internet"
+via = "stream"
+label = "TLS, relayed unchanged"
+external = true
+text = "Bytes the client sent early are forwarded first. The proxy does not look into TLS: a server that answers for several names cannot be told apart (domain fronting)."
+
+[[step]]
+at = "daemon"
+ref = "internal/netpolicy.Proxy.connect"
+text = "Each direction may be idle ten minutes; once one has ended, the other gets one more minute. Then both sides close and the relay place is free again."

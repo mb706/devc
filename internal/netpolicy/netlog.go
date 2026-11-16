@@ -1,3 +1,6 @@
+// This file keeps the allowlist proxy's log of decisions, one file per
+// project, rotated so a box that floods the proxy costs bounded space.
+
 package netpolicy
 
 import (

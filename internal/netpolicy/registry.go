@@ -1,3 +1,7 @@
+// This file keeps the records of running forwards in the runtime directory,
+// for `devc forward ls` and `stop` and for the router, which routes
+// forwarded ports.
+
 package netpolicy
 
 import (
@@ -53,6 +57,8 @@ func NewForwardID() string {
 	return "f" + hex.EncodeToString(b)
 }
 
+// validate checks a record before it is saved and when it is read: the
+// container must be the box of the record's project.
 func (r Record) validate() error {
 	ref, err := names.Parse(r.Ref)
 	switch {

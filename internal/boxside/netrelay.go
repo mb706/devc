@@ -1,5 +1,3 @@
-package boxside
-
 // The box agent's network relays (work order C13). At level allowlist the
 // box has no network interface besides loopback; the agent listens on
 // 127.0.0.1:3128 and relays every connection, unparsed, on a host.proxy
@@ -14,6 +12,8 @@ package boxside
 // no network. The agent bounds the relays it runs at once and the streams
 // it opens per window, below the daemon's channel budgets (muxguard), so
 // that ordinary use never makes the daemon close the channel.
+
+package boxside
 
 import (
 	"context"
@@ -31,8 +31,8 @@ import (
 
 // Relay limits of the agent.
 const (
-	// DefaultMaxRelays bounds the relayed connections at once (proxy and
-	// host exceptions together); the daemon accepts as many.
+	// DefaultMaxRelays bounds the relayed connections at once (proxy, host
+	// exceptions and services together); the daemon accepts as many.
 	DefaultMaxRelays = 64
 	// relayWindow and relayOpens bound the relay streams opened per
 	// window: half of the daemon's budget for new streams, which leaves
@@ -53,6 +53,8 @@ type relayLimiter struct {
 	max   int
 }
 
+// allow counts one more relay stream and reports whether the window has
+// room for it.
 func (l *relayLimiter) allow() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()

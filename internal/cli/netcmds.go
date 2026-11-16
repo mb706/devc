@@ -1,3 +1,6 @@
+// This file implements `devc forward` with its background form, list and
+// stop, and the local URL of a forwarded port.
+
 package cli
 
 import (
@@ -46,6 +49,8 @@ func (a *app) hostExecutable() (string, error) {
 	return exe, nil
 }
 
+// newForwardCmd is `devc forward` with its subcommands ls, stop and the
+// hidden serve.
 func newForwardCmd(a *app) *cobra.Command {
 	var hostPort int
 	var bind string

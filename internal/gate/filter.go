@@ -1,3 +1,5 @@
+// This file decides commands under the read-only profile of an SSH grant.
+
 package gate
 
 import (

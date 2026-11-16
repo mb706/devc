@@ -1,3 +1,7 @@
+// This file computes, from the host's files and the engine's inspect data
+// only, which resolvers a box of level internet may reach and which
+// addresses of its network backend lead to the host.
+
 package netpolicy
 
 import (

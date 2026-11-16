@@ -29,3 +29,9 @@ Small problems in the tool and the app that the content authors met. This list g
 - The shortest-path rule can name a misleading starting step: in `turn-snapshot`, `Relay.Update` is shown as coming from `ClearIncoming`. Prefer the nearest earlier step of the same actor, and fall back to earlier ones only when that fails.
 - `--check` needs a filter by file or directory: warnings from other areas hide an author's own.
 
+## From X8
+
+- The tool has no `via` for a plain network connection (a TCP connection to a listener); authors use `stream` or `unchecked`. Consider `via = "net"`.
+- The content guide's 1,200-word limit should say that quoted code blocks and tables do not count.
+- The README should say that the order in which steps are found depends on the entry function a flow starts at (start a flow at the entry function of the process, not in the middle of a call).
+

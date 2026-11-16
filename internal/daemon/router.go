@@ -1,16 +1,16 @@
-package daemon
-
 // The router for local URLs (work order C13 section 3). The daemon listens
 // on router.listen (default 127.0.0.1:7480, loopback only) and routes by
 // Host: http://<port>.<project>.<realm>.localhost:7480 goes to
-// 127.0.0.1:<port> inside that project's box, through C07's namespace
-// dialer (the host's devc binary in the box's pinned user and network
-// namespaces, never its mount namespace). Only ports in the project's
+// 127.0.0.1:<port> inside that project's box, through the forwarder's
+// dialer (netpolicy.Forwarder.Dial: the host's devc binary in the box's
+// pinned user and network namespaces, never its mount namespace). Only ports in the project's
 // box.ports or currently forwarded (`devc forward`) are routed; anything
 // else is a 404 that says how to allow it. Routing strictly by a Host
 // under .localhost means a page that rebinds its own name to 127.0.0.1
 // reaches nothing. WebSocket upgrades pass through. Browser requests
 // from another origin are refused (crossOrigin).
+
+package daemon
 
 import (
 	"context"
