@@ -1,0 +1,168 @@
+id = "data-save"
+kind = "flow"
+title = "devc save"
+summary = "`devc save [name]` to a savepoint no box can reach: under the box lock the CLI picks the driver and an ID; a helper container makes a vault-owned reflink copy inside `.devc`, or restic backs the data root up into the state directory as the box user; the index, the manifest and retention follow."
+concern = "savepoints"
+trigger = "devc save before-refit demo/analysis"
+actors = ["user", "cli", "podman", "helper", "restic"]
+
+[[step]]
+section = "On the host"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc save"
+label = "devc save before-refit demo/analysis"
+external = true
+text = "You take a named savepoint; a single argument containing `/` would be the project and no name."
+detail = "The same command runs before a session with `before_session = true` (unnamed, unless one is younger than 30 minutes), and when a box's `savepoint` request is approved, by default automatically ([[concern:requests-and-approval]])."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.withData"
+checks = ["internal/config.Config.ProblemsFor", "internal/names.Check"]
+text = "The name must be a valid name. Nothing happens while the project's configuration has problems; the box lock is taken for the whole save."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.Save"
+text = "The driver decides: `none` and `borg` refuse, `restic` needs restic installed. The index is read for every ID ever used, the new ID is the UTC time plus the name (a taken one moves on by a second), and the relay's default-branch tip is noted."
+
+[[step]]
+section = "reflink: drivers auto and reflink"
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.work"
+text = "A `reflink-save` request with the ID, asking for the digest."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run … --cap-add=CHOWN,FOWNER,DAC_OVERRIDE … devc box data-worker"
+ref = "internal/engine.Podman.Run"
+text = "The helper container, with only the project directory mounted."
+
+[[step]]
+from = "podman"
+to = "helper"
+via = "cmd:devc box data-worker"
+label = "devc box data-worker < reflink-save"
+external = true
+text = "The worker reads and checks the request as for every operation ([[flow:data-seal]])."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.reflinkSave"
+checks = ["internal/boxside.ValidSavepointID"]
+text = "The layout is applied, and a savepoint of that ID must not exist yet."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.probeClone"
+text = "A one-byte file is cloned in `.devc/savepoints`. A filesystem that cannot clone is reported as unsupported, with nothing left behind."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.sealedEntries"
+text = "What the savepoint leaves out: the input zones, and the direct children of sealed zones that belong to the vault now."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.copier.copyFile"
+text = "The data root is copied into `<id>.partial/` file by file with `FICLONE`, sharing blocks with the originals; copies belong to the vault without write bits, directories are `0555`, times are kept, special files skipped. The box may be writing meanwhile: each file is copied as it is at that moment."
+detail = "A file that cannot be cloned after the probe succeeded makes the whole save unsupported: the partial copy is removed and the CLI falls back as for an unsupported filesystem."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.writeModes"
+text = "The copy's digest is taken, its top directory becomes the vault's and read-only, the original modes that differ from the default go into `.devc/savepoints/.modes/<id>`, and the copy is renamed from `<id>.partial` to `<id>`."
+
+[[step]]
+from = "helper"
+to = "cli"
+via = "reply"
+label = "DataResult {files, size, exclude, digests | unsupported}"
+ref = "internal/boxside.MarshalReport"
+text = "The host decodes the report strictly. With `driver = reflink` an unsupported filesystem is an error; with `auto` the save goes on with restic if it is installed."
+
+[[step]]
+section = "restic: driver restic, or auto where reflink is unsupported"
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.resticSave"
+text = "A setup worker first checks the layout and reports what to leave out and the digest of the rest, since restic reports none ([[internal/boxside.DataWorker.setup]])."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.ensureRepo"
+text = "The repository `local/savepoints/<realm>/<project>/restic` is created on first use, without a password; it is in the state directory, which no box mounts."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run --user 1000:1000 … restic backup …"
+ref = "internal/data.Service.restic"
+text = "A container from the helper root filesystem as the box user, every capability dropped, no network; the project directory read-only at `/project`, the repository at `/repo`, the cache at `/cache`, the toolbox read-only, a tmpfs `/tmp`."
+
+[[step]]
+from = "podman"
+to = "restic"
+via = "exec"
+label = "restic backup --host devc --tag <id> --exclude=… /project/<root>"
+external = true
+text = "The excluded paths are escaped for restic's patterns, so a name like `*` matches only itself."
+
+[[step]]
+at = "restic"
+external = true
+label = "reads the data root, writes the repository"
+text = "restic reads as the box user: a file the box made unreadable is missing, and restic exits with status 3."
+
+[[step]]
+from = "restic"
+to = "cli"
+via = "reply"
+label = "JSON summary, exit status"
+external = true
+text = "The summary names the snapshot and counts files and bytes."
+
+[[step]]
+at = "cli"
+ref = "internal/data.resticSummary"
+text = "Status 3 still records the savepoint, with a warning that it lacks files; any other failure, or a snapshot ID that is not 8 to 64 hex digits, fails the save."
+
+[[step]]
+section = "Recording"
+
+[[step]]
+at = "cli"
+ref = "internal/data.appendIndex"
+text = "A `save` record goes into `durable/realms/<realm>/savepoints/<project>.jsonl`: ID, name, time, driver, what it covers and leaves out, counts, the relay's tip, the restic snapshot."
+
+[[step]]
+at = "cli"
+ref = "internal/data.AppendManifest"
+text = "The manifest gets a `save` record with path `.` and the digest; a failure is a warning."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Retention"
+text = "Unnamed savepoints beyond `keep` (default 10) are dropped, oldest first; named ones never by retention."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.drop"
+text = "Reflink copies are deleted by a savepoint-drop worker, restic snapshots forgotten (their space returns at the next `devc data gc`), and a `drop` record goes into the index."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "saved 20261116T101500Z-before-refit (reflink, …)"
+ref = "internal/data.Savepoint"
+text = "The ID, driver and counts; the lock is released."

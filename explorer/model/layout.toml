@@ -357,6 +357,12 @@ writer = "host"
 ref = "internal/paths.Paths.TmpDir"
 
 [[tree.entry]]
+path = "local/tmp/restore-<random>"
+text = "What restic restored for `devc restore`, before a worker copies it into the project; written by restic as the box user, emptied by the rm worker in a helper container (box-written data), then removed."
+writer = "host"
+ref = "internal/data.Service.resticRestore"
+
+[[tree.entry]]
 path = "local/tmp/relay-report-<random>.json"
 text = "One push through the relay service: post-receive writes its report here for the daemon, and the hooks keep their notes beside it (`.heads`, the box's branches from pre-receive; `.records`, what each update hook recorded). Created empty (0600) by the daemon, removed when the push is over."
 writer = "host"
@@ -761,3 +767,63 @@ path = "<realm>/<project>/<worktree>"
 text = "A task worktree beside main, on the branch `<branch_prefix><worktree>`; `devc wt rm` removes it after banking, and its branch stays."
 writer = "box"
 ref = "internal/gitx.Service.WorktreeNew"
+
+[[tree.entry]]
+path = "<realm>/<project>/<worktree>/data"
+text = "The data link `data -> ../<root>` in each worktree of a data project, made in the box by `devc box data-links` unless something is there or git tracks `data`."
+writer = "box"
+ref = "internal/boxside.Repo.EnsureDataLinks"
+
+[[tree.entry]]
+path = "<realm>/<project>/<data root>"
+text = "The data root. Owned by the vault, group dev, mode 1770: the box creates entries but cannot rename or remove the vault's; only helper-container workers operate on it for the host."
+writer = "box"
+ref = "internal/boxside.DataWorker.layoutDirs"
+
+[[tree.entry]]
+path = "<realm>/<project>/<data root>/<input zone>"
+text = "An input zone: the box user's (0755) on disk, but mounted read-only into the box; written by pulls through the helper container."
+writer = "host"
+ref = "internal/data.BoxHooks.Contribute"
+
+[[tree.entry]]
+path = "<realm>/<project>/<data root>/<work zone>"
+text = "A work zone: the vault's with group write (0775), so the box writes anything inside but cannot remove the zone itself. Savepoints are its protection."
+writer = "box"
+ref = "internal/boxside.DataWorker.layoutDirs"
+
+[[tree.entry]]
+path = "<realm>/<project>/<data root>/<sealed zone>/<entry>"
+text = "An entry of a sealed zone: the box's until `devc seal` hands it to the vault (directories 0555, files without write bits); the zone is the vault's and sticky (1770), so a sealed entry cannot be moved."
+writer = "both"
+ref = "internal/boxside.DataWorker.seal"
+
+[[tree.entry]]
+path = "<realm>/<project>/.devc"
+text = "devc's own directory in a data project: the vault's, mode 0700, so the box can neither enter nor rename it. Written only by the data workers; one the box made is refused."
+writer = "host"
+ref = "internal/boxside.DataWorker.openDevc"
+
+[[tree.entry]]
+path = "<realm>/<project>/.devc/savepoints/<id>"
+text = "A reflink savepoint: a read-only, vault-owned copy of the data root without input zones and sealed entries; `.devc/savepoints/.modes/<id>` keeps the original modes."
+writer = "host"
+ref = "internal/boxside.DataWorker.reflinkSave"
+
+[[tree.entry]]
+path = "<realm>/<project>/.devc/trash/<id>"
+text = "A trash entry: `payload/<path>` with what rm, a pull or an in-place restore moved there, owners kept, and `meta.json` listing the paths."
+writer = "host"
+ref = "internal/boxside.DataWorker.newTrashEntry"
+
+[[tree.entry]]
+path = "<realm>/<project>/.devc/seals.jsonl"
+text = "One line per seal and unseal, with time, counts and the relay's default-branch tip."
+writer = "host"
+ref = "internal/boxside.SealRecord"
+
+[[tree.entry]]
+path = "<realm>/<project>/.devc-staging/push-<stamp>"
+text = "A push's staging directory: vault-owned directories (0755, below `.devc-staging` at 0711) of hard links to the files sent; host rsync reads only this. Removed after the push, or by a later push after seven days."
+writer = "host"
+ref = "internal/boxside.DataWorker.pushStage"

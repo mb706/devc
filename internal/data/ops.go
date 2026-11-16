@@ -1,3 +1,7 @@
+// This file holds the data operations that are one worker request each:
+// setup, seal, unseal, rm, the trash and ls; and the data links, which run
+// in the box itself.
+
 package data
 
 import (
@@ -53,7 +57,9 @@ func (s *Service) Unseal(ctx context.Context, p *Project, rel string) (*boxside.
 	return s.work(ctx, p, boxside.DataRequest{Op: boxside.OpUnseal, Path: rel}, capsOwner, "")
 }
 
-// Rm moves an entry (from any zone) to .devc/trash by rename.
+// Rm moves an entry of the data root to .devc/trash by rename: anything
+// in a zone or outside the zones, but not a zone or a zone's parent.
+// Sealed entries too: this is the user's command.
 func (s *Service) Rm(ctx context.Context, p *Project, rel string) (*boxside.DataResult, error) {
 	if pl := p.Layout.Classify(rel); pl.Structural() {
 		return nil, fmt.Errorf("%s is part of the data layout (a zone directory or one of its parents) and cannot be removed", rel)

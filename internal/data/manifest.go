@@ -1,3 +1,6 @@
+// This file implements the data manifest: one JSON line per entry a seal,
+// a savepoint, a pull or a push covered, in the realm's context directory.
+
 package data
 
 import (

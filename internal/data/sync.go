@@ -1,3 +1,9 @@
+// Data sync (work order C14): `devc data pull` and `push` wrap rsync on
+// the host, with the user's own SSH. rsync only ever reads from or writes
+// to a staging directory that no box can write; the data root itself is
+// touched only by helper-container workers. This file also holds `devc
+// data status` and `verify`, which compare the data with the manifest.
+
 package data
 
 import (
@@ -24,12 +30,8 @@ import (
 	"github.com/mb706/devc/internal/proto"
 )
 
-// Data sync (work order C14): `devc data pull` and `push` wrap rsync on
-// the host, with the user's own SSH. rsync only ever reads from or writes
-// to a staging directory that no box can write; the data root itself is
-// touched only by helper-container workers.
-
-// rsyncTimeout bounds one transfer; dry runs only list.
+// rsyncTimeout bounds one transfer, rsyncDryTimeout a dry run, which only
+// lists.
 const (
 	rsyncTimeout    = 12 * time.Hour
 	rsyncDryTimeout = 2 * time.Hour
@@ -226,6 +228,9 @@ func (o SyncOptions) confirm(res *SyncResult) (bool, error) {
 	return o.Confirm(res)
 }
 
+// withLock runs fn under o.Lock (the box lock) when one is set: the worker
+// phases of a pull or push change the project directory, the transfer
+// does not and runs without it.
 func (s *Service) withLock(ctx context.Context, o SyncOptions, fn func() error) error {
 	if o.Lock == nil {
 		return fn()

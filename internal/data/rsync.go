@@ -1,3 +1,6 @@
+// This file builds rsync's command line for data pull and push and reads
+// the listing of a dry run.
+
 package data
 
 import (

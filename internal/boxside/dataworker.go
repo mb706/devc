@@ -1,3 +1,7 @@
+// This file implements the data worker of the helper container: the
+// layout and its owners, sealing and unsealing, the trash, listing,
+// reflink savepoints and restores. The sync operations are in datasync.go.
+
 package boxside
 
 import (
@@ -22,8 +26,8 @@ import (
 )
 
 // DataWorker carries out data requests in the helper container. It sees
-// only the project directory (Target) and, for restores from restic, the
-// staging directory (Staging). Every path is resolved below Target
+// only the project directory (Target) and, for restic restores and pulls,
+// a staging directory (Staging). Every path is resolved below Target
 // descriptor by descriptor without following symlinks (safefs.Dir); a
 // symlink in the tree is handled as an object and never dereferenced, and
 // FIFOs, sockets and devices are skipped and reported.
@@ -344,6 +348,9 @@ func (w *DataWorker) layoutDirs(l DataLayout, created *[]string) (proj, root, de
 	return proj, root, devc, nil
 }
 
+// setup applies the layout (layoutDirs) and reports what a savepoint
+// would leave out; with Digest also the digest of the rest, which the
+// restic driver records because restic itself reports none.
 func (w *DataWorker) setup(req DataRequest, res *DataResult) error {
 	proj, root, devc, err := w.layoutDirs(req.Layout, &res.Created)
 	if err != nil {
@@ -745,6 +752,8 @@ func (w *DataWorker) mkdirOwned(d *safefs.Dir, rel string, structural func(strin
 	return cur, nil
 }
 
+// rm moves one entry into a new trash entry by rename (same filesystem,
+// owners kept), under payload/ at its path relative to the data root.
 func (w *DataWorker) rm(req DataRequest, res *DataResult) error {
 	if err := CheckDataPath(req.Path); err != nil {
 		return fmt.Errorf("%q: %w", req.Path, err)
@@ -815,6 +824,10 @@ func (w *DataWorker) trashPayloadDir(entry *safefs.Dir, rel string) (*safefs.Dir
 	return d, nil
 }
 
+// trashRestore moves every path of a trash entry back to its place. Every
+// path is checked before anything moves: not part of the layout, present
+// in the entry, its place free. Missing parents are recreated for the box
+// user, layout directories never.
 func (w *DataWorker) trashRestore(req DataRequest, res *DataResult) error {
 	if len(req.IDs) != 1 || !ValidTrashID(req.IDs[0]) {
 		return errors.New("trash-restore takes exactly one valid trash ID")
@@ -893,6 +906,9 @@ func (w *DataWorker) trashRestore(req DataRequest, res *DataResult) error {
 	return trash.RemoveAll(id)
 }
 
+// trashEmpty deletes the named trash entries. Nothing else the worker
+// does deletes an entry of the data root: rm, pull-in and in-place
+// restores move what they replace into the trash.
 func (w *DataWorker) trashEmpty(req DataRequest, res *DataResult) error {
 	for _, id := range req.IDs {
 		if !ValidTrashID(id) {
@@ -1011,6 +1027,9 @@ func (w *DataWorker) sealedEntries(root *safefs.Dir, l DataLayout) ([]EntryInfo,
 	return entries, sortedUnique(exclude), nil
 }
 
+// ls describes the zones, the sealed zones' entries, the seal records and
+// the trash. It only reads (the worker has DAC_READ_SEARCH alone), so it
+// does not apply the layout.
 func (w *DataWorker) ls(req DataRequest, res *DataResult) error {
 	proj, err := w.project()
 	if err != nil {
@@ -1297,6 +1316,13 @@ func (c *copier) copyFile(src *safefs.Dir, name string, dst *safefs.Dir, dstName
 	return nil
 }
 
+// reflinkSave copies the data root, without input zones and sealed
+// entries, into .devc/savepoints/<id>.partial with FICLONE (the copy
+// shares the files' blocks until either side changes), makes it
+// vault-owned and read-only, writes the mode record and renames it to
+// <id>. A filesystem that cannot clone is reported as Unsupported, with
+// nothing left behind. The box may be writing meanwhile: each file is
+// copied as it is at that moment.
 func (w *DataWorker) reflinkSave(req DataRequest, res *DataResult) error {
 	if !ValidSavepointID(req.Savepoint) {
 		return fmt.Errorf("invalid savepoint ID %q", req.Savepoint)
@@ -1385,6 +1411,8 @@ func (w *DataWorker) reflinkSave(req DataRequest, res *DataResult) error {
 	return nil
 }
 
+// savepointDrop deletes reflink savepoints: the copy, a partial copy left
+// by an interrupted save, and the mode record.
 func (w *DataWorker) savepointDrop(req DataRequest, res *DataResult) error {
 	for _, id := range req.IDs {
 		if !ValidSavepointID(id) {
@@ -1581,6 +1609,11 @@ func (w *DataWorker) dropModes(sp *safefs.Dir, id string) error {
 func stagedFileMode(_ string, m uint32) uint32 { return m & 0o777 }
 func stagedDirMode(_ string, m uint32) uint32  { return m & 0o777 }
 
+// restore copies a savepoint (from .devc/savepoints, or from what restic
+// restored at /staging) into a new restored-<id>[-N] directory in the
+// first work zone, owned by the box user, or with InPlace back to the
+// original places (restoreInPlace). Every path asked for must be in the
+// savepoint and outside the input zones.
 func (w *DataWorker) restore(req DataRequest, res *DataResult) error {
 	if !ValidSavepointID(req.Savepoint) {
 		return fmt.Errorf("invalid savepoint ID %q", req.Savepoint)
@@ -1735,6 +1768,9 @@ type inPlace struct {
 	moved   []string
 }
 
+// restoreInPlace walks the savepoint twice: a dry pass that only looks for
+// refusals, then the pass that changes the tree. Entries that exist now
+// and not in the savepoint are left alone; a restore never deletes.
 func (w *DataWorker) restoreInPlace(req DataRequest, root, devc, src *safefs.Dir, fileMode, dirMode func(string, uint32) uint32, res *DataResult) error {
 	c := &copier{w: w, uid: w.BoxUID, gid: w.BoxGID, clone: true, fileMode: fileMode, dirMode: dirMode}
 	ip := &inPlace{w: w, req: req, devc: devc, copier: c}

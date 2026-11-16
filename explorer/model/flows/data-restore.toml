@@ -1,0 +1,163 @@
+id = "data-restore"
+kind = "flow"
+title = "devc restore"
+summary = "`devc restore <savepoint> [path…] [--in-place]`: under the box lock the CLI finds the savepoint and refuses what it does not cover; restic first restores into a staging directory; a helper container copies into a new directory of the first work zone, or puts entries back in place after a dry pass, moving what is in the way into the trash."
+concern = "savepoints"
+trigger = "devc restore 20261115T090000Z results --in-place -p demo/analysis"
+actors = ["user", "cli", "podman", "helper", "restic"]
+
+[[step]]
+section = "On the host"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc restore"
+label = "devc restore 20261115T090000Z results --in-place"
+external = true
+text = "The savepoint by ID or by a unique name; paths relative to the data root or absolute inside it; the project from `-p`, else from the first path, else the current directory. No path means the whole savepoint."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.withData"
+checks = ["internal/config.Config.ProblemsFor"]
+text = "Nothing happens while the configuration has problems; the box lock is taken for the whole restore."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.Find"
+text = "The savepoint comes from the index; a name several savepoints share is refused."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Normalize"
+checks = ["internal/data.Normalize"]
+text = "Each path becomes a clean path relative to the data root."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.Restore"
+checks = ["internal/data.excluded"]
+text = "A path in an input zone, or one that was sealed when the savepoint was taken, is refused: the savepoint does not hold it. A copy restore needs a work zone."
+
+[[step]]
+section = "restic savepoints only"
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.resticRestore"
+checks = ["internal/data.snapshotRE"]
+text = "A new staging directory `local/tmp/restore-*` is made in the state directory."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run --user 1000:1000 … restic restore <snapshot> --target /restore"
+ref = "internal/data.Service.restic"
+text = "restic as the box user without capabilities or network, the staging directory at `/restore`, the repository, its cache and the toolbox; `--include` patterns select the paths."
+
+[[step]]
+from = "podman"
+to = "restic"
+via = "exec"
+label = "restic restore"
+external = true
+text = "restic writes the saved files under `/restore/project/<root>/`, the absolute paths it saved."
+
+[[step]]
+from = "restic"
+to = "cli"
+via = "reply"
+label = "exit status"
+external = true
+text = "A failure stops the restore before anything in the project changes."
+
+[[step]]
+section = "The restore worker"
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.work"
+text = "A `restore` request: the savepoint, the paths, in place or not, and the source, `.devc/savepoints/<id>` for reflink or the staging directory, mounted read-only at `/staging`, for restic."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run … [--mount <staging>:/staging:ro] … devc box data-worker"
+ref = "internal/engine.Podman.Run"
+text = "The helper container with the ownership capabilities."
+
+[[step]]
+from = "podman"
+to = "helper"
+via = "cmd:devc box data-worker"
+label = "devc box data-worker < restore"
+external = true
+text = "The worker checks the request as for every operation."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.restore"
+checks = ["internal/boxside.ValidSavepointID", "internal/boxside.CheckDataPath"]
+text = "Paths are checked again and the layout is applied. The source is opened without following links, with the savepoint's mode record for reflink; every path asked for must exist in it."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.copier.copyEntry"
+text = "Without `--in-place`: a new `restored-<id>[-N]/` in the first work zone receives the entries, cloned where possible, owned by the box user with the saved modes. Nothing existing is touched."
+
+[[step]]
+section = "In place"
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.restoreInPlace"
+text = "The savepoint is walked twice. The dry pass changes nothing and only looks for refusals, so a refusal comes before any change."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.inPlace.entryAt"
+checks = ["internal/boxside.DataWorker.checkNotSealed"]
+text = "Per entry: input zones are refused; an entry sealed now is skipped by a full restore and refuses an explicit path; a file where the layout has a directory is refused; directories present on both sides are merged entry by entry."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.unchanged"
+text = "An entry that already is what the restore would make (the same symlink target, or a box-owned file with the restored mode and the same bytes; times do not count) is left alone."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.inPlace.displace"
+text = "Anything else in the way moves by rename into one trash entry `<stamp>-restore-<id>`, whose `meta.json` lists it; then the saved entry is copied in. Entries that exist now but not in the savepoint stay."
+
+[[step]]
+from = "helper"
+to = "cli"
+via = "reply"
+label = "DataResult {dest | trash_id, displaced, files, size, skipped}"
+ref = "internal/boxside.MarshalReport"
+text = "Long lists are capped in the report: at most 100 displaced paths, with the total."
+
+[[step]]
+section = "Back on the host"
+
+[[step]]
+at = "cli"
+ref = "internal/data.DecodeResult"
+checks = ["internal/data.DecodeResult"]
+text = "Decoded strictly; the destination and the displaced paths must be data paths, the trash ID valid."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.removeStaging"
+text = "For restic, the staging directory is emptied by `devc box rm-worker` in another helper container, since it holds box-written data, and then removed."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "restored … in place; moved 3 entries into the trash entry …"
+ref = "internal/boxside.DataResult"
+text = "Where the copy went, or how many entries moved to the trash and under which ID (`devc data trash restore <id>` brings them back)."

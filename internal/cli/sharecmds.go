@@ -1,3 +1,6 @@
+// This file holds `devc share` (publish, ls, log, rm) on the host and
+// `devc src` in a box.
+
 package cli
 
 import (
@@ -51,6 +54,8 @@ func short(oid string) string {
 	return oid
 }
 
+// newShareCmd is `devc share`. Every subcommand refuses to run in a box;
+// publish prepares the plan, prints it and asks before it extracts.
 func newShareCmd(a *app) *cobra.Command {
 	var from, dir, ref string
 	var yes bool

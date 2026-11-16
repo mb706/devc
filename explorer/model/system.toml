@@ -119,6 +119,13 @@ kind = "service"
 summary = "Hosts a project is granted through the SSH gate; reached over the master connections `devc ssh login` keeps on the host."
 
 [[actor]]
+id = "data-remote"
+zone = "external"
+title = "Data remote"
+kind = "service"
+summary = "A `[data.remotes.<name>]` of a project: a directory on an SSH host (a cluster, a NAS) or on this machine, which `devc data pull` reads and `devc data push` writes with rsync, never deleting there."
+
+[[actor]]
 id = "internet"
 zone = "external"
 title = "Internet hosts"
@@ -174,6 +181,13 @@ kind = "process"
 summary = "git on the host, run only against relays and only through [[internal/gitx.Host]] (hardened environment, `/` as working directory, an empty hooks directory unless the relay hooks are wanted)."
 
 [[actor]]
+id = "rsync"
+zone = "host"
+title = "rsync (host)"
+kind = "process"
+summary = "rsync on the host for `devc data pull` and `push`, with the argument vector of [[internal/data.RsyncArgs]] and your own SSH: it writes only a pull's staging directory below the state directory and reads only a push's vault-owned staging directory, never the data tree."
+
+[[actor]]
 id = "sshd"
 zone = "host"
 title = "sshd (gate)"
@@ -209,7 +223,7 @@ id = "helper"
 zone = "aux"
 title = "Helper container"
 kind = "process"
-summary = "`podman run --rm --network none` with the toolbox's helper root filesystem and only the target tree mounted: sealing, the trash, savepoints and restores, deletions, reading shared harness state for the archive."
+summary = "`podman run --rm --network none` with the toolbox's helper root filesystem and only the target tree mounted: the data layout, sealing, the trash, savepoints and restores, merging pulls and staging pushes, digests, deletions, reading shared harness state for the archive."
 commands = ["devc box rm-worker", "devc box data-worker", "devc box archive-worker", "devc box statx-worker"]
 
 [[actor]]
@@ -219,6 +233,13 @@ title = "Context container"
 kind = "process"
 summary = "A throwaway container without network that walks a realm's context directory (notes and memory, which boxes write) and commits it to the context repository ([[pkg:internal/ctxrepo]])."
 commands = ["devc box context-worker"]
+
+[[actor]]
+id = "restic"
+zone = "aux"
+title = "restic"
+kind = "process"
+summary = "The toolbox's pinned restic in a throwaway container from the helper root filesystem, as the box user without capabilities or network: it backs up a project's data root, which it sees read-only, into the restic repository of the state directory, and restores into a staging directory. It runs no devc code."
 
 [[actor]]
 id = "installer"
@@ -430,8 +451,49 @@ from = "podman"
 to = "helper"
 title = "Helper run"
 transport = "`podman run --rm --network none` with the helper root filesystem as a throwaway overlay, only the target tree mounted and only the capabilities the worker needs."
-carries = "One worker request (often JSON on stdin); a report back."
-concerns = ["box-lifecycle"]
+carries = "One worker request (often JSON on stdin); a report back. The data worker's request is a DataRequest of at most 1 MiB, its report a DataResult the host captures and decodes within 64 MiB."
+checks = ["internal/boxside.ReadDataRequest", "internal/boxside.DataWorker.Run", "internal/data.DecodeResult"]
+concerns = ["box-lifecycle", "data-and-sealing", "savepoints", "data-sync"]
+
+[[channel]]
+id = "podman-restic"
+from = "podman"
+to = "restic"
+title = "restic run"
+transport = "`podman run --rm --network none` from the helper root filesystem as the box user, every capability dropped; the project directory read-only, the repository and its cache read-write, the toolbox read-only, a tmpfs /tmp."
+carries = "A restic command (init, backup, forget, prune, restore, version); its JSON summary or exit status back."
+concerns = ["savepoints"]
+
+[[channel]]
+id = "cli-rsync"
+from = "cli"
+to = "rsync"
+title = "rsync"
+transport = "The rsync binary with the argument vector of [[internal/data.RsyncArgs]]; dry runs captured (at most 256 MiB), transfers on the terminal."
+carries = "A dry run's listing, parsed line by line, or a transfer's progress and exit status."
+checks = ["internal/data.ParseItems", "internal/data.Totals"]
+concerns = ["data-sync"]
+
+[[channel]]
+id = "rsync-remote"
+from = "rsync"
+to = "data-remote"
+title = "Data transfer"
+transport = "rsync's protocol over your own ssh (through the master of `devc ssh login` when one answers), or directly for a local directory; paths protected from the remote shell."
+carries = "Files of the targets: from the remote into a pull's staging directory, or from a push's staging directory to the remote, never deleting there."
+boundary = true
+concerns = ["data-sync"]
+
+[[channel]]
+id = "box-registries"
+from = "box-tools"
+to = "internet"
+title = "Registries"
+transport = "HTTPS from `devc src` in the box, with the box's network: through the allowlist proxy at level allowlist."
+carries = "Registry documents (CRAN's index, PyPI's and npm's JSON, GitHub's commit) and source archives."
+boundary = true
+checks = ["internal/depsrc.Options.download", "internal/depsrc.Options.client", "internal/depsrc.cranCurrent"]
+concerns = ["dependency-sources"]
 
 [[channel]]
 id = "podman-context"

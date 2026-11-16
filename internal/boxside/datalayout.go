@@ -1,3 +1,7 @@
+// This file describes a project's data layout (the data root and its
+// zones) and the names devc makes in .devc: where a path lies, what may be
+// sealed, savepoint and trash IDs.
+
 package boxside
 
 import (

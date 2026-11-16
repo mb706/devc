@@ -1,0 +1,240 @@
+id = "data-pull"
+kind = "flow"
+title = "devc data pull"
+summary = "A remote directory into the data tree: the CLI checks the plan and takes the sync lock, a check worker refuses sealed targets, a dry run is counted and shown, host rsync fills a staging directory no box can reach, and a helper container merges it under the box lock, moving what it replaces into the trash; the manifest records what arrived."
+concern = "data-sync"
+trigger = "devc data pull cluster results/run7 -p demo/analysis"
+actors = ["user", "cli", "rsync", "podman", "helper", "data-remote"]
+
+[[step]]
+section = "The plan"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc data pull"
+label = "devc data pull cluster results/run7"
+external = true
+text = "A remote of the project's configuration and paths relative to the data root; without paths, the remote's `pull` list."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.runSync"
+checks = ["internal/config.Config.ProblemsFor", "internal/data.Normalize"]
+text = "Nothing is pulled while the project's configuration has problems; the path arguments are normalised; the whole command gets twelve hours. The preview, the question and the box lock are handed to the data service as functions."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.Pull"
+text = "The data service runs the pull; it takes the box lock only for its two worker phases, never for the transfer."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.syncPlan"
+checks = ["internal/config.CheckRemote", "internal/boxside.CheckSyncTarget"]
+text = "The remote's host and path are checked again; every target must be a zone or lie in one, without wildcards or control characters, never `.devc-backup`. A target inside another is dropped."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.lockSync"
+text = "The sync lock of this project and remote is held to the end; if another pull or push holds it for three seconds, this one is refused."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run … devc box data-worker (pull-in, check)"
+ref = "internal/engine.Podman.Run"
+text = "Under the box lock, a check worker runs before anything is fetched."
+
+[[step]]
+from = "podman"
+to = "helper"
+via = "cmd:devc box data-worker"
+label = "devc box data-worker < pull-in {check}"
+external = true
+text = "The worker reads and checks the request ([[flow:data-seal]])."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.checkPullTarget"
+text = "A target that is a sealed entry, or lies inside one, is refused: a pull never changes sealed data. The layout is applied on the way."
+
+[[step]]
+from = "helper"
+to = "cli"
+via = "reply"
+label = "ok, or the refusal"
+ref = "internal/boxside.MarshalReport"
+text = "The box lock is released again."
+
+[[step]]
+section = "The dry run"
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.pullStaging"
+text = "The staging directory `local/staging/<realm>/<project>/<stamp>-<remote>/`, in the state directory, which no box mounts. One an interrupted pull from this remote left is reused, so rsync continues where it stopped."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.remoteShell"
+text = "For an SSH host, rsync uses the master connection of `devc ssh login` when `ssh -O check` answers on its socket, else your ordinary SSH; for a local directory, none."
+
+[[step]]
+from = "cli"
+to = "rsync"
+via = "exec"
+label = "rsync --dry-run --out-format='%i %l %n' … <host>:<path>/./results/run7 <staging>/"
+ref = "internal/data.Service.dryRun"
+text = "The argument vector of [[internal/data.RsyncArgs]]; nothing in it comes from a box. The listing is captured, at most 256 MiB."
+
+[[step]]
+from = "rsync"
+to = "data-remote"
+via = "stream"
+label = "rsync protocol over ssh"
+external = true
+text = "`--protect-args`: the remote's shell never parses a path."
+
+[[step]]
+from = "rsync"
+to = "cli"
+via = "reply"
+label = "one line per item"
+external = true
+text = "rsync compares with the staging directory, not with the data tree: files show as new unless an interrupted pull left them."
+
+[[step]]
+at = "cli"
+ref = "internal/data.ParseItems"
+checks = ["internal/data.ParseItems"]
+text = "Every line must be an item or one of rsync's two known messages; a listing that was cut or holds anything else is refused, since its size could not be counted."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Totals"
+checks = ["internal/data.Totals", "internal/boxside.CheckPullEntries"]
+text = "The total must stay under `--max-size` (default 2g) and the entries within 100,000 and the room of the worker's report; otherwise the pull is refused now, before anything is transferred."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "preview; pull 214 files (38 GB) from cluster? [y/N]"
+ref = "internal/cli.printSyncPreview"
+text = "Up to 200 lines and the totals, then the question; with `--yes` neither, without a terminal a refusal."
+
+[[step]]
+from = "user"
+to = "cli"
+via = "reply"
+label = "y"
+external = true
+text = "You confirm."
+
+[[step]]
+section = "The transfer"
+
+[[step]]
+from = "cli"
+to = "rsync"
+via = "exec"
+label = "rsync --partial --info=progress2 … <host>:<path>/./results/run7 <staging>/"
+ref = "internal/data.Service.transfer"
+text = "The same arguments without `--dry-run`, on your terminal, for up to twelve hours, without the box lock."
+
+[[step]]
+from = "rsync"
+to = "data-remote"
+via = "stream"
+label = "files"
+external = true
+text = "Never `--delete`; symlinks come as links; owners, groups, devices and special files are not transferred."
+
+[[step]]
+at = "rsync"
+external = true
+label = "writes the staging directory"
+text = "rsync writes as you, into the staging directory only. If it fails, the directory is kept and the next pull from this remote continues there."
+
+[[step]]
+section = "The merge"
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run … --mount <staging>:/staging:ro … devc box data-worker"
+ref = "internal/engine.Podman.Run"
+text = "Under the box lock again, the pull-in worker with the project directory and the staging directory, read-only."
+
+[[step]]
+from = "podman"
+to = "helper"
+via = "cmd:devc box data-worker"
+label = "devc box data-worker < pull-in"
+external = true
+text = "The worker reads and checks the request."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.pullIn"
+checks = ["internal/boxside.checkTargets", "internal/boxside.DataWorker.checkPullTarget", "internal/boxside.DataWorker.checkEntries"]
+text = "Targets are checked again, the layout applied, sealed targets refused again; every target must have arrived, and the staged entries must fit the report, since a continued pull may hold more than its dry run listed."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.puller.merge"
+text = "A dry pass finds layout conflicts first. Then each staged entry meets what is here: new entries are copied in, owned by the box user with the remote's mode bits minus set-ID; the same bytes or link target are left alone; sealed entries below a target are never touched; special files are skipped; what exists here and not there stays."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.puller.displace"
+text = "A file, link or directory that differs from what arrived moves by rename into one trash entry `<stamp>-pull-<remote>` before the new one is copied in."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.recordDigests"
+text = "For every entry the pull covers: the digest of this machine's copy after the merge, the digest of what arrived, and the outcome: merged, skipped (a sealed entry that differs) or partial (something left out)."
+
+[[step]]
+from = "helper"
+to = "cli"
+via = "reply"
+label = "DataResult {files, same, trash_id, displaced, digests}"
+ref = "internal/boxside.MarshalReport"
+text = "The box lock is released."
+
+[[step]]
+section = "Afterwards"
+
+[[step]]
+at = "cli"
+ref = "internal/data.DecodeResult"
+checks = ["internal/data.DecodeResult"]
+text = "Decoded strictly; every digest of a pull needs a valid outcome, and a merged entry the remote's observation."
+
+[[step]]
+at = "cli"
+ref = "internal/data.AppendManifest"
+checks = ["internal/data.Record.Check"]
+text = "One `pull` record per entry goes into the manifest, with the remote's digest and the outcome; a failure is a warning."
+
+[[step]]
+at = "cli"
+ref = "internal/data.removeHostTree"
+text = "The staging directory is removed. It came from the remote through your rsync and no box could write it, so the host may walk it; symlinks are removed, never followed."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "pulled 214 files …; moved 3 entries that differed into the trash entry …"
+ref = "internal/data.SyncResult"
+text = "How much arrived, how many files were identical already, and which trash entry holds what was replaced."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.commitManifest"
+text = "The realm's context repository, which holds the manifest, is committed; a failure is a warning, and the next commit picks the records up."

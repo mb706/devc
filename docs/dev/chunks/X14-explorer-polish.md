@@ -35,3 +35,9 @@ Small problems in the tool and the app that the content authors met. This list g
 - The content guide's 1,200-word limit should say that quoted code blocks and tables do not count.
 - The README should say that the order in which steps are found depends on the entry function a flow starts at (start a flow at the entry function of the process, not in the middle of a call).
 
+## From X9
+
+- A step that names the function holding a command's run literal cannot be reached from anything, so a flow has to start at one of the literal's callees. Treat a command's constructor and its run literal as one for the connection check.
+- The shortest-path rule again chose a misleading route (`data-push` through `Service.Pull` until `Service.Push` was named as a step). Same fix as for X7: prefer the nearest earlier step.
+- `query flow <id>`: print the paths the tool found (third request).
+

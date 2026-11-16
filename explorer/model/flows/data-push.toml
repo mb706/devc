@@ -1,0 +1,203 @@
+id = "data-push"
+kind = "flow"
+title = "devc data push"
+summary = "Data from the data tree to a remote: a helper container hard-links the targets into a vault-owned staging directory the box cannot rearrange, rsync reads only that, shows a dry run and sends after you confirm, keeping every remote file it replaces in a backup directory of this push; the staging directory is removed again."
+concern = "data-sync"
+trigger = "devc data push nas results/run7 -p demo/analysis"
+actors = ["user", "cli", "rsync", "podman", "helper", "data-remote"]
+
+[[step]]
+section = "The plan and the staging directory"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc data push"
+label = "devc data push nas results/run7"
+external = true
+text = "A remote and paths relative to the data root; without paths, the remote's `push` list. `--content` also records content hashes."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.runSync"
+checks = ["internal/config.Config.ProblemsFor", "internal/data.Normalize"]
+text = "As for a pull: no push while the configuration has problems, paths normalised, twelve hours at most."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.Push"
+text = "The data service runs the push; it takes the box lock only for its two worker phases."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.syncPlan"
+checks = ["internal/config.CheckRemote", "internal/boxside.CheckSyncTarget"]
+text = "The remote and every target are checked: zones or paths in them, no wildcards, no control characters, not `.devc-backup`."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.lockSync"
+text = "The sync lock of this project and remote, held to the end."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.newBackupID"
+text = "The push's backup directory on the remote is `.devc-backup/<stamp>-<12 random hex digits>`, so two pushes never share one."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run … devc box data-worker (push-stage)"
+ref = "internal/engine.Podman.Run"
+text = "Under the box lock, the push-stage worker with the ownership capabilities (`FOWNER` lets it hard-link files of other owners)."
+
+[[step]]
+from = "podman"
+to = "helper"
+via = "cmd:devc box data-worker"
+label = "devc box data-worker < push-stage"
+external = true
+text = "The worker reads and checks the request ([[flow:data-seal]])."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.pushStage"
+checks = ["internal/boxside.checkTargets", "internal/boxside.ValidStageName", "internal/boxside.DataWorker.checkEntries"]
+text = "Every target must exist and the entries fit a report. `.devc-staging` is opened, or made the vault's with mode `0711`; one the box made is refused. Stages older than seven days are removed, and a new `push-<stamp>[-N]` is made."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.linker.entry"
+text = "Directories are new and the vault's (`0755`); regular files are hard links, made without following a link; symlinks are new links with the same target; special files are skipped. The box can no longer add, remove, rename or swap anything rsync will walk, but a staged file is its own file under a second name, so the box can still rewrite its contents in place."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.recordDigests"
+text = "The digests describe the staged tree, with content hashes when asked."
+
+[[step]]
+from = "helper"
+to = "cli"
+via = "reply"
+label = "DataResult {stage, files, size, digests}"
+ref = "internal/boxside.MarshalReport"
+text = "The host decodes it strictly; the staging name must be `push-<stamp>[-N]`. The box lock is released."
+
+[[step]]
+section = "The dry run"
+
+[[step]]
+from = "cli"
+to = "rsync"
+via = "exec"
+label = "rsync --dry-run … --backup --backup-dir=.devc-backup/… <project>/.devc-staging/<stage>/./results/run7 <host>:<path>/"
+ref = "internal/data.Service.dryRun"
+text = "rsync's source is only the staging directory, which you, as the box user to the kernel, may read. A push sends no directory permissions and keeps the files' executable bits."
+
+[[step]]
+from = "rsync"
+to = "data-remote"
+via = "stream"
+label = "rsync protocol over ssh"
+external = true
+text = "rsync chooses what to send by size and modification time, which the box controls."
+
+[[step]]
+from = "rsync"
+to = "cli"
+via = "reply"
+label = "one line per item"
+external = true
+text = "The listing, at most 256 MiB."
+
+[[step]]
+at = "cli"
+ref = "internal/data.ParseItems"
+checks = ["internal/data.ParseItems", "internal/data.Totals"]
+text = "Every line must parse; files, bytes and files that would replace one there are counted."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "preview; push 12 files (1.2 GB) to nas? [y/N]"
+ref = "internal/cli.printSyncPreview"
+text = "Up to 200 lines, the totals, how many files replace one on the remote and where those are kept."
+
+[[step]]
+from = "user"
+to = "cli"
+via = "reply"
+label = "y"
+external = true
+text = "You confirm."
+
+[[step]]
+section = "The transfer"
+
+[[step]]
+from = "cli"
+to = "rsync"
+via = "exec"
+label = "rsync … --backup --backup-dir=.devc-backup/<stamp>-<id> …"
+ref = "internal/data.Service.transfer"
+text = "The transfer, on your terminal, without the box lock."
+
+[[step]]
+from = "rsync"
+to = "data-remote"
+via = "stream"
+label = "files"
+external = true
+text = "Files of the staged tree go to `<path>/<target>` on the remote."
+
+[[step]]
+at = "data-remote"
+external = true
+label = "replaced files into .devc-backup/<stamp>-<id>/"
+text = "rsync on the remote moves every file the push replaces into the push's backup directory; it deletes nothing, since devc never passes `--delete`."
+
+[[step]]
+section = "Afterwards"
+
+[[step]]
+at = "cli"
+ref = "internal/data.AppendManifest"
+checks = ["internal/data.Record.Check"]
+text = "One `push` record per entry, describing the staged tree as sent; the remote may keep further files there."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run … devc box data-worker (push-unstage)"
+ref = "internal/engine.Podman.Run"
+text = "Whatever happened after staging (a failed transfer, a declined question, a dry run), a push-unstage worker runs under the box lock, with a context its cancellation does not stop."
+detail = "A push whose process is killed leaves its staging directory; the push-stage worker of a later push removes stages older than seven days."
+
+[[step]]
+from = "podman"
+to = "helper"
+via = "cmd:devc box data-worker"
+label = "devc box data-worker < push-unstage"
+external = true
+text = "The worker reads and checks the request."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.pushUnstage"
+text = "The staging directory goes, links and all, and `.devc-staging` once it is empty. The files themselves keep their names in the data tree."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "pushed 12 files to nas; the 2 files it replaced are kept there in …"
+ref = "internal/data.SyncResult"
+text = "What was sent and where the remote keeps what it replaced."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.commitManifest"
+text = "The realm's context repository is committed with the new records."

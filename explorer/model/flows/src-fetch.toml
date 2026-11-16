@@ -1,0 +1,117 @@
+id = "src-fetch"
+kind = "flow"
+title = "devc src"
+summary = "`devc src <package>` in a box to unpacked source in the realm's /src: the spec is checked, the installed version found, a cached exact version answered offline; otherwise the registry names the archive and its checksum, the archive is downloaded under the redirect rules, verified, unpacked safely and renamed into place."
+concern = "dependency-sources"
+trigger = "devc src r:dplyr (in the box)"
+actors = ["harness", "box-tools", "internet"]
+
+[[step]]
+section = "Which version"
+
+[[step]]
+from = "harness"
+to = "box-tools"
+via = "cmd:devc src"
+label = "devc src r:dplyr"
+external = true
+text = "The agent (or you) asks for a package's source; `@<version>` would name a version, and `--json` asks for the result as JSON."
+
+[[step]]
+at = "box-tools"
+ref = "internal/cli.requireBox"
+checks = ["internal/cli.requireBox", "internal/boxside.ReadInfo"]
+text = "It runs only in a box, and only where `/src` exists (boxes created before C16 lack it). The box's network level comes from `/etc/devc/box.json`, for the hints on failure."
+
+[[step]]
+at = "box-tools"
+ref = "internal/depsrc.ParseSpec"
+checks = ["internal/depsrc.Spec.check"]
+text = "The ecosystem and the name are checked by pattern, a PyPI name normalised, a version or ref checked before it can become a path."
+
+[[step]]
+at = "box-tools"
+ref = "internal/depsrc.Discover"
+text = "No version given: the installed one. For R, the first `DESCRIPTION` in the library paths (the environment's, what `Rscript` reports, the user library, the usual directories), parsed strictly; a package installed from GitHub becomes that commit."
+
+[[step]]
+at = "box-tools"
+ref = "internal/depsrc.cachedVersion"
+text = "A version that names one release for good (any CRAN or PyPI version, an exact npm version, a GitHub commit) already in `/src`, directly or through an alias file, is answered here, without the network."
+
+[[step]]
+section = "Asking the registry"
+
+[[step]]
+from = "box-tools"
+to = "internet"
+via = "stream"
+label = "GET <cran>/src/contrib/PACKAGES"
+ref = "internal/depsrc.Options.get"
+text = "https only (plain http only to a configured test base); through the host's proxy at level allowlist, which must allow the registry. Documents are capped at 64 MiB."
+
+[[step]]
+from = "internet"
+to = "box-tools"
+via = "reply"
+label = "the whole package index"
+external = true
+text = "For PyPI and npm the registry's JSON, for GitHub the commit a ref names."
+
+[[step]]
+at = "box-tools"
+ref = "internal/depsrc.Options.cran"
+checks = ["internal/depsrc.cranCurrent", "internal/depsrc.validHexSum"]
+text = "The index is parsed whole and strictly. The current version is fetched from `src/contrib/` with the MD5 the index lists, which must be usable; any other version only from the archive, without a checksum and with redirects only to the same path."
+detail = "PyPI: the source distribution with its sha256 (only wheels: refused). npm: the version's tarball with the strongest usable integrity value, else its SHA-1 shasum; the answer must name the package. GitHub: the tarball of the commit, without a checksum, with redirects only to a tarball of the same owner, repository and commit."
+
+[[step]]
+at = "box-tools"
+ref = "internal/depsrc.Fetch"
+checks = ["internal/depsrc.Spec.check"]
+text = "The version the registry named is checked before it becomes `/src/<ecosystem>/<name>/<version>`; if that directory exists, it is the answer."
+
+[[step]]
+section = "Download and unpack"
+
+[[step]]
+at = "box-tools"
+ref = "internal/depsrc.Options.download"
+checks = ["internal/depsrc.validHexSum"]
+text = "The candidate's checksum must be usable: a known algorithm and a hex digest of its length. A candidate without one is downloaded only where the registry publishes none (CRAN's archive, GitHub's tarballs), and then follows only the redirects its rule allows."
+
+[[step]]
+from = "box-tools"
+to = "internet"
+via = "stream"
+label = "GET …/dplyr_1.1.4.tar.gz"
+ref = "internal/depsrc.Options.getFollowing"
+text = "At most 2 GiB and 15 minutes. Every redirect is checked as the URL was (https, at most ten)."
+
+[[step]]
+from = "internet"
+to = "box-tools"
+via = "reply"
+label = "archive"
+external = true
+text = "Written into a new temporary directory below the package's directory in `/src`."
+
+[[step]]
+at = "box-tools"
+ref = "internal/depsrc.Options.download"
+checks = ["internal/depsrc.Options.download"]
+text = "The archive's checksum must equal the registry's; otherwise it is refused, and the temporary directory is removed, so nothing unverified stays in the cache."
+
+[[step]]
+at = "box-tools"
+ref = "internal/extract.File"
+checks = ["internal/extract.File"]
+text = "The safe extractor unpacks into the temporary directory within the source limits. A single top directory becomes the version: renamed to `/src/r/dplyr/1.1.4`, or, if another fetch got there first, that one is used."
+
+[[step]]
+from = "box-tools"
+to = "harness"
+via = "reply"
+label = "/src/r/dplyr/1.1.4"
+ref = "internal/depsrc.Result"
+text = "The path, with a note on how the version was chosen. Nothing was built, installed or run."

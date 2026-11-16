@@ -1,3 +1,7 @@
+// This file implements savepoints: the reflink and restic drivers, the
+// savepoint index, retention, restores and the restic runs in the helper
+// container.
+
 package data
 
 import (
@@ -107,6 +111,8 @@ func ReadIndex(file string) ([]Savepoint, map[string]bool, error) {
 	return out, used, sc.Err()
 }
 
+// appendIndex appends records to a savepoint index in one write. The
+// index is host-owned state in the durable tree, which no box mounts.
 func appendIndex(file string, recs ...Savepoint) error {
 	var buf bytes.Buffer
 	for _, r := range recs {
@@ -455,6 +461,9 @@ func (s *Service) restic(ctx context.Context, p *Project, extra []engine.RunMoun
 	return res, nil
 }
 
+// ensureRepo creates the project's restic repository unless it exists. It
+// has no password (--insecure-no-password): it lives in the state
+// directory, which no box mounts.
 func (s *Service) ensureRepo(ctx context.Context, p *Project) error {
 	if _, err := os.Stat(filepath.Join(s.Config.Paths.ResticRepo(p.Ref), "config")); err == nil {
 		return nil
@@ -484,6 +493,12 @@ type resticSummary struct {
 	Bytes       int64  `json:"total_bytes_processed"`
 }
 
+// resticSave backs the data root up with restic, leaving out what the
+// setup worker reports (input zones and sealed entries), and fills in the
+// snapshot ID and counts restic's summary gives. restic reads the tree as
+// the box user, so files the box made unreadable are missing (exit status
+// 3, a warning). The digest for the manifest comes from the setup worker,
+// before restic runs.
 func (s *Service) resticSave(ctx context.Context, p *Project, sp *Savepoint) ([]boxside.EntryDigest, error) {
 	// The setup worker checks the layout (no symlinked data root) and
 	// reports what to leave out: input zones and sealed entries, and the
@@ -523,6 +538,10 @@ func (s *Service) resticSave(ctx context.Context, p *Project, sp *Savepoint) ([]
 	return res.Digests, nil
 }
 
+// resticRestore has restic restore a snapshot (or its paths) into a new
+// staging directory below local/tmp, then a restore worker copies from it,
+// mounted read-only, into the project; the staging directory is emptied in
+// the helper container and removed afterwards.
 func (s *Service) resticRestore(ctx context.Context, p *Project, sp *Savepoint, req boxside.DataRequest) (*boxside.DataResult, error) {
 	if !snapshotRE.MatchString(sp.Snapshot) {
 		return nil, fmt.Errorf("the savepoint %s has no valid restic snapshot ID", sp.ID)

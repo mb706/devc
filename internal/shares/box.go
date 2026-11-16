@@ -1,3 +1,6 @@
+// This file puts shares into boxes: the mounts, and /opt/shares rendered
+// at every start.
+
 package shares
 
 import (

@@ -1,0 +1,139 @@
+id = "share-publish"
+kind = "flow"
+title = "devc share publish"
+summary = "A committed directory of a relay to a share mounted in boxes: the CLI resolves the commit and tree with host git, measures the tree against the limits, shows the diff or the file list and asks; git archive is streamed into the safe extractor, the version is renamed into place and logged, and `current` switches, which running boxes see at once."
+concern = "shares"
+trigger = "devc share publish review --from demo/tools --path skills/review"
+actors = ["user", "cli", "host-git", "box-agent", "box-program"]
+
+[[step]]
+section = "The plan"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc share publish"
+label = "devc share publish review --from demo/tools --path skills/review"
+external = true
+text = "The share's name, the project whose relay holds the directory, the directory relative to the repository root, and optionally `--ref` (a branch or a commit)."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.refuseInBox"
+checks = ["internal/cli.app.refuseInBox", "internal/names.Parse"]
+text = "Refused in a box (`DEVC_BOX=1`), which has no configuration; `--from` and `--path` are required and the project must exist. The whole publish gets an hour."
+
+[[step]]
+at = "cli"
+ref = "internal/shares.Service.Prepare"
+checks = ["internal/shares.CheckName", "internal/shares.CheckPath"]
+text = "The name must be a valid share name other than `dep-source`; the path clean and relative, without `..` or a leading `-`. The project must have a relay: only committed, banked content can be published."
+
+[[step]]
+at = "cli"
+ref = "internal/shares.Service.resolve"
+checks = ["internal/names.CheckRef"]
+text = "No `--ref`: the relay's default branch; a branch name must pass devc's ref check; 4 to 64 hex digits are a commit ID."
+
+[[step]]
+from = "cli"
+to = "host-git"
+via = "exec"
+label = "git rev-parse --verify --quiet <ref>^{commit}, <commit>:<path>; cat-file -t"
+ref = "internal/shares.Service.git"
+text = "Host git on the relay, with `--git-dir`, `/` as working directory, no hooks and none of your configuration ([[concern:git-ratchet]])."
+
+[[step]]
+from = "host-git"
+to = "cli"
+via = "reply"
+label = "commit, tree"
+external = true
+text = "The path must name a tree at that commit."
+
+[[step]]
+at = "cli"
+ref = "internal/shares.Service.measure"
+checks = ["internal/shares.Service.measure"]
+text = "`git ls-tree -r -t -l -z` counts entries and bytes: more than 20,000 entries, a file over 128 MiB or 512 MiB in all is refused before anything is extracted."
+
+[[step]]
+at = "cli"
+ref = "internal/shares.Service.Current"
+text = "The current version is the one `current` points at, described by its line in the share's log."
+
+[[step]]
+at = "cli"
+ref = "internal/shares.Service.diff"
+text = "The same tree as the current version: nothing to publish. Otherwise, if the current version's tree is in this relay, git's `diff --stat --summary` and up to 1 MiB of `diff`, made printable; if not, the new version's file list."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "the plan; Publish this as the share review? [y/N]"
+ref = "internal/cli.app.printPlan"
+text = "The source, the commit, entries and size, and the change. Agents in every box listing the share will read what you confirm."
+
+[[step]]
+from = "user"
+to = "cli"
+via = "reply"
+label = "y"
+external = true
+text = "You confirm; `--yes` skips the question, and without a terminal it is refused."
+
+[[step]]
+section = "Publishing"
+
+[[step]]
+at = "cli"
+ref = "internal/shares.Service.Publish"
+text = "The share's lock (`local/locks/share-<name>.lock`) serialises publishes; a new directory `durable/shares/.staging/<name>-*/tree` receives the tree."
+
+[[step]]
+from = "cli"
+to = "host-git"
+via = "exec"
+label = "git archive --format=tar <tree> into a pipe"
+ref = "internal/shares.Service.archive"
+text = "git archive of the tree object, for at most 30 minutes; its tar stream comes back through a pipe the CLI reads as it arrives, its error output is kept to 64 KiB. The stream holds whatever the committed tree holds, including what an agent committed."
+
+[[step]]
+at = "cli"
+ref = "internal/extract.Tar"
+checks = ["internal/extract.Tar"]
+text = "Every entry is created beneath the new directory's descriptor without following a symlink; unsafe names, links that leave the tree, hard links and special files are left out and reported; set-ID bits are dropped; a limit stops it all."
+
+[[step]]
+at = "cli"
+ref = "internal/shares.Service.appendLog"
+text = "The tree is renamed to `durable/shares/<name>/<UTC stamp>`, and its line (source project, ref, commit, path, tree, counts, whether its root holds `SKILL.md`) is appended to `durable/share-log/<name>.jsonl`, which boxes never see."
+
+[[step]]
+at = "cli"
+ref = "internal/shares.symlinkAtomic"
+text = "Only now does `current` point at the new version: a new link renamed over the old one, so a box never sees a half-made version."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "published review version …; boxes of … see it now"
+ref = "internal/shares.Version"
+text = "What was left out, and which projects list the share."
+
+[[step]]
+section = "In the boxes"
+
+[[step]]
+at = "box-program"
+external = true
+label = "cat /opt/shares/review/SKILL.md"
+text = "In a running box that lists the share, `/opt/shares/review` leads to `.v/review/current`, which is followed inside the box's read-only mount of `durable/shares/review`: the new version is there at once."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.LinkSkills"
+unchecked = "box init runs at the box's next start, not because of the publish"
+text = "A share that has become a skill is linked into `~/.agents/skills/review` and `~/.claude/skills/review` when the box next starts."

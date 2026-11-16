@@ -5,6 +5,13 @@
 // and give worktrees their data link, data pull and push with rsync, and
 // the data manifest.
 //
+// Files: data.go (the service, a project's data view, path arguments),
+// helper.go (running a worker and checking its report), box.go (the box
+// hooks), ops.go (setup, seal, unseal, rm, the trash, ls, data links),
+// savepoints.go (savepoints, restores, retention, restic), sync.go (pull,
+// push, status, verify), rsync.go (rsync's command line and dry runs),
+// manifest.go (the data manifest).
+//
 // Security rules: the project tree is box-writable, so this package never
 // walks it, reads it or changes it from the host (README rule 2). Every
 // such operation is a request to a worker in the helper container (plan
@@ -21,10 +28,12 @@
 // in one place (RsyncArgs) from validated configuration; nothing from a
 // box reaches it. The manifest is appended beneath the context directory
 // through safefs. restic runs in the helper container as the box user
-// without capabilities, with the data root mounted read-only. Unsealing, trash deletion and restoring are host-only
-// commands; nothing here can be triggered from a box. The savepoint index
-// and the restic repository live in the state directory, which no box can
-// reach.
+// without capabilities, with the whole project directory mounted
+// read-only. Unsealing, removing, emptying the trash and restoring run
+// only at the user's command; a box can ask only for a seal or a savepoint
+// (devc request), which the host carries out with the same commands. The
+// savepoint index and the restic repository live in the state directory,
+// which no box can reach.
 package data
 
 import (

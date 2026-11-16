@@ -1,10 +1,11 @@
-package boxside
-
-// The data workers run in the helper container (plan 3.3, work order C06):
-// `devc box data-worker` reads one DataRequest as JSON on stdin, acts on
-// the project directory mounted at /target (and, for restores from restic,
-// the staging directory at /staging), and prints one DataResult. The host
+// This file is the protocol between the host and the data workers, which
+// run in the helper container (plan 3.3, work order C06): `devc box
+// data-worker` reads one DataRequest as JSON on stdin, acts on the project
+// directory mounted at /target (and, for restic restores and pulls, a
+// staging directory at /staging), and prints one DataResult. The host
 // decodes the result strictly, with a size cap, and validates it.
+
+package boxside
 
 import (
 	"bytes"
@@ -15,7 +16,7 @@ import (
 )
 
 // HelperStaging is where the helper container mounts a staging directory
-// (restic restores) read-only.
+// read-only: what restic restored, or what a pull received.
 const HelperStaging = "/staging"
 
 // DataProtoVersion is the version of DataRequest and DataResult.
@@ -82,7 +83,9 @@ type DataRequest struct {
 	// Savepoint names the savepoint of reflink-save and restore.
 	Savepoint string `json:"savepoint,omitempty"`
 	// Restore: where the content comes from, which paths (relative to the
-	// data root; empty means all), and whether to restore in place.
+	// data root; empty means all), and whether to restore in place. Paths
+	// are also the targets of pull-in and push-stage and the entries of
+	// digest.
 	Source  string   `json:"source,omitempty"`
 	Paths   []string `json:"paths,omitempty"`
 	InPlace bool     `json:"in_place,omitempty"`
@@ -94,8 +97,9 @@ type DataRequest struct {
 	Stage string `json:"stage,omitempty"`
 	// Check makes pull-in check its targets against the tree and stop.
 	Check bool `json:"check,omitempty"`
-	// Digest asks seal and setup for the digest of what they cover (the
-	// manifest); Content adds the content hash (seal, push-stage, digest).
+	// Digest asks seal, setup and reflink-save for the digest of what they
+	// cover (the manifest); Content adds the content hash (seal,
+	// push-stage, digest).
 	Digest  bool `json:"digest,omitempty"`
 	Content bool `json:"content,omitempty"`
 }
@@ -111,14 +115,17 @@ type DataResult struct {
 	Files int64 `json:"files"`
 	Size  int64 `json:"size"`
 	// Skipped lists entries left alone (FIFOs, sockets, devices, entries
-	// that changed while the worker ran), relative to the data root.
+	// that changed while the worker ran, sealed entries a pull did not
+	// touch), each a path relative to the data root with the reason.
 	Skipped []string `json:"skipped,omitempty"`
 	// Created lists directories setup created.
 	Created []string `json:"created,omitempty"`
-	// TrashID is the trash entry rm or an in-place restore created.
+	// TrashID is the trash entry rm, an in-place restore or pull-in
+	// created.
 	TrashID string `json:"trash_id,omitempty"`
-	// Paths are the paths trash-restore put back, Displaced the ones an
-	// in-place restore moved to the trash, Removed the IDs deleted.
+	// Paths are the paths rm moved and trash-restore put back, Displaced
+	// the ones an in-place restore or pull-in moved to the trash, Removed
+	// the IDs deleted.
 	Paths     []string `json:"paths,omitempty"`
 	Displaced []string `json:"displaced,omitempty"`
 	Removed   []string `json:"removed,omitempty"`
@@ -128,7 +135,8 @@ type DataResult struct {
 	// Unsupported is set by reflink-save when the filesystem cannot clone.
 	Unsupported bool `json:"unsupported,omitempty"`
 	// Exclude lists what a savepoint leaves out: input zones and sealed
-	// entries (reflink-save, and ls for restic).
+	// entries (reflink-save; setup reports it for the restic driver, and
+	// ls too).
 	Exclude []string `json:"exclude,omitempty"`
 	// DisplacedTotal counts the paths moved out of the way when Displaced
 	// lists only some of them (MaxReportedPaths).
@@ -192,7 +200,7 @@ type TrashMeta struct {
 	V      int      `json:"v"`
 	ID     string   `json:"id"`
 	Time   string   `json:"time"`
-	Reason string   `json:"reason"` // rm or restore
+	Reason string   `json:"reason"` // rm, restore or pull
 	Paths  []string `json:"paths"`
 }
 

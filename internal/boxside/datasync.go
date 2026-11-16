@@ -1,5 +1,3 @@
-package boxside
-
 // Data sync and the manifest (work order C14). The host moves data with
 // rsync, but never reads or writes the box-writable data tree itself:
 //
@@ -14,6 +12,8 @@ package boxside
 //   - digest describes entries for `devc data status` and `verify`.
 //
 // Every one of them walks through safefs.Dir and never follows a symlink.
+
+package boxside
 
 import (
 	"crypto/sha256"
@@ -401,6 +401,8 @@ func recordDigests(l DataLayout, targets []string, list, base *safefs.Dir, conte
 	return out, nil
 }
 
+// checkTargets checks the targets of a pull or push again in the worker
+// and drops those inside another.
 func checkTargets(l DataLayout, paths []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, errors.New("no paths to sync")
@@ -457,6 +459,12 @@ type puller struct {
 	partial     map[string]bool
 }
 
+// pullIn merges the staged tree at /staging into the data root, target by
+// target: with Check it only refuses targets in sealed entries (before the
+// transfer); otherwise every target must have arrived, the entries must
+// fit the report, a dry pass looks for layout conflicts, and then the
+// merge runs. The digests describe this machine's copy after the merge
+// and, per entry, the staged copy as it came from the remote.
 func (w *DataWorker) pullIn(req DataRequest, res *DataResult) error {
 	if req.Label != "" && !names.ValidKind(names.KindRemote, req.Label) {
 		return fmt.Errorf("invalid remote name %q", req.Label)
@@ -967,6 +975,10 @@ func (w *DataWorker) stageDirs(sd *safefs.Dir, rel string) (*safefs.Dir, error) 
 	return d, nil
 }
 
+// pushStage hard-links the targets into a new PushStagingDir/push-<stamp>
+// directory, removing stale ones first, and describes the staged tree for
+// the manifest. Only the directories are new: a staged file is the box's
+// own file under a second name, so its contents can still change.
 func (w *DataWorker) pushStage(req DataRequest, res *DataResult) error {
 	targets, err := checkTargets(req.Layout, req.Paths)
 	if err != nil {
@@ -1058,6 +1070,9 @@ func (w *DataWorker) pushStage(req DataRequest, res *DataResult) error {
 	return err
 }
 
+// pushUnstage removes a push staging directory (the hard links, not the
+// files they share with the data root) and PushStagingDir once it is
+// empty.
 func (w *DataWorker) pushUnstage(req DataRequest, res *DataResult) error {
 	if !ValidStageName(req.Stage) {
 		return fmt.Errorf("invalid staging directory name %q", req.Stage)
@@ -1086,6 +1101,8 @@ func (w *DataWorker) pushUnstage(req DataRequest, res *DataResult) error {
 
 // --- digest ---
 
+// digest describes the paths asked for, or every direct child of every
+// zone, for `devc data verify` and `status`. It only reads.
 func (w *DataWorker) digest(req DataRequest, res *DataResult) error {
 	for _, p := range req.Paths {
 		if err := CheckDataPath(p); err != nil {

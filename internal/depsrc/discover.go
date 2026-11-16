@@ -1,3 +1,6 @@
+// This file finds the installed version of a package in the box: R's
+// DESCRIPTION files, Python's distribution metadata, npm's package.json.
+
 package depsrc
 
 import (
@@ -218,6 +221,9 @@ func ParseDCF(b []byte) (map[string]string, error) {
 	return st[0], nil
 }
 
+// discoverR takes the version from the first DESCRIPTION of the package in
+// R's library paths, and the GitHub commit when it was installed from
+// there.
 func discoverR(ctx context.Context, name string, e Env) (*Installed, error) {
 	for _, lib := range RLibPaths(ctx, e) {
 		file := filepath.Join(lib, name, "DESCRIPTION")
@@ -298,6 +304,8 @@ func pythonSitePaths(ctx context.Context, e Env) []string {
 	return out
 }
 
+// discoverPython takes the version from the first *.dist-info/METADATA or
+// *.egg-info/PKG-INFO of the project (names compared as PEP 503 does).
 func discoverPython(ctx context.Context, name string, e Env) (*Installed, error) {
 	want := NormalizePyPI(name)
 	for _, dir := range pythonSitePaths(ctx, e) {
@@ -355,6 +363,9 @@ func parseHeaders(b []byte) map[string]string {
 	return out
 }
 
+// discoverNPM takes the version from the first node_modules/<name>/
+// package.json in the working directory or one of its parents, then in
+// NODE_PATH.
 func discoverNPM(name string, e Env) (*Installed, error) {
 	var dirs []string
 	if e.Getwd != nil {

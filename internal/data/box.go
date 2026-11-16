@@ -1,3 +1,7 @@
+// This file connects the data directory to the box's life cycle: input
+// zones mounted read-only, the layout set up before a start, data links
+// after it.
+
 package data
 
 import (

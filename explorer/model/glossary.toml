@@ -695,3 +695,125 @@ aka = ["delivery files", "delivery daemon"]
 text = "How a box receives its secrets, `secrets.delivery` in config.toml: `files` (the default) writes them before every start into the box's memory-backed secrets directory, mounted read-only at `/run/devc-secrets`; `daemon` writes nothing and the launcher asks the daemon with `host.secret` at each launch."
 refs = ["internal/harness.BoxHooks.deliverSecrets", "internal/secrets.Deliver", "internal/daemon.Daemon.secret"]
 see = ["realm-secret"]
+
+[[term]]
+id = "data-root"
+title = "Data root"
+aka = ["data tree", "data directory"]
+text = "The directory beside `main/` in a project directory (`data` unless `[data] root` says otherwise) that holds a project's data and its zones. The box writes in it; host code never walks it: helper-container workers do every operation on it."
+refs = ["internal/data.Project", "internal/boxside.DataLayout"]
+see = ["zone", "data-worker"]
+
+[[term]]
+id = "zone"
+title = "Zone"
+aka = ["input zone", "work zone", "sealed zone"]
+text = "A directory below the data root with its own protection: an input zone is mounted read-only into the box; a work zone is the box's to change, protected only by savepoints; in a sealed zone the box creates entries that `devc seal` can hand to the vault. Zones are listed in `[data]` and may not overlap."
+refs = ["internal/boxside.DataLayout.Zones", "internal/boxside.DataWorker.layoutDirs"]
+see = ["data-root", "sealing"]
+
+[[term]]
+id = "sealing"
+title = "Sealing"
+aka = ["seal", "sealed entry"]
+text = "`devc seal <path>` hands a direct child of a sealed zone to the vault and removes its write bits, recursively and without following links; from then on nothing in the box can change, move or remove it. It protects against the box, not against you: `devc data unseal` gives it back."
+refs = ["internal/boxside.DataWorker.seal", "internal/boxside.DataWorker.ownTree"]
+see = ["vault", "zone"]
+
+[[term]]
+id = "data-worker"
+title = "Data worker"
+text = "`devc box data-worker` in a helper container: it reads one JSON request on standard input, carries it out on the project directory mounted at `/target` (and a read-only staging directory), resolving every path without following symlinks, and prints one JSON report, which the host decodes strictly."
+refs = ["internal/boxside.DataWorker", "internal/boxside.DataRequest", "internal/data.Service.work"]
+see = ["helper-container", "data-root"]
+
+[[term]]
+id = "data-trash"
+title = "Trash"
+aka = ["data trash"]
+text = "`.devc/trash/<stamp>-<label>/` in a project directory: what `devc data rm`, a pull or an in-place restore moved out of the way, by rename and with its owners, plus a `meta.json` of its paths. `devc data trash restore` puts an entry back; only `devc data trash empty` deletes."
+refs = ["internal/boxside.DataWorker.newTrashEntry", "internal/boxside.TrashMeta"]
+see = ["data-root"]
+
+[[term]]
+id = "savepoint"
+title = "Savepoint"
+text = "A copy of the data root without its input zones and sealed entries that no box can reach, taken by `devc save`, before sessions or on a box's request: a vault-owned reflink copy in `.devc/savepoints/` or a restic snapshot in the state directory. `devc restore` brings it back as a copy or in place."
+refs = ["internal/data.Savepoint", "internal/data.Service.Save"]
+see = ["reflink-copy", "data-trash"]
+
+[[term]]
+id = "reflink-copy"
+title = "Reflink copy"
+aka = ["reflink", "FICLONE"]
+text = "A copy made with the `FICLONE` ioctl on filesystems that support it, such as btrfs and XFS: it shares the original's blocks until either side changes, so it is instant and costs space only as the files diverge. The savepoint driver `reflink` uses it."
+refs = ["internal/boxside.DataWorker.reflinkSave", "internal/boxside.DataWorker.probeClone"]
+see = ["savepoint"]
+
+[[term]]
+id = "data-link"
+title = "Data link"
+text = "The symlink `data -> ../<root>` in every worktree of a data project, so the agent finds the data from any worktree; made in the box as the box user, never over something that exists or that git tracks, and excluded from git status."
+refs = ["internal/boxside.Repo.EnsureDataLinks"]
+see = ["data-root"]
+
+[[term]]
+id = "data-remote"
+title = "Data remote"
+aka = ["remote"]
+text = "A `[data.remotes.<name>]` of a project: an SSH host alias (or none, for a directory on this machine), the path of its data root, and default `pull` and `push` lists, all checked before they reach rsync's command line."
+refs = ["internal/config.Remote", "internal/config.CheckRemote"]
+see = ["sync-staging"]
+
+[[term]]
+id = "sync-staging"
+title = "Staging directory (sync)"
+aka = ["staging directory", "push staging"]
+text = "Where rsync meets a project's data without touching the data tree: a pull fills `local/staging/<realm>/<project>/<stamp>-<remote>/` in the state directory, which a worker then merges; a push reads `.devc-staging/push-<stamp>/`, vault-owned directories of hard links a worker made."
+refs = ["internal/paths.Paths.SyncStagingDir", "internal/boxside.PushStagingDir"]
+see = ["data-remote", "backup-directory"]
+
+[[term]]
+id = "backup-directory"
+title = "Backup directory"
+aka = [".devc-backup"]
+text = "`.devc-backup/<stamp>-<12 hex digits>/` below a remote's data path: where rsync keeps every file a `devc data push` replaced there, one directory per push. devc never deletes on a remote."
+refs = ["internal/data.BackupDir", "internal/data.RsyncArgs"]
+see = ["data-remote"]
+
+[[term]]
+id = "data-manifest"
+title = "Data manifest"
+text = "`durable/realms/<realm>/context/data/<project>/manifest.jsonl`: one record per entry a seal, a savepoint, a pull or a push covered, naming the machine and the entry's digest, committed with the context repository. `devc data status` and `verify` compare the data with it."
+refs = ["internal/data.Record", "internal/data.AppendManifest"]
+see = ["digest", "context-repository"]
+
+[[term]]
+id = "digest"
+title = "Digest"
+aka = ["list digest", "content hash"]
+text = "`sha256:` over the type, path and size of every file and symlink of an entry, in byte order of the paths: it says which files an entry holds and how large they are, not what they contain. The content hash, with `--content`, uses each file's SHA-256 instead of its size."
+refs = ["internal/boxside.Digests"]
+see = ["data-manifest"]
+
+[[term]]
+id = "share"
+title = "Share"
+text = "A directory of a project's relay, published with `devc share publish` as a version in `durable/shares/<name>/` and mounted read-only at `/opt/shares/<name>` into every box whose project or realm lists it, in any realm. A new version is visible in running boxes at once."
+refs = ["internal/shares.Service.Publish", "internal/shares.BoxHooks"]
+see = ["skill"]
+
+[[term]]
+id = "skill"
+title = "Skill"
+text = "A share whose root holds a regular `SKILL.md`, or the built-in `dep-source`: box init links it into `~/.agents/skills/` and `~/.claude/skills/`, where harnesses look for skills."
+refs = ["internal/boxside.LinkSkills", "internal/shares.SkillFile"]
+see = ["share"]
+
+[[term]]
+id = "src-cache"
+title = "Source cache"
+aka = ["/src"]
+text = "`cache/realms/<realm>/src`, mounted read-write at `/src` in every box of the realm: the dependency sources `devc src` fetched, one directory per ecosystem, name and version. Shared and writable by the realm's boxes, never pruned."
+refs = ["internal/paths.Paths.RealmSrcCacheDir", "internal/depsrc.Fetch"]
+see = ["realm"]

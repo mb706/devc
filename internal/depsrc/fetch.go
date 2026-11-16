@@ -1,3 +1,6 @@
+// This file asks the registries which archive to fetch and with which
+// checksum, downloads and verifies it, and unpacks it into the cache.
+
 package depsrc
 
 import (
@@ -483,6 +486,8 @@ func (o Options) getFollowing(ctx context.Context, eco, rawURL string, header ht
 	return err
 }
 
+// getJSON fetches a registry's JSON document (at most maxDocument bytes)
+// into v.
 func (o Options) getJSON(ctx context.Context, eco, u string, header http.Header, v any) error {
 	var buf bytes.Buffer
 	if err := o.get(ctx, eco, u, header, &buf, maxDocument); err != nil {

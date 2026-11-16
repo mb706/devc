@@ -1,0 +1,138 @@
+id = "data-seal"
+kind = "flow"
+title = "devc seal"
+summary = "`devc seal <path>` to an entry the box can no longer change: under the box lock the CLI checks the path and starts a helper container, whose worker hands the entry to the vault top-down without following a link, checks that it was not moved, and reports; the host validates the report and records the seal."
+concern = "data-and-sealing"
+trigger = "devc seal results/run1 demo/analysis"
+actors = ["user", "cli", "podman", "helper"]
+
+[[step]]
+section = "On the host"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc seal"
+label = "devc seal results/run1 demo/analysis"
+external = true
+text = "You seal a finished run. The path is relative to the data root, or absolute inside it as the box or the host sees it; the project is the second argument, else the one an absolute path lies in, else the current directory's."
+detail = "A box can ask for the same with `devc request seal <path>`. The default `requests.auto` approves that at once, and the daemon then runs exactly this command, `devc seal -- <path> <project>` ([[flow:request-approve]]). No request can unseal."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.withData"
+checks = ["internal/config.Config.ProblemsFor", "internal/data.ProjectOf"]
+text = "The command runs inside `withData` with the lock on. Nothing changes while the project's configuration has problems, and the project must define zones. The box lock is taken, waiting up to ten minutes: no other devc command works on this box meanwhile. The box's own processes keep running."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Normalize"
+checks = ["internal/data.Normalize", "internal/boxside.CheckDataPath"]
+text = "The argument becomes a clean path relative to the data root; `..` anywhere, a NUL byte, the data root itself or a path outside it are refused."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.Seal"
+checks = ["internal/boxside.DataLayout.SealTarget"]
+text = "Only a direct child of a sealed zone can be sealed. The relay's default-branch tip is looked up for the seal record."
+
+[[step]]
+at = "cli"
+ref = "internal/data.Service.work"
+text = "The toolbox is synced to this devc build and the project directory ensured (its realm directory private). The request is JSON: version, operation `seal`, the layout, the path, the commit and the host's time."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman run … --cap-add=CHOWN,FOWNER,DAC_OVERRIDE … devc box data-worker"
+ref = "internal/engine.Podman.Run"
+text = "A throwaway helper container: no network, the box's ID mapping, no new privileges, the box's seccomp profile, the three capabilities ownership work needs, and only the project directory, at `/target`. The request goes in on standard input."
+detail = "`--rootfs <toolbox>/helper-rootfs:O` puts the toolbox's helper tree behind an overlay the container cannot change; the worker is that tree's devc. The worker runs as the container's root, which the mapping sends to one of your subordinate IDs, and its capabilities count only in the container's user namespace. The run may take up to six hours; its output is captured up to 64 MiB."
+
+[[step]]
+from = "podman"
+to = "helper"
+via = "cmd:devc box data-worker"
+label = "devc box data-worker < request"
+external = true
+text = "The container runs devc's data worker."
+
+[[step]]
+section = "In the helper container"
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.RequireHelper"
+checks = ["internal/boxside.RequireHelper"]
+text = "The worker refuses to run anywhere else: `DEVC_HELPER=1`, a root filesystem without `/usr`, and a directory at `/target`."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.ReadDataRequest"
+checks = ["internal/boxside.ReadDataRequest"]
+text = "At most 1 MiB, decoded strictly (no unknown fields), version 1."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.Run"
+checks = ["internal/boxside.DataLayout.Validate"]
+text = "The layout and the time are checked again before the operation runs; the seal target is checked again inside it."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.seal"
+checks = ["internal/boxside.DataLayout.SealTarget"]
+text = "The seal operation checks its target again: a direct child of a sealed zone."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.layoutDirs"
+text = "The layout is applied first: owners and modes of the project directory, `.devc`, the data root and the zones; a layout path that is not a directory, or a `.devc` the vault did not make, stops the seal."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.ownTree"
+text = "The entry must be a directory or a regular file, not a symlink. A directory is opened without following a link, handed to the vault and made `0555` before it is listed, so nothing in the box can add, remove or swap its entries any more. Then the walk goes top-down, one descriptor per directory: each subdirectory is handed over and made read-only before it is entered, each file re-owned without its write and set-ID bits, symlinks re-owned as links, FIFOs, sockets and devices skipped and reported."
+detail = "An entry the vault owns already is walked again (completing an interrupted seal) and reported as sealed already. A regular file directly in the zone is re-owned and loses its write bits through a descriptor. Nothing reached through a symlink is touched; trees deeper than 2,048 levels are refused."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.digestEntry"
+text = "The entry's name must still refer to the inode the worker opened; if the box moved it first, the seal fails here without a record. Then the digest of what was sealed: every file and symlink with its size, and its content hash with `--content`."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.DataWorker.appendRecord"
+text = "A seal record (path, time, counts, the relay's tip) is appended to `.devc/seals.jsonl`, which only the vault can read."
+
+[[step]]
+from = "helper"
+to = "cli"
+via = "reply"
+label = "DataResult {files, size, skipped, digests}"
+ref = "internal/boxside.MarshalReport"
+text = "One compact JSON report on standard output; a failure would be a `devc: ` line on standard error instead."
+
+[[step]]
+section = "Back on the host"
+
+[[step]]
+at = "cli"
+ref = "internal/data.DecodeResult"
+checks = ["internal/data.DecodeResult"]
+text = "The report is decoded strictly: the expected operation, counts not negative, valid paths and digests; skipped texts are made printable."
+
+[[step]]
+at = "cli"
+ref = "internal/data.AppendManifest"
+checks = ["internal/data.Record.Check"]
+text = "Unless the entry was sealed already (and no content hash was asked for), a seal record goes into the data manifest, beneath the context directory through safefs. A failure is a warning: the seal has happened."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "sealed results/run1: 1,204 files, 3.1 GB"
+ref = "internal/boxside.DataResult"
+text = "The skipped entries are listed first, made printable. The lock is released."

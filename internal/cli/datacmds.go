@@ -1,3 +1,7 @@
+// This file holds the data commands of the host: seal, save, restore and
+// `devc data` with ls, rm, unseal, gc and the trash, and `devc toolbox
+// install restic`.
+
 package cli
 
 import (
@@ -140,6 +144,9 @@ func (a *app) printSkipped(skipped []string) {
 	}
 }
 
+// newDataCmds returns the top-level seal, save and restore and the `devc
+// data` group. Each command that changes the project refuses while its
+// configuration has problems and holds the box lock (withData with lock).
 func newDataCmds(a *app) []*cobra.Command {
 	var sealContent bool
 	seal := &cobra.Command{
@@ -262,6 +269,8 @@ func newDataCmds(a *app) []*cobra.Command {
 	return []*cobra.Command{seal, save, restore, newDataCmd(a)}
 }
 
+// newDataCmd is `devc data`: ls, rm, unseal, gc, the trash, and the sync
+// commands of datasync.go.
 func newDataCmd(a *app) *cobra.Command {
 	var lsJSON bool
 	ls := &cobra.Command{
@@ -352,6 +361,8 @@ func newDataCmd(a *app) *cobra.Command {
 		newDataPullCmd(a), newDataPushCmd(a), newDataStatusCmd(a), newDataVerifyCmd(a))
 }
 
+// newTrashCmd is `devc data trash`: ls, restore, and empty, which asks on
+// a terminal and refuses without one unless --yes.
 func newTrashCmd(a *app) *cobra.Command {
 	var lsJSON bool
 	ls := &cobra.Command{

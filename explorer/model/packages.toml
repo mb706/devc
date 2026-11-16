@@ -234,7 +234,7 @@ role = "This machine's side of joining hubs: the client certificate, key and CA 
 [package."internal/depsrc"]
 layer = "area"
 group = "data"
-role = "`devc src`: fetches the source of a dependency at the installed version into the realm's cache and prints the path."
+role = "`devc src` in a box: fetches the source of a dependency (the version asked for, else the installed one, else the current release) into the realm's cache at /src, verified where the registry publishes a checksum, and prints the path."
 
 [package."internal/doctor"]
 layer = "area"

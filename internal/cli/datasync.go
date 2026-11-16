@@ -1,3 +1,5 @@
+// This file holds `devc data pull`, `push`, `status` and `verify`.
+
 package cli
 
 import (
@@ -95,7 +97,11 @@ func newDataPushCmd(a *app) *cobra.Command {
 	return cmd
 }
 
-// runSync is data pull and push.
+// runSync is data pull and push: the project and its configuration are
+// checked and the path arguments normalised here; the preview, the
+// question and the box lock are handed to the data service as functions.
+// A successful transfer commits the realm's context repository, which
+// holds the manifest.
 func (a *app) runSync(cmd *cobra.Command, args []string, o syncOptions, push bool, maxSize int64) error {
 	e, err := a.boxEnv()
 	if err != nil {

@@ -1,3 +1,7 @@
+// This file makes the worktrees' `data` links to the data root. It runs in
+// the box as the box user (`devc box data-links`), not in the helper
+// container: the links live in the box's own worktrees.
+
 package boxside
 
 import (

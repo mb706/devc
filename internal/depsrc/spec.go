@@ -1,18 +1,25 @@
 // Package depsrc is `devc src` (work order C16): it fetches the source of a
-// dependency at the installed version into the realm's cache at /src and
-// prints the path. It runs inside a box, with the box's own network access
-// (at level allowlist through the host's proxy, which must allow the
-// registry), and only downloads and unpacks: nothing fetched is ever built,
-// installed, imported or executed.
+// dependency into the realm's cache at /src and prints the path: the
+// version asked for, else the installed one, else the current release. It
+// runs inside a box, with the box's own network access (at level allowlist
+// through the host's proxy, which must allow the registry), and only
+// downloads and unpacks: nothing fetched is ever built, installed,
+// imported or executed.
 //
 // Sources: CRAN source tarballs (the current release, or an older version
-// from the archive),
-// the source distribution named by PyPI's JSON API, the npm registry
-// tarball, and GitHub's tarball endpoint. Checksums the registries publish
-// (PyPI's sha256, npm's integrity, CRAN's MD5 for current releases) are
-// verified. Every archive is unpacked by internal/extract, the same
-// extractor shares use, into a new directory that is renamed into place
-// when complete, so the cache never holds a partial tree.
+// from the archive), the source distribution named by PyPI's JSON API, the
+// npm registry tarball, and GitHub's tarball endpoint. Checksums the
+// registries publish (PyPI's sha256, npm's integrity, CRAN's MD5 for
+// current releases) are verified; where none is published (CRAN's archive,
+// GitHub's tarballs) a redirect may lead only to the same archive. A
+// version that names one release for good and is cached already is
+// answered without the network. Every archive is unpacked by
+// internal/extract, the same extractor shares use, into a new directory
+// that is renamed into place when complete, so the cache never holds a
+// partial tree.
+//
+// Files: spec.go (specs and their checks), discover.go (installed
+// versions), fetch.go (registries, checksums, downloads, the cache).
 //
 // Security rules: the cache is shared by the boxes of one realm and
 // writable by them; that is acceptable within one trust domain, and the

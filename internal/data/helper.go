@@ -1,3 +1,7 @@
+// This file runs the data workers in the helper container and checks what
+// they report: the host's side of the protocol of internal/boxside's
+// DataRequest and DataResult.
+
 package data
 
 import (
@@ -44,6 +48,9 @@ const maxResult = boxside.MaxReport
 // workerTimeout bounds one worker run; copies of large trees take time.
 const workerTimeout = 6 * time.Hour
 
+// syncToolbox makes sure, once per Service, that the toolbox holds this
+// devc build: the helper container runs the toolbox's copy of devc, so an
+// older one would not understand the request.
 func (s *Service) syncToolbox() error {
 	s.syncOnce.Do(func() {
 		if err := s.Config.Paths.Ensure(s.Toolbox.Dir); err != nil {
@@ -76,6 +83,11 @@ func (s *Service) securityOpts(r *config.Resolved) []string {
 	return opts
 }
 
+// helperBase is what every helper container of the data workers and of
+// restic shares: the toolbox's helper root filesystem behind a throwaway
+// overlay, no network, the box's user-namespace mapping and security
+// options, every capability dropped. Callers add the user, the mounts and
+// the capabilities the job needs.
 func (s *Service) helperBase(p *Project) engine.RunOptions {
 	return engine.RunOptions{
 		Rootfs:       s.Toolbox.HelperRootfs(),
@@ -172,7 +184,9 @@ func tail(b []byte) string {
 
 // DecodeResult decodes and validates a worker's result: no unknown fields,
 // nothing after it, the expected operation, valid IDs and paths, sane
-// counts. Text fields are made printable.
+// counts, well-formed digests. The skipped texts are made printable; paths
+// are only checked to be data paths, which may hold any byte but NUL, so
+// whoever prints one makes it printable.
 func DecodeResult(b []byte, op string) (*boxside.DataResult, error) {
 	if len(b) > maxResult {
 		return nil, fmt.Errorf("larger than %d bytes", maxResult)

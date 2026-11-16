@@ -12,18 +12,23 @@
 //
 // Boxes mount durable/shares/<name> whole (read-only), and /opt/shares/<name>
 // is a link to its current entry: a new version is visible in running
-// boxes at once (box.go).
+// boxes at once (box.go). Shares are not per realm: a box of any realm
+// sees a share its project or realm lists.
+//
+// Files: shares.go (publishing, the log, listing, removal), box.go (the
+// box hooks).
 //
 // Security rules: the content comes only from the relay, a host-owned bare
 // repository, through host git (internal/gitx: --git-dir, "/" as working
 // directory, no hooks, no configuration of the user's), and only committed
 // content can be published: never the project directory, which the box
 // writes (README rule 2). Before anything is extracted the change is shown
-// as git's file list and diff from the relay, made printable. The tar
-// stream of git archive is unpacked by internal/extract, which writes
-// nothing outside the new version directory and refuses symlinks leaving
-// it, special files and oversized trees. Share names are validated before
-// they become paths (rule 4).
+// as git's diff from the relay, or its file list when there is nothing in
+// the relay to compare with, made printable. The tar stream of git archive
+// is unpacked by internal/extract, which writes nothing outside the new
+// version directory, leaves out symlinks leaving it and special files, and
+// refuses oversized trees. Share names are validated before they become
+// paths (rule 4).
 package shares
 
 import (
@@ -148,8 +153,8 @@ type Plan struct {
 	Files   int
 	Bytes   int64
 	Current *Version
-	// Unchanged: the current version has the same tree from the same
-	// project.
+	// Unchanged: the current version has the same tree, so the same
+	// content, whichever project it came from.
 	Unchanged bool
 	// Stat and Diff compare the current version with the new tree in the
 	// relay (made printable); empty when there is no current version or
@@ -422,6 +427,9 @@ func (s *Service) archive(ctx context.Context, p *Plan, dir string) (*extract.Re
 	return rep, nil
 }
 
+// limitedBuffer keeps the first max bytes written to it and discards the
+// rest while reporting every write as complete, so git's stderr never
+// blocks git and never grows without bound.
 type limitedBuffer struct {
 	b   *bytes.Buffer
 	max int
@@ -443,6 +451,8 @@ const noFollow = unix.O_NOFOLLOW
 // maxLog bounds a share's log when it is read.
 const maxLog = 8 << 20
 
+// appendLog appends a version to the share's log, synchronously, before
+// current is switched to it.
 func (s *Service) appendLog(name string, v *Version) error {
 	file := s.Paths.ShareLogFile(name)
 	if err := s.Paths.Ensure(filepath.Dir(file)); err != nil {
