@@ -31,10 +31,12 @@ var hello = names.ProjectRef{Realm: "demo", Project: "hello"}
 
 const boxID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+var gen64 = strings.Repeat("ab", 32)
+
 func TestSidecarArgs(t *testing.T) {
 	o := SidecarOptions{Ref: hello, BoxID: boxID, BoxStart: "1234@1700000000000000000", Seccomp: "/s/toolbox/seccomp.json",
 		Labels: []string{"label=level:s0:c1,c2"}, Image: Image,
-		Limits: config.GlobalGUI{Memory: "2g", Pids: 512, CPUs: 2}, Controllers: []string{"cpu", "memory", "pids"}}
+		Limits: config.GlobalGUI{Memory: "2g", Pids: 512, CPUs: 2}, Controllers: []string{"cpu", "memory", "pids"}, Generation: gen64}
 	args, err := SidecarArgs(o)
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +45,7 @@ func TestSidecarArgs(t *testing.T) {
 		"--name", "devc-demo-hello_gui",
 		"--label", "devc.realm=demo", "--label", "devc.project=hello", "--label", "devc.role=aux", "--label", "devc.aux=desktop",
 		"--label", "devc.gui.box=" + boxID, "--label", "devc.gui.box-start=1234@1700000000000000000",
+		"--label", "devc.gui.limits=memory=2147483648 pids=512 cpus=2", "--label", "devc.gui.image=" + gen64,
 		"--network", "container:" + boxID,
 		"--userns=container:" + boxID,
 		"--user", "1000:1000",
@@ -88,6 +91,8 @@ func TestSidecarArgs(t *testing.T) {
 		"label injected": func(o *SidecarOptions) { o.Labels = []string{"label=disable\n--privileged"} },
 		"no controllers": func(o *SidecarOptions) { o.Controllers = nil },
 		"no limits":      func(o *SidecarOptions) { o.Limits = config.GlobalGUI{} },
+		"no generation":  func(o *SidecarOptions) { o.Generation = "" },
+		"bad generation": func(o *SidecarOptions) { o.Generation = "abc" },
 	} {
 		oo := o
 		mod(&oo)
@@ -132,6 +137,21 @@ func TestLimitArgs(t *testing.T) {
 		case c.err == "" && (err != nil || !slices.Equal(got, c.want)):
 			t.Errorf("%s: %q %v, want %q", c.name, got, err, c.want)
 		}
+	}
+	// The record of the limits (E2-01): what the arguments apply, "none"
+	// for a limit switched off; independent of delegation.
+	for l, want := range map[config.GlobalGUI]string{
+		def:                                   "memory=2147483648 pids=512 cpus=2",
+		{Memory: "512m", Pids: 64, CPUs: 0.5}: "memory=536870912 pids=64 cpus=0.5",
+		{Memory: "none", Pids: -1, CPUs: -1}:  "memory=none pids=none cpus=none",
+		{Memory: "none", Pids: 512, CPUs: -1}: "memory=none pids=512 cpus=none",
+	} {
+		if got, err := LimitsSpec(l); err != nil || got != want {
+			t.Errorf("LimitsSpec(%+v) = %q %v, want %q", l, got, err, want)
+		}
+	}
+	if _, err := LimitsSpec(config.GlobalGUI{Memory: "lots", Pids: 1, CPUs: 1}); err == nil {
+		t.Error("LimitsSpec accepted an invalid memory limit")
 	}
 }
 
@@ -557,6 +577,109 @@ func TestRemoveAndStartRemoveSidecar(t *testing.T) {
 	}
 	if err := r.gui.Down(ctx, hello); err != nil || !strings.Contains(r.out.String(), "no desktop runs") {
 		t.Errorf("second down: %v", err)
+	}
+}
+
+// TestOutdatedSidecar: a running desktop is reused only with the limits
+// and the image generation gui up would create now; otherwise gui up
+// refuses it without touching it, status calls it outdated, and only
+// --restart replaces it (finding E2-01).
+func TestOutdatedSidecar(t *testing.T) {
+	ctx := context.Background()
+	r := newRig(t)
+	v, err := r.gui.Up(ctx, hello, UpOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	side := r.eng.Containers["devc-demo-hello_gui"]
+	if side.Labels[LabelLimits] != "memory=2147483648 pids=512 cpus=2" || side.Labels[LabelImage] != AuxImage().Hash() {
+		t.Fatalf("labels %v", side.Labels)
+	}
+	refused := func(name string, want ...string) {
+		t.Helper()
+		r.eng.Log = nil
+		started := len(r.fwd.started)
+		_, err := r.gui.Up(ctx, hello, UpOptions{})
+		if err == nil || !strings.Contains(err.Error(), "'devc gui up --restart demo/hello'") {
+			t.Errorf("%s: up %v", name, err)
+		} else {
+			for _, w := range want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("%s: %q does not name %q", name, err, w)
+				}
+			}
+		}
+		// Nothing was removed, created, started or forwarded.
+		for _, l := range r.eng.Log {
+			if strings.HasPrefix(l, "rm ") || strings.HasPrefix(l, "create ") || strings.HasPrefix(l, "start ") || strings.HasPrefix(l, "build ") {
+				t.Errorf("%s: %s", name, l)
+			}
+		}
+		if ci := r.eng.Containers["devc-demo-hello_gui"]; !ci.State.Running || len(r.fwd.started) != started {
+			t.Errorf("%s: the sidecar was disturbed", name)
+		}
+		if st, err := r.gui.Status(ctx, hello); err != nil || st.State != "outdated" || !strings.Contains(st.Reason, "--restart") {
+			t.Errorf("%s: status %+v %v", name, st, err)
+		}
+	}
+
+	// A desktop created by an earlier devc: no limits, no records.
+	old := side
+	old.Labels = map[string]string{}
+	for k, val := range side.Labels {
+		if k != LabelLimits && k != LabelImage {
+			old.Labels[k] = val
+		}
+	}
+	old.HostConfig.Memory, old.HostConfig.PidsLimit, old.HostConfig.NanoCpus = 0, 0, 0
+	r.eng.Put("devc-demo-hello_gui", old)
+	refused("created without limits", "recorded no resource limits", "an earlier devc")
+	// --restart replaces it with one that has its limits and records.
+	v2, err := r.gui.Up(ctx, hello, UpOptions{Restart: true})
+	if err != nil || v2.Reused || v2.Password == v.Password {
+		t.Fatalf("restart: %+v %v", v2, err)
+	}
+	side = r.eng.Containers["devc-demo-hello_gui"]
+	if hc := side.HostConfig; hc.Memory != 2<<30 || hc.PidsLimit != 512 || hc.NanoCpus != 2e9 || side.Labels[LabelImage] != AuxImage().Hash() {
+		t.Errorf("after the restart: %+v %v", hc, side.Labels)
+	}
+	if v3, err := r.gui.Up(ctx, hello, UpOptions{}); err != nil || !v3.Reused || v3.Password != v2.Password {
+		t.Errorf("up after the restart: %+v %v", v3, err)
+	}
+
+	// The configuration's limits changed since it was created.
+	r.box.Config.Global.GUI.Memory = "1g"
+	refused("other limits", "memory=2147483648 pids=512 cpus=2", "memory=1073741824 pids=512 cpus=2")
+	r.box.Config.Global.GUI.Memory = "2g"
+	if v3, err := r.gui.Up(ctx, hello, UpOptions{}); err != nil || !v3.Reused {
+		t.Errorf("control, the limits as before: %+v %v", v3, err)
+	}
+	if st, _ := r.gui.Status(ctx, hello); st.State != "running" {
+		t.Errorf("status of a current desktop: %+v", st)
+	}
+
+	// Another image generation.
+	ci := r.eng.Containers["devc-demo-hello_gui"]
+	ci.Labels[LabelImage] = strings.Repeat("0", 64)
+	r.eng.Put("devc-demo-hello_gui", ci)
+	refused("other image", "image generation 000000000000", AuxImage().Hash()[:12])
+	ci.Labels[LabelImage] = AuxImage().Hash()
+	r.eng.Put("devc-demo-hello_gui", ci)
+
+	// Without its record devc cannot print the viewer: refused as well.
+	rp, _ := r.gui.recordPath(hello)
+	if err := os.Remove(rp); err != nil {
+		t.Fatal(err)
+	}
+	r.eng.Log = nil
+	if _, err := r.gui.Up(ctx, hello, UpOptions{}); err == nil || !strings.Contains(err.Error(), "no record") || !strings.Contains(err.Error(), "--restart") {
+		t.Errorf("up without a record: %v", err)
+	}
+	if st, _ := r.gui.Status(ctx, hello); st.State != "running" || !strings.Contains(st.Reason, "no record") {
+		t.Errorf("status without a record: %+v", st)
+	}
+	if v4, err := r.gui.Up(ctx, hello, UpOptions{Restart: true}); err != nil || v4.Reused {
+		t.Errorf("restart without a record: %+v %v", v4, err)
 	}
 }
 

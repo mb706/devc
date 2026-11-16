@@ -200,14 +200,16 @@ func TestObserve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-u", "-L", "devc", "-f", ConfigPath, "new-session", "-t", "=devc", "-s", "devc-0a1b", "-f", "read-only,ignore-size", ";",
+	// No read-only flag: tmux would refuse every send-keys while the
+	// observer is attached (C19r4).
+	want := []string{"-u", "-L", "devc", "-f", ConfigPath, "new-session", "-t", "=devc", "-s", "devc-0a1b", "-f", "ignore-size", ";",
 		"set-option", "-t", "=devc-0a1b:", "destroy-unattached", "on", ";", "set-option", "-t", "=devc-0a1b:", "status", "off", ";",
 		"select-window", "-t", "=devc-0a1b:@3"}
 	if !slices.Equal(got, want) {
 		t.Errorf("Observe: %q", got)
 	}
 	got, _ = Observe("devc-0a1b", "@3", true)
-	if !slices.Contains(got, "ignore-size") || slices.Contains(got, "read-only,ignore-size") || !slices.Contains(got, "prefix2") {
+	if !slices.Contains(got, "ignore-size") || slices.ContainsFunc(got, func(a string) bool { return strings.Contains(a, "read-only") }) || !slices.Contains(got, "prefix2") {
 		t.Errorf("Observe in control mode: %q", got)
 	}
 	for _, c := range [][2]string{{"x", "@1"}, {"devc-0a1b", ""}, {"devc-0a1b", "%1"}} {

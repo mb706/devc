@@ -383,10 +383,198 @@ func TestFetchCachedOffline(t *testing.T) {
 		t.Errorf("normalised version: %+v %v", res, err)
 	}
 	// Control: what needs the registry (a branch, the latest release, a
-	// version not cached) fails without it.
-	for _, s := range []string{"github:owner/repo@main", "npm:plain", "pypi:my-lib@1.0.0"} {
+	// version not cached, a dist-tag) fails without it.
+	for _, s := range []string{"github:owner/repo@main", "npm:plain", "pypi:my-lib@1.0.0", "npm:plain@latest"} {
 		if _, err := fetch(s); err == nil {
 			t.Errorf("%s answered without the registry", s)
+		}
+	}
+}
+
+// TestFetchMovingNames: an npm dist-tag (or a range) is resolved with the
+// registry every time and never stored as an alias, so a moved tag is
+// followed; exact versions, also the "v" form the registry normalises,
+// still come from the cache (finding E2-06).
+func TestFetchMovingNames(t *testing.T) {
+	reg := depsrctest.New()
+	srv := httptest.NewServer(reg)
+	defer srv.Close()
+	vars := map[string]string{}
+	for _, kv := range depsrctest.Env(srv.URL) {
+		k, v, _ := strings.Cut(kv, "=")
+		vars[k] = v
+	}
+	root := t.TempDir()
+	none := Env{Getenv: func(string) string { return "" }, DefaultRLibs: []string{}}
+	fetch := func(spec string) (*Result, error) {
+		t.Helper()
+		s, err := ParseSpec(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Fetch(context.Background(), s, none, Options{Root: root, Getenv: func(k string) string { return vars[k] }})
+	}
+	res, err := fetch("npm:plain@latest")
+	if err != nil || res.Spec.Version != "1.0.0" {
+		t.Fatalf("latest: %+v %v", res, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "npm", "plain", ".alias-latest")); err == nil {
+		t.Error("the dist-tag was stored as an alias")
+	}
+	// The tag moves: the next request follows it, online.
+	reg.NPMLatest = "1.1.0"
+	n := reg.Requests()
+	res, err = fetch("npm:plain@latest")
+	if err != nil || res.Spec.Version != "1.1.0" || res.Path != filepath.Join(root, "npm", "plain", "1.1.0") || reg.Requests() == n {
+		t.Errorf("latest after the tag moved: %+v %v (%d requests)", res, err, reg.Requests()-n)
+	}
+	// Asked again with the tag where it is: the registry is asked, the
+	// tree comes from the cache.
+	n = reg.Requests()
+	if res, err := fetch("npm:plain@latest"); err != nil || !res.Cached || res.Spec.Version != "1.1.0" || reg.Requests() == n {
+		t.Errorf("latest again: %+v %v (%d requests)", res, err, reg.Requests()-n)
+	}
+	// Exact versions are answered from the cache without the registry.
+	if _, err := fetch("npm:plain@v1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	n = reg.Requests()
+	for _, s := range []string{"npm:plain@1.0.0", "npm:plain@v1.0.0", "npm:plain@1.1.0"} {
+		if res, err := fetch(s); err != nil || !res.Cached {
+			t.Errorf("%s: %+v %v", s, res, err)
+		}
+	}
+	if reg.Requests() != n {
+		t.Errorf("%d requests for exact cached versions", reg.Requests()-n)
+	}
+	// An alias left by an older devc for a tag is not used.
+	if err := os.WriteFile(filepath.Join(root, "npm", "plain", ".alias-next"), []byte("1.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv.Close()
+	if res, err := fetch("npm:plain@next"); err == nil {
+		t.Errorf("a stored alias answered for a dist-tag: %+v", res)
+	}
+	for v, exact := range map[string]bool{"1.0.0": true, "v1.2.3": true, "1.0.0-rc.1": true, "1.0.0+build.5": true, "2.0.0-alpha-1": true,
+		"latest": false, "next": false, "1.0": false, "1": false, "1.x": false, "01.0.0": false, "1.0.0.0": false, "v": false} {
+		if concrete(EcoNPM, v) != exact {
+			t.Errorf("concrete(npm, %q) = %v", v, !exact)
+		}
+	}
+}
+
+// TestParseDCF: a control file is read completely or not at all (finding
+// E2-03): CRLF and LF, continuation lines; an overlong line, a line that is
+// no field, a continuation without a field and a repeated field are errors.
+func TestParseDCF(t *testing.T) {
+	for name, in := range map[string]string{
+		"lf":   "Package: a\nVersion: 1.0\nDepends: R (>= 3),\n    b\n\nPackage: c\nVersion: 2.0\n",
+		"crlf": "Package: a\r\nVersion: 1.0\r\nDepends: R (>= 3),\r\n    b\r\n\r\nPackage: c\r\nVersion: 2.0\r\n\r\n",
+	} {
+		st, err := ParseDCFAll([]byte(in))
+		if err != nil || len(st) != 2 || st[0]["Depends"] != "R (>= 3), b" || st[1]["Package"] != "c" || st[1]["Version"] != "2.0" {
+			t.Errorf("%s: %v %v", name, st, err)
+		}
+	}
+	for name, in := range map[string]string{
+		"overlong line":       "Package: a\nDescription: " + strings.Repeat("x", maxDCFLine+1) + "\nVersion: 1.0\n",
+		"not a field":         "Package: a\nthis is no field\nVersion: 1.0\n",
+		"name with a space":   "Package: a\nMD5 sum: 00\n",
+		"no field name":       "Package: a\n: 1.0\n",
+		"orphan continuation": "  Version: 1.0\nPackage: a\n",
+		"repeated field":      "Package: a\nVersion: 1.0\nVersion: 2.0\n",
+	} {
+		if st, err := ParseDCFAll([]byte(in)); err == nil {
+			t.Errorf("%s: accepted %v", name, st)
+		}
+	}
+	if _, err := ParseDCF([]byte("Package: a\n\nPackage: b\n")); err == nil {
+		t.Error("ParseDCF accepted two stanzas")
+	}
+	// An installed DESCRIPTION that cannot be read completely is an error,
+	// not a version.
+	lib := t.TempDir()
+	write(t, filepath.Join(lib, "broken", "DESCRIPTION"), "Package: broken\nVersion: 1.0\nRemoteSha "+depsrctest.Commit+"\n")
+	e := Env{Getenv: func(k string) string {
+		if k == "R_LIBS" {
+			return lib
+		}
+		return ""
+	}, DefaultRLibs: []string{}}
+	if in, err := Discover(context.Background(), Spec{Eco: EcoR, Name: "broken"}, e); err == nil {
+		t.Errorf("a broken DESCRIPTION gave %+v", in)
+	}
+}
+
+// TestFetchCRANIndex: the package list is parsed completely before any
+// download; a list that cannot be read stops the download, a current
+// release is verified with its MD5 whatever the line endings, and only an
+// archived version comes without a checksum (finding E2-03).
+func TestFetchCRANIndex(t *testing.T) {
+	reg := depsrctest.New()
+	srv := httptest.NewServer(reg)
+	defer srv.Close()
+	vars := map[string]string{}
+	for _, kv := range depsrctest.Env(srv.URL) {
+		k, v, _ := strings.Cut(kv, "=")
+		vars[k] = v
+	}
+	none := Env{Getenv: func(string) string { return "" }, DefaultRLibs: []string{}}
+	fetch := func(spec string) (*Result, error) {
+		t.Helper()
+		s, err := ParseSpec(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Fetch(context.Background(), s, none, Options{Root: t.TempDir(), Getenv: func(k string) string { return vars[k] }})
+	}
+	crlf := func(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+	wrong := strings.Repeat("0", 32)
+	for _, c := range []struct {
+		name  string
+		index func(md5 string) string
+		spec  string
+		want  string // "" means downloaded
+	}{
+		{"crlf, mypkg second", func(m string) string {
+			return crlf("Package: other\nVersion: 0.1\n\nPackage: mypkg\nVersion: 1.2.0\nMD5sum: " + m + "\n\n")
+		}, "r:mypkg@1.2.0", ""},
+		{"crlf, wrong MD5", func(string) string {
+			return crlf("Package: other\nVersion: 0.1\n\nPackage: mypkg\nVersion: 1.2.0\nMD5sum: " + wrong + "\n\n")
+		}, "r:mypkg@1.2.0", "refusing it"},
+		{"crlf, current without a version", func(m string) string {
+			return crlf("Package: other\nVersion: 0.1\n\nPackage: mypkg\nVersion: 1.2.0\nMD5sum: " + m + "\n\n")
+		}, "r:mypkg", ""},
+		{"overlong line before mypkg", func(m string) string {
+			return "Package: other\nDescription: " + strings.Repeat("x", maxDCFLine+1) + "\n\nPackage: mypkg\nVersion: 1.2.0\nMD5sum: " + m + "\n"
+		}, "r:mypkg@1.2.0", "cannot be read completely"},
+		{"overlong line inside mypkg", func(m string) string {
+			return "Package: mypkg\nDescription: " + strings.Repeat("x", maxDCFLine+1) + "\nVersion: 1.2.0\nMD5sum: " + m + "\n"
+		}, "r:mypkg@1.2.0", "cannot be read completely"},
+		{"a line that is no field", func(m string) string {
+			return "Package: other\nVersion 0.1\n\nPackage: mypkg\nVersion: 1.2.0\nMD5sum: " + m + "\n"
+		}, "r:mypkg@1.2.0", "cannot be read completely"},
+		{"mypkg twice", func(m string) string {
+			return "Package: mypkg\nVersion: 1.1.0\n\nPackage: mypkg\nVersion: 1.2.0\nMD5sum: " + m + "\n"
+		}, "r:mypkg@1.2.0", "twice"},
+		{"a stanza without a package", func(m string) string { return "Version: 0.1\n\nPackage: mypkg\nVersion: 1.2.0\nMD5sum: " + m + "\n" }, "r:mypkg@1.2.0", "names no package"},
+		// A version neither current nor archived is not taken from
+		// src/contrib unchecked, although the stand-in serves it there.
+		{"neither current nor archived", nil, "r:mypkg@1.3.0", "not found"},
+		// Controls: the archive, and the default index.
+		{"archived version", nil, "r:mypkg@1.1.0", ""},
+		{"current release", nil, "r:mypkg@1.2.0", ""},
+	} {
+		reg.CRANIndex = c.index
+		before := reg.Downloads("cran")
+		res, err := fetch(c.spec)
+		switch {
+		case c.want == "" && (err != nil || res.Cached):
+			t.Errorf("%s: %+v %v", c.name, res, err)
+		case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+			t.Errorf("%s: %v, want …%s…", c.name, err, c.want)
+		case c.want != "" && c.want != "refusing it" && reg.Downloads("cran") != before:
+			t.Errorf("%s: downloaded although the index was refused", c.name)
 		}
 	}
 }

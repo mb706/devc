@@ -137,7 +137,9 @@ func (l *Login) run(ctx context.Context, s *config.Service, redactp *[]string) (
 			return nil, fmt.Errorf("reading the secret %s: %w", n, err)
 		}
 		values[n] = v
-		redact = append(redact, string(v), string(secrets.TrimValue(v)))
+		// The value as stored, without its line ending, and without any
+		// surrounding white space, which a login script may well strip.
+		redact = append(redact, string(v), string(secrets.TrimValue(v)), strings.TrimSpace(string(v)))
 	}
 	if err := l.Paths.Ensure(l.Paths.TmpDir()); err != nil {
 		return nil, err

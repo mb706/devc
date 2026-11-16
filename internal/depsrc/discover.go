@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -150,34 +151,71 @@ func readSmall(p string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, maxMetadata))
 }
 
-// ParseDCF reads the first stanza of a Debian control file (R's
-// DESCRIPTION and PACKAGES), joining continuation lines.
-func ParseDCF(b []byte) map[string]string {
-	out := map[string]string{}
+// maxDCFLine bounds one line of a Debian control file.
+const maxDCFLine = 1 << 20
+
+// ParseDCFAll reads a whole Debian control file (R's DESCRIPTION, CRAN's
+// PACKAGES) strictly: LF or CRLF line endings, stanzas separated by blank
+// lines, continuation lines joined to their field. A line longer than
+// maxDCFLine, a line that is neither a field nor a continuation, a
+// continuation without a field, a field without a name or one given twice
+// in a stanza is an error, never a partial result (finding E2-03).
+func ParseDCFAll(b []byte) ([]map[string]string, error) {
+	var out []map[string]string
+	var cur map[string]string
 	var key string
 	sc := bufio.NewScanner(bytes.NewReader(b))
-	sc.Buffer(make([]byte, 64<<10), maxMetadata)
+	sc.Buffer(make([]byte, 64<<10), maxDCFLine)
+	n := 0
 	for sc.Scan() {
-		line := sc.Text()
+		n++
+		line := sc.Text() // ScanLines drops the CR of a CRLF
 		switch {
 		case strings.TrimSpace(line) == "":
-			if len(out) > 0 {
-				return out
+			if cur != nil {
+				out = append(out, cur)
 			}
+			cur, key = nil, ""
 		case line[0] == ' ' || line[0] == '\t':
-			if key != "" {
-				out[key] += " " + strings.TrimSpace(line)
+			if key == "" {
+				return nil, fmt.Errorf("line %d continues no field", n)
 			}
+			cur[key] += " " + strings.TrimSpace(line)
 		default:
 			k, v, ok := strings.Cut(line, ":")
-			if !ok {
-				continue
+			k = strings.TrimSpace(k)
+			if !ok || k == "" || strings.ContainsAny(k, " \t") {
+				return nil, fmt.Errorf("line %d is not a field", n)
 			}
-			key = strings.TrimSpace(k)
-			out[key] = strings.TrimSpace(v)
+			if cur == nil {
+				cur = map[string]string{}
+			}
+			if _, dup := cur[k]; dup {
+				return nil, fmt.Errorf("line %d repeats the field %s", n, printable(proto64(k)))
+			}
+			key = k
+			cur[key] = strings.TrimSpace(v)
 		}
 	}
-	return out
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("after line %d: %w", n, err)
+	}
+	if cur != nil {
+		out = append(out, cur)
+	}
+	return out, nil
+}
+
+// ParseDCF reads a file of one stanza (R's DESCRIPTION) strictly.
+func ParseDCF(b []byte) (map[string]string, error) {
+	st, err := ParseDCFAll(b)
+	switch {
+	case err != nil:
+		return nil, err
+	case len(st) != 1:
+		return nil, fmt.Errorf("%d stanzas where one belongs", len(st))
+	}
+	return st[0], nil
 }
 
 func discoverR(ctx context.Context, name string, e Env) (*Installed, error) {
@@ -187,7 +225,15 @@ func discoverR(ctx context.Context, name string, e Env) (*Installed, error) {
 		if err != nil {
 			continue
 		}
-		d := ParseDCF(b)
+		// A DESCRIPTION that cannot be read completely names no version:
+		// a part of it could hide the GitHub remote it was installed from.
+		if len(b) >= maxMetadata {
+			return nil, fmt.Errorf("%s is larger than %d bytes", file, maxMetadata)
+		}
+		d, err := ParseDCF(b)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", file, err)
+		}
 		if d["Package"] != name || CheckVersion(d["Version"]) != nil {
 			continue
 		}

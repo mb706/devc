@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -219,14 +220,29 @@ func Fetch(ctx context.Context, s Spec, e Env, o Options) (*Result, error) {
 	return res, nil
 }
 
-// concrete reports whether v names one version for good: any version for
-// the registries, only a commit for GitHub (a branch or tag moves).
+// concrete reports whether v names one version for good, which the cache
+// may answer without the registry: for GitHub only a commit (a branch or
+// tag moves), for npm only an exact version (a dist-tag such as latest, or
+// a range, moves; finding E2-06), for PyPI and CRAN any version (they have
+// neither tags nor ranges, and a release keeps its version).
 func concrete(eco, v string) bool {
 	if v == "" || CheckVersion(v) != nil {
 		return false
 	}
-	return eco != EcoGitHub || shaRE.MatchString(v)
+	switch eco {
+	case EcoGitHub:
+		return shaRE.MatchString(v)
+	case EcoNPM:
+		return npmExactRE.MatchString(v)
+	}
+	return true
 }
+
+// npmExactRE is an exact npm version: semver, with the leading "v" the
+// registry normalises away. npm refuses dist-tags that parse as versions
+// or ranges, so no tag matches.
+var npmExactRE = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)` +
+	`(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
 
 // aliasPrefix names the files that map a version as asked to the
 // registry's canonical form, kept beside the version directories.
@@ -487,20 +503,23 @@ func (o Options) headers(eco string) http.Header {
 	return h
 }
 
-// cran: the current release (with PACKAGES' MD5) or a named version, which
-// is in src/contrib while current and in the archive afterwards.
+// cran: the current release, checked against the MD5 in PACKAGES, or a
+// named version: the current one when it is the index's, else only from
+// CRAN's archive of old versions, the one place CRAN publishes no checksum
+// for (finding E2-03).
 func (o Options) cran(ctx context.Context, s Spec) (string, []candidate, error) {
 	base := o.base(EcoR)
-	cur := ""
-	var md5sum string
 	var buf bytes.Buffer
-	// The package list is read for every download: it holds the checksum
-	// of the current release, so without it devc cannot tell whether a
-	// version should have one.
+	// The package list is read for every download, completely: it holds
+	// the checksum of the current release, so without all of it devc cannot
+	// tell whether a version should have one.
 	if err := o.get(ctx, EcoR, base+"/src/contrib/PACKAGES", nil, &buf, maxDocument); err != nil {
 		return "", nil, fmt.Errorf("reading CRAN's package list: %w", err)
 	}
-	cur, md5sum = cranCurrent(buf.Bytes(), s.Name)
+	cur, md5sum, err := cranCurrent(buf.Bytes(), s.Name)
+	if err != nil {
+		return "", nil, fmt.Errorf("CRAN's package list cannot be read completely (%w): refusing to choose between a checked and an unchecked download", err)
+	}
 	v := s.Version
 	if v == "" {
 		if cur == "" {
@@ -520,21 +539,41 @@ func (o Options) cran(ctx context.Context, s Spec) (string, []candidate, error) 
 		}
 		return v, []candidate{{url: base + "/src/contrib/" + file, algo: "md5", sum: md5sum}}, nil
 	}
-	// CRAN publishes no checksum for archived versions.
-	current := candidate{url: base + "/src/contrib/" + file, unchecked: true}
+	// Any other version must be in the archive, for which CRAN publishes
+	// no checksum; a version that is neither current nor archived is not
+	// fetched from anywhere else.
 	archive := candidate{url: base + "/src/contrib/Archive/" + url.PathEscape(s.Name) + "/" + file, unchecked: true}
-	return v, []candidate{current, archive}, nil
+	return v, []candidate{archive}, nil
 }
 
-// cranCurrent finds a package's stanza in PACKAGES.
-func cranCurrent(b []byte, name string) (version, md5sum string) {
-	for _, stanza := range bytes.Split(b, []byte("\n\n")) {
-		d := ParseDCF(stanza)
-		if d["Package"] == name {
-			return d["Version"], d["MD5sum"]
+// cranCurrent parses the whole of PACKAGES and returns a package's current
+// version and MD5 ("" when the package is not listed). A list that cannot
+// be parsed completely, a stanza without a package name and a package
+// listed twice are errors.
+func cranCurrent(b []byte, name string) (version, md5sum string, err error) {
+	stanzas, err := ParseDCFAll(b)
+	if err != nil {
+		return "", "", err
+	}
+	found := false
+	for _, d := range stanzas {
+		p := d["Package"]
+		if p == "" {
+			return "", "", errors.New("a stanza names no package")
+		}
+		if p != name {
+			continue
+		}
+		if found {
+			return "", "", fmt.Errorf("it lists %s twice", name)
+		}
+		found = true
+		version, md5sum = d["Version"], d["MD5sum"]
+		if CheckVersion(version) != nil {
+			return "", "", fmt.Errorf("it lists an unusable version for %s", name)
 		}
 	}
-	return "", ""
+	return version, md5sum, nil
 }
 
 // pypi: the source distribution of a release, from the JSON API.

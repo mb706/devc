@@ -80,6 +80,25 @@ type EntryDigest struct {
 	// Digest is the list digest, Content the content hash (when asked).
 	Digest  string `json:"digest"`
 	Content string `json:"content,omitempty"`
+	// Remote (pull-in) is the list digest of the entry as it arrived from
+	// the remote, Outcome what the merge did with it (findings D2-12,
+	// E2-04): OutcomeMerged when everything the remote had for the entry is
+	// now here, OutcomeSkipped when a sealed entry that differs was left
+	// alone, OutcomePartial when parts of it were left out.
+	Remote  string `json:"remote,omitempty"`
+	Outcome string `json:"outcome,omitempty"`
+}
+
+// Outcomes of pull-in for an entry.
+const (
+	OutcomeMerged  = "merged"
+	OutcomeSkipped = "skipped"
+	OutcomePartial = "partial"
+)
+
+// ValidOutcome reports whether s is an outcome of pull-in.
+func ValidOutcome(s string) bool {
+	return s == OutcomeMerged || s == OutcomeSkipped || s == OutcomePartial
 }
 
 // DigestItem is one regular file ('f') or symlink ('l') of an entry: its
@@ -424,6 +443,7 @@ func (w *DataWorker) checkPullTarget(root *safefs.Dir, l DataLayout, rel string)
 type puller struct {
 	w       *DataWorker
 	req     DataRequest
+	targets []string
 	devc    *safefs.Dir
 	copier  *copier
 	dry     bool
@@ -431,6 +451,10 @@ type puller struct {
 	entry   *safefs.Dir
 	trashID string
 	moved   []string
+	// sealedSkips are the sealed entries left alone because they differ;
+	// partial the entries with something left out (from copier.stats).
+	sealedSkips map[string]bool
+	partial     map[string]bool
 }
 
 func (w *DataWorker) pullIn(req DataRequest, res *DataResult) error {
@@ -472,8 +496,17 @@ func (w *DataWorker) pullIn(req DataRequest, res *DataResult) error {
 			return fmt.Errorf("nothing arrived for %s from the remote", t)
 		}
 	}
+	// The report must hold every entry the pull records: refused here,
+	// before anything is merged, when it could not (finding E2-05).
+	entries, err := pullEntries(req.Layout, targets, src)
+	if err != nil {
+		return err
+	}
+	if err := w.checkEntries("pull", entries); err != nil {
+		return err
+	}
 	keep := func(_ string, m uint32) uint32 { return m & 0o777 }
-	pi := &puller{w: w, req: req, devc: devc,
+	pi := &puller{w: w, req: req, targets: targets, devc: devc, sealedSkips: map[string]bool{},
 		copier: &copier{w: w, uid: w.BoxUID, gid: w.BoxGID, clone: true, fileMode: keep, dirMode: keep}}
 	defer func() {
 		if pi.entry != nil {
@@ -512,13 +545,111 @@ func (w *DataWorker) pullIn(req DataRequest, res *DataResult) error {
 	}
 	res.TrashID, res.Displaced, res.Same = pi.trashID, pi.moved, pi.same
 	res.Files, res.Size, res.Skipped = pi.copier.stats.files, pi.copier.stats.size, pi.copier.stats.skipped
-	if res.Digests, err = recordDigests(req.Layout, targets, src, root, false); err != nil {
+	local, err := recordDigests(req.Layout, targets, src, root, false)
+	if err != nil {
 		return err
 	}
-	// What the remote had, entry by entry, as it arrived: compared with
-	// the local digests, it shows whether the merge made them equal.
-	res.RemoteDigests, err = recordDigests(req.Layout, targets, src, src, false)
-	return err
+	// What the remote had, entry by entry, as it arrived, and what the
+	// merge did with it, go into the same entry: the remote matches this
+	// machine only where the merge was complete (findings D2-12, E2-04).
+	remote, err := recordDigests(req.Layout, targets, src, src, false)
+	if err != nil {
+		return err
+	}
+	byPath := map[string]string{}
+	for _, d := range remote {
+		byPath[d.Path] = d.Digest
+	}
+	for i := range local {
+		local[i].Outcome = pi.outcome(local[i].Path)
+		if r, ok := byPath[local[i].Path]; ok {
+			local[i].Remote = r
+		} else {
+			// What arrived is no data (a special file): nothing of it
+			// was merged, and there is no observation of the remote.
+			local[i].Outcome = OutcomePartial
+		}
+	}
+	res.Digests = local
+	return nil
+}
+
+// pullEntries lists the entries a pull of targets records, from the staged
+// tree src: every direct child of a target that is a zone, else the target
+// itself (the superset of what recordDigests reports).
+func pullEntries(l DataLayout, targets []string, src *safefs.Dir) ([]string, error) {
+	var out []string
+	for _, t := range targets {
+		if !l.Classify(t).IsZone() {
+			out = append(out, t)
+			continue
+		}
+		d, err := src.Walk(t)
+		if errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
+			// Not a directory where the zone is: the merge refuses it.
+			out = append(out, t)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		ents, err := d.Entries(-1)
+		d.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range ents {
+			out = append(out, t+"/"+e.Name)
+		}
+	}
+	return out, nil
+}
+
+// checkEntries refuses a pull or push (what) whose report could not hold
+// its entries (CheckPullEntries, with the worker's limits).
+func (w *DataWorker) checkEntries(what string, entries []string) error {
+	maxEntries, budget := MaxSyncEntries, MaxReport-reportReserve()
+	if w.syncEntries > 0 {
+		maxEntries = w.syncEntries
+	}
+	if w.reportBudget > 0 {
+		budget = w.reportBudget
+	}
+	return checkSyncEntries(what, entries, PathCost, maxEntries, budget)
+}
+
+// entryOf is the entry (as pullEntries names them) that rel lies in.
+func entryOf(l DataLayout, targets []string, rel string) string {
+	for _, t := range targets {
+		if rel != t && !strings.HasPrefix(rel, t+"/") {
+			continue
+		}
+		if !l.Classify(t).IsZone() || rel == t {
+			return t
+		}
+		first, _, _ := strings.Cut(rel[len(t)+1:], "/")
+		return t + "/" + first
+	}
+	return rel
+}
+
+// outcome is what the merge did with an entry: a sealed entry left alone
+// because it differs is skipped, an entry with anything below it left out
+// (special files, files that vanished or could not be read) partial.
+func (pi *puller) outcome(entry string) string {
+	if pi.partial == nil {
+		pi.partial = map[string]bool{}
+		for _, rel := range pi.copier.stats.rels {
+			pi.partial[entryOf(pi.req.Layout, pi.targets, rel)] = true
+		}
+	}
+	switch {
+	case pi.sealedSkips[entry]:
+		return OutcomeSkipped
+	case pi.partial[entry]:
+		return OutcomePartial
+	}
+	return OutcomeMerged
 }
 
 // merge brings src/name to dst/name.
@@ -539,7 +670,8 @@ func (pi *puller) merge(src, dst *safefs.Dir, name, rel string, depth int) error
 	if exists && pi.w.sealedEntryAt(pl, dstat) {
 		// Below a target, sealed entries are left as they are.
 		if !pi.dry && !pi.w.sameTree(src, dst, name, depth) {
-			pi.copier.stats.skip(rel, "sealed here and different from the remote's copy; unseal it to take the remote's")
+			pi.copier.stats.skipped = append(pi.copier.stats.skipped, rel+" (sealed here and different from the remote's copy; unseal it to take the remote's)")
+			pi.sealedSkips[rel] = true
 		}
 		return nil
 	}
@@ -860,6 +992,15 @@ func (w *DataWorker) pushStage(req DataRequest, res *DataResult) error {
 		if err != nil {
 			return fmt.Errorf("%s does not exist", t)
 		}
+	}
+	// A push records its entries as a pull does: one whose report could
+	// not hold them is refused before anything is staged (E2-05).
+	entries, err := pullEntries(req.Layout, targets, root)
+	if err != nil {
+		return err
+	}
+	if err := w.checkEntries("push", entries); err != nil {
+		return err
 	}
 	stg, err := w.openStaging(proj, true)
 	if err != nil {

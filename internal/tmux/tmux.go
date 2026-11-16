@@ -202,19 +202,25 @@ func Attach(client, window string) ([]string, error) {
 
 // Observe attaches a client for the web app's terminal (work order C12
 // section 3) through its own grouped session named client, showing window.
-// The client never resizes the window (ignore-size) and, unless control,
-// cannot type (read-only). Its session has no status line, so the client's
-// size is exactly the window's; in control mode it has no prefix key
-// either, so every key reaches the pane and none switches windows. -u: the
-// client's output is UTF-8 whatever the locale of the exec.
+// The client never resizes the window (ignore-size). Its session has no
+// status line, so the client's size is exactly the window's; in control
+// mode it has no prefix key either, so every key reaches the pane and none
+// switches windows. -u: the client's output is UTF-8 whatever the locale
+// of the exec.
+//
+// An observing client is not tmux's read-only client: tmux refuses
+// send-keys from any command line while a read-only client is the best
+// client of the most recently active session ("client is read-only"), so
+// a prompt typed for the session while someone observed it was pasted but
+// never submitted, and stayed in front of the next one (the flaky
+// TestWebApp step, found in C19r4). Observing is enforced by the daemon
+// instead, which is the only writer of the client's terminal and refuses
+// input to an observing stream.
 func Observe(client, window string, control bool) ([]string, error) {
 	if !ValidClientName(client) || !ValidWindowID(window) {
 		return nil, fmt.Errorf("invalid client %q or window %q", client, window)
 	}
-	flags := "read-only,ignore-size"
-	if control {
-		flags = "ignore-size"
-	}
+	flags := "ignore-size"
 	target := "=" + client + ":"
 	a := append([]string{"-u"}, base()...)
 	a = append(a, "new-session", "-t", "="+SessionName, "-s", client, "-f", flags, sep,

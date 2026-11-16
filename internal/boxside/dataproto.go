@@ -6,12 +6,39 @@ package boxside
 // the staging directory at /staging), and prints one DataResult. The host
 // decodes the result strictly, with a size cap, and validates it.
 
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"math"
+	"strings"
+)
+
 // HelperStaging is where the helper container mounts a staging directory
 // (restic restores) read-only.
 const HelperStaging = "/staging"
 
 // DataProtoVersion is the version of DataRequest and DataResult.
 const DataProtoVersion = 1
+
+// Limits of a worker's report (finding E2-05). The host captures and
+// decodes at most MaxReport bytes of it: the same value in both places.
+// A pull records at most MaxSyncEntries entries, and only as many as fit
+// the report (CheckPullEntries); the host checks that against the preview
+// before anything is transferred, the worker against the staged tree
+// before anything is merged, so a pull is never refused after it changed
+// data. The lists a report carries besides the entries are capped
+// (maxReported texts of at most maxReportedText bytes, MaxReportedPaths
+// displaced paths), so what they take is bounded too.
+const (
+	MaxReport        = 64 << 20
+	MaxSyncEntries   = 100000
+	MaxReportedPaths = 100
+	maxReportedText  = 512
+	// reportFixed bounds the fields of a pull-in report that are neither
+	// entries nor capped lists (version, counts, trash ID).
+	reportFixed = 64 << 10
+)
 
 // Data worker operations.
 const (
@@ -103,19 +130,18 @@ type DataResult struct {
 	// Exclude lists what a savepoint leaves out: input zones and sealed
 	// entries (reflink-save, and ls for restic).
 	Exclude []string `json:"exclude,omitempty"`
+	// DisplacedTotal counts the paths moved out of the way when Displaced
+	// lists only some of them (MaxReportedPaths).
+	DisplacedTotal int64 `json:"displaced_total,omitempty"`
 	// Same counts the files pull-in left alone because they were
 	// identical already.
 	Same int64 `json:"same,omitempty"`
 	// Stage is the push staging directory push-stage created.
 	Stage string `json:"stage,omitempty"`
 	// Digests describe the entries for the manifest (seal, setup with
-	// Digest, reflink-save, pull-in, push-stage, digest).
+	// Digest, reflink-save, pull-in, push-stage, digest). Those of pull-in
+	// carry the remote's observation and the merge's outcome as well.
 	Digests []EntryDigest `json:"digests,omitempty"`
-	// RemoteDigests (pull-in) describe the same entries as the remote had
-	// them, from the staged tree: the remote's observation, which differs
-	// from Digests when sealed entries were skipped or local-only content
-	// was kept (finding D2-12).
-	RemoteDigests []EntryDigest `json:"remote_digests,omitempty"`
 	// ls
 	Zones   []ZoneInfo   `json:"zones,omitempty"`
 	Entries []EntryInfo  `json:"entries,omitempty"`
@@ -168,4 +194,91 @@ type TrashMeta struct {
 	Time   string   `json:"time"`
 	Reason string   `json:"reason"` // rm or restore
 	Paths  []string `json:"paths"`
+}
+
+// MarshalReport is a worker's report as it is printed: compact JSON (no
+// indentation) without HTML escaping, so that a path takes at most what
+// PathCost says.
+func MarshalReport(res *DataResult) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(res); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// PathCost is what a path takes in a report written by MarshalReport,
+// quotes included.
+func PathCost(p string) int {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(p)
+	return buf.Len() - 1 // the encoder's newline
+}
+
+// PrintedPathCost bounds PathCost of a path from rsync's listing of it,
+// where the bytes rsync cannot print appear as \#ooo and the rest as they
+// are (made printable by the host): a byte that is printable ASCII costs
+// what JSON makes of it, any other byte 6, the most JSON makes of one
+// byte (\u00XX). An escape \#ooo then costs at least the 6 its byte can.
+func PrintedPathCost(p string) int {
+	n := 2
+	for i := 0; i < len(p); i++ {
+		switch c := p[i]; {
+		case c == '"' || c == '\\':
+			n += 2
+		case c >= 0x20 && c < 0x7f:
+			n++
+		default:
+			n += 6
+		}
+	}
+	return n
+}
+
+// entryOverhead bounds what one entry of a pull-in report takes besides
+// its path: every other field at its longest, and a separating comma.
+var entryOverhead = func() int {
+	d := strings.Repeat("0", 64)
+	b, _ := json.Marshal(EntryDigest{Type: "symlink", Files: math.MaxInt64, Size: math.MaxInt64,
+		Digest: "sha256:" + d, Content: "sha256:" + d, Remote: "sha256:" + d, Outcome: OutcomePartial})
+	return len(b) - len(`""`) + 1
+}()
+
+// reportReserve bounds what a pull-in report takes besides its entries:
+// the fixed fields and the capped lists (each skipped text and displaced
+// path at JSON's worst, 6 bytes per byte).
+func reportReserve() int64 {
+	skipped := int64(maxReported+1) * int64(6*(maxReportedText+len("…"))+3)
+	displaced := int64(MaxReportedPaths) * int64(6*4096+3)
+	return reportFixed + skipped + displaced
+}
+
+// CheckPullEntries refuses a pull whose report could not hold its
+// entries: more than MaxSyncEntries of them, or more bytes than MaxReport
+// leaves them, with cost bounding what each path takes (PathCost for the
+// staged tree, PrintedPathCost for rsync's listing).
+func CheckPullEntries(entries []string, cost func(string) int) error {
+	return checkSyncEntries("pull", entries, cost, MaxSyncEntries, MaxReport-reportReserve())
+}
+
+// checkSyncEntries is CheckPullEntries for a pull or a push (what), with
+// the limits as arguments (the worker's tests lower them).
+func checkSyncEntries(what string, entries []string, cost func(string) int, maxEntries int, budget int64) error {
+	if len(entries) > maxEntries {
+		return fmt.Errorf("the %s covers %d entries (direct children of the zones named, and the other paths), more than devc records in one %s (%d): %s fewer paths at a time",
+			what, len(entries), what, maxEntries, what)
+	}
+	var total int64
+	for _, e := range entries {
+		total += int64(entryOverhead + cost(e))
+	}
+	if total > budget {
+		return fmt.Errorf("the %s covers %d entries whose names take more room than devc's report of a %s allows (%d of %d bytes): %s fewer paths at a time",
+			what, len(entries), what, total, budget, what)
+	}
+	return nil
 }

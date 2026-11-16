@@ -136,7 +136,16 @@ func headerService(port int) *config.Service {
 }
 
 func staticCred(context.Context, string) (Credential, error) {
-	return Credential{Header: "Authorization", Value: testSecret, Scrub: ScrubValues(testSecret)}, nil
+	return HeaderCredential("Authorization", []byte(testSecret))
+}
+
+func mustCred(t *testing.T, header, stored string) Credential {
+	t.Helper()
+	c, err := HeaderCredential(header, []byte(stored))
+	if err != nil {
+		t.Fatalf("HeaderCredential(%q): %v", stored, err)
+	}
+	return c
 }
 
 // rawExchange sends a raw request and returns the raw response.
@@ -258,30 +267,66 @@ func TestProxyLimits(t *testing.T) {
 	}
 }
 
-// TestProxyShortCredential: a credential with a part too short to scrub
-// never goes out (finding D2-07); the same request with a long one does.
+// TestProxyShortCredential: a credential with a part too short to scrub,
+// or not in its normal form, never goes out (findings D2-07, E2-02); the
+// same request with a long one does.
 func TestProxyShortCredential(t *testing.T) {
 	srv, seen := testUpstream(t)
 	s := headerService(8601)
 	for name, c := range map[string]Credential{
-		"short value":      {Header: "X-Api-Key", Value: "k3y4567", Scrub: ScrubValues("k3y4567")},
-		"short token":      {Header: "Authorization", Value: "Bearer abc", Scrub: ScrubValues("Bearer abc")},
+		"short value":      {Header: "X-Api-Key", Value: "k3y4567", Scrub: []string{"k3y4567"}},
+		"short token":      {Header: "Authorization", Value: "Bearer abc", Scrub: []string{"Bearer abc", "abc"}},
 		"short cookie":     {Header: "Cookie", Value: "lang=en; session=c00kie-v4lue", Scrub: []string{"en", "c00kie-v4lue", "lang=en; session=c00kie-v4lue"}},
-		"value not listed": {Header: "X-Api-Key", Value: "k3y", Scrub: nil},
+		"value not listed": {Header: "X-Api-Key", Value: "k3y45678", Scrub: nil},
+		"empty part":       {Header: "Cookie", Value: "", Scrub: []string{"c00kie-v4lue", ""}},
+		"padded value":     {Header: "Authorization", Value: "abcdefg ", Scrub: []string{"abcdefg "}},
+		"control in value": {Header: "Authorization", Value: "abcdefgh\x01", Scrub: []string{"abcdefgh\x01"}},
 	} {
 		addr := testProxy(t, srv, s, func(context.Context, string) (Credential, error) { return c, nil }, nil, nil)
 		before := len(seen.reqs)
 		resp := rawExchange(t, addr, "GET /api/echo HTTP/1.1\r\nHost: "+addr+"\r\nConnection: close\r\n\r\n")
-		if !strings.HasPrefix(resp, "HTTP/1.1 503") || !strings.Contains(resp, "shorter than 8") || len(seen.reqs) != before {
+		if !strings.HasPrefix(resp, "HTTP/1.1 503") || len(seen.reqs) != before {
 			t.Errorf("%s:\n%s", name, resp)
 		}
 	}
 	// Control: a long key of the same shape is sent and scrubbed.
-	long := Credential{Header: "X-Api-Key", Value: "k3y45678", Scrub: ScrubValues("k3y45678")}
+	long := mustCred(t, "X-Api-Key", "k3y45678")
 	addr := testProxy(t, srv, s, func(context.Context, string) (Credential, error) { return long, nil }, nil, nil)
 	resp := rawExchange(t, addr, "GET /api/echo HTTP/1.1\r\nHost: "+addr+"\r\nConnection: close\r\n\r\n")
 	if !strings.HasPrefix(resp, "HTTP/1.1 200") || seen.last().Header.Get("X-Api-Key") != "k3y45678" {
 		t.Errorf("long key:\n%s", resp)
+	}
+}
+
+// TestProxyPaddedCredential: a stored credential with surrounding white
+// space is normalised where it is loaded; the upstream gets the value that
+// was checked, and when it reflects that value nothing of it reaches the
+// box (finding E2-02). Padding that hides a short value is refused.
+func TestProxyPaddedCredential(t *testing.T) {
+	srv, seen := testUpstream(t)
+	s := headerService(8601)
+	for stored, sent := range map[string]string{
+		"abcdefgh \n":                       "abcdefgh",
+		"\t Bearer s3cr3t-t0ken-value \r\n": "Bearer s3cr3t-t0ken-value",
+		"  pad-left-key\n":                  "pad-left-key",
+	} {
+		cred := mustCred(t, "Authorization", stored)
+		if cred.Value != sent {
+			t.Errorf("%q: value %q, want %q", stored, cred.Value, sent)
+		}
+		addr := testProxy(t, srv, s, func(context.Context, string) (Credential, error) { return cred, nil }, nil, nil)
+		resp := rawExchange(t, addr, "GET /api/echo HTTP/1.1\r\nHost: "+addr+"\r\nConnection: close\r\n\r\n")
+		if got := seen.last().Header.Get("Authorization"); got != sent {
+			t.Errorf("%q: the upstream got %q", stored, got)
+		}
+		secret := sent[strings.LastIndexByte(sent, ' ')+1:]
+		if !strings.HasPrefix(resp, "HTTP/1.1 200") || strings.Contains(resp, secret) || !strings.Contains(resp, "X-Echo-Auth: "+Redacted) {
+			t.Errorf("%q: the reflected credential reached the box:\n%s", stored, resp)
+		}
+	}
+	// The reviewer's case: seven characters and a space.
+	if _, err := HeaderCredential("Authorization", []byte("abcdefg ")); err == nil || !strings.Contains(err.Error(), "7 characters") {
+		t.Errorf("padded short credential: %v", err)
 	}
 }
 
@@ -332,39 +377,72 @@ func TestProxyCookieLogin(t *testing.T) {
 	if !strings.HasPrefix(resp, "HTTP/1.1 302") {
 		t.Errorf("ordinary redirect:\n%s", resp)
 	}
+	// E2-07: a path no stored cookie applies to (the session cookie is for
+	// /private) goes out without a Cookie header, the box's own removed.
+	jar := NewJar("intranet", []Cookie{{Name: "session", Value: "c00kie-v4lue-123", Domain: "127.0.0.1", Path: "/private"}}, time.Now())
+	addr = testProxy(t, srv, s, func(_ context.Context, path string) (Credential, error) {
+		return jar.Credential("127.0.0.1", path, time.Now()), nil
+	}, nil, &needed)
+	resp = rawExchange(t, addr, "GET /health HTTP/1.1\r\nHost: "+addr+"\r\nCookie: mine=1\r\nConnection: close\r\n\r\n")
+	if !strings.HasPrefix(resp, "HTTP/1.1 200") || seen.last().URL.Path != "/health" || len(seen.last().Header.Values("Cookie")) != 0 {
+		t.Errorf("a path without cookies: %v\n%s", seen.last().Header, resp)
+	}
+	// Control: the path the cookie applies to gets it.
+	rawExchange(t, addr, "GET /private/x HTTP/1.1\r\nHost: "+addr+"\r\nConnection: close\r\n\r\n")
+	if got := seen.last().Header.Get("Cookie"); got != "session=c00kie-v4lue-123" {
+		t.Errorf("the cookie's path: %q", got)
+	}
 }
 
-func TestScrubValues(t *testing.T) {
-	for v, want := range map[string][]string{
-		"Basic dXNlcjpwYXNzd29yZDEyMw==": {"Basic dXNlcjpwYXNzd29yZDEyMw==", "dXNlcjpwYXNzd29yZDEyMw==", "user:password123", "password123"},
+// TestHeaderCredential: one normal form (findings D2-07, E2-02): white
+// space around the value is removed, a value a header cannot carry is
+// refused, a leading authentication scheme is public, every other word
+// (and Basic's password) needs MinCredential characters and is scrubbed.
+func TestHeaderCredential(t *testing.T) {
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	for stored, want := range map[string][]string{
+		"12345678":                       {"12345678"},
+		"longsecret\n":                   {"longsecret"},
+		"longsecret\r\n":                 {"longsecret"},
+		" abcdefgh\t\n":                  {"abcdefgh"},
 		"Bearer s3cr3t-t0ken":            {"Bearer s3cr3t-t0ken", "s3cr3t-t0ken"},
+		"bearer  s3cr3t-t0ken ":          {"bearer  s3cr3t-t0ken", "s3cr3t-t0ken"},
+		"Token gh0-t0ken-value":          {"Token gh0-t0ken-value", "gh0-t0ken-value"},
+		"secret1x secret2y":              {"secret1x secret2y", "secret1x", "secret2y"},
+		"Bearer secret1x secret2y":       {"Bearer secret1x secret2y", "secret1x", "secret2y"},
+		"Basic dXNlcjpwYXNzd29yZDEyMw==": {"Basic dXNlcjpwYXNzd29yZDEyMw==", "dXNlcjpwYXNzd29yZDEyMw==", "user:password123", "password123"},
+		"Basic " + b64("u:pw345678"):     {"Basic " + b64("u:pw345678"), b64("u:pw345678"), "u:pw345678", "pw345678"},
 		// A single value is not decoded, even when it is valid base64
 		// holding a colon: it is an API key, not Basic.
 		"dXNlcjpwYXNzd29yZDEyMw==": {"dXNlcjpwYXNzd29yZDEyMw=="},
 	} {
-		if got := ScrubValues(v); !slices.Equal(got, want) {
-			t.Errorf("ScrubValues(%q) = %q, want %q", v, got, want)
+		c, err := HeaderCredential("Authorization", []byte(stored))
+		if err != nil || c.Value != want[0] || !slices.Equal(c.Scrub, want) || c.Header != "Authorization" {
+			t.Errorf("HeaderCredential(%q) = %+v %v, want scrub %q", stored, c, err, want)
 		}
 	}
-	// D2-07: every part must be long enough to be scrubbed; the message
-	// never shows the value.
-	for v, ok := range map[string]bool{
-		"12345678":                       true,
-		"1234567":                        false,
-		"Bearer s3cr3t-t0ken":            true,
-		"Bearer abc1234":                 false,
-		"Basic dXNlcjpwYXNzd29yZDEyMw==": true,
-		"Basic " + base64.StdEncoding.EncodeToString([]byte("user:pw12")):  false,
-		"Basic " + base64.StdEncoding.EncodeToString([]byte("u:pw345678")): true,
+	for stored, why := range map[string]string{
+		"1234567":                   "7 characters",
+		"abcdefg ":                  "7 characters",
+		" \tabcdefg\n":              "7 characters",
+		"Bearer abc1234":            "word 2",
+		"abcdefg secret2yy":         "word 1",
+		"secret1x abc":              "word 2",
+		"Bearer":                    "nothing after",
+		"Bearer   \n":               "nothing after",
+		"Basic " + b64("user:pw12"): "password of the Basic",
+		"":                          "empty",
+		" \t\n":                     "empty",
+		"two\nlines-here":           "control character",
+		"longsecret\n\n":            "control character",
+		"abcdefgh\x00":              "control character",
+		"t\xc3\xb6kenvalue1":        "outside printable ASCII",
+		"abc\x7fdefgh":              "control character",
 	} {
-		err := CheckCredential(v)
-		if (err == nil) != ok || err != nil && (strings.Contains(err.Error(), v) || !strings.Contains(err.Error(), "at least 8")) {
-			t.Errorf("CheckCredential(%q): %v", v, err)
-		}
-	}
-	for stored, ok := range map[string]bool{"longsecret\n": true, "longsecret\r\n": true, "short\n": false, "two\nlines-here": false, "": false} {
-		if _, err := HeaderCredential([]byte(stored)); (err == nil) != ok {
-			t.Errorf("HeaderCredential(%q): %v", stored, err)
+		_, err := HeaderCredential("Authorization", []byte(stored))
+		trimmed := strings.TrimSpace(stored)
+		if err == nil || !strings.Contains(err.Error(), why) || trimmed != "" && strings.Contains(err.Error(), trimmed) {
+			t.Errorf("HeaderCredential(%q): %v, want …%s…", stored, err, why)
 		}
 	}
 	// Every value given is scrubbed, whatever its length.

@@ -5,7 +5,8 @@
 // registry), and only downloads and unpacks: nothing fetched is ever built,
 // installed, imported or executed.
 //
-// Sources: CRAN source tarballs (the current release, then the archive),
+// Sources: CRAN source tarballs (the current release, or an older version
+// from the archive),
 // the source distribution named by PyPI's JSON API, the npm registry
 // tarball, and GitHub's tarball endpoint. Checksums the registries publish
 // (PyPI's sha256, npm's integrity, CRAN's MD5 for current releases) are

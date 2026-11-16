@@ -322,11 +322,11 @@ func (m *serviceManager) credential(ctx context.Context, ref names.ProjectRef, s
 			d.log.Error("reading a service credential", "service", serviceID(svc.Realm, svc.Name), "err", err)
 			return svclogin.Credential{}, &svclogin.Unavailable{Msg: fmt.Sprintf("devc service %s: the host could not read its credential", svc.Name)}
 		}
-		val, err := svclogin.HeaderCredential(v)
+		cred, err := svclogin.HeaderCredential(svc.Auth.Header, v)
 		if err != nil {
 			return svclogin.Credential{}, &svclogin.Unavailable{Msg: fmt.Sprintf("devc service %s: %s; ask the user to set it again with 'devc secret set %s %s'", svc.Name, err, svc.Realm, svc.Auth.ValueSecret)}
 		}
-		return svclogin.Credential{Header: svc.Auth.Header, Value: val, Scrub: svclogin.ScrubValues(val)}, nil
+		return cred, nil
 	case config.ServiceAuthCookie:
 		jar, problem := m.loginProblem(svc, host)
 		if problem != "" && svc.Auth.Auto {
@@ -348,8 +348,7 @@ func (m *serviceManager) credential(ctx context.Context, ref names.ProjectRef, s
 			m.markNeeded(ref, svc, jar, problem)
 			return svclogin.Credential{}, &svclogin.Unavailable{Msg: fmt.Sprintf("devc service %s needs a login: %s. Ask the user to run 'devc service login %s %s' on the host, then retry.", svc.Name, problem, svc.Realm, svc.Name)}
 		}
-		hdr := jar.Header(host, path, time.Now())
-		return svclogin.Credential{Header: "Cookie", Value: hdr, Scrub: append(jar.Values(), hdr)}, nil
+		return jar.Credential(host, path, time.Now()), nil
 	}
 	return svclogin.Credential{}, fmt.Errorf("unknown kind %q", svc.Auth.Kind)
 }

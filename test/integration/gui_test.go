@@ -10,7 +10,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -184,6 +186,15 @@ func wsUpgrade(addr string) (string, error) {
 		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\n\r\n", addr)
 	line, err := bufio.NewReader(c).ReadString('\n')
 	return strings.TrimSpace(line), err
+}
+
+func inspectSidecar(t *testing.T, ref string) engine.ContainerInfo {
+	t.Helper()
+	ci, err := engine.ParseInspect([]byte(itest.Podman(t, "container", "inspect", "--format", "json", sidecarName(ref))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ci
 }
 
 func sidecarExec(t *testing.T, ref string, argv ...string) (string, error) {
@@ -371,6 +382,39 @@ func TestGUI(t *testing.T) {
 	// gui up again keeps the desktop and prints the same address.
 	if v2 := guiUp(t, e, hello); v2 != v {
 		t.Errorf("second gui up: %+v, first %+v", v2, v)
+	}
+	// With other [gui] limits the running desktop is outdated: gui up
+	// refuses it and leaves it alone, and only --restart replaces it
+	// (finding E2-01).
+	cfgFile := filepath.Join(e.ConfigDir, "config.toml")
+	origCfg, err := os.ReadFile(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.WriteConfig("config.toml", strings.Replace(string(origCfg), `memory = "2g"`, `memory = "1g"`, 1))
+	sideID := inspectSidecar(t, hello).ID
+	res = e.Run("gui", "up", hello)
+	if res.ExitCode != 1 || !strings.Contains(res.Stderr, "is outdated") || !strings.Contains(res.Stderr, "memory=1073741824") ||
+		!strings.Contains(res.Stderr, "'devc gui up --restart "+hello+"'") {
+		t.Errorf("gui up with other limits: %d\n%s%s", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	if ci := inspectSidecar(t, hello); ci.ID != sideID || !ci.State.Running {
+		t.Error("the outdated desktop was replaced or stopped without --restart")
+	}
+	if st := guiStatus(t, e, hello); st.State != "outdated" || !strings.Contains(st.Reason, "--restart") {
+		t.Errorf("status of the outdated desktop: %+v", st)
+	}
+	v3 := guiUp(t, e, hello, "--restart")
+	if ci := inspectSidecar(t, hello); ci.ID == sideID || ci.HostConfig.Memory != 1<<30 || v3.password == v.password {
+		t.Errorf("after --restart: memory %d, password changed %v", ci.HostConfig.Memory, v3.password != v.password)
+	}
+	e.WriteConfig("config.toml", string(origCfg))
+	if res := e.Run("gui", "up", hello); res.ExitCode != 1 || !strings.Contains(res.Stderr, "--restart") {
+		t.Errorf("gui up after the limits changed back: %d %s", res.ExitCode, res.Stderr)
+	}
+	v = guiUp(t, e, hello, "--restart")
+	if ci := inspectSidecar(t, hello); ci.HostConfig.Memory != 2<<30 || ci.Labels["devc.gui.limits"] != "memory=2147483648 pids=512 cpus=2" {
+		t.Errorf("the desktop's limits after the second restart: %d %v", ci.HostConfig.Memory, ci.Labels)
 	}
 
 	// 4. down removes the sidecar first; status before and after.

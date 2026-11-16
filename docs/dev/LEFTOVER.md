@@ -1,6 +1,6 @@
 # Leftover checks and open work
 
-This is the list to work from when devc meets real accounts and other machines. It was consolidated at the end of the project (chunk C19r2) from the notes every chunk left; items that a later chunk closed are gone, everything else is here. Nothing below has been verified unless it says so. "Tried here" means: on the development host (Ubuntu 24.04, rootless Podman 5.8.3 with slirp4netns, fuse-overlayfs and runc, cgroup v2 with cpu, memory and pids delegated, AppArmor user-namespace restriction, no SELinux, no KVM, amd64), always against fakes, stand-ins and local servers.
+This is the list to work from when devc meets real accounts and other machines. It was consolidated at the end of the project (chunk C19r2) from the notes every chunk left, and updated by C19r3 and C19r4; items that a later chunk closed are gone, everything else is here. Nothing below has been verified unless it says so. "Tried here" means: on the development host (Ubuntu 24.04, rootless Podman 5.8.3 with slirp4netns, fuse-overlayfs and runc, cgroup v2 with cpu, memory and pids delegated, AppArmor user-namespace restriction, no SELinux, no KVM, amd64), always against fakes, stand-ins and local servers.
 
 Parts: 1. to verify with a real login · 2. to verify on another kind of machine · 3. to set up before first real use · 4. decisions waiting for you · 5. known limits that are accepted · 6. deferred work.
 
@@ -72,12 +72,12 @@ No harness has ever been logged in, no real GitHub account or App, real service,
 
 ### Services (a real upstream)
 
-1. **Header service.** A wiki or API with a token of at least 8 characters (shorter ones are refused since C19r2). Correct: requests the rules allow work from the box, others get 403 with the needed rule, the token never comes back in headers.
-2. **Cookie service.** Copy `examples/services/intranet`, adapt `login.sh` to the real form (CSRF tokens, redirects through an identity provider), `devc service login`. Correct: the jar is stored (cookies shorter than 8 characters are left out by the example script; a site whose session cookie is shorter cannot be used), requests carry the session, expiry or a redirect to `login_path` marks "needs a login", `auto = true` logs in again once. Real servers' HTTP/1.1 and HTTP/2 framing were only tried against Go's test server.
+1. **Header service.** A wiki or API with a token of at least 8 characters (shorter ones are refused since C19r2). Correct: requests the rules allow work from the box, others get 403 with the needed rule, the token never comes back in headers. Since C19r4 the stored value is used without surrounding spaces, every word but a leading scheme (`Bearer`, `Basic`, `Token`, `Bot`, `Key`, `ApiKey`, `Api-Key`, `SSWS`, `OAuth`) must have 8 characters, and control or non-ASCII bytes are refused: check that the real token's format (for example a scheme devc does not list) passes `devc service status`.
+2. **Cookie service.** Copy `examples/services/intranet`, adapt `login.sh` to the real form (CSRF tokens, redirects through an identity provider), `devc service login`. Correct: the jar is stored (cookies shorter than 8 characters are left out by the example script; a site whose session cookie is shorter cannot be used), requests carry the session, expiry or a redirect to `login_path` marks "needs a login", `auto = true` logs in again once, and a path that none of the cookies applies to (a cookie with a narrower `path`) goes out without a `Cookie` header (C19r4). Real servers' HTTP/1.1 and HTTP/2 framing were only tried against Go's test server.
 
 ### Registries for `devc src` (real network)
 
-1. In a box with network: `devc src r:jsonlite`, `pypi:requests`, `npm:@types/node`, `github:cran/git2r@0.36.2`, then the same with explicit versions. Correct: each downloads, unpacks below `/src/<eco>/<name>/<version>/`, and a repeat with a concrete version answers from the cache without network. Since C19r2 a missing checksum is refused: check that PyPI's `digests.sha256`, npm's `dist.integrity` (or `shasum` for old packages) and the `MD5sum` of CRAN's `PACKAGES` are really present for ordinary packages; archived CRAN versions and GitHub tarballs are downloaded unchecked by design.
+1. In a box with network: `devc src r:jsonlite`, `pypi:requests`, `npm:@types/node`, `github:cran/git2r@0.36.2`, then the same with explicit versions. Correct: each downloads, unpacks below `/src/<eco>/<name>/<version>/`, and a repeat with an exact version answers from the cache without network, while `npm:<pkg>@latest` asks the registry every time (C19r4). Since C19r2 a missing checksum is refused: check that PyPI's `digests.sha256`, npm's `dist.integrity` (or `shasum` for old packages) and the `MD5sum` of CRAN's `PACKAGES` are really present for ordinary packages; archived CRAN versions and GitHub tarballs are downloaded unchecked by design. Since C19r4 CRAN's whole `PACKAGES` must parse (a malformed line, a line over 1 MiB or a package listed twice stops every CRAN download): check that the real index parses, and that an older version such as `r:jsonlite@1.8.0` comes from the archive.
 2. At level `allowlist` with the presets `cran`, `pypi`, `npm`, `github`. Correct: the downloads pass the proxy (the presets are hand-written; a missing name shows in `devc net log --denied`).
 
 ### Remote machines over SSH (a real cluster)
@@ -178,6 +178,10 @@ Only slirp4netns was used. On a Podman 6 host:
 
 Boxes keep what they were started with. After upgrading to C19r2: restart every box (`devc down`, `devc up`) — token modes are refused for boxes without the new `github_upstream` in their start record; boxes created before C16 need `devc up --recreate`; restart the daemon; log in to cookie services again if a stored jar has cookie values shorter than 8 characters; store longer header credentials if `devc service status` says `invalid-secret`; service rules with percent-encoded reserved characters are now configuration problems (write the characters unencoded); older pull records have no remote digest, so `devc data status` marks their remote with `*` until the next pull.
 
+After upgrading to C19r3: upgrade the hubs together with the machines (generations completed on an older hub have no completion time, so retention keeps them and `state pull --as-of` takes those files as they are now); restart the daemon; reload the web app (new service-worker cache).
+
+After upgrading to C19r4: a desktop that runs from before is refused by `devc gui up` (it recorded no limits or image generation) until `devc gui up --restart` replaces it; pull records from before C19r4 have no outcome, so `devc data status` does not show their remote as matching until the next pull; a header credential stored with control characters or non-ASCII bytes is now refused (`devc service status` says `invalid-secret`), one with spaces around it is used without them; restart the daemon for the service changes. Alias files that an older devc stored in `/src/npm/...` for dist-tags (`.alias-latest`) are ignored and may be deleted.
+
 ## 4. Decisions waiting for you
 
 | Decision | Context |
@@ -243,7 +247,8 @@ Boxes keep what they were started with. After upgrading to C19r2: restart every 
 - A pull trusts the remote's rsync (receiver bugs); rsync ≥ 3.0 is needed on the remote.
 - One pull or push per project and remote at a time; a second is refused, not queued (C19r2).
 - A preview whose listing is cut (over 256 MiB) or has a line devc does not know is refused; pull fewer paths at a time (C19r2).
-- `data status` compares a remote with what a pull received from it; after a push it can only say that the remote received the entry as it is now (`>`), since devc never deletes on a remote and does not list it afterwards (C19r2).
+- A pull or push records at most 100,000 entries (direct children of the zones named, and the other paths), and fewer when their names are long or need much escaping (the worker's report of 64 MiB must hold them); a pull above that is refused before the transfer and again before the merge, a push before staging (C19r4). `data status` of a project with more than 100,000 top-level entries fails for the same reason.
+- `data status` compares a remote with what a pull received from it, and only a pull that merged the entry completely can match (C19r4: not one that left a sealed entry alone or left a special file out, even with equal listings); after a push it can only say that the remote received the entry as it is now (`>`), since devc never deletes on a remote and does not list it afterwards (C19r2). Digests list names and sizes: a later change that keeps every file's name and size still shows the entry as recorded and the remote as matching (`devc data verify --content` compares contents).
 - The manifest is not rotated; above 10 MiB the context worker leaves it out of commits.
 - A pull and a push with different remotes may run at once (separate staging directories, the box lock only for worker phases); that was never run concurrently in a test.
 - A project directory whose `.devc` the box created (possible before C06) is refused by setup until you move it away; an in-place restore does not reset the mode of a directory that still exists.
@@ -256,6 +261,7 @@ Boxes keep what they were started with. After upgrading to C19r2: restart every 
 - The wrapper is used only when the launcher has a terminal; receipts keep a command's text until it is final, and a queued command older than seven days is refused.
 - `session.start` needs a running box; the CLI creates worktrees, the daemon does not.
 - The daemon keeps the derived view of every session it has read; subscriptions more than 4096 batches behind are disconnected.
+- tmux refuses `send-keys` while a read-only client is attached to its most recently active session; devc's own terminal clients are no longer read-only (C19r4), but a box that attaches a read-only client of its own makes devc's typing into it end `unknown` (text pasted, submit key refused).
 
 ### Daemon and channel
 
@@ -289,14 +295,15 @@ Boxes keep what they were started with. After upgrading to C19r2: restart every 
 
 - A service acts with your account for every request its rules allow; an upstream that reflects request headers in its body shows the credential (only headers are scrubbed).
 - One request per connection; exchanges longer than `limits.timeout` plus a few seconds are cut, also on the box's side (C19r2): raise the timeout for long downloads.
-- Credentials and cookie values shorter than 8 characters cannot be used (C19r2); a site whose session cookie is shorter cannot be a cookie service.
+- Credentials and cookie values shorter than 8 characters cannot be used (C19r2); a site whose session cookie is shorter cannot be a cookie service. Every word of a header credential except a leading scheme from devc's short list counts (C19r4): with a scheme devc does not list, the scheme word itself must have 8 characters and is scrubbed from responses like the secret.
 - Logins run without a terminal (no second factor typed in) and without a browser.
 
 ### Shares and sources
 
 - Shares put published text in front of every agent that lists them; boxes see earlier versions below `/opt/shares/.v/<name>/`; `export-ignore` in `.gitattributes` can make a share smaller than its preview.
 - The source cache is writable by every box of the realm and never pruned; two concurrent fetches of one version both download.
-- CRAN's archived versions and GitHub's tarballs are downloaded without a checksum, because none is published (C19r2).
+- CRAN's archived versions and GitHub's tarballs are downloaded without a checksum, because none is published (C19r2). A CRAN version that is not the index's current one is taken only from the archive, so for the moment between a release and the next index update it is not found (C19r4).
+- npm dist-tags and ranges, GitHub branches and tags, and "the current release" always need the registry; only exact versions and commits are answered offline (C19r4).
 - Installed versions are found through the usual places only (no pipx/uv tool environments, npm's global prefix or `direct_url.json`).
 
 ### Desktop
@@ -304,6 +311,7 @@ Boxes keep what they were started with. After upgrading to C19r2: restart every 
 - The cookie is readable in the box on purpose: anything in the box can drive and read the display and see what you type or paste into the viewer; the clipboard crosses both ways.
 - A box can exhaust its own desktop: the X relay serves 64 connections and the viewer's server 16 at a time, and TigerVNC refuses further unauthenticated VNC connections from 127.0.0.1 after five (its blacklisting, seen in C19r2), so a box holding VNC connections can keep the viewer out for a while. It cannot reach beyond its desktop's limits (`[gui]`).
 - Stale sidecars of a box stopped outside devc run until `gui down`, `down`, `rm` or the next start.
+- A running desktop created with other `[gui]` limits or another image generation (or whose record devc lost) is refused by `gui up` until `--restart` replaces it, never replaced silently (C19r4). `gui build --rebuild` (a security update of the same build files) does not change the generation, so a running desktop keeps its older image until `--restart`.
 - The image is about 470 MB (Mesa and LLVM through libgl1, NumPy, Perl).
 
 ### Fleet and archive
@@ -329,7 +337,6 @@ Boxes keep what they were started with. After upgrading to C19r2: restart every 
 | Work | What it would take |
 |---|---|
 | Race detector | A toolchain image with cgo and `go test -race` over the concurrent packages (part 2, last row); fix what it finds |
-| A flaky `TestWebApp` step | In the final full run the control-mode terminal step timed out once waiting for the typed prompt; alone it passed. Find the race (typing before the observer's pane is ready?) |
 | Web app unit tests | A JS test runner (none is vendored, there is no build step) for the store, timeline and pending-command logic, or `web/check.sh` steps that disconnect an invented machine |
 | `build_from_repo` | An env source that builds from a repository; today it fails with "not supported yet" |
 | Garbage collection of old `toolbox/devc/<id>` builds and toolbox components (old Node.js versions) | A collector that knows which running boxes still use a build |
@@ -340,6 +347,7 @@ Boxes keep what they were started with. After upgrading to C19r2: restart every 
 | `mod` (Claude) and `app-server` (Codex) input adapters | The vendor checks in part 1, then the bridges described there |
 | pi hooks | A hook kind built into the input extension from pi's `agent_start`/`agent_settled`/`input` events |
 | Delta pulls | A worker listing of the target turned into rsync filter rules, so repeated large pulls transfer only changes |
+| Large pull trash entries | A pull rewrites its trash entry's `meta.json` with every displaced path (quadratic in their number), and `meta.json` over 1 MiB cannot be read back, so `devc data trash restore` of a pull that displaced some ten thousand files fails (seen while checking E2-05's neighbours, not changed) |
 | `push --checksum` | A flag passing rsync's `--checksum` for files the box may have changed with size and time restored |
 | A remote listing after push | A dry run into an empty directory after the push would give the remote's full listing, so `data status` could compare pushes too |
 | Manifest rotation | Compaction of old records before the manifest reaches 10 MiB |

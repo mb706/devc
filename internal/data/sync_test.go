@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -574,21 +575,41 @@ func TestSyncPreviewAndLock(t *testing.T) {
 		return n
 	}
 	old := maxPreview
-	maxPreview = 64
 	t.Cleanup(func() { maxPreview = old })
-	for name, out := range map[string]string{
-		"cut":         ">f+++++++++ 10 scratch/a\n" + strings.Repeat(">f+++++++++ 1 scratch/long-name-filling-the-preview\n", 4),
-		"unparseable": ">f+++++++++ 10 scratch/a\nsomething else\n",
-		"overflow":    ">f+++++++++ 9223372036854775800 scratch/a\n>f+++++++++ 9223372036854775800 scratch/b\n",
+	// Each refusal is triggered on its own: the cut preview with a capture
+	// limit below its length, the others with a limit far above theirs, so
+	// that they reach the parser and the arithmetic (finding E2-09). want is
+	// the part of the message only that refusal gives.
+	for _, c := range []struct {
+		name, out, want string
+		max             int
+	}{
+		{"cut", ">f+++++++++ 10 scratch/a\n" + strings.Repeat(">f+++++++++ 1 scratch/long-name-filling-the-preview\n", 4), "longer than", 64},
+		{"unparseable", ">f+++++++++ 10 scratch/a\nsomething else\n", "is not one rsync prints", 1 << 20},
+		{"overflow", ">f+++++++++ 9223372036854775800 scratch/a\n>f+++++++++ 9223372036854775800 scratch/b\n", "add up to more than", 1 << 20},
 	} {
+		maxPreview = c.max
+		if c.name != "cut" && len(c.out) >= c.max {
+			t.Fatalf("%s: the fixture (%d bytes) does not fit the capture limit", c.name, len(c.out))
+		}
 		w.host.Reset()
-		w.host.On("rsync").Stdout(out)
+		w.host.On("rsync").Stdout(c.out)
 		_, err := w.svc.Pull(ctx, w.p, opts)
-		if !errors.Is(err, ErrPreview) || transfers() != 0 {
-			t.Errorf("%s: %v, %d transfers", name, err, transfers())
+		if !errors.Is(err, ErrPreview) || !strings.Contains(err.Error(), c.want) || transfers() != 0 {
+			t.Errorf("%s: %v (want …%s…), %d transfers", c.name, err, c.want, transfers())
 		}
 		if ents, _ := os.ReadDir(w.svc.Config.Paths.SyncStagingDir(w.p.Ref)); slices.ContainsFunc(ents, func(e os.DirEntry) bool { return e.IsDir() }) {
-			t.Errorf("%s: staging left: %v", name, ents)
+			t.Errorf("%s: staging left: %v", c.name, ents)
+		}
+		// The dry run ran with that capture limit.
+		var dryMax []int
+		for _, call := range w.host.Calls() {
+			if call.Name == "rsync" {
+				dryMax = append(dryMax, call.MaxOutput)
+			}
+		}
+		if !slices.Equal(dryMax, []int{c.max}) {
+			t.Errorf("%s: dry runs with capture limits %v, want [%d]", c.name, dryMax, c.max)
 		}
 	}
 	// Control: the same preview within the cap transfers.
@@ -644,17 +665,29 @@ func TestPullRemoteObservation(t *testing.T) {
 	w.put("results/run1/r", "local result")
 	w.put("results/run2/x", "same")
 	w.put("results/run3/local-only", "mine")
-	if _, err := w.svc.Seal(ctx, w.p, "results/run1", false); err != nil {
-		t.Fatal(err)
+	// E2-04: a sealed entry whose file has the same name and length here
+	// and on the remote, but other bytes: equal listings.
+	w.put("results/run5/r", "result = AAAA")
+	// An entry the remote has with a special file in it: the file is left
+	// out, which leaves the listing equal too.
+	w.put("results/run4/x", "same")
+	for _, e := range []string{"results/run1", "results/run5"} {
+		if _, err := w.svc.Seal(ctx, w.p, e, false); err != nil {
+			t.Fatal(err)
+		}
 	}
 	w.host.On("rsync").Stdout(">f+++++++++ 13 results/run1/r\n").Do(func(c execx.Cmd) {
 		if slices.Contains(c.Args, "--dry-run") {
 			return
 		}
 		dst := strings.TrimSuffix(c.Args[len(c.Args)-1], "/")
-		for rel, body := range map[string]string{"results/run1/r": "remote result", "results/run2/x": "same", "results/run3/shared": "theirs"} {
+		for rel, body := range map[string]string{"results/run1/r": "remote result", "results/run2/x": "same", "results/run3/shared": "theirs",
+			"results/run5/r": "result = BBBB", "results/run4/x": "same"} {
 			os.MkdirAll(filepath.Dir(filepath.Join(dst, rel)), 0o755)
 			os.WriteFile(filepath.Join(dst, rel), []byte(body), 0o644)
+		}
+		if err := syscall.Mkfifo(filepath.Join(dst, "results", "run4", "pipe"), 0o644); err != nil {
+			t.Error(err)
 		}
 	})
 	res, err := w.svc.Pull(ctx, w.p, SyncOptions{Remote: "nas", Paths: []string{"results"}, Yes: true})
@@ -670,13 +703,25 @@ func TestPullRemoteObservation(t *testing.T) {
 			byPath[r.Path] = r
 		}
 	}
-	for path, wantSame := range map[string]bool{"results/run1": false, "results/run2": true, "results/run3": false} {
+	if b, _ := os.ReadFile(filepath.Join(w.p.HostRoot(), "results", "run5", "r")); string(b) != "result = AAAA" {
+		t.Fatalf("the sealed entry of the same length changed: %q", b)
+	}
+	// The listings of run4 and run5 are equal here and on the remote; the
+	// outcome says the merge was not complete.
+	for path, want := range map[string]struct {
+		equal   bool
+		outcome string
+	}{
+		"results/run1": {false, boxside.OutcomeSkipped}, "results/run2": {true, boxside.OutcomeMerged},
+		"results/run3": {false, boxside.OutcomeMerged}, "results/run4": {true, boxside.OutcomePartial},
+		"results/run5": {true, boxside.OutcomeSkipped},
+	} {
 		r, ok := byPath[path]
-		if !ok || r.RemoteDigest == "" || (r.RemoteDigest == r.Digest) != wantSame {
-			t.Errorf("%s: record %+v (remote and local equal: want %v)", path, r, wantSame)
+		if !ok || r.RemoteDigest == "" || (r.RemoteDigest == r.Digest) != want.equal || r.Outcome != want.outcome {
+			t.Errorf("%s: record %+v (want listings equal %v, outcome %s)", path, r, want.equal, want.outcome)
 		}
 	}
-	if len(res.Records) != 3 {
+	if len(res.Records) != 5 {
 		t.Errorf("records %+v", res.Records)
 	}
 	st, err := w.svc.Status(ctx, w.p)
@@ -684,7 +729,7 @@ func TestPullRemoteObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range st.Entries {
-		want, ok := map[string]bool{"results/run1": false, "results/run2": true, "results/run3": false}[e.Path]
+		want, ok := map[string]bool{"results/run1": false, "results/run2": true, "results/run3": false, "results/run4": false, "results/run5": false}[e.Path]
 		if !ok {
 			continue
 		}
@@ -784,6 +829,101 @@ func TestStatusAndVerify(t *testing.T) {
 	st, _ = w.svc.Status(ctx, w.p)
 	if st.LastSave == nil || st.LastSave.Savepoint != sp.ID || st.LastSave.Path != "." || st.LastSave.Files != 2 || st.LastSave.Size != 5 {
 		t.Errorf("last save %+v", st.LastSave)
+	}
+}
+
+// TestPullEntryLimits: the number of entries a pull records is checked
+// against the preview before anything is transferred: at the supported
+// maximum the pull goes on, one entry more is refused with nothing
+// transferred or left behind; a report of the maximum decodes (finding
+// E2-05).
+func TestPullEntryLimits(t *testing.T) {
+	w := syncWorld(t)
+	ctx := context.Background()
+	w.put("scratch/a", "local")
+	preview := func(n int) string {
+		var b strings.Builder
+		b.WriteString("cd+++++++++ 0 scratch/\n")
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, ">f+++++++++ 0 scratch/e%06d\n", i)
+		}
+		return b.String()
+	}
+	transfers := func() int {
+		_, dry := w.rsyncCalls()
+		n := 0
+		for _, d := range dry {
+			if !d {
+				n++
+			}
+		}
+		return n
+	}
+	opts := SyncOptions{Remote: "nas", Paths: []string{"scratch"}, Yes: true}
+	w.host.On("rsync").Stdout(preview(boxside.MaxSyncEntries + 1))
+	_, err := w.svc.Pull(ctx, w.p, opts)
+	if err == nil || !strings.Contains(err.Error(), "more than devc records in one pull") || transfers() != 0 {
+		t.Errorf("one entry above the maximum: %v, %d transfers", err, transfers())
+	}
+	if ents, _ := os.ReadDir(w.svc.Config.Paths.SyncStagingDir(w.p.Ref)); len(ents) != 0 {
+		t.Errorf("staging left: %v", ents)
+	}
+	if n := len(mustRead(t, w)); n != 0 {
+		t.Errorf("%d records after a refused pull", n)
+	}
+	// Control: at the maximum the pull is transferred and merged (the fake
+	// transfer brings one of the files).
+	w.host.Reset()
+	w.host.On("rsync").Stdout(preview(boxside.MaxSyncEntries)).Do(func(c execx.Cmd) {
+		if !slices.Contains(c.Args, "--dry-run") {
+			dst := strings.TrimSuffix(c.Args[len(c.Args)-1], "/")
+			os.MkdirAll(filepath.Join(dst, "scratch"), 0o755)
+			os.WriteFile(filepath.Join(dst, "scratch", "e000000"), nil, 0o644)
+		}
+	})
+	if _, err := w.svc.Pull(ctx, w.p, opts); err != nil || transfers() != 1 {
+		t.Errorf("at the maximum: %v, %d transfers", err, transfers())
+	}
+	// A report of the maximum, as the worker writes it, fits the capture
+	// limit and decodes; one entry more does not.
+	d := "sha256:" + strings.Repeat("a", 64)
+	res := &boxside.DataResult{V: boxside.DataProtoVersion, Op: boxside.OpPullIn}
+	for i := 0; i <= boxside.MaxSyncEntries; i++ {
+		res.Digests = append(res.Digests, boxside.EntryDigest{Path: fmt.Sprintf("scratch/e%06d", i), Type: "file", Digest: d, Remote: d, Outcome: boxside.OutcomeMerged})
+	}
+	b, _ := boxside.MarshalReport(res)
+	if _, err := DecodeResult(b, boxside.OpPullIn); err == nil {
+		t.Error("a report above the maximum decoded")
+	}
+	res.Digests = res.Digests[:boxside.MaxSyncEntries]
+	b, _ = boxside.MarshalReport(res)
+	if _, err := DecodeResult(b, boxside.OpPullIn); err != nil || len(b) > maxResult {
+		t.Errorf("a report of the maximum (%d bytes): %v", len(b), err)
+	}
+	// An entry whose remote copy was no data has no observation, and is
+	// not merged.
+	partial := `{"v":1,"op":"pull-in","files":0,"size":0,"digests":[{"path":"scratch/a","type":"file","files":1,"size":2,"digest":"` + d + `","outcome":"partial"}]}`
+	if _, err := DecodeResult([]byte(partial), boxside.OpPullIn); err != nil {
+		t.Errorf("a partial entry without observation: %v", err)
+	}
+	// Pull-in entries carry the remote's observation and the outcome;
+	// other reports none.
+	for _, bad := range []string{
+		`{"v":1,"op":"pull-in","files":0,"size":0,"digests":[{"path":"scratch/a","type":"file","files":1,"size":2,"digest":"` + d + `"}]}`,
+		`{"v":1,"op":"pull-in","files":0,"size":0,"digests":[{"path":"scratch/a","type":"file","files":1,"size":2,"digest":"` + d + `","outcome":"merged"}]}`,
+		`{"v":1,"op":"pull-in","files":0,"size":0,"digests":[{"path":"scratch/a","type":"file","files":1,"size":2,"digest":"` + d + `","remote":"x","outcome":"partial"}]}`,
+		`{"v":1,"op":"pull-in","files":0,"size":0,"digests":[{"path":"scratch/a","type":"file","files":1,"size":2,"digest":"` + d + `","remote":"` + d + `","outcome":"same"}]}`,
+		`{"v":1,"op":"digest","files":0,"size":0,"digests":[{"path":"scratch/a","type":"file","files":1,"size":2,"digest":"` + d + `","outcome":"merged"}]}`,
+	} {
+		var op string
+		if strings.Contains(bad, "pull-in") {
+			op = boxside.OpPullIn
+		} else {
+			op = boxside.OpDigest
+		}
+		if _, err := DecodeResult([]byte(bad), op); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
 	}
 }
 

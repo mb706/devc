@@ -778,7 +778,11 @@ the files into the data root, owned by the box user (set-ID bits dropped):
 be larger in total. The count comes from rsync's dry run; a dry run whose
 output is cut (more than 256 MiB of listing) or has a line devc cannot read
 is refused rather than counted in part, so pull fewer paths at a time if
-that happens. One pull or push per project and remote runs at a time; a
+that happens. A pull records at most 100,000 entries (the direct children
+of each zone it names, and the other paths named), and only as many as the
+report of the merge can hold with their names; a pull above that is
+refused before anything is transferred (checked against the dry run) and
+again before anything is merged (checked against what arrived). One pull or push per project and remote runs at a time; a
 second one is refused until the first has finished. Every pull transfers the selected files in full, since the
 staging directory starts empty: pull the paths you need rather than whole
 zones. When a transfer is interrupted, what arrived is kept and the next pull
@@ -820,9 +824,14 @@ devc seal results/run7 --content          # seal and store a content hash
 `recorded` (as last recorded), `changed` or `absent` (recorded but not here),
 with the machines and remotes it was last recorded on; a `*` marks a record
 that differs from the entry now. For a remote, a pull records what arrived
-from it separately from this machine's copy after the merge: a pull that
-left a sealed entry alone, or kept files that exist only here, is never
-shown as matching the remote. A `>` marks a remote that a push sent the
+from it separately from this machine's copy after the merge, and what the
+merge did with the entry (`merged`, `skipped` for a sealed entry left alone
+because it differs, `partial` when something in it was left out, such as a
+special file). A remote is shown as matching only when its last pull merged
+the entry completely and the entry still lists as what arrived; a skipped
+or partial pull, or one that kept files that exist only here, never is, even
+when the listings (names and sizes) are equal. Pull records written before
+C19r4 have no outcome and are not shown as matching. A `>` marks a remote that a push sent the
 entry to as it is now; the remote may keep other files besides, since devc
 never deletes there.
 
@@ -1049,7 +1058,7 @@ desktop next to the box:
 
 ```sh
 devc gui up demo/hello                  # starts the box too; prints the viewer's address
-devc gui status demo/hello              # absent, running, stopped or stale
+devc gui status demo/hello              # absent, running, outdated, stopped or stale
 devc gui down demo/hello
 devc gui up demo/hello --restart        # new cookie and password
 devc gui build [--rebuild]              # the image; built on first use anyway
@@ -1112,6 +1121,16 @@ limit off explicitly. The X relay serves at most 64 connections at a time
 and the viewer's server 16; further connections wait. A box that holds
 those connections, or fills the desktop's memory, only disturbs its own
 desktop.
+
+A running desktop records the limits and the image generation it was
+created with. `devc gui up` reuses it only when both are what it would
+create now; after you change `[gui]`, or upgrade to a devc whose desktop
+image differs (including a desktop started before these records existed),
+`devc gui up` refuses the running desktop and names the difference, and
+`devc gui status` calls it *outdated*. It is never replaced silently,
+since programs on its display would lose it: `devc gui up --restart`
+replaces it when you are ready. The same holds when devc has lost its
+record of a running desktop (its password and forward).
 
 **From a phone**, the viewer is reached like any forwarded port. Exposing it
 beyond the loopback interface needs the same care as the hub
@@ -1341,13 +1360,18 @@ the daemon, which decides everything:
 - On the way back `Set-Cookie`, `Proxy-*` and hop-by-hop headers are
   dropped, `Location` headers that point at the upstream are rewritten to
   the local address, 1xx responses and trailers never pass, and every header
-  is scrubbed of the credential (the value and its parts: the token after a
-  scheme such as `Bearer`, the user:password and password of `Basic`).
-  Bodies pass through within `max_body`. Every part of a credential must have
-  at least 8 characters, so that scrubbing it cannot garble ordinary
-  headers: a shorter header credential is refused (`devc service status`
-  says `invalid-secret`, boxes get 503), and so is a login whose cookies
-  have shorter values.
+  is scrubbed of the credential (the value and its parts: every word except
+  a leading scheme such as `Bearer`, `Basic`, `Token` or `Bot`, and the
+  user:password and password of `Basic`). Bodies pass through within
+  `max_body`. A stored credential is used in one normal form: spaces and
+  tabs around it are removed (HTTP drops them on the wire anyway), and a
+  value with control characters or bytes outside printable ASCII is
+  refused. Every secret word of it must have at least 8 characters, so that
+  scrubbing it cannot garble ordinary headers: a shorter header credential
+  is refused (`devc service status` says `invalid-secret`, boxes get 503),
+  and so is a login whose cookies have shorter values (cookie values are
+  trimmed the same way). A request to a path that none of the stored
+  cookies applies to goes out without a `Cookie` header.
 - The whole exchange ends with `timeout` (and a few seconds' grace): a box
   that stops reading the answer, or never finishes sending its body, loses
   that connection then, and only that connection.
@@ -1475,19 +1499,28 @@ devc src pypi:requests --json      # path, version, source URL, whether the cach
 Without a version devc uses the installed one, else the current release. An
 R package installed from GitHub (its `DESCRIPTION` names a GitHub remote and
 commit) is fetched from that commit instead of CRAN. Sources: CRAN's source
-tarballs (current, then the archive), the source distribution PyPI's JSON
-API names, the npm registry's tarball, GitHub's tarball endpoint. Where a
-registry publishes a checksum it is required and verified: PyPI's sha256,
-npm's integrity value (sha512, sha384, sha256 or sha1; the strongest is
-used) or, for old packages without one, its SHA-1 shasum, and the MD5 of
-CRAN's current releases. A missing or unusable checksum there refuses the
-download rather than skipping the check. CRAN's archived versions and
-GitHub's tarballs have no published checksum and are downloaded unchecked
-(a GitHub tarball is named by its commit). Archives are unpacked with the
-same safe extractor as shares and are never built, installed or run. A
-concrete version that is already in the cache (any registry version, or a
-GitHub commit) is answered without any network access; a branch, a tag or
-"the current release" needs the registry.
+tarballs (the current release, or an older version from CRAN's archive),
+the source distribution PyPI's JSON API names, the npm registry's tarball,
+GitHub's tarball endpoint. Where a registry publishes a checksum it is
+required and verified: PyPI's sha256, npm's integrity value (sha512,
+sha384, sha256 or sha1; the strongest is used) or, for old packages without
+one, its SHA-1 shasum, and the MD5 of CRAN's current releases. A missing or
+unusable checksum there refuses the download rather than skipping the
+check. CRAN's package list (`PACKAGES`) is read completely for every CRAN
+download; if any of it cannot be parsed, nothing is downloaded. A CRAN
+version that is not the list's current one is taken only from CRAN's
+archive of old versions, which (like GitHub's tarballs) has no published
+checksum and is downloaded unchecked; a version that is in neither is an
+error. A GitHub tarball is named by its commit. Archives are unpacked with
+the same safe extractor as shares and are never built, installed or run.
+An exact version that is already in the cache (a CRAN or PyPI version, an
+exact npm version such as `1.2.3` or `v1.2.3`, or a GitHub commit) is
+answered without any network access. Anything that can move is resolved
+with the registry every time: "the current release", an npm dist-tag such
+as `latest` or a range, a GitHub branch or tag. (A GitHub branch or tag is
+never cached under its own name: devc asks GitHub for its commit on every
+request and caches the tree under the commit, so a branch that moved is
+followed.)
 
 The cache is `cache/realms/<realm>/src/` in devc's state, mounted at `/src`
 in every box of the realm as `/src/<ecosystem>/<name>/<version>/`. It is

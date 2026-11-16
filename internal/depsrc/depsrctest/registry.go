@@ -44,7 +44,12 @@ type Registry struct {
 	PyPIDigests map[string]string
 	NPMDist     func(archive []byte) (integrity, shasum string)
 	CRANNoMD5   bool
-	requests    int
+	// CRANIndex, when set, is PACKAGES, given the MD5 of mypkg 1.2.0.
+	CRANIndex func(md5 string) string
+	// NPMLatest is the version the dist-tag latest of plain names (1.0.0
+	// when empty); plain 1.0.0 and 1.1.0 exist.
+	NPMLatest string
+	requests  int
 }
 
 // Requests counts every request the registry answered.
@@ -104,7 +109,8 @@ func Tarball(top string, files map[string]string, hostile bool) []byte {
 }
 
 // The packages: CRAN mypkg 1.2.0 (current) and 1.1.0 (archived), PyPI
-// my-lib 2.0.0, npm @scope/thing 3.1.4 and plain 1.0.0, GitHub owner/repo.
+// my-lib 2.0.0, npm @scope/thing 3.1.4 and plain 1.0.0 and 1.1.0, GitHub
+// owner/repo.
 func (r *Registry) archive(eco, version string) []byte {
 	switch eco {
 	case "cran":
@@ -124,8 +130,11 @@ func (r *Registry) archive(eco, version string) []byte {
 func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	r.requests++
-	pyDigests, npmDist, noMD5 := r.PyPIDigests, r.NPMDist, r.CRANNoMD5
+	pyDigests, npmDist, noMD5, cranIndex, npmLatest := r.PyPIDigests, r.NPMDist, r.CRANNoMD5, r.CRANIndex, r.NPMLatest
 	r.mu.Unlock()
+	if npmLatest == "" {
+		npmLatest = "1.0.0"
+	}
 	p := req.URL.EscapedPath()
 	base := "http://" + req.Host
 	writeJSON := func(v any) { w.Header().Set("Content-Type", "application/json"); json.NewEncoder(w).Encode(v) }
@@ -133,6 +142,10 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case p == "/cran/src/contrib/PACKAGES":
 		a := r.archive("cran", "1.2.0")
 		sum := md5.Sum(a)
+		if cranIndex != nil {
+			fmt.Fprint(w, cranIndex(hex.EncodeToString(sum[:])))
+			return
+		}
 		if noMD5 {
 			fmt.Fprint(w, "Package: other\nVersion: 0.1\n\nPackage: mypkg\nVersion: 1.2.0\n\n")
 			return
@@ -144,6 +157,11 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case p == "/cran/src/contrib/Archive/mypkg/mypkg_1.1.0.tar.gz":
 		r.count("cran")
 		w.Write(r.archive("cran", "1.1.0"))
+	case p == "/cran/src/contrib/mypkg_1.3.0.tar.gz":
+		// In src/contrib but neither the index's current version nor in
+		// the archive: devc must not take it unchecked.
+		r.count("cran")
+		w.Write(r.archive("cran", "1.3.0"))
 	case p == "/pypi/pypi/my-lib/json" || p == "/pypi/pypi/my-lib/2.0.0/json":
 		a := r.archive("pypi", "2.0.0")
 		sum := sha256.Sum256(a)
@@ -165,10 +183,17 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case p == "/pypi/files/my_lib-2.0.0.tar.gz":
 		r.count("pypi")
 		w.Write(r.archive("pypi", "2.0.0"))
-	case p == "/npm/@scope%2Fthing/latest" || p == "/npm/@scope%2Fthing/3.1.4", p == "/npm/plain/1.0.0", p == "/npm/plain/v1.0.0", p == "/npm/plain/latest":
-		// "v1.0.0" is normalised to 1.0.0, as registries do.
+	case p == "/npm/@scope%2Fthing/latest" || p == "/npm/@scope%2Fthing/3.1.4", p == "/npm/plain/1.0.0", p == "/npm/plain/v1.0.0",
+		p == "/npm/plain/latest", p == "/npm/plain/1.1.0":
+		// "v1.0.0" is normalised to 1.0.0, as registries do; the dist-tag
+		// latest moves with NPMLatest.
 		name, v := "@scope/thing", "3.1.4"
-		if strings.HasPrefix(p, "/npm/plain") {
+		switch p {
+		case "/npm/plain/latest":
+			name, v = "plain", npmLatest
+		case "/npm/plain/1.1.0":
+			name, v = "plain", "1.1.0"
+		case "/npm/plain/1.0.0", "/npm/plain/v1.0.0":
 			name, v = "plain", "1.0.0"
 		}
 		a := r.archive("npm", v)

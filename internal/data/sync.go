@@ -373,6 +373,16 @@ func (s *Service) Pull(ctx context.Context, p *Project, o SyncOptions) (*SyncRes
 		}
 		return res, fmt.Errorf("the pull would transfer %d bytes, more than --max-size (%d bytes): pull fewer paths, or raise --max-size", res.Size, o.MaxSize)
 	}
+	// The worker's report of the merge must hold every entry: a pull that
+	// could not be reported is refused now, before anything is transferred
+	// (finding E2-05); the worker checks the staged tree again before it
+	// merges.
+	if err := boxside.CheckPullEntries(previewEntries(p.Layout, targets, items), boxside.PrintedPathCost); err != nil {
+		if !reused {
+			discard()
+		}
+		return res, err
+	}
 	if (!o.Yes || o.DryRun) && o.Preview != nil {
 		o.Preview(res)
 	}
@@ -406,10 +416,38 @@ func (s *Service) Pull(ctx context.Context, p *Project, o SyncOptions) (*SyncRes
 		return res, fmt.Errorf("%w; the pulled files are kept in %s, and the next 'devc data pull %s' uses them", err, dir, o.Remote)
 	}
 	s.reportSkipped(res.Worker.Skipped)
-	res.Records = withRemoteDigests(s.records(ActionPull, o.Remote, "", res.Worker.Digests), res.Worker.RemoteDigests)
+	res.Records = s.records(ActionPull, o.Remote, "", res.Worker.Digests)
 	s.record(ctx, p, res.Records)
 	discard()
 	return res, nil
+}
+
+// previewEntries are the entries a pull of targets will record, from its
+// dry run: the first component below each target that is a zone, the
+// target itself otherwise.
+func previewEntries(l boxside.DataLayout, targets []string, items []Item) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(e string) {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	for _, t := range targets {
+		if !l.Classify(t).IsZone() {
+			add(t)
+			continue
+		}
+		for _, it := range items {
+			n := strings.TrimSuffix(it.Name, "/")
+			if rest, ok := strings.CutPrefix(n, t+"/"); ok && rest != "" {
+				first, _, _ := strings.Cut(rest, "/")
+				add(t + "/" + first)
+			}
+		}
+	}
+	return out
 }
 
 // Push hard-links paths into a vault-owned staging directory (a worker),
@@ -498,11 +536,15 @@ type RecordedAt struct {
 	// Same is set when that record's observation of the machine or remote
 	// is the entry's current digest: for a machine its copy, for a remote
 	// what a pull received from it (never this machine's copy after the
-	// merge, finding D2-12).
+	// merge, finding D2-12), and only when that pull merged the entry
+	// completely (finding E2-04).
 	Same bool `json:"same"`
 	// Sent (remotes) is set when the last record is a push of the entry as
 	// it is now: the remote received these files but may keep others.
 	Sent bool `json:"sent,omitempty"`
+	// Outcome (remotes) is what the last pull's merge did with the entry
+	// (merged, skipped, partial; empty for records of an older devc).
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // Entry states of `devc data status`.
@@ -626,7 +668,11 @@ func fillRecords(e *StatusEntry, rs []Record) {
 			case !remote:
 				ra.Same = r.Digest == e.Digest
 			case r.Action == ActionPull:
-				ra.Same = r.RemoteDigest != "" && r.RemoteDigest == e.Digest
+				// Equal listings alone never make a remote match: a sealed
+				// entry skipped because its bytes differ lists the same
+				// (finding E2-04).
+				ra.Outcome = r.Outcome
+				ra.Same = r.Outcome == boxside.OutcomeMerged && r.RemoteDigest != "" && r.RemoteDigest == e.Digest
 			case r.Action == ActionPush:
 				ra.Sent = r.Digest == e.Digest
 			}

@@ -5,9 +5,12 @@ package daemon
 // daemon's (`podman exec -t` with it as controlling terminal) and relays
 // its output as terminal.data notifications on the connection that opened
 // it. The client attaches through its own grouped session with the client
-// flags read-only and ignore-size (tmux.Observe): it cannot type and never
-// resizes the pane; the pseudo-terminal gets the window's size, and follows
-// it when the window changes. Control mode drops read-only and accepts
+// flag ignore-size (tmux.Observe): it never resizes the pane; the
+// pseudo-terminal gets the window's size, and follows it when the window
+// changes. An observing stream cannot type because the daemon, the only
+// writer of its pseudo-terminal, refuses terminal.input for it (tmux's
+// read-only flag is not used: it makes tmux refuse the daemon's own
+// send-keys while the observer is attached). Control mode accepts
 // terminal.input; it is refused unless [terminal] control = true in
 // config.toml (the hub has its own switch). A stream ends when the session
 // or its window ends, when the client exits, when the connection closes,

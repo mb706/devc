@@ -118,6 +118,15 @@ func humanSize(n int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "kMGTPE"[exp])
 }
 
+// displaced is how many paths a worker moved out of the way: its list may
+// name only some of them (boxside.MaxReportedPaths).
+func displaced(res *boxside.DataResult) int64 {
+	if res.DisplacedTotal > 0 {
+		return res.DisplacedTotal
+	}
+	return int64(len(res.Displaced))
+}
+
 func plural(n int64, one, many string) string {
 	if n == 1 {
 		return fmt.Sprintf("%d %s", n, one)
@@ -240,8 +249,8 @@ func newDataCmds(a *app) []*cobra.Command {
 					return nil
 				}
 				fmt.Fprintf(a.stdout, "restored %s in place (%s, %s)\n", sp.ID, plural(res.Files, "file", "files"), humanSize(res.Size))
-				if len(res.Displaced) > 0 {
-					fmt.Fprintf(a.stdout, "moved %s out of the way into the trash entry %s\n", plural(int64(len(res.Displaced)), "entry", "entries"), res.TrashID)
+				if n := displaced(res); n > 0 {
+					fmt.Fprintf(a.stdout, "moved %s out of the way into the trash entry %s\n", plural(n, "entry", "entries"), res.TrashID)
 				}
 				return nil
 			})

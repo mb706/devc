@@ -2,7 +2,6 @@ package data
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -234,7 +233,12 @@ func (w *world) run(o engine.RunOptions) (execx.Result, error) {
 		if err != nil {
 			return execx.Result{ExitCode: 1, Stderr: []byte("devc: " + err.Error() + "\n")}, &execx.ExitError{Result: execx.Result{ExitCode: 1}}
 		}
-		b, _ := json.Marshal(res)
+		// As the worker prints it; the capture limit applies as in the
+		// real engine.
+		b, _ := boxside.MarshalReport(res)
+		if o.MaxOutput > 0 && len(b) > o.MaxOutput {
+			return execx.Result{Stdout: b[:o.MaxOutput], Truncated: true}, nil
+		}
 		return execx.Result{Stdout: b}, nil
 	case slices.Equal(o.Cmd, []string{"/bin/devc", "box", "rm-worker"}):
 		return execx.Result{}, boxside.ClearDir(mountOf(o, boxside.HelperTarget))

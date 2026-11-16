@@ -1,11 +1,15 @@
 package boxside
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -389,5 +393,190 @@ func TestDataDigestOps(t *testing.T) {
 	save := tw.must(DataRequest{Op: OpReflinkSave, Savepoint: "20261115T040600Z", Digest: true})
 	if len(save.Digests) != 1 || save.Digests[0] != setup.Digests[0] {
 		t.Errorf("savepoint digest %+v, setup %+v", save.Digests, setup.Digests)
+	}
+}
+
+// TestReportBounds: the bound CheckPullEntries uses holds for the report
+// MarshalReport writes, also for names JSON escapes and with the capped
+// lists full; rsync's listing of a name never costs less than its JSON;
+// the count and the size limits refuse, with controls (finding E2-05).
+func TestReportBounds(t *testing.T) {
+	names := []string{"a", `quote"back\slash`, "<html>&amp;", "tab\there", "ctl\x01\x1f\x7f", "bad\xff\xfeutf8", "uni éx", strings.Repeat("\x02", 255)}
+	var entries []string
+	res := &DataResult{V: DataProtoVersion, Op: OpPullIn, TrashID: "20261116T000000Z-pull-nas", Files: math.MaxInt64, Size: math.MaxInt64, Same: math.MaxInt64}
+	d := "sha256:" + strings.Repeat("f", 64)
+	for i := 0; i < 2000; i++ {
+		p := "zone/" + names[i%len(names)] + strconv.Itoa(i)
+		entries = append(entries, p)
+		res.Digests = append(res.Digests, EntryDigest{Path: p, Type: "symlink", Files: math.MaxInt64, Size: math.MaxInt64, Digest: d, Content: d, Remote: d, Outcome: OutcomePartial})
+	}
+	for i := 0; i < 5000; i++ {
+		res.Skipped = append(res.Skipped, strings.Repeat("\x01", 2000))
+		res.Displaced = append(res.Displaced, "zone/"+strings.Repeat("\x01", 4000))
+	}
+	capReport(res)
+	if len(res.Skipped) != maxReported+1 || len(res.Displaced) != MaxReportedPaths || res.DisplacedTotal != 5000 {
+		t.Fatalf("capped lists: %d skipped, %d displaced of %d", len(res.Skipped), len(res.Displaced), res.DisplacedTotal)
+	}
+	b, err := MarshalReport(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bound int64 = reportReserve()
+	for _, e := range entries {
+		bound += int64(entryOverhead + PathCost(e))
+	}
+	if int64(len(b)) > bound {
+		t.Errorf("a report of %d bytes, more than its bound %d", len(b), bound)
+	}
+	if bytes.Contains(b, []byte("\n  ")) || bytes.Count(b, []byte("\n")) != 1 {
+		t.Error("the report is indented")
+	}
+	// rsync prints what it cannot print as \#ooo; the cost from its listing
+	// is never below the cost of the name itself.
+	rsyncPrint := func(s string) string {
+		var o strings.Builder
+		for i := 0; i < len(s); i++ {
+			if c := s[i]; c < 0x20 || c == 0x7f || c >= 0x80 {
+				fmt.Fprintf(&o, "\\#%03o", c)
+			} else {
+				o.WriteByte(c)
+			}
+		}
+		return o.String()
+	}
+	for _, n := range append(names, "plain-name.txt") {
+		if PrintedPathCost(rsyncPrint(n)) < PathCost(n) {
+			t.Errorf("%q: printed cost %d below its cost %d", n, PrintedPathCost(rsyncPrint(n)), PathCost(n))
+		}
+	}
+	// The count: the supported maximum passes, one more is refused.
+	many := make([]string, MaxSyncEntries+1)
+	for i := range many {
+		many[i] = "scratch/e" + strconv.Itoa(i)
+	}
+	if err := CheckPullEntries(many[:MaxSyncEntries], PathCost); err != nil {
+		t.Errorf("the supported maximum: %v", err)
+	}
+	if err := CheckPullEntries(many, PathCost); err == nil || !strings.Contains(err.Error(), "more than devc records in one pull") {
+		t.Errorf("one entry more: %v", err)
+	}
+	// The size: as many entries with names JSON makes six times longer do
+	// not fit; the same count with plain names does.
+	long := make([]string, 40000)
+	plain := make([]string, len(long))
+	for i := range long {
+		long[i] = "scratch/" + strings.Repeat("\x01", 240) + strconv.Itoa(i)
+		plain[i] = "scratch/" + strings.Repeat("a", 240) + strconv.Itoa(i)
+	}
+	if err := CheckPullEntries(long, PathCost); err == nil || !strings.Contains(err.Error(), "take more room") {
+		t.Errorf("long names: %v", err)
+	}
+	if err := CheckPullEntries(plain, PathCost); err != nil {
+		t.Errorf("plain names of the same length: %v", err)
+	}
+}
+
+// TestPullInEntryLimit: a staged tree with more entries than the report
+// may hold is refused before anything is merged; at the limit it is merged
+// (finding E2-05). The worker's limits are lowered here (the real values
+// are tested on CheckPullEntries in TestReportBounds and against the
+// preview in the data package), so that the tree stays small.
+func TestPullInEntryLimit(t *testing.T) {
+	tw := newTestWorker(t)
+	tw.must(DataRequest{Op: OpSetup})
+	tw.write("data/scratch/keep.txt", "local", 0o644)
+	tw.syncEntries = 20
+	// keep.txt and 19 more: exactly the limit.
+	tw.stage("scratch/keep.txt", "remote", 0o644)
+	for i := 1; i < 20; i++ {
+		tw.stage("scratch/e"+strconv.Itoa(i), "", 0o644)
+	}
+	refused := func(name, want string) {
+		t.Helper()
+		if _, err := tw.run(DataRequest{Op: OpPullIn, Paths: []string{"scratch"}, Label: "nas"}); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if b, _ := os.ReadFile(tw.p("data/scratch/keep.txt")); string(b) != "local" {
+			t.Errorf("%s: the refused pull changed data", name)
+		}
+		if ents, _ := os.ReadDir(tw.p("data/scratch")); len(ents) != 1 {
+			t.Errorf("%s: the refused pull added %d entries", name, len(ents)-1)
+		}
+	}
+	// One more is refused before anything is merged.
+	tw.stage("scratch/extra", "x", 0o644)
+	refused("one entry above the limit", "more than devc records in one pull (20)")
+	if err := os.Remove(filepath.Join(tw.Staging, "scratch", "extra")); err != nil {
+		t.Fatal(err)
+	}
+	// Names that would not fit the report's room are refused too.
+	var room int64
+	for _, e := range append([]string{"scratch/keep.txt"}, func() []string {
+		var o []string
+		for i := 1; i < 20; i++ {
+			o = append(o, "scratch/e"+strconv.Itoa(i))
+		}
+		return o
+	}()...) {
+		room += int64(entryOverhead + PathCost(e))
+	}
+	tw.reportBudget = room - 1
+	refused("one byte short of the room", "take more room")
+	tw.reportBudget = room
+	res, err := tw.run(DataRequest{Op: OpPullIn, Paths: []string{"scratch"}, Label: "nas"})
+	if err != nil {
+		t.Fatalf("at the limit: %v", err)
+	}
+	if len(res.Digests) != 20 || len(res.Displaced) != 1 {
+		t.Errorf("at the limit: %d digests, displaced %v", len(res.Digests), res.Displaced)
+	}
+	for _, d := range res.Digests {
+		if d.Outcome != OutcomeMerged || d.Remote != d.Digest {
+			t.Errorf("entry %+v", d)
+		}
+	}
+	// A push of the 20 entries now here is staged; with one more it is
+	// refused before anything is staged.
+	tw.reportBudget = 0
+	if _, err := tw.run(DataRequest{Op: OpPushStage, Paths: []string{"scratch"}, Stage: "push-20261116T000000Z"}); err != nil {
+		t.Fatalf("push at the limit: %v", err)
+	}
+	tw.must(DataRequest{Op: OpPushUnstage, Stage: "push-20261116T000000Z"})
+	tw.write("data/scratch/one-more", "x", 0o644)
+	if _, err := tw.run(DataRequest{Op: OpPushStage, Paths: []string{"scratch"}, Stage: "push-20261116T000001Z"}); err == nil ||
+		!strings.Contains(err.Error(), "more than devc records in one push (20)") {
+		t.Errorf("push above the limit: %v", err)
+	}
+	if ents, _ := os.ReadDir(tw.p(PushStagingDir)); len(ents) != 0 {
+		t.Errorf("a refused push staged %v", ents)
+	}
+}
+
+// TestPullInSpecialEntry: an entry that arrived as no data (a FIFO where
+// this machine has a file) is left alone and reported as partial without
+// an observation of the remote, rather than making the report invalid
+// after the merge.
+func TestPullInSpecialEntry(t *testing.T) {
+	tw := newTestWorker(t)
+	tw.must(DataRequest{Op: OpSetup})
+	tw.write("data/scratch/p", "local", 0o644)
+	tw.stage("scratch/other", "remote", 0o644)
+	if err := syscall.Mkfifo(filepath.Join(tw.Staging, "scratch", "p"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := tw.must(DataRequest{Op: OpPullIn, Paths: []string{"scratch"}, Label: "nas"})
+	if b, _ := os.ReadFile(tw.p("data/scratch/p")); string(b) != "local" {
+		t.Errorf("the file was replaced: %q", b)
+	}
+	got := map[string]EntryDigest{}
+	for _, d := range res.Digests {
+		got[d.Path] = d
+	}
+	if d := got["scratch/p"]; d.Outcome != OutcomePartial || d.Remote != "" {
+		t.Errorf("the special entry: %+v", d)
+	}
+	if d := got["scratch/other"]; d.Outcome != OutcomeMerged || d.Remote != d.Digest {
+		t.Errorf("the ordinary entry: %+v", d)
 	}
 }

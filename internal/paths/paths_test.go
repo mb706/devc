@@ -152,12 +152,41 @@ func TestLayout(t *testing.T) {
 		InBoxProjectDir(r):                        "/w/work/foo",
 		InBoxRepoDir(r):                           "/w/work/foo/.repo",
 		InBoxWorktree(r, "main"):                  "/w/work/foo/main",
+		p.SyncLockFile(r, "nas"):                  s + "/local/locks/sync/work/foo/nas.lock",
 	}
 	for got, w := range want {
 		if got != w {
 			t.Errorf("got %q, want %q", got, w)
 		}
 	}
+}
+
+// TestSyncLockNames: project and remote names may hold hyphens; their
+// sync locks never share a file (finding E2-08).
+func TestSyncLockNames(t *testing.T) {
+	p, _ := Resolve(Options{Home: "/h", Getenv: env(nil)})
+	seen := map[string]string{}
+	for _, c := range []struct{ realm, project, remote string }{
+		{"a", "b-c", "d"}, {"a", "b", "c-d"}, {"a", "b-c-d", "e"}, {"a", "b", "c-d-e"}, {"a", "b-c", "d-e"},
+		{"ab", "c", "d"}, {"a", "bc", "d"}, {"a", "b.c", "d"}, {"a", "b", "c.d"},
+	} {
+		f := p.SyncLockFile(names.ProjectRef{Realm: c.realm, Project: c.project}, c.remote)
+		key := c.realm + "/" + c.project + " " + c.remote
+		if other, dup := seen[f]; dup {
+			t.Errorf("%s and %s share the lock %s", key, other, f)
+		}
+		seen[f] = key
+		rel := strings.TrimPrefix(f, p.LocalDir()+"/locks/sync/")
+		if rel != c.realm+"/"+c.project+"/"+c.remote+".lock" {
+			t.Errorf("%s: lock %s", key, f)
+		}
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("an invalid remote name made a lock path")
+		}
+	}()
+	p.SyncLockFile(names.ProjectRef{Realm: "a", Project: "b"}, "../x")
 }
 
 func TestUnvalidatedNamesPanic(t *testing.T) {

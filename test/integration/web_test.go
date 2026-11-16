@@ -267,7 +267,18 @@ func TestWebApp(t *testing.T) {
 	if tc.open["mode"] != "observe" || tc.open["cols"].(float64) < 20 || tc.open["rows"].(float64) < 5 {
 		t.Errorf("open: %v", tc.open)
 	}
-	api.command(machine, "send", newCommandID(), map[string]any{"session": sid, "text": "say visible in the terminal", "mode": "steer"}, 30)
+	// A prompt sent while the terminal observes is typed and submitted. The
+	// send waits until the observer has drawn the pane, so its tmux client
+	// is attached: an observing client that was tmux's read-only client
+	// made tmux refuse the submit key, which left the text in the agent's
+	// input line in front of the next prompt (C19r4: the step below that
+	// types into the terminal then timed out now and then). The echo of
+	// the typed text is no proof; the prompt event is.
+	tc.until(20*time.Second, "the observer's first screen", func() bool { return tc.out.Len() > 0 })
+	if code, rec, body := api.command(machine, "send", newCommandID(), map[string]any{"session": sid, "text": "say visible in the terminal", "mode": "steer"}, 30); code != 200 || rec.Outcome != proto.OutcomeDelivered {
+		t.Errorf("a prompt sent while the terminal observes: %d %s", code, body)
+	}
+	hubWait(t, 30*time.Second, "the prompt sent while observing", func() bool { return promptsIn(t, e, ref, sid, "say visible in the terminal") == 1 })
 	tc.until(30*time.Second, "the reply on the screen", func() bool { return strings.Contains(tc.out.String(), "visible in the terminal") })
 	tc.send(map[string]string{"type": "input", "data": "x"})
 	tc.until(10*time.Second, "the end after input", func() bool { return tc.end != "" })

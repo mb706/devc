@@ -100,7 +100,9 @@ func newGUICmd(a *app) *cobra.Command {
 			"is printed with the VNC password, which is new for every start. Programs in the box draw on the display with " +
 			"DISPLAY=127.0.0.1:1 and the cookie in /run/devc/display.xauth; sessions and 'devc sh' started from then on have both " +
 			"set. Anything in the box can therefore drive and read the display. The image localhost/devc-aux/desktop is built on " +
-			"first use. A desktop that already runs is kept (its address is printed again) unless --restart is given.\n\n" +
+			"first use. A desktop that already runs is kept (its address is printed again) unless --restart is given; one that " +
+			"was created with other [gui] limits or by an earlier devc's desktop image is refused, and only --restart replaces " +
+			"it, since programs on its display lose it.\n\n" +
 			"--bind with an address other than a loopback address makes the viewer reachable from the network; treat that " +
 			"like exposing the hub (see docs/guide.md).",
 		Args: maxArgs(1),
@@ -148,8 +150,9 @@ func newGUICmd(a *app) *cobra.Command {
 		Use:   "status [<realm>/<project>] [--json]",
 		Short: "Show whether a box's desktop runs and where its viewer is",
 		Long: "Report the desktop sidecar of a project's box: absent, running (with the viewer's address, without the password), " +
-			"stopped (the container has exited), or stale (it belongs to an earlier start of the box, or the box is not running; " +
-			"'devc gui down' or the next 'devc up' removes it).",
+			"outdated (it runs, but with other limits or another desktop image than 'devc gui up' would create now; " +
+			"'devc gui up --restart' replaces it), stopped (the container has exited), or stale (it belongs to an earlier start " +
+			"of the box, or the box is not running; 'devc gui down' or the next 'devc up' removes it).",
 		Args: maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.withBox(cmd, args, func(ctx context.Context, e *boxEnv, ref names.ProjectRef) error {

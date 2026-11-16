@@ -176,8 +176,8 @@ func (a *app) runSync(cmd *cobra.Command, args []string, o syncOptions, push boo
 			fmt.Fprintf(a.stdout, "; %s already identical", plural(w.Same, "file was", "files were"))
 		}
 		fmt.Fprintln(a.stdout)
-		if len(w.Displaced) > 0 {
-			fmt.Fprintf(a.stdout, "moved %s that differed into the trash entry %s\n", plural(int64(len(w.Displaced)), "entry", "entries"), w.TrashID)
+		if n := displaced(w); n > 0 {
+			fmt.Fprintf(a.stdout, "moved %s that differed into the trash entry %s\n", plural(n, "entry", "entries"), w.TrashID)
 		}
 	}
 	a.commitManifest(ctx, e, ref.Realm, fmt.Sprintf("devc data %s %s %s", map[bool]string{true: "push", false: "pull"}[push], ref, res.Remote))
@@ -231,7 +231,8 @@ func newDataStatusCmd(a *app) *cobra.Command {
 		Long: "For each top-level entry of each zone: its size and digest now, whether it differs from the last record in " +
 			"the data manifest (new, recorded, changed; absent for recorded entries that are not here), and on which " +
 			"machines and remotes it was last recorded (marked * when that record differs from the entry now; for a remote, " +
-			"what a pull received from it is compared, not this machine's copy after the merge; > marks a remote that a push " +
+			"what a pull received from it is compared, not this machine's copy after the merge, and only a pull that merged " +
+			"the entry completely can match; > marks a remote that a push " +
 			"sent the entry to as it is now, which may keep other files besides).",
 		Args: maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

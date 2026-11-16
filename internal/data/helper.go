@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -38,8 +37,9 @@ var (
 	capsRead  = []string{"DAC_READ_SEARCH"}
 )
 
-// maxResult caps a worker's JSON result.
-const maxResult = 8 << 20
+// maxResult caps a worker's JSON result, as captured and as decoded: one
+// value for both (finding E2-05).
+const maxResult = boxside.MaxReport
 
 // workerTimeout bounds one worker run; copies of large trees take time.
 const workerTimeout = 6 * time.Hour
@@ -120,9 +120,13 @@ func (s *Service) work(ctx context.Context, p *Project, req boxside.DataRequest,
 	// The request goes in on stdin (-i).
 	o.Interactive = true
 	o.Stdin = bytes.NewReader(in)
+	o.MaxOutput = maxResult
 	res, err := s.Engine.Run(ctx, o)
 	if err != nil {
 		return nil, workerError(req.Op, err, res)
+	}
+	if res.Truncated {
+		return nil, fmt.Errorf("the %s worker's report is larger than %d bytes", req.Op, maxResult)
 	}
 	out, err := DecodeResult(res.Stdout, req.Op)
 	if err != nil {
@@ -249,12 +253,24 @@ func DecodeResult(b []byte, op string) (*boxside.DataResult, error) {
 	if r.Stage != "" && !boxside.ValidStageName(r.Stage) {
 		return nil, fmt.Errorf("invalid staging directory %q", proto.Printable(r.Stage))
 	}
-	if len(r.Digests) > 100000 || len(r.RemoteDigests) > 100000 {
+	if len(r.Digests) > boxside.MaxSyncEntries {
 		return nil, errors.New("too many digests")
 	}
-	for _, d := range append(slices.Clone(r.Digests), r.RemoteDigests...) {
+	if r.DisplacedTotal < 0 || r.DisplacedTotal > 0 && r.DisplacedTotal < int64(len(r.Displaced)) {
+		return nil, errors.New("invalid count of displaced paths")
+	}
+	for _, d := range r.Digests {
 		if err := checkEntryDigest(d); err != nil {
 			return nil, err
+		}
+		// Only pull-in observes a remote, and then for every entry.
+		switch {
+		case op == boxside.OpPullIn && !boxside.ValidOutcome(d.Outcome),
+			op == boxside.OpPullIn && d.Remote == "" && d.Outcome == boxside.OutcomeMerged,
+			op == boxside.OpPullIn && d.Remote != "" && !boxside.ValidDigest(d.Remote):
+			return nil, fmt.Errorf("the digest of %q lacks a valid outcome or the remote's observation", proto.Printable(d.Path))
+		case op != boxside.OpPullIn && (d.Remote != "" || d.Outcome != ""):
+			return nil, fmt.Errorf("a remote observation in a %s report", op)
 		}
 	}
 	return &r, nil

@@ -26,7 +26,11 @@
 // process per connection in the relays), and the sidecar has a cgroup of
 // its own, so it gets limits of its own ([gui] memory, pids, cpus in
 // config.toml); a configured limit that cannot be applied fails `devc gui
-// up` (rule 6), and the image bounds the processes each relay forks.
+// up` (rule 6), and the image bounds the processes each relay forks. The
+// limits and the image generation a sidecar was created with are recorded
+// in its labels; a running sidecar with others (one made by an earlier
+// devc, or before the configuration changed) is never reused or silently
+// replaced: `gui up` refuses it until --restart replaces it.
 package gui
 
 import (
@@ -72,6 +76,12 @@ const (
 	// box the sidecar joined (its main PID and start time).
 	LabelBox      = "devc.gui.box"
 	LabelBoxStart = "devc.gui.box-start"
+	// LabelLimits records the resource limits the sidecar was created with
+	// (LimitsSpec), LabelImage the generation of its image (the hash of the
+	// image's build files, AuxImage().Hash()). A running sidecar is reused
+	// only while both equal what `gui up` would create now (finding E2-01).
+	LabelLimits = "devc.gui.limits"
+	LabelImage  = "devc.gui.image"
 )
 
 // entry is the sidecar's program in the image.
@@ -107,6 +117,8 @@ type SidecarOptions struct {
 	// controllers delegated to the user.
 	Limits      config.GlobalGUI
 	Controllers []string
+	// Generation is the generation of Image (its build files' hash).
+	Generation string
 }
 
 // LimitArgs returns the engine arguments for the sidecar's resource limits
@@ -151,8 +163,36 @@ func LimitArgs(l config.GlobalGUI, controllers []string) ([]string, error) {
 	return args, nil
 }
 
+// LimitsSpec is the record of the limits that l gives the sidecar, as
+// LabelLimits holds it: "memory=<bytes> pids=<n> cpus=<n>", with "none"
+// for a limit switched off. It is derived from the same arguments the
+// sidecar is created with, so the record is what was applied.
+func LimitsSpec(l config.GlobalGUI) (string, error) {
+	args, err := LimitArgs(l, []string{"cpu", "memory", "pids"})
+	if err != nil {
+		return "", err
+	}
+	return limitsSpec(args), nil
+}
+
+func limitsSpec(args []string) string {
+	v := map[string]string{"memory": "none", "pids": "none", "cpus": "none"}
+	for i := 0; i+1 < len(args); i += 2 {
+		switch args[i] {
+		case "--memory":
+			v["memory"] = args[i+1]
+		case "--pids-limit":
+			v["pids"] = args[i+1]
+		case "--cpus":
+			v["cpus"] = args[i+1]
+		}
+	}
+	return "memory=" + v["memory"] + " pids=" + v["pids"] + " cpus=" + v["cpus"]
+}
+
 var (
 	containerIDRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	generationRE  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	boxStartRE    = regexp.MustCompile(`^[0-9]{1,10}@-?[0-9]{1,20}$`)
 	labelOptRE    = regexp.MustCompile(`^label=(disable|level:[A-Za-z0-9:,.-]{1,128})$`)
 )
@@ -175,6 +215,8 @@ func SidecarArgs(o SidecarOptions) ([]string, error) {
 		return nil, fmt.Errorf("bad seccomp profile path %q", o.Seccomp)
 	case o.Image == "":
 		return nil, fmt.Errorf("no image")
+	case !generationRE.MatchString(o.Generation):
+		return nil, fmt.Errorf("bad image generation %q", o.Generation)
 	}
 	limits, err := LimitArgs(o.Limits, o.Controllers)
 	if err != nil {
@@ -188,6 +230,8 @@ func SidecarArgs(o SidecarOptions) ([]string, error) {
 		"--label", LabelAux + "=" + AuxDesktop,
 		"--label", LabelBox + "=" + o.BoxID,
 		"--label", LabelBoxStart + "=" + o.BoxStart,
+		"--label", LabelLimits + "=" + limitsSpec(limits),
+		"--label", LabelImage + "=" + o.Generation,
 		"--network", "container:" + o.BoxID,
 		"--userns=container:" + o.BoxID,
 		"--user", strconv.Itoa(paths.BoxUID) + ":" + strconv.Itoa(paths.BoxGID),

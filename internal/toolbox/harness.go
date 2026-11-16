@@ -58,6 +58,9 @@ const (
 	RoleAux      = "aux"
 	labelAux     = "devc.aux"
 	labelAuxHash = "devc.aux.hash"
+	// LabelAuxHash is the image label that holds AuxImage.Hash of the build
+	// files an auxiliary image was built from.
+	LabelAuxHash = labelAuxHash
 )
 
 var stampRE = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z(-[0-9]{1,4})?$`)

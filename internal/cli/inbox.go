@@ -300,7 +300,13 @@ func newBoxCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return writeJSON(a.stdout, res)
+			// Compact: the host captures at most boxside.MaxReport bytes.
+			b, err := boxside.MarshalReport(res)
+			if err != nil {
+				return err
+			}
+			_, err = a.stdout.Write(b)
+			return err
 		},
 	}
 

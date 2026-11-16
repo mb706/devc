@@ -460,8 +460,13 @@ func (p *Paths) SyncStagingDir(r names.ProjectRef) string {
 
 // SyncLockFile serialises the pulls and pushes of a project with one
 // remote (finding D2-11). It lives in local/locks, which no box can reach.
+// Realm, project and remote are one validated path component each
+// (local/locks/sync/<realm>/<project>/<remote>.lock): names may hold
+// hyphens, so joining them into one name would let a-b/c and a/b-c share a
+// lock (finding E2-08).
 func (p *Paths) SyncLockFile(r names.ProjectRef, remote string) string {
-	return filepath.Join(p.LocalDir(), "locks", "sync-"+must(names.KindRealm, r.Realm)+"-"+must(names.KindProject, r.Project)+"-"+must(names.KindRemote, remote)+".lock")
+	return filepath.Join(p.LocalDir(), "locks", "sync", must(names.KindRealm, r.Realm), must(names.KindProject, r.Project),
+		must(names.KindRemote, remote)+".lock")
 }
 
 // SavepointIndex lists a project's savepoints (one JSON object per line);

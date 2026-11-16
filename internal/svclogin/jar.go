@@ -81,9 +81,7 @@ func ParseLoginOutput(b []byte, host string, now time.Time) ([]Cookie, error) {
 		return nil, errors.New("the login command's output is not a JSON array of cookies")
 	}
 	for i := range list {
-		if list[i].Path == "" {
-			list[i].Path = "/"
-		}
+		normalizeCookie(&list[i])
 		list[i].Domain = strings.ToLower(list[i].Domain)
 	}
 	if err := checkCookies(list, host); err != nil {
@@ -120,6 +118,18 @@ func jsonProblem(err error) string {
 		return "the JSON ends early"
 	}
 	return "invalid JSON"
+}
+
+// normalizeCookie is the one form of a cookie where it is loaded (finding
+// E2-02): name and value without surrounding spaces and tabs, as RFC 6265
+// user agents store them, and "/" for a missing path. checkCookies then
+// refuses anything a cookie value may not hold.
+func normalizeCookie(c *Cookie) {
+	c.Name = strings.Trim(c.Name, " \t")
+	c.Value = strings.Trim(c.Value, " \t")
+	if c.Path == "" {
+		c.Path = "/"
+	}
 }
 
 // checkCookies validates a list of cookies for host.
@@ -271,9 +281,7 @@ func ParseJar(b []byte, service string) (*Jar, error) {
 		return nil, errors.New("the stored cookie jar is not a jar of this service")
 	}
 	for i := range j.Cookies {
-		if j.Cookies[i].Path == "" {
-			j.Cookies[i].Path = "/"
-		}
+		normalizeCookie(&j.Cookies[i])
 	}
 	// The host is checked when the cookies are used (Header): the jar
 	// itself only needs to be well-formed.
@@ -303,6 +311,20 @@ func (j *Jar) Header(host, path string, now time.Time) string {
 		parts[i] = c.Name + "=" + c.Value
 	}
 	return strings.Join(parts, "; ")
+}
+
+// Credential is what the proxy adds to a request to host and path: the
+// Cookie header of the cookies that apply, scrubbing every stored value
+// and the header. When no cookie applies the header is empty, which is no
+// credential: nothing is sent and only the stored values are scrubbed
+// (finding E2-07).
+func (j *Jar) Credential(host, path string, now time.Time) Credential {
+	hdr := j.Header(host, path, now)
+	scrub := j.Values()
+	if hdr != "" {
+		scrub = append(scrub, hdr)
+	}
+	return Credential{Header: "Cookie", Value: hdr, Scrub: scrub}
 }
 
 // Values are the cookie values, for scrubbing responses.

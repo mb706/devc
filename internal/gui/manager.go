@@ -144,7 +144,9 @@ func urlHost(bind string) string {
 // Up starts the desktop sidecar of a project's box (starting the box if
 // needed) and brings its viewer to the host. A running sidecar of the
 // box's current start is kept unless o.Restart; its viewer is forwarded
-// again if that forward has ended.
+// again if that forward has ended. One that was created with other limits
+// or another image generation, or whose record is gone, is refused: only
+// o.Restart replaces it.
 func (m *Manager) Up(ctx context.Context, ref names.ProjectRef, o UpOptions) (*Viewer, error) {
 	if o.Bind == "" {
 		o.Bind = "127.0.0.1"
@@ -168,9 +170,23 @@ func (m *Manager) up(ctx context.Context, ref names.ProjectRef, boxCI *engine.Co
 	}
 	name := SidecarName(ref)
 	if cur != nil && cur.State.Running && !o.Restart && cur.Labels[LabelBoxStart] == StartID(boxCI) && cur.Labels[LabelBox] == boxCI.ID {
-		if rec, err := m.readRecord(ref); err == nil && rec.ID == cur.ID {
-			return m.reuse(ctx, ref, rec, o)
+		// A desktop of the box's current start may have programs on its
+		// display: it is reused only as gui up would create it now, and
+		// replaced only with --restart (finding E2-01).
+		diff, err := m.outdated(cur)
+		if err != nil {
+			return nil, err
 		}
+		if diff != "" {
+			return nil, fmt.Errorf("the desktop of %s is outdated: %s; 'devc gui up --restart %s' replaces it (programs on its display lose it)",
+				names.BoxName(ref), diff, ref)
+		}
+		rec, err := m.readRecord(ref)
+		if err != nil || rec.ID != cur.ID {
+			return nil, fmt.Errorf("the desktop of %s runs, but devc has no record of its viewer (its password and forward); "+
+				"'devc gui up --restart %s' replaces it (programs on its display lose it)", names.BoxName(ref), ref)
+		}
+		return m.reuse(ctx, ref, rec, o)
 	}
 	// Limits that cannot be applied fail before anything changes.
 	facts, err := m.Box.HostFacts(ctx)
@@ -183,8 +199,19 @@ func (m *Manager) up(ctx context.Context, ref names.ProjectRef, boxCI *engine.Co
 	if err := m.remove(ctx, ref, false); err != nil {
 		return nil, err
 	}
-	if err := toolbox.EnsureAuxImage(ctx, m.Engine, AuxImage(), m.ImageContext, o.Rebuild, m.Out); err != nil {
+	img := AuxImage()
+	if err := toolbox.EnsureAuxImage(ctx, m.Engine, img, m.ImageContext, o.Rebuild, m.Out); err != nil {
 		return nil, fmt.Errorf("building the desktop image %s: %w", Image, err)
+	}
+	// The generation recorded is the one of the image the sidecar is made
+	// from, read back from the image.
+	ii, err := m.Engine.ImageInspect(ctx, Image)
+	if err != nil {
+		return nil, fmt.Errorf("reading the desktop image %s: %w", Image, err)
+	}
+	gen := ii.Labels[toolbox.LabelAuxHash]
+	if gen != img.Hash() {
+		return nil, fmt.Errorf("the desktop image %s changed while devc prepared it (another devc version may have built it): run 'devc gui up' again", Image)
 	}
 	sec, err := NewSecrets(m.Rand)
 	if err != nil {
@@ -192,7 +219,7 @@ func (m *Manager) up(ctx context.Context, ref names.ProjectRef, boxCI *engine.Co
 	}
 	args, err := SidecarArgs(SidecarOptions{Ref: ref, BoxID: boxCI.ID, BoxStart: StartID(boxCI),
 		Seccomp: m.Toolbox.SeccompPath(), Labels: selinuxOptions(boxCI), Image: Image,
-		Limits: m.Box.Config.Global.GUI, Controllers: facts.Controllers})
+		Limits: m.Box.Config.Global.GUI, Controllers: facts.Controllers, Generation: gen})
 	if err != nil {
 		return nil, err
 	}
@@ -279,6 +306,32 @@ func (m *Manager) fail(ctx context.Context, ref names.ProjectRef, name string, c
 	}
 	errs = append(errs, fmt.Errorf("the stopped container %s is kept for '%s logs %s'; 'devc gui down %s' removes it", name, m.Engine.Binary(), name, ref))
 	return errors.Join(errs...)
+}
+
+// outdated compares what a sidecar records it was created with (its limits
+// and its image generation) with what gui up would create now, and says
+// what differs ("" when nothing does). A sidecar without the records was
+// created by an earlier devc and counts as outdated.
+func (m *Manager) outdated(ci *engine.ContainerInfo) (string, error) {
+	want, err := LimitsSpec(m.Box.Config.Global.GUI)
+	if err != nil {
+		return "", err
+	}
+	var diffs []string
+	switch have, ok := ci.Labels[LabelLimits]; {
+	case !ok:
+		diffs = append(diffs, "it was created by an earlier devc, which recorded no resource limits (it may have none)")
+	case have != want:
+		diffs = append(diffs, fmt.Sprintf("it has the limits %s, and [gui] in config.toml now asks for %s", proto.Printable(have), want))
+	}
+	gen := AuxImage().Hash()
+	switch have, ok := ci.Labels[LabelImage]; {
+	case !ok:
+		diffs = append(diffs, "it runs a desktop image of an earlier devc")
+	case have != gen:
+		diffs = append(diffs, fmt.Sprintf("it runs desktop image generation %.12s, and this devc's is %.12s", proto.Printable(have), gen))
+	}
+	return strings.Join(diffs, "; "), nil
 }
 
 // reuse keeps a running sidecar and makes sure its viewer is forwarded.
@@ -386,9 +439,11 @@ type Status struct {
 	Ref       string `json:"ref"`
 	Container string `json:"container"`
 	Box       string `json:"box"`
-	// State is absent, running, stopped (the container has exited) or
-	// stale (it belongs to an earlier start of the box, or the box is not
-	// running).
+	// State is absent, running, outdated (it runs for the box's current
+	// start but with other limits or another image generation than gui up
+	// would create now; gui up --restart replaces it), stopped (the
+	// container has exited) or stale (it belongs to an earlier start of the
+	// box, or the box is not running).
 	State   string     `json:"state"`
 	Reason  string     `json:"reason,omitempty"`
 	Started *time.Time `json:"started,omitempty"`
@@ -425,12 +480,28 @@ func (m *Manager) Status(ctx context.Context, ref names.ProjectRef) (*Status, er
 		return st, nil
 	}
 	st.State, st.Display = "running", Display
-	if rec, err := m.readRecord(ref); err == nil && rec.ID == cur.ID && rec.Forward != "" && m.Forwards.Alive(rec.Forward) {
+	var reasons []string
+	diff, err := m.outdated(cur)
+	if err != nil {
+		return nil, err
+	}
+	if diff != "" {
+		st.State = "outdated"
+		reasons = append(reasons, diff+"; 'devc gui up --restart' replaces it")
+	}
+	rec, err := m.readRecord(ref)
+	switch {
+	case err != nil || rec.ID != cur.ID:
+		if diff == "" {
+			reasons = append(reasons, "devc has no record of its viewer; 'devc gui up --restart' replaces it")
+		}
+	case rec.Forward != "" && m.Forwards.Alive(rec.Forward):
 		v := Viewer{Bind: rec.Bind, HostPort: rec.HostPort}
 		st.Viewer, st.Forward = v.BaseURL(), rec.Forward
-	} else {
-		st.Reason = "the viewer is not forwarded; 'devc gui up' forwards it again"
+	case diff == "":
+		reasons = append(reasons, "the viewer is not forwarded; 'devc gui up' forwards it again")
 	}
+	st.Reason = strings.Join(reasons, "; ")
 	return st, nil
 }
 

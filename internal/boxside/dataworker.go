@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -33,6 +34,10 @@ type DataWorker struct {
 	BoxUID, BoxGID, VaultUID, VaultGID int
 	// Clone clones src into dst (FICLONE); tests replace it.
 	Clone func(dst, src *os.File) error
+	// syncEntries and reportBudget replace MaxSyncEntries and the report's
+	// budget for entries when set (tests).
+	syncEntries  int
+	reportBudget int64
 }
 
 // NewDataWorker returns the worker of the helper container.
@@ -130,11 +135,40 @@ func (w *DataWorker) Run(req DataRequest) (*DataResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	capReport(res)
+	return res, nil
+}
+
+// capReport bounds the lists of a report that grow with the tree (finding
+// E2-05): at most maxReported skipped entries of at most maxReportedText
+// bytes each, and at most MaxReportedPaths displaced paths (valid data
+// paths; DisplacedTotal keeps the count).
+func capReport(res *DataResult) {
 	if len(res.Skipped) > maxReported {
 		n := len(res.Skipped) - maxReported
 		res.Skipped = append(res.Skipped[:maxReported], fmt.Sprintf("… and %d more", n))
 	}
-	return res, nil
+	for i, s := range res.Skipped {
+		if len(s) > maxReportedText {
+			cut := maxReportedText - len("…")
+			for cut > 0 && !utf8.RuneStart(s[cut]) {
+				cut--
+			}
+			res.Skipped[i] = s[:cut] + "…"
+		}
+	}
+	if n := len(res.Displaced); n > 0 {
+		var listed []string
+		for _, p := range res.Displaced {
+			if len(listed) < MaxReportedPaths && CheckDataPath(p) == nil {
+				listed = append(listed, p)
+			}
+		}
+		if len(listed) < n {
+			res.DisplacedTotal = int64(n)
+		}
+		res.Displaced = listed
+	}
 }
 
 // project opens the project directory.
@@ -338,10 +372,14 @@ func (w *DataWorker) setup(req DataRequest, res *DataResult) error {
 type treeStats struct {
 	files, size int64
 	skipped     []string
+	// rels are the paths of skipped (pull-in tells partial entries by
+	// them).
+	rels []string
 }
 
 func (s *treeStats) skip(rel, why string) {
 	s.skipped = append(s.skipped, rel+" ("+why+")")
+	s.rels = append(s.rels, rel)
 }
 
 // ownFile re-owns a regular file and sets its mode through a descriptor.

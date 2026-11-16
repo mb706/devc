@@ -136,6 +136,29 @@ func TestServiceStreams(t *testing.T) {
 	if strings.Contains(got, "d43m0n") || strings.Contains(got, "from-the-upstream") {
 		t.Errorf("the credential or Set-Cookie came back: %s", got)
 	}
+	// E2-02: a credential stored with white space around it is normalised
+	// where it is loaded: the upstream gets the value that was checked, and
+	// reflecting it gives the box nothing; padding that makes a short value
+	// look long enough is refused before anything goes out.
+	store.Set("demo", "WIKI_TOKEN", []byte(" \tBearer padded-t0ken-value \n"))
+	got = svcExchange(t, wikiPort, svcGet(wikiPort, "/api/echo"))
+	mu.Lock()
+	if seenAuth[len(seenAuth)-1] != "Bearer padded-t0ken-value" {
+		t.Errorf("the upstream saw %q", seenAuth[len(seenAuth)-1])
+	}
+	nAuth := len(seenAuth)
+	mu.Unlock()
+	if !strings.Contains(got, "200 OK") || strings.Contains(got, "padded-t0ken") || !strings.Contains(got, "X-Echo: "+svclogin.Redacted) {
+		t.Errorf("a padded credential: %s", got)
+	}
+	store.Set("demo", "WIKI_TOKEN", []byte("abcdefg \n"))
+	got = svcExchange(t, wikiPort, svcGet(wikiPort, "/api/echo"))
+	mu.Lock()
+	if !strings.Contains(got, "503") || !strings.Contains(got, "7 characters") || len(seenAuth) != nAuth {
+		t.Errorf("a short credential padded to 8 bytes: %s (%d requests reached the upstream)", got, len(seenAuth)-nAuth)
+	}
+	mu.Unlock()
+	store.Set("demo", "WIKI_TOKEN", []byte(svcToken+"\n"))
 	// Refusals.
 	for _, tc := range []struct{ req, want string }{
 		{"POST /api/x HTTP/1.1\r\nHost: 127.0.0.1:" + strconv.Itoa(wikiPort) + "\r\nContent-Length: 0\r\n\r\n", "no rule allows POST /api/x"},
@@ -218,6 +241,30 @@ func TestServiceStreams(t *testing.T) {
 		t.Errorf("the upstream saw cookies %q", seenCookie[len(seenCookie)-1])
 	}
 	mu.Unlock()
+	// E2-07: where no stored cookie applies (the session cookie is for
+	// /private), the request goes out without a Cookie header instead of
+	// being refused as a short credential.
+	storeJarPath := func(value, path string) {
+		j := svclogin.NewJar("intranet", []svclogin.Cookie{{Name: "session", Value: value, Domain: host, Path: path, Expiry: time.Now().Add(time.Hour).Unix()}}, time.Now())
+		b, _ := j.Marshal()
+		if err := store.Set("demo", config.JarSecret("intranet"), b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	storeJarPath("c00kie-session-0001", "/private")
+	got = svcExchange(t, intraPort, svcGet(intraPort, "/health"))
+	mu.Lock()
+	if !strings.Contains(got, "200 OK") || seenCookie[len(seenCookie)-1] != "" {
+		t.Errorf("a path without cookies: %q, the upstream saw %q", got, seenCookie[len(seenCookie)-1])
+	}
+	mu.Unlock()
+	got = svcExchange(t, intraPort, svcGet(intraPort, "/private/x"))
+	mu.Lock()
+	if !strings.Contains(got, "200 OK") || seenCookie[len(seenCookie)-1] != "session=c00kie-session-0001" || strings.Contains(got, "c00kie") {
+		t.Errorf("the cookie's own path: %q, the upstream saw %q", got, seenCookie[len(seenCookie)-1])
+	}
+	mu.Unlock()
+	storeJar(time.Now(), "c00kie-session-0001")
 	// The upstream asks for a login: 503 now and for later requests.
 	if got := svcExchange(t, intraPort, svcGet(intraPort, "/api/unauth")); !strings.Contains(got, "503") || !strings.Contains(got, "401") {
 		t.Errorf("401 from the upstream: %s", got)

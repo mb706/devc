@@ -72,7 +72,7 @@ func statusOf(c *config.Config, s *config.Service, store secrets.Store, now time
 		case err != nil:
 			st.Login, st.Detail = "no-secret", fmt.Sprintf("the secret %s is not set ('devc secret set %s %s')", s.Auth.ValueSecret, s.Realm, s.Auth.ValueSecret)
 		default:
-			if _, err := svclogin.HeaderCredential(v); err != nil {
+			if _, err := svclogin.HeaderCredential(s.Auth.Header, v); err != nil {
 				st.Login, st.Detail = "invalid-secret", fmt.Sprintf("the secret %s cannot be used: %s ('devc secret set %s %s')", s.Auth.ValueSecret, err, s.Realm, s.Auth.ValueSecret)
 			} else {
 				st.Login, st.Detail = "ok", "header "+s.Auth.Header+" from the secret "+s.Auth.ValueSecret

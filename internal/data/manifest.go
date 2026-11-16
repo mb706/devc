@@ -63,6 +63,12 @@ type Record struct {
 	// sent is Digest, and the remote may keep further files (devc never
 	// deletes there).
 	RemoteDigest string `json:"remote_digest,omitempty"`
+	// Outcome (pull) is what the merge did with the entry
+	// (boxside.OutcomeMerged, OutcomeSkipped, OutcomePartial): only a
+	// complete merge can make this machine's copy the remote's (finding
+	// E2-04). Records written before outcomes existed have none and never
+	// count as matching.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // Check validates a record read back from the manifest.
@@ -103,6 +109,8 @@ func (r Record) Check() error {
 		return errors.New("invalid content hash")
 	case r.RemoteDigest != "" && (r.Action != ActionPull || !boxside.ValidDigest(r.RemoteDigest)):
 		return errors.New("invalid remote digest")
+	case r.Outcome != "" && (r.Action != ActionPull || !boxside.ValidOutcome(r.Outcome)):
+		return errors.New("invalid outcome")
 	}
 	return nil
 }
@@ -204,29 +212,22 @@ func ParseManifest(b []byte) []Record {
 	return out
 }
 
-// records turns worker digests into manifest records of this machine.
+// records turns worker digests into manifest records of this machine; a
+// pull's records keep the remote's observation and the merge's outcome of
+// each entry (findings D2-12, E2-04).
 func (s *Service) records(action, remote, savepoint string, ds []boxside.EntryDigest) []Record {
 	now := s.now().Format(time.RFC3339Nano)
 	machine := s.Config.Global.Machine()
 	out := make([]Record, 0, len(ds))
 	for _, d := range ds {
-		out = append(out, Record{V: 1, Time: now, Machine: machine, Action: action, Path: d.Path, Files: d.Files, Size: d.Size,
-			Digest: d.Digest, Content: d.Content, Remote: remote, Savepoint: savepoint})
+		r := Record{V: 1, Time: now, Machine: machine, Action: action, Path: d.Path, Files: d.Files, Size: d.Size,
+			Digest: d.Digest, Content: d.Content, Remote: remote, Savepoint: savepoint}
+		if action == ActionPull {
+			r.RemoteDigest, r.Outcome = d.Remote, d.Outcome
+		}
+		out = append(out, r)
 	}
 	return out
-}
-
-// withRemoteDigests adds the remote's observations of a pull to its
-// records (by path); a record without one claims nothing about the remote.
-func withRemoteDigests(recs []Record, remote []boxside.EntryDigest) []Record {
-	by := map[string]string{}
-	for _, d := range remote {
-		by[d.Path] = d.Digest
-	}
-	for i := range recs {
-		recs[i].RemoteDigest = by[recs[i].Path]
-	}
-	return recs
 }
 
 // record appends records to the manifest. The operation they describe has

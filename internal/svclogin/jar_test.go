@@ -2,6 +2,7 @@ package svclogin
 
 import (
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -84,6 +85,24 @@ func TestParseLoginOutput(t *testing.T) {
 	if _, err := ParseLoginOutput([]byte(`[{"name":"a","value":"bvalue-1","domain":"0.0.1"}]`), "127.0.0.1", now); err == nil {
 		t.Error("a suffix of an IP address was accepted")
 	}
+	// E2-02: values a login stores are normalised as header credentials
+	// are: surrounding white space goes (as RFC 6265 user agents drop it),
+	// and the length rule applies to what is left.
+	cs, err = ParseLoginOutput([]byte(`[{"name":" session\t","value":"  abcdefgh \t","domain":"intranet.example.org"}]`), "intranet.example.org", now)
+	if err != nil || cs[0].Name != "session" || cs[0].Value != "abcdefgh" {
+		t.Errorf("padded cookie: %+v %v", cs, err)
+	}
+	if _, err := ParseLoginOutput([]byte(`[{"name":"session","value":"abcdefg ","domain":"intranet.example.org"}]`), "intranet.example.org", now); err == nil ||
+		!strings.Contains(err.Error(), "7 characters") {
+		t.Errorf("padded short cookie: %v", err)
+	}
+	if _, err := ParseJar([]byte(`{"v":1,"service":"intranet","login_at":"2026-01-01T00:00:00Z","cookies":[{"name":"a","value":"abcdefg ","domain":"x.example"}]}`), "intranet"); err == nil {
+		t.Error("a stored padded short cookie was accepted")
+	}
+	if j, err := ParseJar([]byte(`{"v":1,"service":"intranet","login_at":"2026-01-01T00:00:00Z","cookies":[{"name":"a","value":" abcdefgh","domain":"x.example"}]}`), "intranet"); err != nil ||
+		j.Cookies[0].Value != "abcdefgh" {
+		t.Errorf("a stored padded cookie: %+v %v", j, err)
+	}
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
@@ -115,6 +134,18 @@ func TestJar(t *testing.T) {
 	}
 	if got := j2.Header("intranet.example.org", "/", now.Add(time.Hour)); got != "" {
 		t.Errorf("header after expiry: %q", got)
+	}
+	// E2-07: the credential of a request: the cookies that apply; where
+	// none does, no header and no empty value to scrub, only the stored
+	// values.
+	c := j2.Credential("intranet.example.org", "/api/x", now)
+	if c.Header != "Cookie" || c.Value != "api=apitoken99; session=s3cr3tsession" ||
+		!slices.Equal(c.Scrub, []string{"s3cr3tsession", "apitoken99", "expired-value", "api=apitoken99; session=s3cr3tsession"}) || c.check() != nil {
+		t.Errorf("credential for /api/x: %+v %v", c, c.check())
+	}
+	c = j2.Credential("intranet.example.org", "/", now.Add(time.Hour))
+	if c.Value != "" || !slices.Equal(c.Scrub, []string{"s3cr3tsession", "apitoken99", "expired-value"}) || c.check() != nil {
+		t.Errorf("credential without an applicable cookie: %+v %v", c, c.check())
 	}
 	if e := j2.Expires("intranet.example.org"); e.Unix() != now.Unix()-1 {
 		t.Errorf("Expires: %v", e)
