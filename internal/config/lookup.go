@@ -255,8 +255,11 @@ type Resolved struct {
 	Capabilities Capabilities `toml:"capabilities" json:"capabilities"`
 	Box          ResolvedBox  `toml:"box" json:"box"`
 	Mounts       []Mount      `toml:"mounts" json:"mounts"`
-	SyncHub      bool         `toml:"sync_hub" json:"sync_hub"`
-	Requests     Requests     `toml:"requests" json:"requests"`
+	// Shares are the realm's shares followed by the project's (work order
+	// C16), without the built-in dep-source.
+	Shares   []string `toml:"shares" json:"shares"`
+	SyncHub  bool     `toml:"sync_hub" json:"sync_hub"`
+	Requests Requests `toml:"requests" json:"requests"`
 	// SecretsDelivery is the global secrets.delivery.
 	SecretsDelivery string `toml:"secrets_delivery" json:"secrets_delivery"`
 	// GitHubApp is the realm's [github.app] (work order C15).
@@ -362,6 +365,7 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 			Ports:  nonNilInts(p.Box.Ports),
 		},
 		Mounts:   p.Mounts,
+		Shares:   union(realm.Shares, p.Shares),
 		SyncHub:  realm.Sync.Hub,
 		Requests: Requests{Auto: nonNil(p.Requests.Auto)},
 

@@ -201,6 +201,8 @@ func newRoot(a *app) *cobra.Command {
 		newRequestCmd(a),
 		newRequestsCmd(a),
 		newGHCmd(a),
+		newShareCmd(a),
+		newSrcCmd(a),
 		newPRCmd(a),
 		newSSHCmd(a),
 		newGateExecCmd(a),

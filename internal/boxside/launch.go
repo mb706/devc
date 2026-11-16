@@ -65,6 +65,10 @@ type Launch struct {
 	// (grants.github "app" or "token:<secret>", work order C15): the
 	// launcher asks the daemon for it at every start and exports GH_TOKEN.
 	GitHubToken bool `json:"github_token,omitempty"`
+	// Path lists directories put first in PATH: the bin directories of the
+	// toolbox components the harness needs (install.needs, work order C16),
+	// in the concrete version directory current at the last devc up.
+	Path []string `json:"path,omitempty"`
 }
 
 // DeliveryDaemon is Launch.Delivery for secrets served by the daemon.
@@ -81,7 +85,9 @@ type LaunchAuth struct {
 
 // LaunchHome describes the harness home and how it is shared.
 type LaunchHome struct {
-	Dir      string   `json:"dir"` // absolute
+	Dir string `json:"dir"` // absolute
+	// Also are further state directories (home.also), absolute.
+	Also     []string `json:"also,omitempty"`
 	Strategy string   `json:"strategy"`
 	Shared   []string `json:"shared"`
 	PerBox   []string `json:"per_box"`
@@ -138,6 +144,16 @@ func (l *Launch) Validate() error {
 	for k := range l.Env {
 		if !envNameRE.MatchString(k) {
 			return fmt.Errorf("harness %s: invalid environment variable %q", l.ID, k)
+		}
+	}
+	for _, d := range l.Path {
+		if !below("/opt/devc", d) || strings.ContainsRune(d, ':') {
+			return fmt.Errorf("harness %s: PATH entry %q is not below /opt/devc", l.ID, d)
+		}
+	}
+	for _, d := range l.Home.Also {
+		if !below("/home/dev", d) {
+			return fmt.Errorf("harness %s: home directory %q is not below /home/dev", l.ID, d)
 		}
 	}
 	if l.Auth.Env != "" && !envNameRE.MatchString(l.Auth.Env) {
@@ -308,6 +324,13 @@ func PrepareLaunch(l *Launch, userArgs []string, e LaunchEnv) (*Prepared, error)
 
 	for k, v := range l.Env {
 		env.set(k, v)
+	}
+	if len(l.Path) > 0 {
+		p := strings.Join(l.Path, ":")
+		if cur := env.get("PATH"); cur != "" {
+			p += ":" + cur
+		}
+		env.set("PATH", p)
 	}
 	env.set("DEVC_SESSION", session)
 	env.set("DEVC_HARNESS", l.ID)

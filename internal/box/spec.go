@@ -304,6 +304,9 @@ func BuildSpec(in Inputs, contribs ...Contributor) (*Spec, error) {
 	mounts = append(mounts,
 		Mount{Source: p.BoxHomeDir(ref), Target: paths.InBoxHome},
 		Mount{Source: p.RealmPkgCacheDir(r.Realm), Target: paths.InBoxCache},
+		// Dependency sources fetched by `devc src` (work order C16): shared
+		// by the boxes of the realm, like the package cache.
+		Mount{Source: p.RealmSrcCacheDir(r.Realm), Target: paths.InBoxSrc},
 		Mount{Source: p.NotesDir(ref), Target: paths.InBoxNotes},
 		Mount{Source: p.MemoryDir(r.Realm, r.MemoryGroup), Target: paths.InBoxMemory},
 		Mount{Source: in.Toolbox.Dir, Target: paths.InBoxTools, ReadOnly: true},

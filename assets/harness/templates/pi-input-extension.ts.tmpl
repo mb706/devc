@@ -1,0 +1,92 @@
+// devc's input extension for pi (work order C16). devc renders it into the
+// read-only baseline directory /etc/pi; pi loads it with -e when the
+// harness manifest's input.adapter is "extension". It connects to the devc
+// box agent on its in-box socket (the abstract socket @devc-agent),
+// registers for this session (DEVC_SESSION, set by devc's launcher) and
+// submits the user messages the devc daemon sends through pi's own API
+// instead of typing them into the terminal. It never runs anything else.
+import * as net from "node:net";
+
+export default function (pi: any) {
+  const session = process.env.DEVC_SESSION ?? "";
+  if (!/^s[0-9a-v]{20}$/.test(session)) return;
+  let busy = false;
+  let stopped = false;
+  let sock: net.Socket | undefined;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+
+  pi.on("agent_start", async () => { busy = true; });
+  pi.on("agent_settled", async () => { busy = false; });
+  pi.on("session_shutdown", async () => {
+    stopped = true;
+    if (retry) clearTimeout(retry);
+    sock?.destroy();
+  });
+
+  const reply = (msg: object) => {
+    sock?.write(JSON.stringify(Object.assign({ jsonrpc: "2.0" }, msg)) + "\n");
+  };
+
+  const handle = (m: any) => {
+    if (m === null || typeof m !== "object" || m.id === undefined) return;
+    if (m.method !== "input.submit") {
+      reply({ id: m.id, error: { code: -32601, message: "method not found" } });
+      return;
+    }
+    const text = String(m.params?.text ?? "");
+    const steer = m.params?.mode === "steer";
+    try {
+      if (busy) {
+        pi.sendUserMessage(text, { deliverAs: steer ? "steer" : "followUp" });
+        reply({ id: m.id, result: { accepted: true, delivered: steer ? "steer" : "follow_up" } });
+      } else {
+        pi.sendUserMessage(text);
+        reply({ id: m.id, result: { accepted: true, delivered: "now" } });
+      }
+    } catch (e) {
+      reply({ id: m.id, error: { code: -32000, message: String(e).slice(0, 300) } });
+    }
+  };
+
+  const connect = () => {
+    if (stopped || sock) return;
+    const s = net.createConnection({ path: "\0devc-agent" });
+    s.unref(); // never keeps pi running (print mode exits as usual)
+    sock = s;
+    let buf = "";
+    let registered = false;
+    s.setEncoding("utf8");
+    s.on("connect", () => {
+      s.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "box.input.register",
+        params: { session: session, harness: "pi", version: 1 } }) + "\n");
+    });
+    s.on("data", (chunk: string) => {
+      buf += chunk;
+      if (buf.length > 4194304) { s.destroy(); return; }
+      let i = buf.indexOf("\n");
+      while (i >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        i = buf.indexOf("\n");
+        let m: any;
+        try { m = JSON.parse(line); } catch { continue; }
+        if (!registered) {
+          registered = true;
+          if (m && m.error) { stopped = true; s.destroy(); }
+          continue;
+        }
+        handle(m);
+      }
+    });
+    s.on("error", () => {});
+    s.on("close", () => {
+      if (sock === s) sock = undefined;
+      if (!stopped) {
+        retry = setTimeout(connect, 5000);
+        retry.unref?.();
+      }
+    });
+  };
+
+  pi.on("session_start", async () => { connect(); });
+}

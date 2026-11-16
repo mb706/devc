@@ -110,6 +110,14 @@ flags:
 			o.neverSubmit = true
 		case "--winsize":
 			o.winsize = true
+		case "--append-system-prompt", "-e":
+			// pi's flags (work order C16): the built-in pi manifest passes
+			// them; the fake accepts and ignores them.
+			if len(args) < 2 {
+				fmt.Fprintf(stderr, "%s needs a value\n", args[0])
+				return 2
+			}
+			args = args[1:]
 		case "--busy":
 			if len(args) < 2 {
 				fmt.Fprintln(stderr, "--busy needs seconds")

@@ -34,6 +34,9 @@ internal/
   netpolicy/         firewall rules, forwarder, allowlist proxy, exceptions, proxy log
   secrets/           secret store backends, delivery
   github/            GitHub: repository of an upstream, read facade requests, host credential, App tokens (C15)
+  extract/           safe extraction of untrusted archives (tar, gzip, bzip2, zip) for shares and sources (C16)
+  shares/            publishing directories of relays as read-only shares; their mounts in boxes (C16)
+  depsrc/            devc src in a box: dependency-source specs, installed versions, registry downloads (C16)
   daemon/            machine daemon: API, box channels, relay service, gate, forwards   (phase 2)
   hub/               hub server: listeners, projections, inbox, ntfy, web app           (phase 2)
   selinux/ apparmor/ host integration helpers

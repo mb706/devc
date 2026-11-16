@@ -7,7 +7,8 @@ reference for each command is `devc <command> --help`; host preparation is in
 Contents: [Concepts](#concepts) · [Configuration and state](#configuration-and-state) ·
 [Boxes](#boxes) · [Sessions](#sessions) · [Git](#git-relay-bank-pull-push) ·
 [Data](#data-zones-sealing-savepoints) · [Network](#network-levels-exceptions-and-port-forwarding) ·
-[Logins and secrets](#logins-and-secrets) · [Notes and memory](#notes-and-memory) ·
+[Logins and secrets](#logins-and-secrets) · [Shares](#shares-skills-and-reference-material-for-boxes) ·
+[Dependency sources](#dependency-sources-devc-src) · [Notes and memory](#notes-and-memory) ·
 [Editors](#editors) · [What is protected](#what-is-protected-and-what-is-not)
 
 ## Concepts
@@ -20,7 +21,7 @@ Contents: [Concepts](#concepts) · [Configuration and state](#configuration-and-
 | **Box** | The container of one project, named `devc-<realm>-<project>`. It runs as user `dev` (UID 1000) whatever your own UID is. |
 | **Worktree** | A checkout inside the project directory: `main/`, and one sibling directory per task. |
 | **Session** | One agent (or shell) running in a tmux window in a box, with an ID such as `s01k7etp7bc05l9nn1t9l`. |
-| **Harness** | A coding agent devc knows how to install, log in and start: Claude Code and Codex are built in; others are described by a manifest. |
+| **Harness** | A coding agent devc knows how to install, log in and start: Claude Code, Codex, pi, the Cursor CLI and OpenCode are built in; others are described by a manifest. |
 | **Toolbox** | A directory mounted read-only at `/opt/devc` in every box: the devc helper, a static tmux, the installed harnesses. |
 | **Relay** | A bare git repository on the host, one per project, between the box and the upstream repository. |
 
@@ -67,9 +68,11 @@ effect: `[sync]`. `build_from_repo` and
 
 State lives in `~/.local/share/devc` (`--state-dir`, `DEVC_STATE_DIR` or
 `state_dir`): `durable/` holds what is worth backing up (relays, journals,
-context repositories with the data manifests, harness state, secrets),
+context repositories with the data manifests, harness state, secrets,
+published shares),
 `local/` what belongs to this machine (box homes, savepoint repositories, the
-staging directories of data pulls), `cache/` what can be deleted, and
+staging directories of data pulls), `cache/` what can be deleted (the realms'
+package caches and dependency sources), and
 `toolbox/` the toolbox. Project directories live below `projects_root`
 (default `~/devc/<realm>/<project>`). Runtime files are in
 `$XDG_RUNTIME_DIR/devc`.
@@ -889,6 +892,8 @@ login:
 devc login demo claude                 # runs `claude setup-token` in a throwaway container, then asks for the token
 devc login demo claude --token-stdin   # or read the token from stdin
 devc login demo codex                  # runs Codex's device login with the realm's shared Codex home
+devc login demo pi                     # `pi auth login` with the realm's shared pi directory
+devc login demo cursor                 # `cursor-agent login`; the login lands in the realm's shared ~/.config/cursor
 devc login status demo
 ```
 
@@ -986,6 +991,127 @@ shared by all boxes of the realm. A shared home is writable by every box of
 the realm, so configuration planted there by one box (hooks, servers) can run
 in the others: a realm is one trust domain.
 
+**pi, Cursor and OpenCode** (built-in manifests written from the vendors'
+documentation; none has been tried against a real account, see
+`docs/dev/LEFTOVER.md`):
+
+- **pi** (`devc harness install pi`) needs Node.js; installing pi installs
+  the toolbox's pinned Node.js first (`devc toolbox install node` does it on
+  its own), and pi runs with that Node first in `PATH`. Its agent directory
+  `~/.pi/agent` (login, settings, sessions) is shared across the realm. devc's
+  instructions reach it with `--append-system-prompt`. pi has no approval
+  prompts at all, by design; the box is its sandbox.
+- **Cursor CLI** (`cursor-agent`) shares both of its directories, `~/.cursor`
+  and `~/.config/cursor` (which holds the login), across the realm. Instead
+  of a login, a dashboard API key works: `[harness.cursor] auth = "api-key"`
+  in `realm.toml`, then `devc login <realm> cursor` stores it and sessions
+  get it as `CURSOR_API_KEY`. Cursor has no instruction file outside the
+  project, so it gets no baseline or sandbox description.
+- **OpenCode** keeps everything in the box (each box logs in with `opencode
+  auth login` inside it): its database holds sessions and credentials and is
+  fragile when shared. devc's managed configuration in `/etc/opencode`
+  names the instructions file.
+
+A manifest can ask for toolbox components with `install.needs = ["node"]`,
+keep state in several home directories (`home.also`), and pass extra
+arguments when a structured input adapter is chosen (`input.args`). pi's
+structured adapter is an extension devc renders into `/etc/pi`: with your
+own copy of the pi manifest saying `input.adapter = "extension"`, pi loads
+it and the daemon hands messages to pi's API instead of typing them; while
+no extension is connected it types them as before, and the receipt says so.
+
+## Shares: skills and reference material for boxes
+
+A share is a directory you publish from a project and mount read-only into
+other projects' boxes: a skill, a tool, reference material. Because it puts
+text in front of other agents, possibly in another realm, publishing is a
+deliberate step on the host, and only committed content can be published:
+
+```sh
+devc share publish review --from demo/tools --path skills/review [--ref main] [--yes]
+devc share ls [--json]                 # shares, their current version and source, who lists them
+devc share log review                  # every published version with its source commit
+devc share rm review [--yes]
+```
+
+`publish` reads the directory from the project's **relay** with git (bank the
+box first: `devc bank demo/tools`), at the default branch or `--ref` (a
+branch or a commit), never from the project directory, so uncommitted work
+in the box is not published. It shows the change against the current
+version (git's file list and diff, made printable; for a new share, or one
+last published from another project, the list of files) and asks before
+publishing; without a terminal it needs `--yes`. The new version is
+unpacked into `durable/shares/<name>/<version>/` by devc's safe extractor:
+symlinks that leave the directory, special files and oversized trees are
+left out (and listed). Old versions are kept; `current` points at the
+newest.
+
+Boxes get the shares their project and realm list:
+
+```toml
+# project.toml (or realm.toml, whose list every box of the realm gets as well)
+shares = ["review", "styleguide"]
+```
+
+In the box each share is at `/opt/shares/<name>`, read-only (its earlier
+versions are visible below `/opt/shares/.v/<name>/`). A share whose
+top directory holds `SKILL.md` is a skill: box init links it into
+`~/.agents/skills/<name>` (read by Codex, pi, OpenCode and Cursor) and
+`~/.claude/skills/<name>` (Claude Code), and removes its links to shares the
+box no longer lists; your own entries there are left alone.
+
+**When boxes see a change.** A new version of a share a box already mounts
+is visible at once: the box mounts the share's whole directory and
+`/opt/shares/<name>` follows its `current` link inside the box. A share that
+becomes a skill only in a later version is linked at the box's next start.
+Changing a project's (or realm's) `shares` list changes its box definition:
+`devc up` then asks for `devc up --recreate`. `share rm` leaves running
+boxes an empty `/opt/shares/<name>`.
+
+Every box also has the built-in skill `dep-source` (at
+`/opt/shares/dep-source`, from the toolbox), which tells agents how to use
+`devc src`.
+
+## Dependency sources: `devc src`
+
+Installed packages are often not their source (an installed R package has no
+`R/*.R` files, a wheel no C code, an npm package built output). In a box,
+`devc src` downloads the source of a dependency into the realm's cache and
+prints the path:
+
+```sh
+devc src r:dplyr                   # the installed version, from DESCRIPTION in R's library paths
+devc src pypi:requests             # the version installed in the active Python environment
+devc src npm:@types/node           # the version in node_modules (searched upwards from the current directory)
+devc src npm:react@18.3.1          # an explicit version
+devc src github:tidyverse/dplyr@v1.1.4   # a branch, tag or commit (the default branch without @)
+devc src pypi:requests --json      # path, version, source URL, whether the cache answered
+```
+
+Without a version devc uses the installed one, else the current release. An
+R package installed from GitHub (its `DESCRIPTION` names a GitHub remote and
+commit) is fetched from that commit instead of CRAN. Sources: CRAN's source
+tarballs (current, then the archive), the source distribution PyPI's JSON
+API names, the npm registry's tarball, GitHub's tarball endpoint; published
+checksums (PyPI, npm, CRAN's current releases) are verified. Archives are
+unpacked with the same safe extractor as shares and are never built,
+installed or run.
+
+The cache is `cache/realms/<realm>/src/` in devc's state, mounted at `/src`
+in every box of the realm as `/src/<ecosystem>/<name>/<version>/`. It is
+**shared by the realm's boxes and writable by them**: one box could change
+what another reads there. That is acceptable within one realm, which is one
+trust domain anyway; boxes of other realms never see it.
+
+`devc src` downloads with the box's own network. At level `allowlist` the
+registry must be on the allowlist; a failed download names the preset to add
+(`cran`, `pypi`, `npm`, `github`), or the agent can make a `devc request net`
+request. At level `none` it cannot download. The base URLs can be pointed at
+mirrors with `DEVC_SRC_CRAN`, `DEVC_SRC_PYPI`, `DEVC_SRC_NPM` and
+`DEVC_SRC_GITHUB_API` in the box. For GitHub, a `GH_TOKEN` or `GITHUB_TOKEN`
+in the box is sent to api.github.com (unauthenticated requests are limited
+to 60 an hour).
+
 ## Notes and memory
 
 Each realm has a context repository in devc's state. In a box, `/ctx/notes`
@@ -1070,9 +1196,13 @@ everything that matters outside it, but it is not a virtual machine.
   granted to the project, and the GitHub token of `grants.github = "app"` or
   `"token:…"`, which can do on GitHub whatever its permissions allow, beyond
   the relay's branch rules (protect branches with a ruleset).
-- **Within a realm**, boxes share harness state, memory and the package cache;
-  one box can influence the others. Use separate realms for work that must
-  stay apart.
+- **Within a realm**, boxes share harness state, memory, the package cache
+  and the dependency sources in `/src`; one box can influence the others. Use
+  separate realms for work that must stay apart.
+- **Shares** put text you publish in front of every agent whose box lists
+  them, in any realm. devc publishes only committed content, shows the diff
+  first and unpacks safely, but what the text says is up to you: read the
+  diff before you confirm.
 - **The project directory is writable by the box.** Running git, direnv, an
   editor, a build tool or a test runner on it from the host runs whatever the
   box planted there (hooks, `.envrc`, `.vscode/tasks.json`, `Makefile`). Use

@@ -112,6 +112,9 @@ type Realm struct {
 	Harness     map[string]HarnessOverride `toml:"harness" json:"harness,omitempty"`
 	Sync        RealmSync                  `toml:"sync" json:"sync"`
 	GitHub      RealmGitHub                `toml:"github" json:"github"`
+	// Shares are mounted into every box of the realm, in addition to the
+	// project's own (work order C16).
+	Shares []string `toml:"shares" json:"shares"`
 }
 
 // RealmGitHub is [github] of a realm.
@@ -192,6 +195,9 @@ type Project struct {
 	Box           ProjectBox     `toml:"box" json:"box"`
 	Mounts        []Mount        `toml:"mounts" json:"mounts"`
 	Requests      Requests       `toml:"requests" json:"requests"`
+	// Shares names published shares mounted read-only at
+	// /opt/shares/<name> (work order C16); the realm's are added.
+	Shares []string `toml:"shares" json:"shares"`
 }
 
 type ProjectGit struct {
@@ -362,19 +368,30 @@ type HarnessInstall struct {
 	// the version directory.
 	Env map[string]string `toml:"env" json:"env,omitempty"`
 	// Path is the host file copied to Exe ("local").
-	Path       string   `toml:"path" json:"path,omitempty"`
-	Exe        string   `toml:"exe" json:"exe"`
+	Path string `toml:"path" json:"path,omitempty"`
+	Exe  string `toml:"exe" json:"exe"`
+	// Needs lists toolbox components the harness needs (work order C16:
+	// "node"); their bin directories come first in PATH when it is
+	// installed, logs in and is launched.
 	Needs      []string `toml:"needs" json:"needs"`
 	VersionCmd []string `toml:"version_cmd" json:"version_cmd"`
 }
 
+// ToolboxComponents are the names install.needs accepts.
+var ToolboxComponents = []string{"node"}
+
 type HarnessHome struct {
-	Strategy string            `toml:"strategy" json:"strategy"`
-	Dir      string            `toml:"dir" json:"dir"`
-	Env      map[string]string `toml:"env" json:"env,omitempty"`
-	Shared   []string          `toml:"shared" json:"shared"`
-	PerBox   []string          `toml:"per_box" json:"per_box"`
-	Seed     []HarnessSeed     `toml:"seed" json:"seed"`
+	Strategy string `toml:"strategy" json:"strategy"`
+	Dir      string `toml:"dir" json:"dir"`
+	// Also lists further directories of the harness's state, relative to
+	// /home/dev, handled like Dir by the strategy: with "shared" each is
+	// mounted whole from the realm's state (work order C16: Cursor keeps
+	// its login in ~/.config/cursor beside ~/.cursor).
+	Also   []string          `toml:"also" json:"also,omitempty"`
+	Env    map[string]string `toml:"env" json:"env,omitempty"`
+	Shared []string          `toml:"shared" json:"shared"`
+	PerBox []string          `toml:"per_box" json:"per_box"`
+	Seed   []HarnessSeed     `toml:"seed" json:"seed"`
 }
 
 type HarnessSeed struct {
@@ -437,7 +454,11 @@ type HarnessHooks struct {
 // screen ("{n}" is the option's number), and how long a question hook
 // waits for an answer from elsewhere (seconds; 0: never).
 type HarnessInput struct {
-	Adapter       string   `toml:"adapter" json:"adapter"`
+	Adapter string `toml:"adapter" json:"adapter"`
+	// Args are added to the harness's command line when the adapter is a
+	// structured one, not paste (work order C16: pi loads devc's extension
+	// with -e).
+	Args          []string `toml:"args" json:"args,omitempty"`
 	SubmitKey     string   `toml:"submit_key" json:"submit_key"`
 	InterruptKeys []string `toml:"interrupt_keys" json:"interrupt_keys"`
 	AnswerKeys    []string `toml:"answer_keys" json:"answer_keys"`

@@ -113,7 +113,7 @@ func TestExampleLoadsCleanly(t *testing.T) {
 	check("realms", realms, "demo", "other")
 	check("projects", projects, "demo/analysis", "demo/hello", "other/tools")
 	check("envs", envs, "base", "python-base", "r-base")
-	check("harnesses", harnesses, "claude", "codex")
+	check("harnesses", harnesses, "claude", "codex", "cursor", "opencode", "pi")
 	if n := len(c.Projects("demo")); n != 2 {
 		t.Errorf("Projects(demo) has %d entries", n)
 	}
@@ -356,6 +356,17 @@ func TestBrokenConfigurations(t *testing.T) {
 	}
 	cases := []brokenCase{
 		{"unknown global key", pre("config.toml", "bogus = 1"), "config.toml", "bogus", "unknown key"},
+		// Work order C16: shares and the new manifest keys.
+		{"share built in", pre(tools, "shares = [\"dep-source\"]"), tools, "shares[0]", "built in"},
+		{"share name", pre(tools, "shares = [\"Bad Name\"]"), tools, "shares[0]", "share"},
+		{"share twice", pre(tools, "shares = [\"a\", \"a\"]"), tools, "shares[1]", "listed twice"},
+		{"realm share name", pre("realms/other/realm.toml", "shares = [\"../x\"]"), "realms/other/realm.toml", "shares[0]", "share"},
+		{"needs unknown", set("harness/pi.toml", minimalManifest("pi")+"[install]\nneeds = [\"python\"]\n"), "harness/pi.toml", "install.needs[0]", "toolbox component"},
+		{"also nests", set("harness/pi.toml", minimalManifest("pi")+"also = [\".pi/sub\"]\n"), "harness/pi.toml", "home.also[0]", "overlap"},
+		{"also home itself", set("harness/pi.toml", minimalManifest("pi")+"also = [\".\"]\n"), "harness/pi.toml", "home.also[0]", "not the home itself"},
+		{"also absolute", set("harness/pi.toml", minimalManifest("pi")+"also = [\"/etc/x\"]\n"), "harness/pi.toml", "home.also[0]", "relative"},
+		{"input args", set("harness/pi.toml", minimalManifest("pi")+"[input]\nargs = [\"a\\nb\"]\n"), "harness/pi.toml", "input.args[0]", "control character"},
+		{"settings text", set("harness/pi.toml", minimalManifest("pi")+"[baseline.settings]\npath = \"/etc/pi/s\"\nformat = \"text\"\n"), "harness/pi.toml", "baseline.settings.format", "not one of"},
 		{"unknown nested key", add(tools, "[box]\nmemroy = \"1g\""), tools, "box.memroy", "unknown key"},
 		{"unknown table", add(tools, "[extra]\na = 1\nb = 2"), tools, "extra", "unknown key"},
 		{"unknown manifest key", set("harness/pi.toml", "colour = \"red\"\n"+minimalManifest("pi")), "harness/pi.toml", "colour", "unknown key"},
@@ -383,7 +394,7 @@ func TestBrokenConfigurations(t *testing.T) {
 		{"default_env missing", set("config.toml", "default_env = \"nope\"\n"), "config.toml", "default_env", "does not exist"},
 		{"env without recipe", set("envs/empty/env.toml", "description = \"x\"\n"), "envs/empty", "", "needs a Containerfile or a base"},
 		{"bad image", set(tools, "image = \"--privileged\"\n"), tools, "image", "not a valid image reference"},
-		{"harness without manifest", set(tools, "image = \"debian\"\nharnesses = [\"pi\"]\n"), tools, "harnesses[0]", "no harness manifest with id \"pi\""},
+		{"harness without manifest", set(tools, "image = \"debian\"\nharnesses = [\"nosuch\"]\n"), tools, "harnesses[0]", "no harness manifest with id \"nosuch\""},
 		{"duplicate harness", set(tools, "image = \"debian\"\nharnesses = [\"codex\", \"codex\"]\n"), tools, "harnesses[1]", "listed twice"},
 		{"absolute data path", add(hello, "[data]\ninputs = [\"/abs\"]"), hello, "data.inputs[0]", "must be relative"},
 		{"dot-dot data path", add(hello, "[data]\nwork = [\"a/../b\"]"), hello, "data.work[0]", "must not contain .."},
@@ -550,5 +561,27 @@ func TestBrokenOverride(t *testing.T) {
 		if got := c.ProblemsFor(names.ProjectRef{Realm: "demo", Project: "analysis"}); len(got) == 0 {
 			t.Error("an unreadable manifest directory did not block a project")
 		}
+	}
+}
+
+// TestResolvedShares: the realm's shares come first, the project's are
+// added without repeating any (work order C16).
+func TestResolvedShares(t *testing.T) {
+	dir := copyExample(t)
+	rf := filepath.Join(dir, "realms", "demo", "realm.toml")
+	b, _ := os.ReadFile(rf)
+	os.WriteFile(rf, []byte(strings.Replace(string(b), "shares = []", "shares = [\"style\", \"review\"]", 1)), 0o644)
+	prependTo(t, dir, "realms/demo/projects/hello/project.toml", "shares = [\"review\", \"docs\"]")
+	c, probs := load(t, dir)
+	if len(probs) > 0 {
+		t.Fatalf("problems: %v", probs)
+	}
+	r, err := c.Resolved(names.ProjectRef{Realm: "demo", Project: "hello"})
+	if err != nil || !slices.Equal(r.Shares, []string{"style", "review", "docs"}) {
+		t.Errorf("shares %v %v", r.Shares, err)
+	}
+	r, _ = c.Resolved(names.ProjectRef{Realm: "other", Project: "tools"})
+	if len(r.Shares) != 0 {
+		t.Errorf("other/tools shares %v", r.Shares)
 	}
 }

@@ -28,7 +28,9 @@ var (
 	seedWhen         = []string{"missing", "always"}
 	authMethods      = []string{"env-token", "shared-home", "api-key", "none"}
 	baselineFormats  = []string{"json", "toml"}
-	inputAdapters    = []string{"paste", "mod", "app-server", "extension"}
+	// baseline.files may also be plain text (a pi extension, for one).
+	baselineFileFormats = []string{"json", "toml", "text"}
+	inputAdapters       = []string{"paste", "mod", "app-server", "extension"}
 	// tmuxKeyRE is a tmux key name devc may pass to send-keys.
 	tmuxKeyRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,31}$`)
 )
@@ -266,6 +268,23 @@ func validateGlobal(c *Config, ps *problems) {
 	}
 }
 
+// BuiltinShare is the share every box has (the dependency-source skill);
+// it is not published and cannot be listed.
+const BuiltinShare = "dep-source"
+
+// shares checks a list of share names.
+func (k checker) shares(key string, list []string) {
+	for i, s := range list {
+		if !k.name(idx(key, i), names.KindShare, s) {
+			continue
+		}
+		if s == BuiltinShare {
+			k.bad(idx(key, i), "%q is built in: every box has it already", s)
+		}
+	}
+	k.noDuplicates(key, list)
+}
+
 // netAllowlist checks [network.allowlist] of a realm or project.
 func (k checker) netAllowlist(key string, a NetAllowlist) {
 	for i, d := range a.Domains {
@@ -338,8 +357,11 @@ func validateHarness(h *Harness, ps *problems) {
 		}
 	}
 	for i, n := range in.Needs {
-		k.name(idx("install.needs", i), "toolbox component", n)
+		if !slices.Contains(ToolboxComponents, n) {
+			k.bad(idx("install.needs", i), "%q is not a toolbox component devc provides (one of %s)", n, strings.Join(ToolboxComponents, ", "))
+		}
 	}
+	k.noDuplicates("install.needs", in.Needs)
 
 	hm := &h.Home
 	k.enum("home.strategy", hm.Strategy, homeStrategies)
@@ -373,6 +395,26 @@ func validateHarness(h *Harness, ps *problems) {
 			}
 			good = append(good, s)
 		}
+	}
+	// Further state directories: below /home/dev like home.dir, never the
+	// home itself, and none may nest in another or in home.dir (each can be
+	// a writable mount).
+	dirs := []string{hm.Dir}
+	for i, a := range hm.Also {
+		key := idx("home.also", i)
+		if !k.relPath(key, a, "home directory") {
+			continue
+		}
+		if a == "." {
+			k.bad(key, "must name a directory below /home/dev, not the home itself")
+			continue
+		}
+		for _, o := range dirs {
+			if o == a || nested(o, a) || nested(a, o) {
+				k.bad(key, "%q and %q overlap; the directories must not nest", o, a)
+			}
+		}
+		dirs = append(dirs, a)
 	}
 	if hm.Strategy == "shared" && len(hm.Shared) > 0 {
 		k.bad("home.shared", "only applies to strategy \"private\"; with \"shared\" the whole directory is shared")
@@ -427,7 +469,7 @@ func validateHarness(h *Harness, ps *problems) {
 	for i, f := range h.Baseline.Files {
 		key := idx("baseline.files", i)
 		k.absPath(key+".path", f.Path, "baseline file path")
-		k.enum(key+".format", f.Format, baselineFormats)
+		k.enum(key+".format", f.Format, baselineFileFormats)
 		k.template(key+".template", f.Template)
 	}
 	// The directory of the baseline paths is mounted read-only over the
@@ -458,6 +500,11 @@ func validateHarness(h *Harness, ps *problems) {
 		k.name("hooks.kind", "hook kind", h.Hooks.Kind)
 	}
 	k.enum("input.adapter", h.Input.Adapter, inputAdapters)
+	for i, a := range h.Input.Args {
+		if strings.ContainsAny(a, "\x00\n\r") {
+			k.bad(idx("input.args", i), "contains a control character")
+		}
+	}
 	if !tmuxKeyRE.MatchString(h.Input.SubmitKey) {
 		k.bad("input.submit_key", "must be a tmux key name such as Enter, Tab or M-Enter")
 	}
@@ -546,6 +593,7 @@ func validateRealm(c *Config, r *Realm, ps *problems) {
 	k := checker{file: r.File, ps: ps}
 	k.enum("network.default", r.Network.Default, networkLevels)
 	k.netAllowlist("network.allowlist", r.Network.Allowlist)
+	k.shares("shares", r.Shares)
 	validateRealmGitHub(k, r.GitHub)
 	if r.SELinux.Level != "" && !selinuxRE.MatchString(r.SELinux.Level) {
 		k.bad("selinux.level", "%q does not match s0 or s0:cN[,cN…], for example s0:c100,c200", r.SELinux.Level)
@@ -670,6 +718,7 @@ func validateProject(c *Config, p *Project, ps *problems) {
 	validateGitHub(k, p.Grants, app)
 
 	validateData(k, &p.Data)
+	k.shares("shares", p.Shares)
 
 	if p.Network.Level != "" {
 		k.enum("network.level", p.Network.Level, networkLevels)

@@ -1,0 +1,78 @@
+# Built-in harness manifest for pi (pi.dev). A file <config>/harness/pi.toml
+# replaces it entirely. Written from the research report and pi's
+# documentation and not verified against a real installation; every
+# assumption is listed in docs/dev/LEFTOVER.md (C16).
+id = "pi"
+display = "pi"
+bin = "pi"
+
+[install]
+method = "script"
+# install.sh runs `npm ci --ignore-scripts` from a pinned lockfile into
+# $PI_CODING_AGENT_DIR/install/releases/<version>/ and links the launcher at
+# $PI_CODING_AGENT_DIR/bin/pi. It needs Node.js 22.19 or later: the toolbox
+# component node is mounted for the installer and put first in PATH.
+url = "https://pi.dev/install.sh"
+args = []
+env = { PI_CODING_AGENT_DIR = "{dir}/home/.pi/agent", PI_TELEMETRY = "0", PI_SKIP_VERSION_CHECK = "1" }
+exe = "home/.pi/agent/bin/pi"
+needs = ["node"]
+version_cmd = ["--version"]
+
+[home]
+# pi keeps its login (auth.json), settings and sessions in one agent
+# directory, written in place under a lock file; it is shared across the
+# realm (spec 8.1).
+strategy = "shared"
+dir = ".pi/agent"
+env = { PI_CODING_AGENT_DIR = "/home/dev/.pi/agent" }
+shared = []
+per_box = []
+
+[auth]
+method = "shared-home"         # `pi auth login` writes auth.json into the shared agent directory
+login = ["pi", "auth", "login"]
+status = ["pi", "auth", "check"]
+env = ""
+secret = ""
+
+# pi has no system settings layer; the sandbox description and the
+# instructions reach it through --append-system-prompt (launch.args), and
+# devc's input extension sits beside them for `pi -e` (input.args).
+[baseline.instructions]
+path = "/etc/pi/devc-instructions.md"
+
+[[baseline.files]]
+path = "/etc/pi/devc-input.ts"
+format = "text"
+template = "pi-input-extension.ts.tmpl"
+
+[env]
+PI_SKIP_VERSION_CHECK = "1"
+PI_TELEMETRY = "0"
+
+[launch]
+args = ["--append-system-prompt", "/etc/pi/devc-instructions.md"]
+resume = ["--session", "{id}"]
+
+[status]
+osc7501 = false
+
+[hooks]
+kind = ""
+
+[input]
+# paste types into the terminal. "extension" (opt in with your own copy of
+# this manifest) loads devc's extension, which submits messages through
+# pi's API; input.args are added to the command line only then.
+adapter = "paste"
+args = ["-e", "/etc/pi/devc-input.ts"]
+submit_key = "Enter"
+interrupt_keys = ["Escape"]
+answer_keys = ["{n}", "Enter"]
+
+[memory]
+kind = ""
+
+[transcripts]
+globs = ["sessions/*/*.jsonl"]

@@ -6,6 +6,7 @@ build_from_repo = ""           # optional Containerfile path inside the reposito
 harnesses = ["claude"]
 memory_group = "demo-shared"   # default: the project name
 default_branch = "main"
+shares = []                    # published shares, read-only at /opt/shares/<name>; skills among them are linked for the harnesses
 
 [git]
 forward = []                   # glob patterns of branches forwarded to the upstream automatically

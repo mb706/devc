@@ -1,15 +1,18 @@
 package daemon
 
 // Input adapters (work order C09 section 4): one interface, chosen by the
-// manifest's input.adapter. Only paste can be exercised on this machine;
-// the structured adapters for Claude Code (a mod), Codex (a second
-// app-server client) and pi (an extension) are described in
+// manifest's input.adapter. The structured adapters for Claude Code (a mod)
+// and Codex (a second app-server client) are described in
 // docs/dev/LEFTOVER.md and report themselves unavailable, in which case
-// the daemon falls back to paste and says so in the receipt.
+// the daemon falls back to paste and says so in the receipt. The extension
+// adapter (work order C16, pi) hands messages to an extension the harness
+// loaded, through the box agent; while no extension is connected it types
+// them like paste.
 
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/proto"
@@ -53,7 +56,7 @@ func adapterFor(m *config.Harness) (Adapter, string) {
 	case "app-server":
 		a = unavailable{name: "app-server", reason: "the Codex app-server client is not built yet (docs/dev/LEFTOVER.md)"}
 	case "extension":
-		a = unavailable{name: "extension", reason: "the pi extension is not built yet (docs/dev/LEFTOVER.md)"}
+		a = extension{}
 	default:
 		return paste{}, ""
 	}
@@ -78,6 +81,56 @@ func (u unavailable) Interrupt(context.Context, *target) (string, string) {
 }
 func (u unavailable) Answer(context.Context, *target, int, string) (string, string) {
 	return proto.OutcomeRefused, u.name + " adapter " + ErrNotAvailable.Error()
+}
+
+// extension submits messages through the harness extension registered
+// for the session with the box agent (box.input.submit); interrupts and
+// answers to dialogs are typed as by paste. Nothing is typed for a
+// message, so the input gate does not apply to it.
+type extension struct{}
+
+func (extension) Name() string { return "extension" }
+
+func (extension) Capabilities() Capabilities {
+	return Capabilities{Available: true, Confirms: "extension", Steer: true, Answer: true}
+}
+
+func (extension) Send(ctx context.Context, t *target, text string) (string, string) {
+	var ex proto.BoxExtension
+	if err := t.w.call(ctx, proto.MethodBoxExtension, proto.BoxInputParams{Session: t.session}, &ex); err != nil || !ex.Connected {
+		outcome, detail := paste{}.Send(ctx, t, text)
+		return outcome, strings.TrimSuffix("no extension is connected to the session, so it was typed; "+detail, "; ")
+	}
+	if outcome, detail := t.begin(); outcome != "" {
+		return outcome, detail
+	}
+	mode := proto.InputSteer
+	if t.queued {
+		mode = proto.InputQueue
+	}
+	var r proto.InputSubmitReply
+	if err := t.w.call(ctx, proto.MethodBoxSubmit, proto.BoxInputParams{Session: t.session, Text: text, Mode: mode}, &r); err != nil {
+		if proto.IsCode(err, proto.CodeRefused) || proto.IsCode(err, proto.CodeNotFound) {
+			// Refused before the harness took it: nothing was delivered.
+			return proto.OutcomeRefused, boxErr(err)
+		}
+		return proto.OutcomeUnknown, boxErr(err)
+	}
+	if !r.Accepted {
+		return proto.OutcomeRefused, "the extension did not accept the message: " + r.Detail
+	}
+	if r.Delivered != "" && r.Delivered != "now" {
+		return proto.OutcomeDelivered, "through the extension (" + r.Delivered + ")"
+	}
+	return proto.OutcomeDelivered, "through the extension"
+}
+
+func (extension) Interrupt(ctx context.Context, t *target) (string, string) {
+	return paste{}.Interrupt(ctx, t)
+}
+
+func (extension) Answer(ctx context.Context, t *target, choice int, text string) (string, string) {
+	return paste{}.Answer(ctx, t, choice, text)
 }
 
 // paste types into the session's tmux pane: a bracketed paste of the text,

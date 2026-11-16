@@ -71,6 +71,9 @@ type AgentOptions struct {
 	MaxRelays int
 	// Retry is the pause after a listener failed (default 5 s).
 	Retry time.Duration
+	// ProcDir is where a registering extension's environment is read
+	// (default /proc).
+	ProcDir string
 }
 
 // DefaultAgentOptions are the agent's settings in a box.
@@ -91,6 +94,8 @@ type Agent struct {
 	// listeners are the host-exception ports (box.listen).
 	lmu       sync.Mutex
 	listeners map[int]net.Listener
+	// ext are the harness extensions by session (extension.go).
+	ext extensions
 }
 
 // HostPeer accepts a peer that the kernel reports with PID 0: a process
@@ -302,6 +307,9 @@ func (a *Agent) serveHost(ctx context.Context, s *yamux.Session) {
 		proto.MethodBoxPaste:    a.inputHandler(proto.MethodBoxPaste),
 		proto.MethodBoxKeys:     a.inputHandler(proto.MethodBoxKeys),
 		proto.MethodBoxListen:   a.handleListen(ctx),
+		// Work order C16.
+		proto.MethodBoxSubmit:    a.handleSubmit,
+		proto.MethodBoxExtension: a.handleExtension,
 	}
 	for {
 		st, err := s.AcceptStreamWithContext(ctx)
@@ -437,6 +445,12 @@ func (a *Agent) relay(c *net.UnixConn) {
 		return
 	}
 	_ = c.SetReadDeadline(time.Time{})
+	// A harness extension registers with the agent itself; it is never
+	// relayed to the host.
+	if m, kind, perr := proto.ParseMessage(line); perr == nil && kind == proto.KindRequest && m.Method == proto.MethodInputRegister {
+		a.serveExtension(c, r, m)
+		return
+	}
 	var st *yamux.Stream
 	if s := a.current(); s != nil {
 		st, err = s.OpenStream()

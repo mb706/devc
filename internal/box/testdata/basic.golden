@@ -47,6 +47,8 @@ type=bind,source=/home/u/.local/share/devc/local/boxes/demo/hello/home,destinati
 --mount
 type=bind,source=/home/u/.local/share/devc/cache/realms/demo/pkg,destination=/home/dev/.cache
 --mount
+type=bind,source=/home/u/.local/share/devc/cache/realms/demo/src,destination=/src
+--mount
 type=bind,source=/home/u/.local/share/devc/durable/realms/demo/context/notes/hello,destination=/ctx/notes
 --mount
 type=bind,source=/home/u/.local/share/devc/durable/realms/demo/context/memory/hello,destination=/ctx/memory
@@ -63,7 +65,7 @@ devc.project=hello
 --label
 devc.role=box
 --label
-devc.confighash=d739a4a009b92ff3301d23d39df3d3f6a3ea01ba95ac0d422f1f0cbe871d679d
+devc.confighash=ae99b2a0b0e431f7d3ca24f1fe36f5670342ce626dd7fd44f1a2d5419b282fec
 localhost/devc-env/base:latest
 box
 init

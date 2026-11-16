@@ -448,6 +448,37 @@ func (p *Paths) ResticCache(r names.ProjectRef) string {
 	return filepath.Join(p.CacheDir(), "restic", must(names.KindRealm, r.Realm), must(names.KindProject, r.Project))
 }
 func (p *Paths) CacheDir() string { return filepath.Join(p.stateDir, "cache") }
+
+// RealmSrcCacheDir is a realm's cache of dependency sources, mounted at
+// /src in every box of the realm (work order C16): shared within the realm
+// and box-writable.
+func (p *Paths) RealmSrcCacheDir(realm string) string {
+	return filepath.Join(p.CacheDir(), "realms", must(names.KindRealm, realm), "src")
+}
+
+// SharesDir holds the published shares (work order C16), one directory
+// per share with its versions and current; each is mounted read-only into
+// the boxes that list it. Only devc writes here, never a box.
+func (p *Paths) SharesDir() string { return filepath.Join(p.DurableDir(), "shares") }
+func (p *Paths) ShareDir(name string) string {
+	return filepath.Join(p.SharesDir(), must(names.KindShare, name))
+}
+
+// ShareStagingDir receives a version while it is extracted; it is a
+// sibling of the share directories, never mounted.
+func (p *Paths) ShareStagingDir() string { return filepath.Join(p.SharesDir(), ".staging") }
+
+// ShareLogFile records the published versions of a share with their
+// sources. It is kept apart from the share directory, which boxes of other
+// realms see.
+func (p *Paths) ShareLogFile(name string) string {
+	return filepath.Join(p.DurableDir(), "share-log", must(names.KindShare, name)+".jsonl")
+}
+
+// BoxSharesDir is rendered for a box's /opt/shares.
+func (p *Paths) BoxSharesDir(r names.ProjectRef) string {
+	return filepath.Join(p.BoxLocalDir(r), "shares")
+}
 func (p *Paths) RealmPkgCacheDir(realm string) string {
 	return filepath.Join(p.CacheDir(), "realms", must(names.KindRealm, realm), "pkg")
 }

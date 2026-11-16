@@ -73,6 +73,9 @@ type Data struct {
 	SSH *SSHFacts
 	// GitHub is set for projects with an upstream (work order C15).
 	GitHub *GitHubFacts
+	// Shares are the shares the project's box mounts (work order C16),
+	// besides the built-in dep-source.
+	Shares []string
 }
 
 // GitHubFacts describes what a box can do with GitHub.
@@ -136,6 +139,7 @@ func NewData(r *config.Resolved, m *config.Harness) Data {
 		QuestionHookTimeout: m.Input.Wait() + 60,
 		AutoRequests:        append([]string{}, r.Requests.Auto...),
 		AutoSeal:            slices.Contains(r.Requests.Auto, "seal"),
+		Shares:              append([]string{}, r.Shares...),
 	}
 	// The description must match the level in force: a level devc cannot
 	// enforce yet never gets a box, and is never described as restricted.
@@ -512,6 +516,9 @@ func RenderBaselineFile(c *config.Config, r *config.Resolved, m *config.Harness,
 	out, err := execTemplate(f.Template, src, d)
 	if err != nil {
 		return nil, err
+	}
+	if f.Format == "text" {
+		return []byte(out), nil
 	}
 	if _, err := parseSettings(f.Template, f.Format, []byte(out)); err != nil {
 		return nil, fmt.Errorf("the template %s did not render valid %s: %w", f.Template, f.Format, err)

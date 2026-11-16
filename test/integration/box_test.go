@@ -120,6 +120,9 @@ func TestBoxLifecycle(t *testing.T) {
 		"/ctx/memory":      {filepath.Join(e.StateDir, "durable", "realms", itest.RealmA, "context", "memory", "hello"), true},
 		"/opt/devc":        {filepath.Join(e.StateDir, "toolbox"), false},
 		"/etc/devc":        {filepath.Join(box, "etc"), false},
+		// Work order C16: the realm's dependency sources and the box's shares.
+		"/src":        {filepath.Join(e.StateDir, "cache", "realms", itest.RealmA, "src"), true},
+		"/opt/shares": {filepath.Join(box, "shares"), false},
 	}
 	seen := map[string]bool{}
 	for _, m := range ci.Mounts {

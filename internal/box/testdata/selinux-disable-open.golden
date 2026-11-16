@@ -45,6 +45,8 @@ type=bind,source=/home/u/.local/share/devc/local/boxes/demo/hello/home,destinati
 --mount
 type=bind,source=/home/u/.local/share/devc/cache/realms/demo/pkg,destination=/home/dev/.cache
 --mount
+type=bind,source=/home/u/.local/share/devc/cache/realms/demo/src,destination=/src
+--mount
 type=bind,source=/home/u/.local/share/devc/durable/realms/demo/context/notes/hello,destination=/ctx/notes
 --mount
 type=bind,source=/home/u/.local/share/devc/durable/realms/demo/context/memory/hello,destination=/ctx/memory
@@ -61,7 +63,7 @@ devc.project=hello
 --label
 devc.role=box
 --label
-devc.confighash=fbcfae8b05268eff75b58682d5a193dd51915b413f079631a2546936f9cfe1d4
+devc.confighash=9b6a7c0193f5a60653a75a9610dd0185024ccbf2b7681a29a0f80d34c19e99d6
 docker.io/library/debian:trixie-slim
 box
 init

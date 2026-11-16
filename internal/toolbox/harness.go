@@ -411,16 +411,24 @@ func (in *Installer) Install(ctx context.Context, m *config.Harness, version str
 	boxDir := paths.InBoxHarnessVersionDir(m.ID, stamp)
 	mount := engine.RunMount{Source: verDir, Target: boxDir}
 	labels := map[string]string{LabelRole: RoleAux, labelAux: "install"}
+	// Components the harness needs (install.needs) are mounted read-only
+	// at their in-box paths and come first in PATH, for the installer
+	// (pi's runs npm) and for the check.
+	needMounts, pathEnv, err := in.Toolbox.NeedsFor(m)
+	if err != nil {
+		return nil, err
+	}
 
 	switch m.Install.Method {
 	case "script":
 		env := []string{"HOME=" + path.Join(boxDir, "home"), "DEVC_INSTALL_DIR=" + boxDir}
+		env = append(env, pathEnv...)
 		env = append(env, SubstituteEnv(m.Install.Env, boxDir, version)...)
 		cmd := append([]string{"bash", "-c", installScript, "devc-install", m.Install.URL}, SubstituteArgs(m.Install.Args, version)...)
 		in.printf("devc: installing %s from %s\n", m.ID, m.Install.URL)
 		code, err := in.Engine.RunStream(ctx, engine.RunOptions{
 			Image: InstallerImage, Labels: labels, SecurityOpts: in.SecurityOpts,
-			Mounts: []engine.RunMount{mount}, Tmpfs: InstallerTmpfs, Env: env, Workdir: path.Join(boxDir, "home"),
+			Mounts: append([]engine.RunMount{mount}, needMounts...), Tmpfs: InstallerTmpfs, Env: env, Workdir: path.Join(boxDir, "home"),
 			Cmd: cmd, Stdout: in.Out, Stderr: in.Out, Timeout: 30 * time.Minute,
 		})
 		if err != nil {
@@ -443,8 +451,8 @@ func (in *Installer) Install(ctx context.Context, m *config.Harness, version str
 	cmd := append([]string{"bash", "-c", checkScript, "devc-check", exe}, m.Install.VersionCmd...)
 	res, err := in.Engine.Run(ctx, engine.RunOptions{
 		Image: InstallerImage, Labels: labels, Network: "none", SecurityOpts: in.SecurityOpts,
-		Mounts: []engine.RunMount{{Source: verDir, Target: boxDir, ReadOnly: true}}, Tmpfs: InstallerTmpfs,
-		Env: []string{"HOME=/tmp"}, Workdir: "/tmp", Cmd: cmd, Timeout: 2 * time.Minute,
+		Mounts: append([]engine.RunMount{{Source: verDir, Target: boxDir, ReadOnly: true}}, needMounts...), Tmpfs: InstallerTmpfs,
+		Env: append([]string{"HOME=/tmp"}, pathEnv...), Workdir: "/tmp", Cmd: cmd, Timeout: 2 * time.Minute,
 	})
 	if err != nil {
 		var ee *execx.ExitError
@@ -478,6 +486,44 @@ func (in *Installer) Install(ctx context.Context, m *config.Harness, version str
 		return inst, err
 	}
 	return inst, nil
+}
+
+// SystemPATH is the PATH of auxiliary containers after the components a
+// harness needs.
+const SystemPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// NeedsFor returns the read-only mounts of the components harness m needs
+// (at their in-box paths below /opt/devc) and the PATH setting that puts
+// their bin directories first; nothing when it needs none. A component
+// that is not installed is an error naming the command that installs it.
+func (t *Toolbox) NeedsFor(m *config.Harness) ([]engine.RunMount, []string, error) {
+	if len(m.Install.Needs) == 0 {
+		return nil, nil, nil
+	}
+	var mounts []engine.RunMount
+	var bins []string
+	for _, n := range m.Install.Needs {
+		bin, host, ok := t.ComponentBin(n)
+		if !ok {
+			return nil, nil, fmt.Errorf("harness %s needs the toolbox component %s, which is not installed: run 'devc toolbox install %s'", m.ID, n, n)
+		}
+		mounts = append(mounts, engine.RunMount{Source: host, Target: path.Dir(bin), ReadOnly: true})
+		bins = append(bins, bin)
+	}
+	return mounts, []string{"PATH=" + strings.Join(bins, ":") + ":" + SystemPATH}, nil
+}
+
+// NeedsPath returns the in-box bin directories of the components harness
+// m needs, for its launch description; ok is false when one is missing.
+func (t *Toolbox) NeedsPath(m *config.Harness) (dirs []string, missing string) {
+	for _, n := range m.Install.Needs {
+		bin, _, ok := t.ComponentBin(n)
+		if !ok {
+			return nil, n
+		}
+		dirs = append(dirs, bin)
+	}
+	return dirs, ""
 }
 
 // Hooks for failure injection in tests.

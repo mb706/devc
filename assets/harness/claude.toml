@@ -55,7 +55,7 @@ osc7501 = true
 kind = "claude"
 
 [input]
-adapter = "paste"              # paste | mod | app-server | extension (only paste is available yet)
+adapter = "paste"              # paste | mod | app-server | extension (mod and app-server are not built yet)
 submit_key = "Enter"           # tmux key sent after a pasted prompt
 interrupt_keys = ["Escape"]    # stop the current turn
 answer_keys = ["{n}", "Enter"] # choose option {n} of a dialog on screen

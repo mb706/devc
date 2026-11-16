@@ -238,6 +238,9 @@ func newHarnessCmds(a *app) []*cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), installTimeout)
 			defer cancel()
+			if err := a.ensureNeeds(ctx, e, m); err != nil {
+				return err
+			}
 			in, err := a.installer(e).Install(ctx, m, instVersion)
 			if err != nil {
 				return err
@@ -317,6 +320,9 @@ func newHarnessCmds(a *app) []*cobra.Command {
 			var failed []string
 			for _, id := range ids {
 				m, err := a.manifestFor(e.cfg, id)
+				if err == nil {
+					err = a.ensureNeeds(ctx, e, m)
+				}
 				if err == nil {
 					var in *toolbox.Installed
 					if in, err = a.installer(e).Install(ctx, m, ""); err == nil && in != nil {

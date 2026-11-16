@@ -27,6 +27,15 @@ const (
 	MethodBoxClients = "box.input.clients"
 	MethodBoxPaste   = "box.input.paste"
 	MethodBoxKeys    = "box.input.keys"
+	// Structured input through a harness extension (work order C16, pi):
+	// the host asks the agent with box.input.submit (BoxInputParams, Mode)
+	// and box.input.extension (is one connected?); the extension registers
+	// with the agent on its in-box socket (box.input.register, handled by
+	// the agent itself, never relayed) and receives input.submit.
+	MethodBoxSubmit     = "box.input.submit"
+	MethodBoxExtension  = "box.input.extension"
+	MethodInputRegister = "box.input.register"
+	MethodInputSubmit   = "input.submit"
 	// Box to host, on streams the box agent opens for in-box clients.
 	MethodHostHint     = "host.hint" // notification
 	MethodHostPing     = "host.ping"
@@ -516,6 +525,43 @@ type BoxInputParams struct {
 	Text    string   `json:"text,omitempty"`
 	Submit  string   `json:"submit,omitempty"`
 	Keys    []string `json:"keys,omitempty"`
+	// Mode is how box.input.submit delivers: InputQueue or InputSteer.
+	Mode string `json:"mode,omitempty"`
+}
+
+// Delivery modes of a message through an extension.
+const (
+	InputQueue = "queue"
+	InputSteer = "steer"
+)
+
+// InputRegisterParams are what a harness extension sends first on the
+// agent's in-box socket: the session of the process it runs in.
+type InputRegisterParams struct {
+	Session string `json:"session"`
+	Harness string `json:"harness"`
+	Version int    `json:"version"`
+}
+
+// InputSubmitParams are what the agent sends an extension: a user message
+// to submit, now or queued.
+type InputSubmitParams struct {
+	Text string `json:"text"`
+	Mode string `json:"mode"`
+}
+
+// InputSubmitReply is an extension's answer: whether the harness took the
+// message, and how it delivers it ("now", "steer", "follow_up").
+type InputSubmitReply struct {
+	Accepted  bool   `json:"accepted"`
+	Delivered string `json:"delivered,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+}
+
+// BoxExtension is the answer of box.input.extension.
+type BoxExtension struct {
+	Connected bool   `json:"connected"`
+	Harness   string `json:"harness,omitempty"`
 }
 
 // BoxClients is the answer of box.input.clients: the session's window and

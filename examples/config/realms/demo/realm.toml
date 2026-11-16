@@ -1,4 +1,5 @@
 description = "Demonstration realm"
+shares = []                    # shares mounted into every box of the realm (devc share publish); projects add their own
 
 [git]
 user_name = "Demo User"

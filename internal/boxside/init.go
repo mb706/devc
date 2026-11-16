@@ -35,6 +35,10 @@ type InitOptions struct {
 	// when it exists, ~/.ssh/config gets an Include line for it (work
 	// order C10b). Empty skips this.
 	SSHConfig string
+	// Shares is the box's /opt/shares (work order C16): shares whose root
+	// holds SKILL.md are linked into the skill directories of the home.
+	// Empty skips this.
+	Shares string
 	// Agent, when set, runs after the readiness marker is written, in its
 	// own goroutine, until ctx ends (the box channel, work order C08). A
 	// panic in it is logged and never ends init.
@@ -47,7 +51,8 @@ func DefaultInitOptions(log io.Writer, mountPoints []string) InitOptions {
 	if len(mountPoints) == 0 {
 		mountPoints = []string{".cache"}
 	}
-	return InitOptions{Home: "/home/dev", Dotfiles: DotfilesDir, Skel: "/etc/skel", Run: RunDir, MountPoints: mountPoints, SeedRoot: "/", SSHConfig: SSHConfigFile, Log: log}
+	return InitOptions{Home: "/home/dev", Dotfiles: DotfilesDir, Skel: "/etc/skel", Run: RunDir, MountPoints: mountPoints, SeedRoot: "/", SSHConfig: SSHConfigFile,
+		Shares: SharesDir, Log: log}
 }
 
 // Init is the box's main process: it prepares the home, links the dotfiles,
@@ -77,6 +82,11 @@ func Init(ctx context.Context, o InitOptions) error {
 	}
 	if o.SeedRoot != "" {
 		for _, err := range ApplySeeds(o.SeedRoot) {
+			logf("%v", err)
+		}
+	}
+	if o.Shares != "" {
+		for _, err := range LinkSkills(o.Home, o.Shares) {
 			logf("%v", err)
 		}
 	}
@@ -247,4 +257,91 @@ func copySkel(skel, home string) error {
 		}
 		return nil
 	})
+}
+
+// SharesDir is where a box's shares appear (work order C16).
+const SharesDir = "/opt/shares"
+
+// SkillDirs are the skill directories of the home that shares are linked
+// into: ~/.agents/skills, which Codex, pi, OpenCode and Cursor read, and
+// ~/.claude/skills for Claude Code.
+var SkillDirs = []string{".agents/skills", ".claude/skills"}
+
+// LinkSkills links every share of the box whose root holds SKILL.md into
+// each skill directory of home as <name> -> <shares>/<name>, and removes
+// links into shares that are no longer skills of this box. Entries the
+// user made (anything that is not a link into shares) are left alone.
+func LinkSkills(home, shares string) []error {
+	var errs []error
+	des, err := os.ReadDir(shares)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return []error{fmt.Errorf("reading %s: %w", shares, err)}
+	}
+	want := map[string]string{}
+	for _, de := range des {
+		name := de.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if fi, err := os.Stat(filepath.Join(shares, name, "SKILL.md")); err == nil && fi.Mode().IsRegular() {
+			want[name] = filepath.Join(shares, name)
+		}
+	}
+	for _, sd := range SkillDirs {
+		dir := filepath.Join(home, sd)
+		if len(want) > 0 {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				errs = append(errs, fmt.Errorf("creating %s: %w", dir, err))
+				continue
+			}
+		}
+		for name, target := range want {
+			p := filepath.Join(dir, name)
+			fi, err := os.Lstat(p)
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+			case err != nil:
+				errs = append(errs, err)
+				continue
+			case fi.Mode()&fs.ModeSymlink == 0:
+				errs = append(errs, fmt.Errorf("%s exists and is not devc's link; the skill %s is not linked there", p, name))
+				continue
+			default:
+				cur, _ := os.Readlink(p)
+				if cur == target {
+					continue
+				}
+				if !strings.HasPrefix(cur, shares+"/") {
+					errs = append(errs, fmt.Errorf("%s links to %s; the skill %s is not linked there", p, cur, name))
+					continue
+				}
+				if err := os.Remove(p); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+			}
+			if err := os.Symlink(target, p); err != nil {
+				errs = append(errs, fmt.Errorf("linking the skill %s: %w", name, err))
+			}
+		}
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		for _, de := range ents {
+			if de.Type()&fs.ModeSymlink == 0 || want[de.Name()] != "" {
+				continue
+			}
+			p := filepath.Join(dir, de.Name())
+			if cur, err := os.Readlink(p); err == nil && strings.HasPrefix(cur, shares+"/") {
+				if err := os.Remove(p); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+	}
+	return errs
 }

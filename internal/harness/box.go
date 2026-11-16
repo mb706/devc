@@ -34,13 +34,23 @@ func Describe(r *config.Resolved, m *config.Harness, rh config.ResolvedHarness, 
 	for k, v := range m.Home.Env {
 		env[k] = v
 	}
+	args := append([]string{}, m.Launch.Args...)
+	if m.Input.Adapter != "" && m.Input.Adapter != "paste" {
+		// A structured input adapter may need the harness to load something
+		// (pi: devc's extension); with paste nothing extra is loaded.
+		args = append(args, m.Input.Args...)
+	}
+	var also []string
+	for _, a := range m.Home.Also {
+		also = append(also, path.Join(paths.InBoxHome, a))
+	}
 	l := &boxside.Launch{
 		Schema: boxside.LaunchSchema, ID: m.ID, Bin: m.Bin, Display: m.Display,
 		Realm: r.Realm, Project: r.Project,
 		Exe: exe, Env: env,
-		Args: nonNil(m.Launch.Args), Resume: nonNil(m.Launch.Resume),
+		Args: args, Resume: nonNil(m.Launch.Resume),
 		Auth:  boxside.LaunchAuth{Method: rh.AuthMethod},
-		Home:  boxside.LaunchHome{Dir: home, Strategy: m.Home.Strategy, Shared: nonNil(m.Home.Shared), PerBox: nonNil(m.Home.PerBox)},
+		Home:  boxside.LaunchHome{Dir: home, Also: also, Strategy: m.Home.Strategy, Shared: nonNil(m.Home.Shared), PerBox: nonNil(m.Home.PerBox)},
 		Seeds: []boxside.LaunchSeed{}, Secrets: []boxside.LaunchSecret{},
 		Hooks:  m.Hooks.Kind,
 		Status: boxside.LaunchStatus{OSC7501: m.Status.OSC7501},
@@ -91,6 +101,13 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// AlsoStateDir is the realm state behind a further home directory of a
+// shared harness (home.also): durable/realms/<realm>/harness/<id>/also/
+// <dir>, beside the main home's "home".
+func AlsoStateDir(p *paths.Paths, realm, id, dir string) string {
+	return filepath.Join(p.HarnessStateDir(realm, id), "also", filepath.FromSlash(dir))
 }
 
 // BaselineDir is the in-box directory a harness's baseline is mounted at,
@@ -173,8 +190,12 @@ func (h *BoxHooks) Contribute(in *box.Inputs, s *box.Spec) error {
 	// state mount would hold the other's mount points.
 	for j, m := range ms {
 		for _, o := range ms[:j] {
-			if m.Home.Dir == o.Home.Dir || paths.Within(o.Home.Dir, m.Home.Dir) || paths.Within(m.Home.Dir, o.Home.Dir) {
-				return fmt.Errorf("the harnesses %s and %s use overlapping home directories (%s and %s); a project cannot list both", o.ID, m.ID, o.Home.Dir, m.Home.Dir)
+			for _, md := range append([]string{m.Home.Dir}, m.Home.Also...) {
+				for _, od := range append([]string{o.Home.Dir}, o.Home.Also...) {
+					if md == od || paths.Within(od, md) || paths.Within(md, od) {
+						return fmt.Errorf("the harnesses %s and %s use overlapping home directories (%s and %s); a project cannot list both", o.ID, m.ID, od, md)
+					}
+				}
 			}
 		}
 	}
@@ -196,6 +217,12 @@ func (h *BoxHooks) Contribute(in *box.Inputs, s *box.Spec) error {
 		case "shared":
 			if err := s.AddMount(box.Mount{Source: filepath.Join(state, "home"), Target: home}); err != nil {
 				return err
+			}
+			// Further state directories are shared whole as well.
+			for _, a := range m.Home.Also {
+				if err := s.AddMount(box.Mount{Source: AlsoStateDir(p, r.Realm, m.ID, a), Target: path.Join(paths.InBoxHome, a)}); err != nil {
+					return err
+				}
 			}
 			for _, sub := range m.Home.PerBox {
 				src := filepath.Join(p.BoxHarnessDir(ref, m.ID), filepath.FromSlash(sub))
@@ -257,11 +284,16 @@ func (h *BoxHooks) Prepare(ctx context.Context, in *box.Inputs, s *box.Spec) err
 			}
 			continue
 		}
+		dirs, missing := h.Toolbox.NeedsPath(m)
+		if missing != "" {
+			h.warnf("harness %s needs the toolbox component %s, which is not installed: run 'devc toolbox install %s' (or 'devc harness install %s')", m.ID, missing, missing, m.ID)
+			continue
+		}
 		installed = append(installed, m)
 		if err := h.Toolbox.EnsureShim(m.Bin); err != nil {
 			return err
 		}
-		if err := h.writeLaunch(etc, r, m, byID[m.ID], exe); err != nil {
+		if err := h.writeLaunch(etc, r, m, byID[m.ID], exe, dirs); err != nil {
 			return fmt.Errorf("writing the launch description of %s: %w", m.ID, err)
 		}
 		keep[m.ID+".json"], keep[m.ID] = true, len(m.Home.Seed) > 0
@@ -385,8 +417,9 @@ func (h *BoxHooks) renderBaseline(p *paths.Paths, ref names.ProjectRef, r *confi
 	return prune(dir, keep)
 }
 
-func (h *BoxHooks) writeLaunch(etc string, r *config.Resolved, m *config.Harness, rh config.ResolvedHarness, exe string) error {
+func (h *BoxHooks) writeLaunch(etc string, r *config.Resolved, m *config.Harness, rh config.ResolvedHarness, exe string, pathDirs []string) error {
 	l := Describe(r, m, rh, exe)
+	l.Path = pathDirs
 	if err := l.Validate(); err != nil {
 		return err
 	}
@@ -481,6 +514,11 @@ func (h *BoxHooks) refreshOne(ctx context.Context, ref names.ProjectRef, m *conf
 		}
 	}
 	l := Describe(r, m, rh, exe)
+	dirs, missing := h.Toolbox.NeedsPath(m)
+	if missing != "" {
+		return fmt.Errorf("the toolbox component %s is missing: run 'devc toolbox install %s'", missing, missing)
+	}
+	l.Path = dirs
 	if err := l.Validate(); err != nil {
 		return err
 	}

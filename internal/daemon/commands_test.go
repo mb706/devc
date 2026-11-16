@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -131,6 +133,9 @@ func (r *rig) agentWithInput(f *fakeBox) {
 		AcceptHost: func(*unix.Ucred) error { return nil },
 		Retry:      100 * time.Millisecond,
 		Input:      &boxside.Input{Tmux: f.tmux, TmuxStdin: f.tmuxStdin, Pause: 10 * time.Millisecond},
+		// A harness extension registering from this process (work order
+		// C16) is checked against the environment written there.
+		ProcDir: r.proc,
 	}
 	done := make(chan struct{})
 	go func() { boxside.RunAgent(ctx, o); close(done) }()
@@ -808,3 +813,95 @@ func TestDeliveryChecks(t *testing.T) {
 type syscallErr string
 
 func (e syscallErr) Error() string { return string(e) }
+
+// TestExtensionAdapter covers the extension input adapter (work order C16,
+// pi): with an extension registered for the session, a send goes through
+// it (steer now, a queued send as queued), nothing is typed; without one
+// the text is typed as by paste, and the receipt says so.
+func TestExtensionAdapter(t *testing.T) {
+	shortTimes(t)
+	r := newRig(t)
+	b, err := os.ReadFile(filepath.Join("..", "..", "assets", "harness", "claude.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(r.base, "c", "harness"), 0o755)
+	manifest := strings.Replace(string(b), `adapter = "paste" `, `adapter = "extension" `, 1)
+	if manifest == string(b) {
+		t.Fatal("the claude manifest has no paste adapter line to replace")
+	}
+	os.WriteFile(filepath.Join(r.base, "c", "harness", "claude.toml"), []byte(manifest), 0o644)
+	r.boxUp(true)
+	r.start()
+	c := r.client(nil)
+	sid := names.NewSessionID()
+	os.WriteFile(filepath.Join(r.proc, strconv.Itoa(os.Getpid()), "environ"), []byte("DEVC_SESSION="+sid+"\x00"), 0o644)
+	f := &fakeBox{r: r, sid: sid, buffers: map[string][]byte{}}
+	r.agentWithInput(f)
+	r.waitChannel(c, proto.ChannelConnected)
+	r.startSession(c, sid)
+
+	// No extension yet: typed, with a note.
+	id := newID()
+	call(t, c, proto.MethodSessionSend, proto.SendParams{ID: id, Session: sid, Text: "typed", Mode: proto.ModeSteer})
+	if rec := waitFinal(t, c, id); rec.Adapter != "extension" || !strings.Contains(rec.Detail, "no extension is connected") || rec.Outcome != proto.OutcomeDelivered {
+		t.Errorf("without an extension: %+v", rec)
+	}
+	if p, _ := f.counts(); p != 1 {
+		t.Errorf("pastes %q", f.pastes)
+	}
+
+	// The extension registers on the agent's in-box socket.
+	conn, err := net.Dial("unix", r.local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	reg, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": proto.MethodInputRegister,
+		"params": proto.InputRegisterParams{Session: sid, Harness: "claude", Version: 1}})
+	conn.Write(append(reg, '\n'))
+	rd := bufio.NewReader(conn)
+	if line, err := rd.ReadString('\n'); err != nil || !strings.Contains(line, `"result"`) {
+		t.Fatalf("registration: %q %v", line, err)
+	}
+	got := make(chan proto.InputSubmitParams, 4)
+	go func() {
+		for {
+			line, err := rd.ReadString('\n')
+			if err != nil {
+				return
+			}
+			var m proto.RPCMessage
+			json.Unmarshal([]byte(line), &m)
+			var p proto.InputSubmitParams
+			json.Unmarshal(m.Params, &p)
+			got <- p
+			delivered := "now"
+			if p.Mode == proto.InputSteer {
+				delivered = "steer"
+			}
+			b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": proto.InputSubmitReply{Accepted: true, Delivered: delivered}})
+			conn.Write(append(b, '\n'))
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	id = newID()
+	call(t, c, proto.MethodSessionSend, proto.SendParams{ID: id, Session: sid, Text: "steered", Mode: proto.ModeSteer})
+	if rec := waitFinal(t, c, id); rec.Outcome != proto.OutcomeDelivered || rec.Detail != "through the extension (steer)" {
+		t.Errorf("steer: %+v", rec)
+	}
+	if p := <-got; p.Text != "steered" || p.Mode != proto.InputSteer {
+		t.Errorf("the extension got %+v", p)
+	}
+	id = newID()
+	call(t, c, proto.MethodSessionSend, proto.SendParams{ID: id, Session: sid, Text: "queued"})
+	if rec := waitFinal(t, c, id); rec.Outcome != proto.OutcomeDelivered || rec.Detail != "through the extension" {
+		t.Errorf("queued: %+v", rec)
+	}
+	if p := <-got; p.Text != "queued" || p.Mode != proto.InputQueue {
+		t.Errorf("the extension got %+v", p)
+	}
+	if p, _ := f.counts(); p != 1 {
+		t.Errorf("something was typed although the extension delivered: %q", f.pastes)
+	}
+}

@@ -1,0 +1,69 @@
+# Built-in harness manifest for the Cursor CLI (cursor-agent). A file
+# <config>/harness/cursor.toml replaces it entirely. Written from the
+# research report and Cursor's documentation and not verified against a
+# real installation; every assumption is listed in docs/dev/LEFTOVER.md
+# (C16).
+id = "cursor"
+display = "Cursor CLI"
+bin = "cursor-agent"           # not `agent`, which other tools install too
+
+[install]
+method = "script"
+# The installer unpacks to ~/.local/share/cursor-agent/versions/<version>/
+# (Node.js is bundled) and links ~/.local/bin/cursor-agent; HOME is the
+# version directory's home.
+url = "https://cursor.com/install"
+args = []
+env = { }
+exe = "home/.local/bin/cursor-agent"
+needs = []
+version_cmd = ["--version"]
+
+[home]
+# Two directories, both shared across the realm: ~/.cursor (configuration,
+# chats, transcripts, skills) and ~/.config/cursor, which holds the login
+# (auth.json).
+strategy = "shared"
+dir = ".cursor"
+also = [".config/cursor"]
+env = { }
+shared = []
+per_box = []
+
+[auth]
+# `cursor-agent login` writes ~/.config/cursor/auth.json. The alternative is
+# a dashboard API key: [harness.cursor] auth = "api-key" in realm.toml, then
+# `devc login <realm> cursor` stores it and sessions get CURSOR_API_KEY.
+method = "shared-home"
+login = ["cursor-agent", "login"]
+status = ["cursor-agent", "status"]
+env = "CURSOR_API_KEY"
+secret = "cursor-api-key"
+
+# Cursor has no instruction file or settings layer outside the project and
+# its home (both writable by the agent), so there is no baseline.
+
+[env]
+NO_OPEN_BROWSER = "1"          # the login prints its URL instead of opening a browser
+
+[launch]
+args = []
+resume = ["--resume", "{id}"]
+
+[status]
+osc7501 = false
+
+[hooks]
+kind = ""
+
+[input]
+adapter = "paste"
+submit_key = "Enter"
+interrupt_keys = ["Escape"]
+answer_keys = ["{n}", "Enter"]
+
+[memory]
+kind = ""
+
+[transcripts]
+globs = ["projects/*/agent-transcripts/*.jsonl"]

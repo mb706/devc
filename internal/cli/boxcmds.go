@@ -20,6 +20,7 @@ import (
 	"github.com/mb706/devc/internal/harness"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/secrets"
+	"github.com/mb706/devc/internal/shares"
 	"github.com/mb706/devc/internal/version"
 )
 
@@ -54,8 +55,10 @@ func (a *app) boxEnv() (*boxEnv, error) {
 	gh := &gate.BoxHooks{Paths: c.Paths, Runner: a.runner, AllowPersistent: a.getenv(secrets.EnvAllowPersistent) == "1"}
 	hooks := &harness.BoxHooks{Config: c, Toolbox: m.Toolbox, Secrets: secrets.NewFileStore(c.Paths), Out: a.stderr,
 		AllowPersistentSecrets: a.getenv(secrets.EnvAllowPersistent) == "1", Extra: []harness.SecretSource{gh}}
-	m.Contributors = append(m.Contributors, hooks, gh)
-	m.Preparers = append(m.Preparers, gh, hooks)
+	// Shares (work order C16): /opt/shares and the share directories.
+	sh := &shares.BoxHooks{Paths: c.Paths, Out: a.stderr}
+	m.Contributors = append(m.Contributors, hooks, gh, sh)
+	m.Preparers = append(m.Preparers, gh, hooks, sh)
 	m.Cleaners = append(m.Cleaners, hooks, gh)
 	e := &boxEnv{cfg: c, mgr: m, git: a.gitService(c, m.Engine), data: a.dataService(c, m.Engine, m.Toolbox, exe)}
 	// Data zones: input mounts, layout setup before start, worktree links

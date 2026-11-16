@@ -91,8 +91,24 @@ func (l *LoginRunner) options(realm string, m *config.Harness, argv []string, tm
 			return engine.RunOptions{}, err
 		}
 		mounts = append(mounts, engine.RunMount{Source: dir, Target: path.Join(paths.InBoxHome, m.Home.Dir)})
+		// Further state directories (home.also): Cursor writes its login
+		// to ~/.config/cursor.
+		for _, a := range m.Home.Also {
+			adir := AlsoStateDir(l.Config.Paths, realm, m.ID, a)
+			if err := l.Config.Paths.Ensure(adir); err != nil {
+				return engine.RunOptions{}, err
+			}
+			mounts = append(mounts, engine.RunMount{Source: adir, Target: path.Join(paths.InBoxHome, a)})
+		}
 	}
 	env := []string{"HOME=" + paths.InBoxHome}
+	// The toolbox is mounted whole; the components the harness needs come
+	// first in PATH (install.needs).
+	if dirs, missing := l.Toolbox.NeedsPath(m); missing != "" {
+		return engine.RunOptions{}, fmt.Errorf("%s needs the toolbox component %s: run 'devc toolbox install %s'", m.ID, missing, missing)
+	} else if len(dirs) > 0 {
+		env = append(env, "PATH="+strings.Join(dirs, ":")+":"+toolbox.SystemPATH)
+	}
 	if l.Term != "" && !strings.ContainsAny(l.Term, "\x00\n") {
 		env = append(env, "TERM="+l.Term)
 	}

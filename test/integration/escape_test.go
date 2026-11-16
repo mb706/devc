@@ -63,11 +63,14 @@ func TestEscape(t *testing.T) {
 
 	t.Run("read-only parts", func(t *testing.T) {
 		var scripts []string
-		for _, dir := range []string{"/opt/devc", "/opt/devc/bin", "/etc/devc", "/etc/fakeagent", "/run/devc-secrets", bdir + "/data/raw"} {
+		for _, dir := range []string{"/opt/devc", "/opt/devc/bin", "/etc/devc", "/etc/fakeagent", "/run/devc-secrets", bdir + "/data/raw",
+			"/opt/shares", "/opt/devc/skills/dep-source"} {
 			scripts = append(scripts, "touch "+dir+"/x", "mount -o remount,rw "+dir, "mount -o remount,rw,bind "+dir)
 		}
 		scripts = append(scripts, "echo x > /etc/devc/box.json", "echo x >> /etc/fakeagent/settings.json",
-			"rm -f /run/devc-secrets/ESC_GRANTED", "rm -f /opt/devc/bin/devc", "umount /opt/devc", "umount -l /etc/devc")
+			"rm -f /run/devc-secrets/ESC_GRANTED", "rm -f /opt/devc/bin/devc", "umount /opt/devc", "umount -l /etc/devc",
+			// Work order C16: the shares' directory and the built-in skill.
+			"rm -f /opt/shares/dep-source", "ln -s /tmp /opt/shares/planted", "echo x > /opt/shares/dep-source/SKILL.md", "umount /opt/shares")
 		expectAllFail(t, e, ref, "on a read-only part", scripts)
 	})
 

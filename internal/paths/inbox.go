@@ -43,7 +43,22 @@ const (
 	InBoxHarnessRoot = "/opt/devc/harness"
 	InBoxShims       = "/opt/devc/shims"
 	InBoxTerminfo    = "/opt/devc/terminfo"
+	// InBoxShares holds one entry per share of the box (work order C16):
+	// a read-only directory devc renders per box, whose entry <name> leads
+	// to the share's current version below .v/<name>, where the share's
+	// whole directory is mounted read-only.
+	InBoxShares = "/opt/shares"
+	// InBoxSkills holds the built-in skills of the toolbox (dep-source).
+	InBoxSkills = "/opt/devc/skills"
+	// InBoxSrc is the realm's cache of dependency sources (devc src).
+	InBoxSrc = "/src"
 )
+
+// InBoxShareMount is where the directory of share name (all its versions
+// and current) is mounted.
+func InBoxShareMount(name string) string {
+	return path.Join(InBoxShares, ".v", must(names.KindShare, name))
+}
 
 // InBoxHarnessVersionDir is where one installation of a harness lives in
 // every box, and where the installer container mounts it.

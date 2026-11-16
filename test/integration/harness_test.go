@@ -492,9 +492,13 @@ func TestHarnessNetwork(t *testing.T) {
 	}
 	e := itest.New(t)
 	itest.EnsureBaseImage(t, e)
-	project(e, hello, "harnesses = [\"claude\", \"codex\"]\n")
+	// pi, Cursor and OpenCode (work order C16) are installed too; pi's
+	// install also installs the toolbox component node.
+	ids := []string{"claude", "codex", "pi", "cursor", "opencode"}
+	bins := map[string]string{"cursor": "cursor-agent"}
+	project(e, hello, "harnesses = [\"claude\", \"codex\", \"pi\", \"cursor\", \"opencode\"]\n")
 	installed := map[string]bool{}
-	for _, id := range []string{"claude", "codex"} {
+	for _, id := range ids {
 		t.Run("install-"+id, func(t *testing.T) {
 			old := e.Timeout
 			e.Timeout = 15 * time.Minute
@@ -509,12 +513,16 @@ func TestHarnessNetwork(t *testing.T) {
 		})
 	}
 	e.MustRun("up", hello)
-	for _, id := range []string{"claude", "codex"} {
+	for _, id := range ids {
 		if !installed[id] {
 			continue
 		}
+		bin := id
+		if b, ok := bins[id]; ok {
+			bin = b
+		}
 		t.Run("version-"+id, func(t *testing.T) {
-			res := e.Run("run", hello, "--", id, "--version")
+			res := e.Run("run", hello, "--", bin, "--version")
 			t.Logf("%s --version: exit %d\nstdout: %s\nstderr: %s", id, res.ExitCode, res.Stdout, res.Stderr)
 			if res.ExitCode != 0 || strings.TrimSpace(res.Stdout) == "" {
 				t.Errorf("%s --version failed", id)

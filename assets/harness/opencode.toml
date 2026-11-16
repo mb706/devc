@@ -1,0 +1,70 @@
+# Built-in harness manifest for OpenCode (version 2). A file
+# <config>/harness/opencode.toml replaces it entirely. Written from the
+# research report and OpenCode's documentation and not verified against a
+# real installation; every assumption is listed in docs/dev/LEFTOVER.md
+# (C16).
+id = "opencode"
+display = "OpenCode"
+bin = "opencode"
+
+[install]
+method = "script"
+# The v2 installer puts the native binary in $HOME/.opencode/bin; HOME is
+# the version directory's home.
+url = "https://opencode.ai/v2/install"
+args = []
+env = { }
+exe = "home/.opencode/bin/opencode"
+needs = []
+version_cmd = ["--version"]
+
+[home]
+# Private, nothing shared (spec 8.1): sessions and credentials live in one
+# SQLite database (~/.local/share/opencode/opencode.db) that is fragile when
+# shared, so each box logs in on its own (`opencode auth login` in the box).
+strategy = "private"
+dir = ".config/opencode"
+env = { }
+shared = []
+per_box = []
+
+[auth]
+method = "none"
+login = []
+status = []
+env = ""
+secret = ""
+
+# The managed configuration in /etc/opencode wins over every other layer;
+# devc's instructions are named there by absolute path.
+[baseline.settings]
+path = "/etc/opencode/opencode.json"
+format = "json"
+template = "opencode-managed.json.tmpl"
+
+[baseline.instructions]
+path = "/etc/opencode/devc-instructions.md"
+
+[env]
+
+[launch]
+args = []
+resume = ["--session", "{id}"]
+
+[status]
+osc7501 = false
+
+[hooks]
+kind = ""
+
+[input]
+adapter = "paste"
+submit_key = "Enter"
+interrupt_keys = ["Escape"]
+answer_keys = ["{n}", "Enter"]
+
+[memory]
+kind = ""
+
+[transcripts]
+globs = []

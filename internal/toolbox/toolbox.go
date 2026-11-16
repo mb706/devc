@@ -14,6 +14,8 @@
 //	seccomp.json            the box profile (seccomp.go)
 //	tmux/, bin/tmux, terminfo/   the static tmux (tmux.go)
 //	restic/                 the pinned restic for savepoints (restic.go)
+//	node/                   the pinned Node.js for harnesses that need it (node.go)
+//	skills/                 the built-in skills (skills.go)
 //	harness/, shims/        harness installations (harness.go)
 //
 // Installers and the tmux build run in throwaway containers with the box
@@ -151,6 +153,11 @@ func (t *Toolbox) Sync(exe, version string) (SyncResult, error) {
 		}
 		res.Changed = true
 	}
+	if changed, err := t.syncSkills(); err != nil {
+		return res, fmt.Errorf("writing the built-in skills: %w", err)
+	} else if changed {
+		res.Changed = true
+	}
 	return res, nil
 }
 
@@ -189,10 +196,13 @@ type Info struct {
 	TmuxRecipe string `json:"tmux_recipe"`
 	Terminfo   bool   `json:"terminfo"`
 	// Restic is the installed restic version ("" when missing).
-	Restic       string   `json:"restic"`
-	ResticPinned string   `json:"restic_pinned"`
-	Shims        []string `json:"shims"`
-	Problems     []string `json:"problems"`
+	Restic       string `json:"restic"`
+	ResticPinned string `json:"restic_pinned"`
+	// Node is the installed Node.js version ("" when missing).
+	Node       string   `json:"node"`
+	NodePinned string   `json:"node_pinned"`
+	Shims      []string `json:"shims"`
+	Problems   []string `json:"problems"`
 }
 
 // List reports what is installed. A toolbox that was never synced yields
@@ -202,6 +212,7 @@ func (t *Toolbox) List() (Info, error) {
 	in.Tmux = t.InstalledTmux()
 	in.Restic, _ = t.InstalledRestic()
 	in.ResticPinned = ResticVersion
+	in.Node, in.NodePinned = t.InstalledNode(), NodeVersion
 	if fi, err := os.Stat(t.TerminfoDir()); err == nil && fi.IsDir() {
 		in.Terminfo = true
 	}

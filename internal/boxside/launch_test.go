@@ -110,6 +110,34 @@ func TestPrepareLaunch(t *testing.T) {
 	}
 }
 
+// TestLaunchPath: the bin directories of the components a harness needs
+// (work order C16) come first in PATH; bad entries are refused.
+func TestLaunchPath(t *testing.T) {
+	l := fakeLaunch()
+	l.Env = map[string]string{}
+	l.Path = []string{"/opt/devc/node/24.22.3/bin"}
+	root := launchRoot(t, l)
+	e := LaunchEnv{Root: root, Environ: []string{"PATH=/usr/bin:/bin"}, Stderr: &bytes.Buffer{}, NewSession: func() string { return "s0000000000aaaaaaaaaa" }}
+	p, err := PrepareLaunch(&l, nil, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := envMap(p.Env); m["PATH"] != "/opt/devc/node/24.22.3/bin:/usr/bin:/bin" {
+		t.Errorf("PATH %q", m["PATH"])
+	}
+	for _, bad := range []string{"/usr/bin", "/opt/devc/x:/evil", "relative", "/opt/devc/../etc"} {
+		l.Path = []string{bad}
+		if err := l.Validate(); err == nil {
+			t.Errorf("PATH entry %q accepted", bad)
+		}
+	}
+	l.Path = nil
+	l.Home.Also = []string{"/etc/cursor"}
+	if err := l.Validate(); err == nil {
+		t.Error("home.also outside /home/dev accepted")
+	}
+}
+
 func TestPrepareLaunchRefusesSelf(t *testing.T) {
 	l := fakeLaunch()
 	root := launchRoot(t, l)
