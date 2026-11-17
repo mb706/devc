@@ -1,0 +1,169 @@
+id = "phone-answer"
+kind = "flow"
+title = "An answer from the web app"
+summary = "The user answers a pending question in the web app: the hub checks and forwards the command with the client's ID to the machine, whose daemon stores a receipt and hands the answer to the waiting hook; the receipt comes back, and the answer's events clear the inbox entry and the phone's notification."
+concern = "hub-commands-and-terminal"
+trigger = "The user picks the second option of a pending question in the web app"
+actors = ["user", "browser", "hub", "daemon", "hook", "harness"]
+
+[[step]]
+section = "Through the hub"
+
+[[step]]
+from = "user"
+to = "browser"
+external = true
+label = "choose option 2"
+text = "The question is the one the hub's projection holds for the session."
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:POST /api/commands"
+external = true
+label = "POST /api/commands {machine, type: answer, id, params, wait}"
+text = "The command carries an ID the client chose (a UUID); `params` hold the session, the question's ID and the choice."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiCommand"
+checks = ["internal/hub.Server.checkSession", "internal/hub.Server.checkSite", "internal/hub.decodeBody", "internal/proto.ValidCommandID"]
+text = "Class user, rule strict. The body is decoded strictly; the type `answer` maps to `session.answer`; the ID must be a UUID or of session-ID form; `wait` at most 60 seconds."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.commandParams"
+checks = ["internal/proto.DecodeParams"]
+text = "`params` are decoded strictly into the daemon's own parameter type; an `id` among them is refused, and the client's ID is set."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.fillRef"
+text = "The session's project: the one the client named, checked, or the one the hub holds for the session."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.link"
+text = "The machine must be connected and have said hello; otherwise 503 at once, and nothing is queued."
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "rpc:session.answer"
+label = "session.answer {id, session, ref, question, choice}"
+ref = "internal/hub.machineLink.forward"
+text = "Called from the request's goroutine on the machine link, not through the link's worker; at most 90 seconds in all."
+detail = "The method is looked up by the command's type in [[internal/hub.commandMethods]]. A notification button sends the same method, named directly ([[internal/hub.Server.apiAct]])."
+
+[[step]]
+section = "On the machine"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.apiAnswer"
+checks = ["internal/proto.DecodeParams", "internal/daemon.checkCommandID", "internal/daemon.checkSession", "internal/proto.CheckInputText"]
+text = "A hub's table holds the same handler as the local socket ([[internal/daemon.Daemon.hubHandlers]]). The session must be live in that project with a pending question, the named question must be that one, and option 2 must exist."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.submit"
+text = "The receipt is stored as `accepted` before anything is typed; an ID seen before gets its stored receipt instead, so a retry never answers twice."
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "reply"
+label = "receipt: accepted"
+ref = "internal/daemon.commander.submit"
+text = "Not final yet."
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "rpc:command.get"
+label = "command.get {id, wait}"
+ref = "internal/hub.machineLink.forward"
+text = "With `wait`, the hub asks for the final receipt within the same 90 seconds."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.apiCommandGet"
+text = "The daemon answers once the receipt is final or the wait is over."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.execute"
+unchecked = "submit queued the command in the session's line; the line's own goroutine (commander.drain) takes it"
+text = "Meanwhile the session's line takes the command and checks that the session is still live."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.answerByHook"
+text = "The answer's question must still be the pending one, else it is refused as stale and never typed. Here the harness's question hook waits for this session, so the answer goes to it; without a waiting hook it would be typed into the dialog. [[flow:question-answer]] follows this part in detail."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.questionWait"
+unchecked = "answerByHook sends the reply on the waiter's channel; the host.question handler, blocked on that channel, returns it"
+text = "The waiting `host.question` handler receives the answer."
+
+[[step]]
+from = "daemon"
+to = "hook"
+via = "reply"
+label = "QuestionReply {choice: 2}"
+ref = "internal/daemon.commander.questionWait"
+text = "On the hook's stream of the box channel."
+
+[[step]]
+from = "hook"
+to = "harness"
+via = "reply"
+label = "the chosen option"
+ref = "internal/boxside.claudeQuestion"
+text = "The hook gives Claude Code the answer in its own form, and the harness goes on."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.recordAnswer"
+text = "The daemon appends a host-only `answer` event to the session's journal; then the receipt becomes final: `delivered` ([[internal/daemon.commander.finish]])."
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "reply"
+label = "receipt: delivered"
+ref = "internal/daemon.Daemon.apiCommandGet"
+text = "The waiting `command.get` returns."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "200 receipt: delivered"
+ref = "internal/hub.Server.apiCommand"
+text = "If the machine had gone away during either call, the answer would say `uncertain`: the client keeps the ID and asks again ([[term:uncertain-outcome]])."
+
+[[step]]
+section = "The inbox catches up"
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "stream"
+label = "events.event: answer, state working"
+ref = "internal/daemon.subscriber.send"
+unchecked = "the journal follower reads the new events from the journal and queues them; the hub's subscription goroutine (subscriber.run) sends them"
+text = "The new events reach the hub like any others ([[flow:event-to-phone]])."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.machineLink.applyEvent"
+unchecked = "the link's reader queues the notification; the worker (machineLink.run) applies it in a batch"
+text = "The question is no longer pending and the session leaves needs-you; browsers' streams get the event and the new summary."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.notifier.update"
+unchecked = "the notifier's goroutine wakes on Store.Changed when the worker's transaction commits"
+text = "The needs-you record ends: its buttons stop working and the message on the phone is cleared at ntfy by its sequence ID."

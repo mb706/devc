@@ -1,11 +1,12 @@
-package hub
-
-// Notifications through ntfy (work order C11b section 3). The notifier
-// follows the change log on its own goroutine, so a slow or unreachable
-// ntfy server never holds up the machine links. When a session enters
-// needs-you, failed or finished, and its machine named this hub as
-// notifier, and no logged-in client follows the session's events, one
-// message is published: title "<project> · <harness>", the question or the
+// This file implements notifications through ntfy (work order C11b section
+// 3). The notifier follows the change log on its own goroutine, so a slow
+// or unreachable ntfy server never holds up the machine links. When a
+// session enters needs-you, failed or finished, the state gets a
+// notification record. Once the session's machine names this hub as its
+// notifier, and while the state lasts, one message is published (failures
+// are retried), unless a logged-in client follows the session's events at
+// that moment: then nothing is sent for that state. The message has the
+// title "<project> · <harness>", the question or the
 // last message as body, a priority by section, a click URL into the web
 // app, and up to three buttons (one per option of a question with one or
 // two options, and Open). An option button posts to /api/act with a token
@@ -13,6 +14,8 @@ package hub
 // finding C2-06): random, single-use, valid for an hour, bound to that one
 // answer. When the session leaves the state, the message is cleared by its
 // sequence ID and its buttons stop working.
+
+package hub
 
 import (
 	"bytes"

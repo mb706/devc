@@ -7,8 +7,10 @@
 // directory (README rule 1); credentials live in the state directory,
 // which no box mounts. Keys are written 0600 in 0700 directories and never
 // printed (rule 5). config.toml is edited by appending or removing one
-// [[hubs]] block, and every edit is verified by decoding the result; an
-// edit that would change anything else is refused.
+// [[hubs]] block, and every edit is verified by decoding the result: the
+// file must still parse and its hub list must be the old one with exactly
+// that URL added or removed, or nothing is written (an inline hubs = [...]
+// list, for example, is left for the user to edit).
 package hubnode
 
 import (

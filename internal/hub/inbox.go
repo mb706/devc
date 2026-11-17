@@ -1,7 +1,7 @@
-package hub
-
 // The inbox (work order C11a section 4) is derived from the projection on
 // every request, never stored as truth.
+
+package hub
 
 import (
 	"sort"

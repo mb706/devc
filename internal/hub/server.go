@@ -1,3 +1,8 @@
+// This file implements the server's life: New and Run with the goroutines
+// they start, the listener of each mode, who a request comes from (the
+// client certificate and the registry), long-lived connections that end
+// with their certificate, and hourly housekeeping.
+
 package hub
 
 import (
@@ -33,8 +38,9 @@ const (
 	maxHeaderBytes = 64 << 10
 	// DefaultWindow is how far back the hub takes sessions from machines.
 	DefaultWindow = 30 * 24 * time.Hour
-	// registryPoll is how often long-lived connections are re-checked
-	// against the registry when it changed.
+	// registryPoll is how often the registry's generation is read; when it
+	// changed, the certificate of every long-lived connection is checked
+	// again.
 	registryPoll = time.Second
 )
 
@@ -372,7 +378,9 @@ func (s *Server) listen() (net.Listener, error) {
 	return tls.NewListener(ln, cfg), nil
 }
 
-// Run serves until ctx ends.
+// Run serves until ctx ends. It marks every machine offline first (no link
+// survives a restart), then starts the registry watcher, housekeeping and
+// the notifier beside the HTTP server.
 func (s *Server) Run(ctx context.Context) error {
 	defer s.devCleanup()
 	defer s.st.Close()
@@ -485,8 +493,9 @@ func (s *Server) dropLive(c *liveConn) {
 	s.mu.Unlock()
 }
 
-// watchRegistry ends long-lived connections whose certificate was revoked
-// (by another process: devc hub ca revoke).
+// watchRegistry ends long-lived connections whose certificate is no longer
+// valid after a change of the registry, which another process makes (devc
+// hub ca revoke, devices revoke, machines revoke).
 func (s *Server) watchRegistry(ctx context.Context) {
 	last, _ := s.st.RegistryGen()
 	t := time.NewTicker(registryPoll)
@@ -518,7 +527,10 @@ func (s *Server) watchRegistry(ctx context.Context) {
 	}
 }
 
-// housekeeping removes sessions that ended before the window.
+// housekeeping runs at start and then every hour: it removes the sessions
+// that ended before the window, login sessions unused for SessionIdle,
+// enrolment tokens that expired a day ago (and the bundles of expired
+// ones), and expired action tokens.
 func (s *Server) housekeeping(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()

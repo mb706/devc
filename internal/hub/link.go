@@ -1,13 +1,14 @@
-package hub
-
-// The hub side of the machine link (work order C11a section 3). A machine
-// connects to /machine with its certificate and says hub.hello; the hub
-// then subscribes to the machine's event stream with the cursors it stored
-// for that machine, and refreshes the box, session and request lists once
-// it has caught up and every 30 s. One worker per machine applies what
+// This file implements the hub side of the machine link (work order C11a
+// section 3). A machine connects to /machine with its certificate and says
+// hub.hello; the hub then subscribes to the machine's event stream with
+// the cursors it stored for that machine, and refreshes the box, session
+// and request lists once it has caught up and every 30 s. One worker per
+// machine (the goroutine serving the /machine request) applies what
 // arrives in order and writes it in batches. The hub's view of a session
-// is always the fold of the session's events up to its stored cursor, so a
-// reconnection (of either side) resumes without gaps or duplicates.
+// is the fold of the session's events up to its stored cursor (folded
+// here, or taken from the machine at a re-read, or at a refresh that finds
+// the same cursor), so a reconnection (of either side) resumes without
+// gaps or duplicates.
 //
 // The worker never waits for the machine: calls run in goroutines and
 // their results come back through the same queue as the notifications.
@@ -22,6 +23,8 @@ package hub
 // capacity is reserved for stored plus outstanding sessions. A machine
 // that breaks a bound has its link closed; its daemon reconnects with
 // backoff.
+
+package hub
 
 import (
 	"context"
@@ -41,6 +44,12 @@ import (
 	"github.com/mb706/devc/internal/wsconn"
 )
 
+// Sizes and intervals of a link: the items waiting for the worker and the
+// most one transaction applies; the refresh interval; how long a link may
+// stay silent (the daemon's heartbeats come every 15 s) and how long hello
+// may take; how long the reader waits for room in the queue before the
+// link is closed; how often last_seen is written; the page size of
+// sessions.list.
 const (
 	linkQueue        = 4096
 	linkBatch        = 500
@@ -115,6 +124,7 @@ type RequestKey struct {
 	ID      string `json:"id"`
 }
 
+// itemKind is what a linkItem asks of the worker.
 type itemKind int
 
 const (
@@ -127,6 +137,10 @@ const (
 	itemPrune  // remove sessions that ended before cutoff
 )
 
+// linkItem is one entry of the worker's queue: a notification from the
+// machine, the result of a call, or a request from elsewhere in the hub
+// (refresh the requests, prune). Everything that changes a link's state
+// passes through the queue, so only the worker touches that state.
 type linkItem struct {
 	kind   itemKind
 	event  proto.EventNote
@@ -135,6 +149,8 @@ type linkItem struct {
 	cutoff time.Time
 }
 
+// sessState is the worker's copy of a stored session: its view and the seq
+// it was folded to, which is the session's cursor.
 type sessState struct {
 	view    proto.SessionView
 	lastSeq int64
@@ -149,6 +165,9 @@ type resync struct {
 	again bool
 }
 
+// machineLink is one machine's connection: the codec, the queue, and the
+// state its worker (run) owns. A machine has at most one; a new connection
+// replaces the old.
 type machineLink struct {
 	s      *Server
 	name   string
@@ -418,6 +437,11 @@ func (l *machineLink) fail(what string, err error) func(*Tx) error {
 	return nil
 }
 
+// run waits up to helloWait for hello, loads the machine's stored sessions
+// and requests, asks for daemon.info and subscribes, and is then the
+// worker: it applies queued items in batches of up to linkBatch, one
+// transaction each, and starts a refresh every linkRefresh once the replay
+// has caught up. It returns when the connection ends or a write fails.
 func (l *machineLink) run() {
 	select {
 	case <-l.helloCh:

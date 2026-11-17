@@ -1,9 +1,9 @@
-package cli
-
 // Hub access commands (work order C11b): the user's password and TOTP,
 // login sessions, the device and machine registry, enrolment tokens and
 // the doctor, all working on the hub directory; and `devc join --token`
 // on a machine.
+
+package cli
 
 import (
 	"bufio"

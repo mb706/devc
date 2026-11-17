@@ -1,10 +1,11 @@
-package hub
+// This file implements the hub's private CA (work order C11a section 1):
+// an ECDSA P-256 CA valid for ten years signs the hub's server certificate
+// and one-year client certificates for machines and devices, with the name
+// as common name and the role as organisational unit. Issued client
+// certificates are recorded in the registry by fingerprint; the registry,
+// not the certificate, is what the server believes.
 
-// The hub's private CA (work order C11a section 1): an ECDSA P-256 CA valid
-// for ten years signs one-year client certificates for machines and
-// devices, with the name as common name and the role as organisational
-// unit. Issued certificates are recorded in the registry by fingerprint;
-// the registry, not the certificate, is what the server believes.
+package hub
 
 import (
 	"crypto/ecdsa"

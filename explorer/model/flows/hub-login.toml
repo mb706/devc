@@ -1,0 +1,125 @@
+id = "hub-login"
+kind = "flow"
+title = "Logging in to the hub"
+summary = "A browser with a device certificate posts the password and a TOTP code; one attempt per certificate at a time, a lock after five failures, at most two hashes at once; a session token whose hash is stored, bound to the certificate, in a cookie; and how every later request is checked against it."
+concern = "hub-access"
+trigger = "Opening the web app with a device certificate and no session"
+actors = ["user", "browser", "hub", "hub-db"]
+
+[[step]]
+section = "The login"
+
+[[step]]
+from = "user"
+to = "browser"
+external = true
+label = "password, TOTP code"
+text = "The API's 401 says whether a code is needed, so the login screen asks for one only when TOTP is on."
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:POST /api/login"
+external = true
+label = "POST /api/login {password, totp}"
+text = "With the device certificate, `X-Devc-Request: 1`, the hub's Origin and a JSON body."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiLogin"
+checks = ["internal/hub.Server.identify", "internal/hub.Server.guard", "internal/hub.Server.checkSite"]
+text = "Class device: a registered device certificate, no session needed, but one of 64 places for requests without a login. A certificate whose failures used up its rate limit gets 429."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.loginSlot"
+text = "One attempt per certificate at a time; a second one meanwhile gets 429. So a burst of attempts cannot all pass the lock before the fifth failure sets it ([[finding:C2-03]])."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Store.LoginLocked"
+text = "After five failures in a row the certificate's logins are locked for 15 minutes (429 with `Retry-After`); other devices can still log in."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.decodeBody"
+checks = ["internal/hub.decodeBody"]
+text = "The body is decoded strictly, within the ten-second body deadline. Without a password set the answer is 403."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.hashSlot"
+text = "At most two logins hash at a time (64 MiB each) and eight wait; beyond that 429. The lock is read once more right before the password is looked at."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.VerifyPassword"
+text = "argon2id with the parameters stored in the hash (bounded, so a changed database cannot make a login take forever), compared in constant time."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.CheckTOTP"
+text = "When TOTP is on, the code must be that of the current 30-second step or one either side, and of a step later than the last one used."
+
+[[step]]
+from = "hub"
+to = "hub-db"
+via = "file"
+label = "meta: user_totp_last_step"
+ref = "internal/hub.Store.UseTOTPStep"
+text = "The step is taken in a transaction, so one code cannot open two sessions."
+
+[[step]]
+section = "On a wrong password or code"
+
+[[step]]
+from = "hub"
+to = "hub-db"
+via = "file"
+label = "login_failures"
+ref = "internal/hub.Store.LoginFailed"
+text = "The failure is counted for the certificate (forgotten after 15 quiet minutes), the fifth in a row sets the lock, the rate limiter counts it, and the answer is 401. Every attempt is logged with its outcome, never the password."
+
+[[step]]
+section = "On success"
+
+[[step]]
+from = "hub"
+to = "hub-db"
+via = "file"
+label = "logins: SHA-256 of the token"
+ref = "internal/hub.Store.AddLogin"
+text = "The failures are forgotten and a 256-bit token is made; its hash is stored with the certificate's fingerprint and the device's name."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "Set-Cookie: __Host-devc-session"
+ref = "internal/hub.Server.setSessionCookie"
+text = "Secure, HttpOnly, SameSite=Strict, Path=/, for 30 days; the answer also says whether the hub allows terminal control."
+
+[[step]]
+section = "Every later request"
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:GET /api/inbox"
+external = true
+label = "GET /api/inbox + cookie"
+text = "The same certificate, the cookie."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiInbox"
+checks = ["internal/hub.Server.guard", "internal/hub.Server.checkSession"]
+text = "Class user: before the handler, the session is looked up by the token's hash. It must belong to this certificate (with another, the session is deleted as copied) and have been used within 30 days; once a minute the use is recorded and the cookie renewed. Without a valid session: 401, counted against the certificate's rate limit."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "the inbox, stream_id"
+ref = "internal/hub.BuildInbox"
+text = "The inbox, and the change-log position to follow changes from ([[concern:hub-inbox-and-notifications]])."

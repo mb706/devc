@@ -47,3 +47,10 @@ Small problems in the tool and the app that the content authors met. This list g
 - A word counter for concern pages (prose only), reported by `--check` when a page passes the limit.
 - Diagram labels such as `127.0.0.1:6001` wrap in the middle of a token; do not break inside code-like tokens.
 
+## From X11
+
+- A table wider than three columns is clipped in a concern page without any sign. Let wide tables scroll sideways, with a visible cue.
+- The call graph cannot follow net/http's router into the hub's `guard`, so the front's checks can appear only as `checks`. A way to declare such a hand-over in the model (a route's handler is reached through a named wrapper) would let flows verify it.
+- The guide should say that a step naming the function that holds a command's literal does connect when it is the actor's first step.
+- A word counter in `--check` (second request).
+

@@ -78,15 +78,23 @@ id = "hub"
 zone = "hub"
 title = "Hub server"
 kind = "process"
-summary = "`devc hub serve`: accepts machine links and the web app's requests, both only with client certificates from its CA ([[internal/hub.Server.gate]]), keeps a projection of every session, sends notifications."
+summary = "`devc hub serve`: accepts machine links and the web app's requests, both only with client certificates from its CA (enrolment aside: [[internal/hub.Server.gate]]), keeps a projection of every session, sends notifications through ntfy, and forwards commands and terminals to machines."
 commands = ["devc hub serve"]
+
+[[actor]]
+id = "hub-cli"
+zone = "hub"
+title = "Hub CLI"
+kind = "process"
+summary = "The `devc hub` commands run on the hub's server against the hub directory: init, the CA and its certificates, enrolment tokens, the password and TOTP, login sessions, devices and machines, the doctor, the archive's listing. They write the database while the server runs; the server notices a change of the registry within a second."
+commands = ["devc hub"]
 
 [[actor]]
 id = "hub-db"
 zone = "hub"
 title = "Hub database"
 kind = "store"
-summary = "SQLite (pure Go): the certificate registry, the machines, the latest view of every session with its cursor, a bounded tail of events per session, pending requests, and a change log that event streams resume from."
+summary = "SQLite (pure Go) in the hub directory: the certificate registry, the machines, the latest view of every session with its cursor, a bounded tail of events per session, pending requests, a change log that event streams and the notifier follow, and the access state: the password hash and TOTP secret, login sessions, enrolment, action and notification records."
 
 # ----- actors: outside services
 
@@ -147,7 +155,7 @@ zone = "host"
 title = "CLI"
 kind = "process"
 summary = "Every `devc` command the user runs on the host. Commands are thin: they parse arguments, call into the internal packages and print. Most read the configuration and talk to Podman or to the daemon."
-commands = ["devc", "devc daemon status", "devc daemon stop"]
+commands = ["devc", "devc daemon status", "devc daemon stop", "devc hub status"]
 
 [[actor]]
 id = "daemon"
@@ -596,27 +604,50 @@ from = "daemon"
 to = "hub"
 title = "Machine link"
 transport = "A WebSocket the daemon dials to each hub in config.toml, over TLS with the machine certificate `devc join` stored; JSON-RPC, one object per text frame ([[pkg:internal/wsconn]])."
-carries = "The hub calls the daemon's allowlisted methods (views, events, session commands, low-risk decisions); the daemon calls hub.hello and hub.role ([[surface:hub-link]])."
+carries = "The hub calls the daemon's allowlisted methods (views, events, session commands, low-risk decisions, terminals); the daemon sends its session events as notifications and calls only hub.hello and hub.role ([[surface:hub-link]])."
 boundary = true
-checks = ["internal/daemon.Daemon.hubHandlers", "internal/proto.ValidateData"]
+checks = ["internal/daemon.Daemon.hubHandlers", "internal/hub.cleanEvent", "internal/hub.cleanView", "internal/hub.cleanRequest", "internal/hub.machineLink.listSessions"]
+concerns = ["hub-machine-link", "hub-commands-and-terminal"]
 
 [[channel]]
 id = "hub-db-write"
 from = "hub"
 to = "hub-db"
 title = "Database"
-transport = "SQLite in the hub directory."
-carries = "The registry, session views and event tails, pending requests, the change log."
+transport = "SQLite in the hub directory, writes serialised in the process ([[internal/hub.Store.Write]])."
+carries = "Machines, session views and event tails, pending requests, the change log, login sessions, used tokens, notification records."
+concerns = ["hub-machine-link", "hub-access"]
+
+[[channel]]
+id = "hub-cli-db"
+from = "hub-cli"
+to = "hub-db"
+title = "Admin writes"
+transport = "SQLite in the hub directory, opened by each command; its writes wait on SQLite's lock while the server runs."
+carries = "Issued, imported and revoked certificates, enrolment tokens (with a device's encrypted bundle), the password hash and TOTP secret, ended login sessions."
+concerns = ["hub-access"]
+
+[[channel]]
+id = "cli-hub-enrol"
+from = "cli"
+to = "hub"
+title = "Enrolment"
+transport = "HTTPS without a client certificate to `/enroll/<token>`, reachable only while an enrolment token is outstanding."
+carries = "`devc join --token`'s certificate request; the signed machine certificate back."
+boundary = true
+checks = ["internal/hub.Server.gate", "internal/hub.Store.EnrolmentUsable", "internal/hub.ParseCSR"]
+concerns = ["hub-access"]
 
 [[channel]]
 id = "web-api"
 from = "browser"
 to = "hub"
 title = "Web API"
-transport = "HTTPS with a device certificate and a login session bound to it; JSON, server-sent events, a WebSocket for the terminal."
-carries = "The inbox, sessions, commands, decisions, the terminal ([[surface:hub-routes]])."
+transport = "HTTPS with a device certificate, and for the API a login session bound to it; JSON, server-sent events, a WebSocket for the terminal. Without a certificate only `/enroll/<token>`, while an enrolment token is outstanding."
+carries = "The inbox, sessions, commands, decisions, the terminal ([[surface:hub-routes]]); a device's enrolment bundle."
 boundary = true
-checks = ["internal/hub.Server.gate", "internal/hub.Server.guard"]
+checks = ["internal/hub.Server.identify", "internal/hub.Server.gate", "internal/hub.Server.guard", "internal/hub.Server.checkSession"]
+concerns = ["hub-access", "hub-commands-and-terminal", "hub-inbox-and-notifications"]
 
 [[channel]]
 id = "user-browser"
@@ -631,9 +662,19 @@ id = "hub-ntfy"
 from = "hub"
 to = "ntfy"
 title = "Notifications"
-transport = "HTTPS requests to the configured ntfy server."
-carries = "A short message when a session needs the user, with action buttons that carry single-use tokens."
+transport = "HTTPS requests to the ntfy server in hub.toml, with its bearer token when one is set."
+carries = "A short message when a session needs the user, failed or finished a turn, with action buttons that carry single-use tokens; the clearing of that message when the state ends."
 boundary = true
+concerns = ["hub-inbox-and-notifications"]
+
+[[channel]]
+id = "ntfy-phone"
+from = "ntfy"
+to = "user"
+title = "Push"
+transport = "The ntfy app on the user's phone."
+carries = "The notification; a button posts to the hub's `/api/act`, which needs a device certificate; Open leads into the web app."
+concerns = ["hub-inbox-and-notifications"]
 
 [[channel]]
 id = "relay-service"

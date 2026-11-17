@@ -1,17 +1,21 @@
-package daemon
-
-// The machine side of the machine link (work order C11a section 3): one
-// WebSocket connection per hub listed in config.toml, dialled out with the
-// client certificate `devc join` stored, reconnected with backoff capped at
-// two minutes. Over it the hub is the caller and the daemon the server.
+// This file implements the machine side of the machine link (work order
+// C11a section 3): one WebSocket connection per hub listed in config.toml,
+// dialled out with the client certificate `devc join` stored, reconnected
+// with backoff capped at two minutes. Over it the hub is the caller and
+// the daemon the server; the daemon itself calls only hub.hello and
+// hub.role.
 //
 // What a hub may do is decided here and nowhere else: hubMethods is the
-// allowlist, hubHandlers builds the hub's method table from it, and every
-// call arriving this way has origin hub. The hub cannot stop the daemon,
-// reach the host, change policy, decide high-risk requests
-// (requests.MayDecide), declare a stronger origin (requests.EffectiveOrigin)
-// or read host paths. The first connected hub in the list is the notifier;
-// every connected hub is told its role whenever that changes.
+// allowlist, hubHandlers builds the hub's method table from it, and a
+// decision arriving this way has origin hub. The hub cannot stop the
+// daemon, read the hub or archive status, call net.sync, decide high-risk
+// requests (requests.MayDecide), declare a stronger origin
+// (requests.EffectiveOrigin) or learn the daemon's directories and PID;
+// nothing it may call starts or stops a box or writes the configuration.
+// The first connected hub in the list is the notifier; every connected hub
+// is told its role whenever that changes.
+
+package daemon
 
 import (
 	"context"
@@ -102,7 +106,8 @@ func (d *Daemon) hubInfo(ctx context.Context, c *proto.Conn, params json.RawMess
 	return info, nil
 }
 
-// Backoff of hub connections.
+// Backoff of hub connections, the timeouts of dialling and of pings, and
+// how often a hub without credentials is looked at again.
 const (
 	hubBackoffMin  = time.Second
 	hubBackoffMax  = 2 * time.Minute

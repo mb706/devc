@@ -219,6 +219,12 @@ writer = "host"
 ref = "internal/paths.Paths.NodeHubDir"
 
 [[tree.entry]]
+path = "durable/node/hubs/<hub-id>/key.pem"
+text = "The machine's private key for this hub, 0600 in a 0700 directory: made here by `devc join --token`, or copied from `devc hub ca issue machine`. Beside it `cert.pem` (the machine certificate), `ca.pem` (the CA of the hub's server certificate, when `--ca` was given) and `hub.json` (the hub's URL and when it was joined), all written atomically by `devc join`."
+writer = "host"
+ref = "internal/hubnode.Save"
+
+[[tree.entry]]
 path = "durable/shares"
 text = "Published shares, one directory per share with its versions; mounted read-only into the boxes that list them. `durable/share-log/` records their sources."
 writer = "host"
@@ -863,3 +869,47 @@ path = "<realm>/<project>/.devc-staging/push-<stamp>"
 text = "A push's staging directory: vault-owned directories (0755, below `.devc-staging` at 0711) of hard links to the files sent; host rsync reads only this. Removed after the push, or by a later push after seven days."
 writer = "host"
 ref = "internal/boxside.DataWorker.pushStage"
+
+# ----- the hub's directory (X11)
+
+[[tree]]
+id = "hub-dir"
+title = "Hub directory"
+root = "~/.local/share/devc-hub"
+summary = "Everything a hub keeps, on the hub's server: `DEVC_HUB_DIR` or `--hub-dir` move it. Made 0700 by `devc hub init`; never mixed with a machine's state directory. The session views in the database can be rebuilt from the machines; the CA, the registry and the password cannot."
+
+[[tree.entry]]
+path = "ca/ca.crt"
+text = "The hub CA's certificate (ECDSA P-256, ten years). Machines that join with `--ca` and reverse proxies that verify client certificates need a copy."
+ref = "internal/hub.Layout.CACert"
+
+[[tree.entry]]
+path = "ca/ca.key"
+text = "The CA's private key, 0600 in a 0700 directory. Read by `devc hub ca issue`, `devc hub enroll device` and `devc hub init`, and by the server only to sign a machine's certificate request at enrolment."
+ref = "internal/hub.Layout.CAKey"
+
+[[tree.entry]]
+path = "server/server.key"
+text = "The key of the hub's TLS server certificate, 0600; used in direct TLS unless `--tls-key` names another."
+ref = "internal/hub.Layout.ServerKey"
+
+[[tree.entry]]
+path = "server/server.crt"
+text = "A one-year server certificate from the hub CA for the public name, with the CA's certificate after it; the default of direct TLS. Read once, when the server starts."
+ref = "internal/hub.Layout.ServerCert"
+
+[[tree.entry]]
+path = "server/server.csr"
+text = "A certificate request for the same key, for a public CA."
+ref = "internal/hub.Layout.ServerCSR"
+
+[[tree.entry]]
+path = "hub.db"
+text = "The SQLite database (with `hub.db-wal` and `hub.db-shm`), 0600: the certificate registry, machines, session views with cursors, event tails, pending requests, the change log, the user's password hash and TOTP secret, login sessions, failed logins, enrolment tokens (with a device's encrypted bundle until it is downloaded), action tokens, notification records. Tokens are stored as their SHA-256."
+ref = "internal/hub.Layout.DB"
+
+[[tree.entry]]
+path = "hub.toml"
+text = "The hub's settings, written by the user: the public URL, ntfy server, topic and token, whether terminals may be controlled, the archive's limits. Decoded strictly; the server warns when others can read it."
+writer = "user"
+ref = "internal/hub.Layout.ConfigFile"

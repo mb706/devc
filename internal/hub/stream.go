@@ -1,14 +1,15 @@
-package hub
-
-// GET /api/stream: server-sent events from the change log. Every message
-// carries the change's ID, so a browser that reconnects (Last-Event-ID)
-// gets exactly the changes after the last one it saw. Inbox changes
+// This file implements GET /api/stream: server-sent events from the change
+// log. Every message carries the change's ID, so a browser that
+// reconnects (Last-Event-ID) gets exactly the changes after the last one
+// it saw. Inbox changes
 // (sessions, machines, requests) go to every stream; the events of a
 // session only to streams that name it (?session=<machine>/<id>, up to
 // 32). A stream that starts without an ID begins at the present; one whose
 // ID is older than the change log gets a reset message and starts at the
 // present, and the client reads its snapshot again. While a stream names
 // a session, the hub sends no notifications for it.
+
+package hub
 
 import (
 	"context"

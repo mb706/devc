@@ -1,7 +1,6 @@
-package hub
-
-// The front (work orders C11a section 2 and C11b sections 1, 2 and 4):
-// every request passes ServeHTTP before any handler runs.
+// This file implements the front (work orders C11a section 2 and C11b
+// sections 1, 2 and 4): every request passes ServeHTTP before any handler
+// runs.
 //
 //  1. Security headers, the access log, the Host check.
 //  2. The client certificate (TLS, or the proxy header behind a proxy),
@@ -14,8 +13,12 @@ package hub
 //     session bound to it; or enrolment) and a cross-site rule, both
 //     enforced by guard before the handler runs.
 //
-// Failures of unauthenticated requests are rate-limited per address and
-// per certificate.
+// Failures (refused certificates, requests the gate turns away, refused
+// enrolment and button tokens, missing login sessions, failed logins)
+// drain a rate limit per address and per certificate; a request with a
+// valid login session is never limited.
+
+package hub
 
 import (
 	"context"
@@ -62,22 +65,25 @@ const (
 	// xsiteStrict (state changes from the web app): X-Devc-Request: 1, an
 	// Origin equal to the hub's, and an application/json body.
 	xsiteStrict
-	// xsiteToken (state changes by callers that are not browsers, ntfy and
-	// devc join, with a single-use token in the path): X-Devc-Request: 1
-	// and an Origin, when sent, equal to the hub's.
+	// xsiteToken (state changes by callers that are not browsers and send
+	// no Origin: ntfy's buttons with their token in a header, devc join
+	// with its token in the path, a machine's archive uploads):
+	// X-Devc-Request: 1 and an Origin, when sent, equal to the hub's.
 	xsiteToken
 	// xsiteOpen: no check (the enrolment download, opened from a link).
 	xsiteOpen
 )
 
 // RequestHeader must be 1 on state-changing requests: a browser cannot
-// send a custom header cross-site without a preflight, which the hub
-// never answers.
+// send a custom header cross-site without a preflight, which the hub never
+// grants (it sends no CORS headers).
 const RequestHeader = "X-Devc-Request"
 
 // enrolPrefix is the path of the enrolment endpoint.
 const enrolPrefix = "/enroll/"
 
+// route is one entry of the route table: method and pattern, access
+// class, cross-site rule and handler.
 type route struct {
 	method, path string
 	access       access
@@ -297,8 +303,10 @@ func (s *Server) enrolOpen() bool {
 	return open
 }
 
-// guard enforces a route's access class and cross-site rule, then runs
-// its handler.
+// guard enforces a route's access class and cross-site rule, admits a
+// request of class device or enrolment only while fewer than maxAnonymous
+// such requests are in progress, checks the login session of a route of
+// class user, then runs the handler.
 func (s *Server) guard(rt route) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.routeHook != nil {

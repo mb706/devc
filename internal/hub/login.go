@@ -1,5 +1,3 @@
-package hub
-
 // Login (work order C11b section 1). The hub has one user: a password
 // (argon2id) and optionally TOTP. POST /api/login with a device
 // certificate creates a session: a 256-bit random token in a cookie
@@ -9,6 +7,8 @@ package hub
 // needs the certificate and a session bound to it (Server.checkSession, run
 // by guard). Five failed logins in a row lock that certificate's logins for
 // 15 minutes; every attempt is logged, never the password.
+
+package hub
 
 import (
 	"context"

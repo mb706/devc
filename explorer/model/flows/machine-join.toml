@@ -1,0 +1,196 @@
+id = "machine-join"
+kind = "flow"
+title = "A machine joins a hub"
+summary = "An enrolment token made on the hub's server, a key and certificate request made on the machine, the certificate signed against the token, credentials stored and the hub listed in config.toml; then the daemon dials out, says hello, subscribes from its cursors and catches up."
+concern = "hub-machine-link"
+trigger = "devc hub enroll machine laptop (on the hub), then devc join https://hub.example.org --token <token> (on the machine)"
+actors = ["hub-cli", "hub-db", "hub", "daemon", "cli", "state-dir"]
+
+[[step]]
+section = "On the hub's server"
+
+[[step]]
+at = "hub-cli"
+ref = "internal/hub.CreateEnrolment"
+text = "`devc hub enroll machine laptop` makes a 256-bit token for the name, valid for at most 15 minutes, and prints `devc join <public URL> --token <token>`, with a hint to add `--ca` when the hub serves the server certificate `devc hub init` made."
+
+[[step]]
+from = "hub-cli"
+to = "hub-db"
+via = "file"
+label = "enrolments: SHA-256 of the token"
+ref = "internal/hub.Store.AddEnrolment"
+text = "Only the token's hash is stored, with role, name and expiry. Until it is used or expires, the hub accepts connections without a client certificate, for the enrolment path alone."
+
+[[step]]
+section = "On the machine"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.newJoinCmd"
+text = "`devc join https://hub.example.org --token <token>`: the URL must be https with a host and no query, fragment or user information ([[internal/hubnode.NormalizeURL]])."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.joinWithToken"
+checks = ["internal/hub.ValidToken"]
+text = "The token must have the form `devc hub enroll` prints; `--token -` reads it from standard input, so it need not appear in the shell's history."
+
+[[step]]
+at = "cli"
+ref = "internal/hub.NewMachineCSR"
+text = "The machine makes its own ECDSA P-256 key and a certificate request; the key never leaves it."
+
+[[step]]
+from = "cli"
+to = "hub"
+via = "http:POST /enroll/{token}"
+label = "POST /enroll/<token> {csr}"
+ref = "internal/cli.app.joinWithToken"
+text = "Without a client certificate, with `X-Devc-Request: 1`, 30 seconds. The hub's server certificate is checked against `--ca` when given, else the system's roots."
+detail = "In direct TLS the handshake itself succeeds without a client certificate only while some enrolment token is outstanding; otherwise `devc join` reports that the token is unknown, used or expired."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.enrolMachine"
+checks = ["internal/hub.Server.gate", "internal/hub.Server.checkSite", "internal/hub.Store.EnrolmentUsable", "internal/hub.ParseCSR"]
+text = "The gate passes only this exact path while a token is outstanding; the guard wants the header and one of 64 places for requests without a login. The token must be an unused machine token before the body is read; the body, at most 16 KiB, must hold one valid ECDSA P-256 request."
+detail = "Every refusal of the token answers 404, closes the connection and counts as a failure of the client's address for the rate limit. Only the request's public key is used: the name comes from the token."
+
+[[step]]
+from = "hub"
+to = "hub-db"
+via = "file"
+label = "token used, certs row"
+ref = "internal/hub.Store.UseEnrolment"
+text = "In one transaction the token is marked used and the certificate the CA signs for the token's name is registered as a machine certificate; the server reads the CA key for this alone. A second use of the token finds it used."
+
+[[step]]
+from = "hub"
+to = "cli"
+via = "reply"
+label = "{name, certificate}"
+ref = "internal/hub.Server.enrolMachine"
+text = "The certificate is valid for a year and only for client authentication."
+
+[[step]]
+at = "cli"
+ref = "internal/hubnode.Check"
+checks = ["internal/hubnode.Check", "internal/hub.RoleOf"]
+text = "Certificate and key must form a pair, the certificate must not have expired and must name the role machine."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "durable/node/hubs/<id>/"
+ref = "internal/hubnode.Save"
+text = "`hub.json` with the URL, `cert.pem`, `key.pem` and the CA from `--ca`, each written atomically, 0600 in a 0700 directory named by 16 hex characters of the URL's SHA-256."
+
+[[step]]
+at = "cli"
+ref = "internal/hubnode.AddToConfig"
+text = "A `[[hubs]]` block for the URL is appended to config.toml unless it is listed; the result must decode to exactly the old hub list plus this URL, or the user is asked to add it."
+
+[[step]]
+section = "The daemon connects"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hubManager.sync"
+text = "Within three seconds the daemon's watch loop sees the changed configuration (a reload) or the new credentials (their stamp) and starts a link for the URL."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hubLink.run"
+text = "One goroutine per hub: it loads the credentials, connects, and after a loss waits from one second, doubling to two minutes. A listed hub without credentials is shown as `no-credentials` and looked at again every 30 seconds."
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "http:GET /machine"
+label = "WebSocket wss://<hub>/machine"
+ref = "internal/daemon.hubLink.connectOnce"
+text = "TLS with the stored machine certificate; the server is checked against the stored CA, else the system's roots; `HTTPS_PROXY` is honoured; 30 seconds to connect."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.serveLink"
+checks = ["internal/hub.Server.identify", "internal/hub.Server.guard"]
+text = "The certificate is in the registry, valid, of role machine; its registry name is the machine's name from now on. An older link of that name is ended and must mark the machine offline before this one goes on."
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "rpc:hub.hello"
+label = "hub.hello {protocol, name, version, instance}"
+ref = "internal/daemon.hubLink.connectOnce"
+text = "The host name and version are informational: they are stored, never used as keys."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.machineLink.onHello"
+checks = ["internal/proto.HubHello.Validate"]
+text = "Within ten seconds of connecting; protocol 1, printable name and version within their lengths, a well-formed instance, and only once."
+
+[[step]]
+from = "hub"
+to = "hub-db"
+via = "file"
+label = "machines: online, notifier off"
+ref = "internal/hub.Tx.MachineUp"
+text = "The machine is recorded before the answer, and a `machine` change tells the browsers' streams."
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "reply"
+label = "{protocol, hub, machine}"
+ref = "internal/hub.machineLink.onHello"
+text = "The answer names the machine as the registry does; the daemon checks the protocol and that the name is valid, and records the link as connected."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hubManager.recomputeLocked"
+text = "The first connected hub in config.toml's order is the notifier; each connected hub is told its role with `hub.role`, and told again whenever it changes."
+
+[[step]]
+section = "Catching up"
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "rpc:events.subscribe"
+label = "events.subscribe {cursor, window}"
+ref = "internal/hub.machineLink.start"
+text = "The worker has loaded the machine's stored sessions and requests, and asked `daemon.info` for the boxes. It subscribes with the last seq of every session live or active in the last 30 days, keyed `<realm>/<project>/<id>`, and a window of 30 days."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hub.subscribe"
+checks = ["internal/proto.Cursor.Validate"]
+text = "One subscription per connection. Sessions in the cursor are replayed after their seq; other sessions live or active within the window, from the start."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.subscriber.replayOne"
+text = "Each session's journal events after the cursor go out as notifications; a journal that ends before the cursor, or cannot be read to its end, gets `missed`."
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "stream"
+label = "events.event …, events.caught_up"
+ref = "internal/daemon.subscriber.run"
+text = "Then `caught_up`, live events as journals grow, and a heartbeat every 15 seconds."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.machineLink.process"
+unchecked = "the link's reader (proto.Conn) runs the notification handlers, which put each item on the worker's queue; the worker (machineLink.run) takes them in batches"
+text = "The worker applies what arrives in batches of up to 500, one transaction each ([[flow:event-to-phone]] follows one event)."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.machineLink.startRefresh"
+text = "At `caught_up`, and every 30 seconds after, the first refresh: `sessions.list` in strictly advancing pages and `boxes.list`; sessions the stream did not bring are read again; then `requests.list` replaces the pending requests."

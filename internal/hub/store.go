@@ -1,11 +1,12 @@
-package hub
+// This file implements the hub's SQLite database (pure Go,
+// modernc.org/sqlite): the certificate registry, the machines, the latest
+// view per machine and session with the cursor it was folded to, a bounded
+// tail of events per session, pending requests, and a bounded change log
+// that server-sent event streams and the notifier follow. Writes are
+// serialised in this process; other processes (devc hub ca revoke) wait on
+// SQLite's lock. The access state is in store_access.go.
 
-// The hub's SQLite database (pure Go, modernc.org/sqlite): the certificate
-// registry, the machines, the latest view per machine and session with the
-// cursor it was folded to, a bounded tail of events per session, pending
-// requests, and a bounded change log that server-sent event streams resume
-// from. Writes are serialised in this process; other processes (devc hub ca
-// revoke) wait on SQLite's lock.
+package hub
 
 import (
 	"database/sql"
@@ -375,8 +376,10 @@ type Tx struct {
 	changes int
 }
 
-// Write runs fn in a transaction; streams are woken after a commit that
-// added changes.
+// Write runs fn in one transaction, serialised with every other write of
+// this process. A transaction that added changes also trims the change log
+// to its last KeepChanges entries, and its commit wakes everyone waiting on
+// Changed (event streams, the notifier).
 func (s *Store) Write(fn func(*Tx) error) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()

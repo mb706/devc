@@ -1,0 +1,171 @@
+id = "hub-terminal"
+kind = "flow"
+title = "A session's terminal in the browser"
+summary = "The web app opens a session's terminal: the hub checks the mode against hub.toml, registers a sink and asks the machine for a terminal stream; the daemon attaches a tmux client in the box through a grouped session of its own; output flows back as notifications into the sink and out as WebSocket frames; input passes only in control mode."
+concern = "hub-commands-and-terminal"
+trigger = "The terminal tab of a session in the web app"
+actors = ["user", "browser", "hub", "daemon", "podman", "tmux"]
+
+[[step]]
+section = "Opening"
+
+[[step]]
+from = "user"
+to = "browser"
+external = true
+label = "open the terminal"
+text = "Observe mode unless the user asked to take control and the hub said it allows that."
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:GET /api/terminal/{machine}/{session}"
+external = true
+label = "WebSocket /api/terminal/<machine>/<session>?mode=observe"
+text = "A WebSocket upgrade with the device certificate and the session cookie."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiTerminal"
+checks = ["internal/hub.Server.checkSession", "internal/hub.Server.checkSite"]
+text = "Class user; an Origin on the upgrade must be the hub's. The mode is `observe`, or `control` only if hub.toml has `[terminal] control = true`; the machine must be connected. Frames from the browser are limited to 16 KiB."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.machineLink.addTerm"
+text = "A random stream ID and a sink of 512 messages are registered on the machine's link before anything is asked, so the machine's output finds them."
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "rpc:terminal.open"
+label = "terminal.open {stream, session, ref, mode}"
+ref = "internal/hub.machineLink.forward"
+text = "30 seconds for the answer."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.termManager.open"
+checks = ["internal/proto.DecodeParams"]
+text = "At most four streams for this connection (the hub's link, so for every browser of this hub together) and sixteen in all. Control mode needs `[terminal] control = true` in config.toml; the session must be live in a running box with a tmux window."
+
+[[step]]
+from = "daemon"
+to = "podman"
+via = "exec"
+label = "podman exec -t <box> tmux attach (own grouped session)"
+ref = "internal/tmux.Observe"
+text = "On a pseudo-terminal of the daemon's: the box's tmux client attaches through a grouped session of its own with `ignore-size`, so it never resizes the window. It is not tmux's read-only mode: the daemon, the only writer of that pseudo-terminal, enforces observing."
+
+[[step]]
+from = "podman"
+to = "tmux"
+via = "exec"
+external = true
+label = "tmux client in the box"
+text = "The client shows the session's window as it is."
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "reply"
+label = "{stream, cols, rows}"
+ref = "internal/daemon.termManager.open"
+text = "The hub checks that the stream ID is its own and the size plausible, and sends the browser `open` with the size and mode."
+
+[[step]]
+section = "Output"
+
+[[step]]
+from = "tmux"
+to = "daemon"
+via = "stream"
+external = true
+label = "output on the pseudo-terminal"
+text = "What the client draws."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.termStream.read"
+unchecked = "the engine process writes the pseudo-terminal; read runs as the stream's goroutine, started by open"
+text = "The output goes out as `terminal.data` notifications on the connection that opened the stream; another goroutine reads the window's size every five seconds and reports changes."
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "stream"
+label = "terminal.data {stream, data}"
+ref = "internal/daemon.termStream.read"
+text = "On the machine link, between the link's other messages."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.machineLink.onTermData"
+unchecked = "the link's reader (proto.Conn.readLoop) runs the notification handler"
+checks = ["internal/proto.CheckTerminalData"]
+text = "Checked and put into the sink of that stream ID on this link. A sink that is full ends the stream rather than make the reader wait."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiTerminal"
+unchecked = "termSink.put hands the message over a channel to the loop of the terminal's handler"
+text = "The handler's loop sends each chunk to the browser, a size change as `size`, and a `ping` every 25 seconds."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "stream"
+label = "binary frames"
+ref = "internal/hub.Server.apiTerminal"
+text = "30 seconds per write."
+
+[[step]]
+section = "Input, in control mode only"
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "stream"
+external = true
+label = "{\"type\":\"input\",\"data\":…}"
+text = "Keystrokes as a JSON text frame."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiTerminal"
+unchecked = "the handler's reader goroutine, a function literal in apiTerminal, reads the frame"
+text = "In observe mode an input frame ends the stream. In control mode frames of 1 to 4,096 bytes are forwarded; others are ignored."
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "rpc:terminal.input"
+label = "terminal.input {stream, data}"
+ref = "internal/hub.machineLink.forward"
+text = "Ten seconds; a failure ends the stream."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.termManager.input"
+text = "Only for a control-mode stream that this connection opened: the bytes are written to its pseudo-terminal, into the session's window."
+
+[[step]]
+section = "The end"
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiTerminal"
+text = "The stream ends with the session, the page, the machine's link, 30 minutes without the page visible, the login session (checked every 15 seconds), or the certificate; the browser gets `end` with the reason."
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "rpc:terminal.close"
+label = "terminal.close {stream}"
+ref = "internal/hub.machineLink.forward"
+text = "Sent whatever ended the stream; a no-op when the machine ended it."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.termManager.close"
+text = "The stream's grouped tmux session is killed: the client detaches and exits."

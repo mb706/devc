@@ -927,3 +927,138 @@ aka = ["dependent"]
 text = "A container that joined a box's namespaces and must go before the box stops, is removed or starts again; the desktop sidecar is the only one. One that cannot be removed stops the operation."
 refs = ["internal/box.Dependent", "internal/box.Manager.removeDependents"]
 see = ["desktop-sidecar"]
+
+# ----- the hub (X11)
+
+[[term]]
+id = "hub"
+title = "Hub"
+aka = ["hub server"]
+text = "An always-on `devc hub serve` on a server that machine daemons dial out to. It mirrors every session of every joined machine, derives the inbox, notifies through ntfy and serves the web app; it acts on a machine only through the methods that machine's daemon allows a hub."
+refs = ["internal/hub.Server", "internal/daemon.hubMethods"]
+see = ["machine-link", "projection"]
+
+[[term]]
+id = "machine-link"
+title = "Machine link"
+aka = ["hub link"]
+text = "The WebSocket a machine's daemon keeps open to each hub in config.toml, authenticated by the machine certificate. Over it the hub calls the daemon's allowlisted methods and receives the machine's session events; the daemon calls only `hub.hello` and `hub.role`."
+refs = ["internal/daemon.hubLink.connectOnce", "internal/hub.Server.serveLink"]
+see = ["hub", "client-certificate"]
+
+[[term]]
+id = "hub-ca"
+title = "Hub CA"
+text = "The hub's own certificate authority (ECDSA P-256, ten years) in `<hub>/ca/`. It signs the machine and device certificates and the hub's default server certificate. Its key is read by the hub's commands and, to sign a machine's request at enrolment, by the server."
+refs = ["internal/hub.createCA", "internal/hub.LoadCA", "internal/hub.CA.signClient"]
+see = ["client-certificate", "certificate-registry"]
+
+[[term]]
+id = "client-certificate"
+title = "Machine and device certificates"
+aka = ["machine certificate", "device certificate", "client certificate"]
+text = "One-year client certificates from the hub CA, with the name as CN and the role as OU. A machine certificate opens the machine link; a device certificate lets a browser or phone use the web app and the API. What counts is the registry's record of the certificate, not the certificate itself."
+refs = ["internal/hub.CA.signClient", "internal/hub.CertRecord"]
+see = ["certificate-registry", "hub-ca"]
+
+[[term]]
+id = "certificate-registry"
+title = "Certificate registry"
+aka = ["registry"]
+text = "The `certs` table of the hub's database: every certificate the hub issued or imported, by SHA-256 fingerprint, with role, name, expiry and revocation. Every request is checked against it, and long-lived connections whenever it changes."
+refs = ["internal/hub.Store.Cert", "internal/hub.CertRecord.Valid", "internal/hub.Store.Revoke"]
+see = ["client-certificate"]
+
+[[term]]
+id = "enrolment-token"
+title = "Enrolment token"
+text = "A single-use 256-bit token from `devc hub enroll machine|device <name>`, valid at most 15 minutes and stored as its hash. While one is outstanding the hub serves `/enroll/<token>` without a client certificate: a device downloads its bundle there, a machine has its certificate request signed."
+refs = ["internal/hub.CreateEnrolment", "internal/hub.Store.UseEnrolment", "internal/hub.Server.gate"]
+see = ["hub-gate"]
+
+[[term]]
+id = "hub-gate"
+title = "Gate (hub)"
+text = "The one place where the hub handles a request without a client certificate ([[internal/hub.Server.gate]]): exactly `/enroll/<token>` goes on while an enrolment token is outstanding; everything else gets 404 and a closed connection."
+refs = ["internal/hub.Server.gate", "internal/hub.isEnrolPath"]
+see = ["enrolment-token", "access-class"]
+
+[[term]]
+id = "login-session"
+title = "Login session"
+text = "What `POST /api/login` with the hub's password (and TOTP code) creates: a 256-bit token in the cookie `__Host-devc-session`, stored as its hash and bound to the device certificate it was made with. It lasts 30 days after its last use and ends at logout, revocation, or when the cookie comes with another certificate."
+refs = ["internal/hub.Server.apiLogin", "internal/hub.Server.checkSession"]
+see = ["client-certificate"]
+
+[[term]]
+id = "access-class"
+title = "Access class"
+text = "What a hub route requires: a machine certificate, a device certificate, a device certificate with a login session, or for enrolment nothing but the token. Every route of the route table names one, and a cross-site rule; the front enforces both before the handler runs."
+refs = ["internal/hub.routeTable", "internal/hub.Server.guard"]
+see = ["cross-site-rule", "hub-gate"]
+
+[[term]]
+id = "cross-site-rule"
+title = "Cross-site rule"
+text = "A hub route's defence against requests that a page on another site makes the browser send: reads check `Origin` and `Sec-Fetch-Site` when sent; the web app's state changes need `X-Devc-Request: 1`, the hub's Origin and a JSON body; requests with a token need the header."
+refs = ["internal/hub.Server.checkSite", "internal/hub.RequestHeader"]
+see = ["access-class"]
+
+[[term]]
+id = "projection"
+title = "Projection (hub)"
+aka = ["hub projection"]
+text = "The hub's copy of a machine's sessions in its database: each session's view folded to its cursor, a tail of at most 500 events and 1 MiB, the pending requests, the boxes. It can always be rebuilt from the machines' journals."
+refs = ["internal/hub.Tx.PutSession", "internal/hub.Tx.TrimTail", "internal/hub.machineLink.applyEvent"]
+see = ["journal", "cursor", "machine-link"]
+
+[[term]]
+id = "change-log"
+title = "Change log"
+text = "The hub's table of recent changes (events, session summaries, machines, requests): the last 20,000, with consecutive IDs. Browsers' event streams and the notifier follow it and resume from an ID; an ID the log no longer reaches means starting again from a snapshot."
+refs = ["internal/hub.Tx.AddChange", "internal/hub.Store.changesAfter", "internal/hub.KeepChanges"]
+see = ["projection"]
+
+[[term]]
+id = "hub-resync"
+title = "Re-read (hub)"
+aka = ["resynchronisation"]
+text = "When the hub's copy of a session cannot continue from its cursor (a gap, a session the event stream did not bring, a `missed` notice), the hub reads the session again with `sessions.get`: its view and last 500 events, holding back events that arrive meanwhile. Re-reads wait in a queue of 256 and run four at a time."
+refs = ["internal/hub.machineLink.startResync", "internal/hub.machineLink.finishResync"]
+see = ["projection", "cursor"]
+
+[[term]]
+id = "notifier"
+title = "Notifier"
+text = "The hub a machine names to send its notifications: the first connected hub in config.toml's order, told with `hub.role`. Also that hub's goroutine that follows the change log and publishes to ntfy."
+refs = ["internal/daemon.hubManager.recomputeLocked", "internal/hub.notifier.run"]
+see = ["notification-record"]
+
+[[term]]
+id = "notification-record"
+title = "Notification record"
+text = "The hub's record of one attention state of a session (needs-you with its question, failed, a finished turn): pending until published or handled without a message, sent, then cleared when the state ends. Failures are retried with backoff, across restarts too."
+refs = ["internal/hub.NoteState", "internal/hub.notifier.update"]
+see = ["notifier", "action-token"]
+
+[[term]]
+id = "action-token"
+title = "Action token"
+aka = ["button token"]
+text = "The 256-bit token behind an option button of a notification: bound to one answer of one question of one session, valid an hour, used once, sent in the `X-Devc-Action` header to `/api/act`."
+refs = ["internal/hub.Server.apiAct", "internal/hub.Store.UseAction"]
+see = ["notification-record"]
+
+[[term]]
+id = "inbox"
+title = "Inbox"
+text = "The hub's list of sessions across machines in sections: needs-you, failed, finished, working, idle. It is derived from the projection on every request and never stored."
+refs = ["internal/hub.SectionOf", "internal/hub.BuildInbox"]
+see = ["needs-you", "projection"]
+
+[[term]]
+id = "uncertain-outcome"
+title = "Uncertain outcome"
+text = "A command the hub forwarded whose answer never came back: the machine went away, did not answer in time, or sent an invalid receipt. The API says `\"uncertain\": true`, and the client asks for the receipt or retries with the same command ID."
+refs = ["internal/hub.rpcStatus", "internal/hub.writeRPCError"]
+see = ["receipt", "command"]

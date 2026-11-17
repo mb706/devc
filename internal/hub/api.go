@@ -1,10 +1,13 @@
-package hub
+// This file implements the HTTP API (work order C11a section 5): JSON over
+// HTTPS for device certificates with a login session. Reads come from the
+// projection, except a session's older events, which the machine is asked
+// for when the hub's tail does not reach back far enough. Commands are
+// forwarded to the machine with the client's command ID and the machine's
+// answer (its stored receipt) is returned; decisions are forwarded too,
+// and the machine applies the hub's origin to them. A machine that is not
+// connected gets nothing queued: the request fails at once.
 
-// The HTTP API (work order C11a section 5): JSON over HTTPS for device
-// certificates. Reads come from the projection; commands and decisions are
-// forwarded to the machine with the client's ID, and the machine's answer
-// (its stored receipt) is returned. A machine that is not connected gets
-// nothing queued: the request fails at once.
+package hub
 
 import (
 	"bytes"
@@ -482,6 +485,12 @@ func (s *Server) offline(w http.ResponseWriter, machine string) {
 	}
 }
 
+// apiCommand forwards one session command to its machine. The type must
+// map to one of the daemon's command methods, the parameters are decoded
+// strictly into that method's type and carry the client's command ID (a
+// repeat with the same ID gets the stored receipt), and a session's
+// project is filled in from the hub's view when the client named none.
+// With wait the final receipt is awaited through command.get.
 func (s *Server) apiCommand(w http.ResponseWriter, r *http.Request) {
 	var c CommandRequest
 	if !decodeBody(w, r, &c) {
@@ -605,6 +614,9 @@ type DecideRequest struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
+// apiDecide forwards a decision on a pending request to its machine, whose
+// daemon gives it the origin hub: only low-risk requests can be decided
+// this way (requests.MayDecide on the machine).
 func (s *Server) apiDecide(w http.ResponseWriter, r *http.Request) {
 	machine, id := r.PathValue("machine"), r.PathValue("id")
 	if !validMachine(machine) || !proto.ValidRequestID(id) {

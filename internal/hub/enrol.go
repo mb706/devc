@@ -1,5 +1,3 @@
-package hub
-
 // Enrolment (work order C11b section 2). `devc hub enroll machine|device
 // <name>` creates a single-use token valid for at most 15 minutes. While
 // one is outstanding, /enroll/<token> is reachable without a client
@@ -16,6 +14,8 @@ package hub
 // The token is the credential: unknown, used and expired tokens get 404,
 // and count as failures for the rate limit. The server reads the CA key
 // only to sign such a request.
+
+package hub
 
 import (
 	"crypto/ecdsa"

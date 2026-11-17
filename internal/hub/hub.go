@@ -2,11 +2,11 @@
 // process on a server that machine daemons dial out to. It keeps a
 // projection of every session on every machine in SQLite (views, a bounded
 // tail of events per session, cursors, pending requests), derives the
-// inbox, offers a JSON API with server-sent events for a user interface,
-// and sends notifications through ntfy. Its CA issues the client
-// certificates that are the front door for machines and devices, by hand
-// or through single-use enrolment tokens. It also keeps the archive of
-// the machines' durable state and their encrypted secrets bundles (work
+// inbox, offers a JSON API with server-sent events and a terminal relay
+// for the web app, and sends notifications through ntfy. Its CA issues the
+// client certificates that are the front door for machines and devices, by
+// hand or through single-use enrolment tokens. It also keeps the archive
+// of the machines' durable state and their encrypted secrets bundles (work
 // order C17, archive.go). Its view of the sessions can be rebuilt from the
 // machines; its registry of certificates, the user's password and the
 // archive cannot.
@@ -14,8 +14,9 @@
 // Security rules: the hub is public-facing and can type into agent
 // sessions. Nothing reaches a route without a client certificate from its
 // CA, checked against the registry (known, not expired, not revoked) on
-// every request and, for long-lived connections, whenever the registry
-// changes; the role and name come from the registry, never from the
+// every request; a long-lived connection ends when a change of the
+// registry leaves its certificate invalid, and when the certificate
+// expires. The role and name come from the registry, never from the
 // request. The one exception is the enrolment path, while a single-use
 // enrolment token is outstanding; one gate (Server.gate, front.go) decides
 // that. The API also needs a login session bound to the request's
@@ -23,17 +24,35 @@
 // stored hashed, constant-time comparisons, lockout and rate limits. The
 // reverse-proxy header is honoured only in behind-proxy mode, from
 // loopback peers, on a loopback listener. Every request has a size limit,
-// the Host header must name the hub, state-changing requests must carry
-// X-Devc-Request: 1 and come from the hub's own origin, and no CORS
-// headers are sent. Secrets never reach the log. Everything a machine sends is decoded strictly
-// and validated before it is stored (events through proto.ValidateData);
-// a machine can only write rows under its own registry name, and only
-// append to the archive below its own registry name (a ratchet with
-// budgets: archive.go). Over the
+// the Host header must name the hub, every POST and PUT must carry
+// X-Devc-Request: 1 (and those of the web app an Origin equal to the
+// hub's), and no CORS headers are sent. Secrets never reach the log.
+// Everything a machine sends is decoded strictly and validated before it
+// is stored (events through proto.ValidateData); a machine can only write
+// rows under its own registry name, and only append to the archive below
+// its own registry name (a ratchet with budgets: archive.go). Over the
 // machine link the hub only calls methods; which ones a hub may call, and
 // with what effect, is decided by the daemon (internal/daemon/hublink.go).
 // The CA key never leaves the hub directory (0600 in 0700); the server
 // reads it only to sign a machine's certificate request at enrolment.
+//
+// Files:
+//   - hub.go: the hub directory and its creation; ca.go: the CA and the
+//     certificates it issues.
+//   - server.go: start, the listeners of both modes, who a request comes
+//     from, long-lived connections, housekeeping; front.go: the route
+//     table, the gate, access classes, cross-site rules, rate limits and
+//     the access log.
+//   - auth.go, login.go: passwords, TOTP, tokens, login sessions;
+//     enrol.go: enrolment; doctor.go: devc hub doctor; config.go: hub.toml.
+//   - store.go, store_access.go: the database.
+//   - link.go, validate.go: the machine link and the checks of what a
+//     machine sends.
+//   - api.go, stream.go, terminal.go: the API, the event stream and the
+//     terminal relay; inbox.go, notify.go: the inbox and notifications.
+//   - archive.go, retention.go: the archive; web.go, static.go: the web
+//     app's API and files; devmode.go, devmachine.go, devterm.go: the
+//     development mode.
 package hub
 
 import (

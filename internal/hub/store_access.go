@@ -1,10 +1,10 @@
-package hub
-
 // Access state in the hub database (work order C11b): the user's password
 // and TOTP secret (meta), login sessions bound to a device certificate,
 // failed logins per certificate, enrolment tokens, action tokens of
 // notification buttons, the notifications outstanding, and when each
 // certificate was last seen. Tokens are stored as their SHA-256 only.
+
+package hub
 
 import (
 	"database/sql"

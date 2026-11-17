@@ -1,0 +1,100 @@
+id = "device-enrol"
+kind = "flow"
+title = "A phone gets its certificate"
+summary = "An enrolment link from the hub's server: the device's key, certificate and bundle are made on the hub and wait in the database; the phone downloads the bundle once, without a certificate, and imports it with a passphrase only the terminal saw."
+concern = "hub-access"
+trigger = "devc hub enroll device phone (on the hub), then the printed URL opened on the phone"
+actors = ["user", "hub-cli", "hub-db", "hub", "browser"]
+
+[[step]]
+section = "On the hub's server"
+
+[[step]]
+at = "hub-cli"
+ref = "internal/hub.CreateEnrolment"
+text = "`devc hub enroll device phone` makes a single-use 256-bit token, valid for at most 15 minutes. For a device the hub makes the key and certificate itself, now."
+
+[[step]]
+at = "hub-cli"
+ref = "internal/hub.CA.IssueClient"
+text = "The CA key is read from `ca/ca.key`; the certificate (one year, CN `phone`, OU `device`, client authentication only) and the key go into a PKCS#12 bundle with the CA certificate, encrypted with a passphrase of four groups of five characters (`--legacy-p12` for older phones)."
+
+[[step]]
+from = "hub-cli"
+to = "hub-db"
+via = "file"
+label = "enrolments: token hash, bundle, certificate"
+ref = "internal/hub.Store.AddEnrolment"
+text = "The encrypted bundle waits in the database beside the token's hash. The certificate is not registered yet."
+
+[[step]]
+from = "hub-cli"
+to = "user"
+via = "reply"
+label = "URL and passphrase"
+ref = "internal/hub.NewEnrolment"
+text = "The terminal shows `<public URL>/enroll/<token>` and the passphrase; the passphrase is stored nowhere."
+
+[[step]]
+section = "On the phone"
+
+[[step]]
+from = "user"
+to = "browser"
+external = true
+label = "open the URL"
+text = "The user opens the URL on the phone, which has no certificate for the hub yet."
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:GET /enroll/{token}"
+external = true
+label = "GET /enroll/<token>"
+text = "No client certificate. In direct TLS the handshake is allowed without one only while some token is outstanding."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.enrolDevice"
+checks = ["internal/hub.Server.gate", "internal/hub.isEnrolPath", "internal/hub.ValidToken"]
+text = "The gate passes exactly this path while a token is outstanding, within 64 requests without a login at a time. Only GET uses the token: a HEAD, as a link preview sends, gets 405."
+
+[[step]]
+from = "hub"
+to = "hub-db"
+via = "file"
+label = "token used, bundle removed, certs row"
+ref = "internal/hub.Store.UseEnrolment"
+text = "In one transaction the token is marked used, the bundle removed from its row and the certificate registered as a device named `phone`. An unknown, used or expired token gets 404, a closed connection, and a failure on the address's rate limit."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "phone.p12"
+ref = "internal/hub.Server.enrolDevice"
+text = "The bundle, as `application/x-pkcs12`. The log names the device and the address, never the token: the access log shows `/enroll/-`."
+
+[[step]]
+from = "user"
+to = "browser"
+external = true
+label = "import with the passphrase"
+text = "The user imports the bundle with the passphrase from the terminal; from now on the phone's browser presents the certificate to the hub."
+
+[[step]]
+section = "With the certificate"
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:GET /{$}"
+external = true
+label = "GET /"
+text = "The first request with the certificate."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.serveIndex"
+checks = ["internal/hub.Server.identify", "internal/hub.Server.guard"]
+text = "The registry now knows the certificate: class device reaches the web app's page and files, while the API's routes other than login and the buttons answer 401 until the user logs in ([[flow:hub-login]])."

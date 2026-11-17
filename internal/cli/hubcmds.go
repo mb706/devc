@@ -1,9 +1,9 @@
-package cli
-
 // Hub commands (work order C11a): the hub server's own commands (`devc hub
 // init`, `ca`, `serve`, working on DEVC_HUB_DIR) and the machine's side
 // (`devc join`, `devc leave`, `devc hub status`). The access commands of
 // C11b are in hubaccess.go.
+
+package cli
 
 import (
 	"context"
@@ -33,6 +33,10 @@ func (a *app) hubDir(flag string) (string, error) {
 	return hub.ResolveDir(a.getenv, a.getenv("HOME"))
 }
 
+// newHubCmd builds `devc hub`: the commands that run on the hub's server
+// against the hub directory (init, ca, serve, archive and the access
+// commands of hubaccess.go), and `devc hub status`, which asks this
+// machine's daemon about its links.
 func newHubCmd(a *app) *cobra.Command {
 	var dirFlag string
 
@@ -416,6 +420,8 @@ func newHubCmd(a *app) *cobra.Command {
 	return cmd
 }
 
+// writeExclusive writes a new file with exactly mode; it never replaces an
+// existing file.
 func writeExclusive(path string, data []byte, mode os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
@@ -435,6 +441,12 @@ func writeExclusive(path string, data []byte, mode os.FileMode) error {
 	return f.Close()
 }
 
+// newJoinCmd builds `devc join`: credentials for one hub, from an
+// enrolment token (the key is made here and never leaves the machine) or
+// from files the hub issued, checked to be a key pair with a machine
+// certificate that has not expired, stored under durable/node/hubs/<id>/,
+// and the hub appended to config.toml's hub list, which the daemon
+// follows.
 func newJoinCmd(a *app) *cobra.Command {
 	var certFile, keyFile, caFile, token string
 	cmd := &cobra.Command{
@@ -518,6 +530,9 @@ func newJoinCmd(a *app) *cobra.Command {
 	return cmd
 }
 
+// newLeaveCmd builds `devc leave`: the hub's [[hubs]] entry and its
+// credentials are removed, and the daemon drops the link when it next
+// reloads the configuration.
 func newLeaveCmd(a *app) *cobra.Command {
 	return &cobra.Command{
 		Use:   "leave <hub-url>",

@@ -229,7 +229,7 @@ role = "The parts of service logins that do not depend on the daemon: the strict
 [package."internal/hubnode"]
 layer = "area"
 group = "hub"
-role = "This machine's side of joining hubs: the client certificate, key and CA for each hub, and the hub list in config.toml."
+role = "This machine's side of joining hubs: the client certificate, key and CA stored for each hub, and the edits of config.toml's hub list by `devc join` and `devc leave`."
 
 [package."internal/depsrc"]
 layer = "area"
@@ -298,7 +298,7 @@ role = "The machine daemon, one per runtime directory: a channel to every runnin
 [package."internal/hub"]
 layer = "service"
 group = "hub"
-role = "The hub server that machine daemons dial out to: a SQLite projection of every session, the inbox, a JSON API with server-sent events, ntfy notifications, the CA and registry of client certificates, and the archive."
+role = "The hub server that machine daemons dial out to: access by client certificates from its own CA with enrolment and a password login, a SQLite projection of every session kept over the machine links, the inbox and ntfy notifications, the JSON API with server-sent events and a terminal relay, the web app's files, and the archive."
 
 # --- entry
 

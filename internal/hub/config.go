@@ -1,8 +1,10 @@
-package hub
+// This file implements hub.toml in the hub directory (work order C11b
+// section 3): the public URL, the ntfy server notifications go to, whether
+// the web app may take control of terminals, and the archive's limits. The
+// file is decoded strictly; a key the hub does not know is an error, not
+// ignored. The server reads it once, at start.
 
-// hub.toml in the hub directory (work order C11b section 3): the public URL
-// and the ntfy server notifications go to. The file is decoded strictly;
-// a key the hub does not know is an error, not ignored.
+package hub
 
 import (
 	"errors"

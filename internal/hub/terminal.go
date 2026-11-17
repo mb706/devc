@@ -1,10 +1,10 @@
-package hub
-
-// GET /api/terminal/<machine>/<session> (work order C12 section 3): a
-// WebSocket between the web app and the machine's terminal.open stream of
-// a session's tmux window. The hub picks the stream ID, so the machine's
-// terminal.data notifications always find their sink, and relays output as
-// binary frames. The browser sends JSON text frames: {"type":"input",
+// This file implements GET /api/terminal/<machine>/<session> (work order
+// C12 section 3): a WebSocket between the web app and the machine's
+// terminal.open stream of a session's tmux window. The hub picks the
+// stream ID, so the machine's terminal.data notifications always find
+// their sink, and relays output as binary frames. Each machine link
+// carries the terminals of every browser, within the daemon's limit per
+// connection. The browser sends JSON text frames: {"type":"input",
 // "data":…} (control mode only) and {"type":"visible","visible":bool}. The
 // hub sends {"type":"open",cols,rows,mode}, {"type":"size",cols,rows},
 // {"type":"ping"} (keeps proxies from closing a quiet stream) and
@@ -12,9 +12,12 @@ package hub
 //
 // Control mode is refused here unless hub.toml says [terminal] control =
 // true; the machine checks its own switch. A stream ends when the session
-// ends, when either side disconnects, after 30 minutes without the page
-// being visible, when the login session ends, and when the device
-// certificate is revoked.
+// ends, when either side disconnects or the machine goes offline, when the
+// browser falls termSinkQueue messages behind, after 30 minutes without
+// the page being visible, when the login session ends, and when the device
+// certificate is revoked or expires.
+
+package hub
 
 import (
 	"context"

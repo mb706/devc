@@ -1,0 +1,163 @@
+id = "event-to-phone"
+kind = "flow"
+title = "A question reaches the phone"
+summary = "A question a harness asked, from the machine's journal over the machine link into the hub's projection and change log; the notifier records the new attention state and publishes it to ntfy with two answer buttons; and the same session in the inbox."
+concern = "hub-inbox-and-notifications"
+trigger = "Claude Code asks a question with two options while nobody follows the session"
+actors = ["user", "browser", "ntfy", "hub-db", "hub", "daemon"]
+
+[[step]]
+section = "On the machine"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hub.poll"
+text = "The harness's hook recorded `question` and `state blocked`, and ingestion appended them to the session's journal ([[flow:event-ingestion]]). Every second the journal follower reads the journals that grew."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hub.enqueueLocked"
+text = "The new events are folded into the follower's view and queued for every subscriber, the hub's subscription among them, within 4,096 batches and 32 MiB per subscriber; one that falls behind is disconnected and resumes from its cursor."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.subscriber.send"
+unchecked = "enqueueLocked puts the batch on the subscriber's queue; the subscription's goroutine (subscriber.run) takes it"
+text = "The subscription sends each event of the session it has not sent yet, in order."
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "stream"
+label = "events.event {ref, event}"
+ref = "internal/daemon.subscriber.send"
+text = "A JSON-RPC notification, one text frame on the machine link."
+
+[[step]]
+section = "Into the projection"
+
+[[step]]
+at = "hub"
+ref = "internal/hub.machineLink.onEvent"
+unchecked = "the link's reader (proto.Conn.readLoop) runs the notification handler"
+checks = ["internal/proto.DecodeParams"]
+text = "Decoded strictly and put on the worker's queue of 4,096 items; a worker that makes no room for a minute loses the link, and the machine reconnects from the stored cursors."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.machineLink.process"
+unchecked = "onEvent puts the item on the link's queue; the worker (machineLink.run) takes it with up to 499 others"
+text = "The worker applies up to 500 queued items in one transaction."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.cleanEvent"
+checks = ["internal/hub.cleanEvent", "internal/proto.ValidateData"]
+text = "Version, seq, session ID, a known type, timestamps and the question's data are checked, and the event is re-encoded from the checked fields; a failing event is dropped."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.machineLink.applyEvent"
+text = "The seq must follow the session's cursor. The event is folded into the stored view: blocked, with the question pending."
+
+[[step]]
+from = "hub"
+to = "hub-db"
+via = "file"
+label = "events, sessions, changes"
+ref = "internal/hub.Tx.AddChange"
+text = "The event joins the session's tail (trimmed to 500 events and 1 MiB), view and cursor are stored, and the change log gets an `event` change and a `session` change whose summary puts the session in needs-you."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Store.Write"
+text = "The commit trims the change log to its last 20,000 entries and wakes everyone waiting for changes: browsers' event streams, which pass the summary on at once, and the notifier."
+
+[[step]]
+section = "The notifier"
+
+[[step]]
+at = "hub"
+ref = "internal/hub.notifier.run"
+unchecked = "the notifier's own goroutine waits on Store.Changed, a channel the commit closes"
+text = "It reads the new changes and takes the latest summary of each session."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.notifier.update"
+text = "The key `needs-you/q/<question ID>` is new for this session: a pending record with a fresh sequence ID."
+
+[[step]]
+from = "hub"
+to = "hub-db"
+via = "file"
+label = "notify_states: pending"
+ref = "internal/hub.Store.PutNoteState"
+text = "The record outlives a restart of the hub and a failure of ntfy."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.notifier.publish"
+checks = ["internal/hub.notifier.machineNotifies", "internal/hub.Server.watched"]
+text = "Only if the machine is online and named this hub its notifier; if a logged-in event stream names the session, the record becomes sent without a message instead."
+
+[[step]]
+from = "hub"
+to = "hub-db"
+via = "file"
+label = "actions: two token hashes"
+ref = "internal/hub.Store.AddActions"
+text = "A 256-bit token per option, stored as its hash with the question ID, the choice and a command ID for the answer; valid for an hour."
+
+[[step]]
+from = "hub"
+to = "ntfy"
+via = "stream"
+label = "POST / {topic, title, message, actions, sequence_id}"
+ref = "internal/hub.ntfyClient.publish"
+text = "Title `<project> · <harness>`, the question as body, priority 4, a click URL into the web app, a button per option and Open; ten seconds per attempt, three attempts on network errors, 408, 429 and 5xx."
+
+[[step]]
+from = "hub"
+to = "hub-db"
+via = "file"
+label = "notify_states: sent"
+ref = "internal/hub.Store.PutNoteState"
+text = "On success the record is sent. On failure the buttons are deleted and the record stays pending, retried after 30 seconds, doubling up to 15 minutes, while the question lasts."
+
+[[step]]
+from = "ntfy"
+to = "user"
+external = true
+label = "push notification"
+text = "The phone shows the message. A button posts the answer to the hub's `/api/act`; Open leads to the session in the web app ([[flow:phone-answer]])."
+
+[[step]]
+section = "In the web app"
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:GET /api/inbox"
+external = true
+label = "GET /api/inbox"
+text = "A browser opening the inbox later reads it fresh; one that has it open already received the `session` change on its event stream."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiInbox"
+checks = ["internal/hub.Server.checkSession"]
+text = "Every summary is built from the stored views and the pending requests, on this request."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.SectionOf"
+text = "A live session that is blocked goes into needs-you, with its question; `stale` is set while the machine is offline."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "sections: needs-you …"
+ref = "internal/hub.BuildInbox"
+text = "Five sections, newest change first in each, and the position to resume the event stream from."

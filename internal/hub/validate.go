@@ -1,8 +1,9 @@
-package hub
+// This file implements the validation of what machines send. A machine is
+// authenticated, but it may be compromised; nothing it sends is stored
+// before it passed these checks, and it can only ever write under its own
+// registry name.
 
-// Validation of what machines send. A machine is authenticated, but it may
-// be compromised; nothing it sends is stored before it passed these checks,
-// and it can only ever write under its own registry name.
+package hub
 
 import (
 	"encoding/json"

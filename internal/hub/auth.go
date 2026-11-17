@@ -1,11 +1,11 @@
-package hub
-
 // Credentials of the hub's one user (work order C11b section 1): an
 // argon2id password hash, an optional TOTP secret (RFC 6238, SHA-1, six
 // digits, 30-second steps), and the random tokens of login sessions, action
 // buttons and enrolments. Tokens are 256-bit random values handed out once
 // and stored only as their SHA-256; every comparison of a secret is
 // constant-time.
+
+package hub
 
 import (
 	"crypto/hmac"

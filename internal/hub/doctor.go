@@ -1,7 +1,7 @@
-package hub
-
 // devc hub doctor (work order C11b section 4): file permissions of the hub
 // directory, the CA key, the password, the public URL and ntfy.
+
+package hub
 
 import (
 	"context"
