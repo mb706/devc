@@ -76,8 +76,8 @@ refs = ["internal/daemon.subscriber.send", "internal/daemon.subscriber.replayOne
 tests = ["internal/daemon.TestSubscribeRaceWithReplay", "internal/daemon.TestReplayFailure"]
 
 [[invariant]]
-text = "A panic in a goroutine of the daemon ends only that stream or request: every goroutine starts through goTask or goSafe, and every timer or context callback through afterFunc or contextAfter, which recover it, after the goroutine's own deferred calls gave back its places, the box lock and in-flight markers; the log names the box, the method and the frames, never the panic's value unless it is a runtime error."
-refs = ["internal/daemon.recoverTask", "internal/daemon.goTask", "internal/daemon.Daemon.goSafe", "internal/daemon.afterFunc", "internal/daemon.contextAfter", "internal/daemon.recoverHandler", "internal/proto.PanicText", "internal/daemon.Daemon.runPush"]
+text = "A panic in a goroutine started in the daemon's own package ends only that stream or request: every such goroutine starts through goTask or goSafe, and every timer or context callback through afterFunc or contextAfter, which recover it, after the goroutine's own deferred calls gave back its places, the box lock and in-flight markers; the log names the box, the method and the frames, never the panic's value unless it is a runtime error. Not covered, so a panic there still ends the daemon: goroutines that other packages start on the daemon's behalf (the proxy's pumps and policy rechecks in netpolicy, a bank's input pump in gitx) and functions the standard library runs on goroutines of its own (the router's dial function)."
+refs = ["internal/daemon.recoverTask", "internal/daemon.goTask", "internal/daemon.Daemon.goSafe", "internal/daemon.afterFunc", "internal/daemon.contextAfter", "internal/daemon.recoverHandler", "internal/proto.PanicText", "internal/daemon.Daemon.runPush", "internal/daemon.router.dial"]
 tests = ["internal/daemon.TestNoBareGoroutines", "internal/daemon.TestBoxStreamPanic", "internal/daemon.TestPushPanicReleases", "internal/daemon.TestProjectsPanic"]
 
 [[invariant]]

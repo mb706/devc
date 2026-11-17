@@ -540,3 +540,12 @@ The accuracy review (`docs/dev/reviews/G1-review.md` to `G5-review.md`) checked 
 3. **A client that half-closes waits at most 10 s for the box.** `devc forward` cannot tell a client that shut down its sending side and still reads from one that has gone (it does not read the socket it hands to the dial process), so either gets `netpolicy.ClientGoneGrace` before its connection is ended; a long download to a half-closed client is cut. The router's connections (`Forwarder.Dial`) end when the HTTP transport closes them, as before.
 4. **Local terminal openers still confirm.** `terminal.confirm` is required from every opener except a hub whose hello did not announce it; no local client opens terminals today, so this binds only tests and future local tools.
 
+### Left by the last check (J)
+
+The reviewer's re-check of the final fix commit (`docs/dev/reviews/J-review.md`) found no high-severity problem and four of medium severity. They are not fixed.
+
+1. **J-01, box-tip observations can still be lost.** When the combined transaction that confirms a record together with its box-tip observation fails, the record is confirmed without the observation (`internal/gitx/relayservice.go`, the settling). Banked commits are not affected; the box-tip refs can lag.
+2. **J-02, a refused update's record that survives a daemon crash can block a branch's bank refs.** This is the price of the rule that only the settling right after a push may delete a record (H2-01): after a crash between `receive-pack` and settling, a refused update's record is confirmed and its name stays taken. A box cannot make the daemon crash at will; see the entry above on the same subject.
+3. **J-03, a forwarded connection whose client half-closes is cut after ten seconds.** The forwarder treats the end of the client's sending side as the client having gone (H1-02). A client that shuts down its sending side and then waits longer than ten seconds for the reply loses the connection. Ordinary HTTP and WebSocket clients do not do this.
+4. **J-04, the explorer's `daemon` page claimed panic recovery for every goroutine.** Corrected on the page: the recovery covers goroutines started in the daemon's own package; see the entry above on goroutines outside it.
+
