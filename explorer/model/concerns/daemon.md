@@ -15,6 +15,7 @@ files = [
 key = [
   "internal/daemon.Daemon.Run",
   "internal/daemon.Daemon.goSafe",
+  "internal/daemon.recoverTask",
   "internal/daemon.Daemon.watchOnce",
   "internal/daemon.boxWorker",
   "internal/daemon.boxWorker.ingestLoop",
@@ -35,6 +36,7 @@ tests = [
   "internal/daemon.TestSubscriberByteBudget",
   "internal/daemon.TestReplayFailure",
   "internal/daemon.TestTurnBanking",
+  "internal/daemon.TestBoxStreamPanic",
   "internal/proto.TestCalls",
   "internal/wsconn.TestFrames",
   "test/integration.TestDaemon",
@@ -72,6 +74,11 @@ tests = ["internal/daemon.TestSubscriberByteBudget"]
 text = "A subscription sends each event of a session at most once and in seq order, and a session whose journal the replay could not read to its end gets `missed` before `caught_up`."
 refs = ["internal/daemon.subscriber.send", "internal/daemon.subscriber.replayOne"]
 tests = ["internal/daemon.TestSubscribeRaceWithReplay", "internal/daemon.TestReplayFailure"]
+
+[[invariant]]
+text = "A panic in a goroutine of the daemon ends only that stream or request: every goroutine starts through goTask or goSafe, which recover it, after the goroutine's own deferred calls gave back its places, the box lock and in-flight markers; the log names the box, the method and the frames, never the panic's value unless it is a runtime error."
+refs = ["internal/daemon.recoverTask", "internal/daemon.goTask", "internal/daemon.Daemon.goSafe", "internal/daemon.recoverHandler", "internal/proto.PanicText", "internal/daemon.Daemon.runPush"]
+tests = ["internal/daemon.TestNoBareGoroutines", "internal/daemon.TestBoxStreamPanic", "internal/daemon.TestPushPanicReleases", "internal/daemon.TestProjectsPanic"]
 
 [[invariant]]
 text = "A restart loses no session event, command or request: views come back from the journals, commands from their receipts, requests from their logs."
@@ -235,7 +242,7 @@ The CLI works without a daemon: it ingests spool files and reconciles sessions w
 
 **Start and stop.** [[internal/daemon.Daemon.Run]] makes the runtime directory 0700 and takes `daemon.lock` with a timeout of one millisecond, so a second daemon fails at once. It replaces a stale socket with `<runtime>/daemon.sock` (0600), loads the configuration, resumes the commands and requests a previous daemon left, starts the request workers, the [[concern:forwards-and-local-urls|router]], the [[concern:service-logins|services]] and the [[concern:hub-machine-link|hub links]], and then its loops. SIGTERM, SIGINT or [[rpc:daemon.stop]] cancel its context: it closes the socket, subscriptions, terminals and box workers, and waits up to 15 seconds for its goroutines. [[flow:daemon-start]] goes through this.
 
-**What runs where.** The loops, box workers, command lines and request workers run in goroutines started by [[internal/daemon.Daemon.goSafe]], which logs a panic instead of ending the process. The handlers of a box's raw streams and the workers of `projects.list` run under a plain `go`, so a panic there ends the daemon (`docs/dev/LEFTOVER.md` part 7). [[diagram:inside]] shows how they hand work on.
+**What runs where.** The loops, box workers, command lines and request workers run in goroutines started by [[internal/daemon.Daemon.goSafe]], counted in the wait group a stop waits for; every other goroutine, a box's streams and their copies, the push watchdog, the workers of `projects.list`, subscribers and hub links among them, starts through [[internal/daemon.goTask]]. Both end in [[internal/daemon.recoverTask]]: a panic is logged with the box, the method and the frames ([[internal/proto.PanicText]] gives the value only for a runtime error, which holds no data), and the task's `end` closes that stream or the request fails, while the goroutine's deferred calls have already given back its places, the box lock, a login flight or a worktree read ([[doc:docs/dev/LEFTOVER.md#the-daemon-sessions-input-requests-x6]], item 2). The HTTP servers of services and local URLs wrap their handlers in [[internal/daemon.recoverHandler]]. [[diagram:inside]] shows how they hand work on.
 
 | Goroutine | Does | When |
 |---|---|---|

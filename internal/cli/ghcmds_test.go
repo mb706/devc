@@ -2,17 +2,20 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mb706/devc/internal/execx"
+	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/secrets"
 )
@@ -156,5 +159,116 @@ func TestGHFormats(t *testing.T) {
 	view := `{"run":{"id":77,"status":"completed","conclusion":"failure"},"jobs":{"jobs":[{"name":"test","conclusion":"failure","steps":[{"name":"go test","conclusion":"failure"},{"name":"setup","conclusion":"success"}]}]}}`
 	if err := formatRunView(&b, []byte(view)); err != nil || !strings.Contains(b.String(), "step go test: failure") || strings.Contains(b.String(), "setup") {
 		t.Errorf("run view: %v %q", err, b.String())
+	}
+}
+
+// relayRunner runs git for real and answers everything else (podman) from
+// a fake; it refuses every git command that would reach the upstream and
+// counts the pushes, so nothing leaves the test.
+type relayRunner struct {
+	fake   *execx.Fake
+	pushes int
+}
+
+func (r *relayRunner) git(c execx.Cmd) error {
+	for _, a := range c.Args {
+		switch a {
+		case "push":
+			r.pushes++
+			return errors.New("the test refuses pushes to the upstream")
+		case "fetch", "ls-remote", "clone":
+			return errors.New("the test refuses the network")
+		}
+	}
+	return nil
+}
+
+func (r *relayRunner) Run(ctx context.Context, c execx.Cmd) (execx.Result, error) {
+	if c.Name != "git" {
+		return r.fake.Run(ctx, c)
+	}
+	if err := r.git(c); err != nil {
+		return execx.Result{ExitCode: 1}, err
+	}
+	return execx.Real{}.Run(ctx, c)
+}
+
+func (r *relayRunner) Interactive(ctx context.Context, c execx.Cmd) (int, error) {
+	if c.Name != "git" {
+		return r.fake.Interactive(ctx, c)
+	}
+	if err := r.git(c); err != nil {
+		return 1, err
+	}
+	return execx.Real{}.Interactive(ctx, c)
+}
+
+// TestPRCreateChecksFirst: `devc pr create` (also what an approved pr
+// request runs) refuses, before anything is pushed or GitHub is asked, a
+// branch that is the base, the project's default branch, the upstream's
+// default as the relay records it, a protected branch, or one the relay
+// does not have (finding X10 3). Control: a branch that passes the checks
+// reaches the push (which the test refuses).
+func TestPRCreateChecksFirst(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Method+" "+r.URL.Path)
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+	env := ghEnv(t, srv.URL, "image = \"debian\"\nupstream = \"https://github.com/acme/app.git\"\ndefault_branch = \"develop\"\n[git]\nprotected = [\"release/*\"]\n")
+	p, err := paths.Resolve(paths.Options{Home: env["HOME"], Getenv: func(k string) string { return env[k] }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The relay: main (its HEAD, the upstream's default), develop,
+	// feat/x and release/1.
+	relay := p.RelayRepo(names.ProjectRef{Realm: "r", Project: "p"})
+	work := t.TempDir()
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=T", "-c", "user.email=t@example.org", "-c", "init.defaultBranch=main"}, args...)...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	os.MkdirAll(filepath.Dir(relay), 0o700)
+	git(work, "init", "-q", "--bare", relay)
+	git(work, "init", "-q", "w")
+	git(filepath.Join(work, "w"), "commit", "-q", "--allow-empty", "-m", "one")
+	for _, b := range []string{"develop", "feat/x", "release/1"} {
+		git(filepath.Join(work, "w"), "branch", b)
+	}
+	git(filepath.Join(work, "w"), "push", "-q", relay, "main", "develop", "feat/x", "release/1")
+	git(work, "--git-dir="+relay, "symbolic-ref", "HEAD", "refs/heads/main")
+	fake := execx.NewFake()
+	fake.On("podman").Exit(125).Stderr("Error: no such container devc-r-p\n")
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--branch", "feat/x", "--base", "feat/x"}, "is the pull request's base"},
+		{[]string{"--branch", "develop"}, "is the pull request's base"},
+		{[]string{"--branch", "develop", "--base", "main"}, "is the default branch of r/p's upstream"},
+		{[]string{"--branch", "main", "--base", "develop"}, "is the default branch of r/p's upstream"},
+		{[]string{"--branch", "release/1"}, "is a protected branch of r/p (git.protected)"},
+		{[]string{"--branch", "nope"}, "the relay of r/p has no branch nope"},
+	} {
+		r := &relayRunner{fake: fake}
+		code, _, errOut := runWith(t, env, r, "", append([]string{"pr", "create", "r/p", "--yes"}, tc.args...)...)
+		if code != 1 || !strings.Contains(errOut, tc.want) || !strings.Contains(errOut, "nothing was pushed") || r.pushes != 0 {
+			t.Errorf("%v: exit %d, %d pushes, %q", tc.args, code, r.pushes, errOut)
+		}
+	}
+	// Control: feat/x passes the checks and reaches the push.
+	r := &relayRunner{fake: fake}
+	code, _, errOut := runWith(t, env, r, "", "pr", "create", "r/p", "--yes", "--branch", "feat/x")
+	if code != 1 || r.pushes != 1 || !strings.Contains(errOut, "the test refuses pushes") {
+		t.Errorf("control: exit %d, %d pushes, %q", code, r.pushes, errOut)
+	}
+	if len(got) != 0 {
+		t.Errorf("GitHub was asked: %q", got)
 	}
 }

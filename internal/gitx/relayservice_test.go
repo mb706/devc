@@ -253,3 +253,53 @@ func TestRecordPush(t *testing.T) {
 		t.Errorf("format: %q", out)
 	}
 }
+
+// TestPendingRecords: records the update hook wrote for a push that
+// nobody settled (the daemon ended before receive-pack) count for nothing:
+// neither RefSet nor the archive has them; the next bank settles them, and
+// those of updates git never applied go (finding X7 3).
+func TestPendingRecords(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	def, err := w.svc.InitRelay(ctx, w.p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.svc.InitBox(ctx, w.p, def); err != nil {
+		t.Fatal(err)
+	}
+	head := w.git(filepath.Join(w.box, "main"), "rev-parse", "HEAD")
+	b, err := w.svc.RecordUpdate(ctx, w.p, PushedRef{Old: Zero(head), New: head, Ref: "refs/heads/never"})
+	if err != nil || b.Branch == nil || b.Branch.BankRef == "" {
+		t.Fatalf("branch record: %+v %v", b, err)
+	}
+	tg, err := w.svc.RecordUpdate(ctx, w.p, PushedRef{Old: Zero(head), New: head, Ref: "refs/tags/never-tag"})
+	if err != nil || tg.Tag == nil {
+		t.Fatalf("tag record: %+v %v", tg, err)
+	}
+	set, err := w.p.Relay.RefSet(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := set.LastBank["never"]; ok || set.DevcTags["never-tag"] != nil || len(set.Pending) != 2 {
+		t.Errorf("pending records count: last bank %v, devc tags %v, pending %v", set.LastBank, set.DevcTags, set.Pending)
+	}
+	arch, err := w.p.Relay.ArchiveRefs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := arch[b.Branch.BankRef]; ok {
+		t.Error("a pending record is archived")
+	}
+	if _, ok := arch[tg.Tag.Ref]; ok {
+		t.Error("a pending tag record is archived")
+	}
+	if _, err := w.svc.Bank(ctx, w.p); err != nil {
+		t.Fatalf("bank: %v", err)
+	}
+	for _, prefix := range []string{BankPrefix + "never/", DevcTagsPrefix + "never-tag/", PendingPrefix} {
+		if refs, _ := w.p.Relay.Refs(ctx, prefix); len(refs) != 0 {
+			t.Errorf("left after the bank: %v", refs)
+		}
+	}
+}

@@ -133,6 +133,31 @@ func validateGitHub(k checker, g Grants, app *GitHubApp) {
 	k.noDuplicates("grants.github_read", g.GitHubRead)
 }
 
+// validateGitHubSecrets refuses a project that would receive the realm's
+// GitHub credential (github.HostTokenSecret) or its App's private key
+// (github.app.key_secret) as an ordinary secret, through grants.secrets
+// or as a harness's credential (harnessOf: secret to harness), as
+// validateServiceGrants refuses a service's credential (finding X10 1).
+// With the key a box could mint its own tokens, past every check of
+// github.Minter.
+func validateGitHubSecrets(k checker, granted []string, harnessOf map[string]string, app *GitHubApp) {
+	type reserved struct{ holds, noun string }
+	held := map[string]reserved{github.HostTokenSecret: {"the realm's GitHub credential", "credential"}}
+	if app != nil && app.KeySecret != "" {
+		held[app.KeySecret] = reserved{"the private key of the realm's GitHub App (github.app.key_secret)", "key"}
+	}
+	for i, s := range granted {
+		if r, ok := held[s]; ok {
+			k.bad(idx("grants.secrets", i), "the secret %s holds %s, and the project also receives it (grants.secrets): the %s would enter the box", s, r.holds, r.noun)
+		}
+	}
+	for _, s := range sortedKeys(harnessOf) {
+		if r, ok := held[s]; ok {
+			k.bad("harnesses", "the secret %s holds %s, and the project also receives it (as the credential of harness %s): the %s would enter the box", s, r.holds, harnessOf[s], r.noun)
+		}
+	}
+}
+
 // validateRealmGitHub checks [github] of a realm.
 func validateRealmGitHub(k checker, g RealmGitHub) {
 	a := g.App

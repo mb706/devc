@@ -81,8 +81,20 @@ func (d *Daemon) worktrees(ctx context.Context, e *env, ref names.ProjectRef) (l
 		ent.loading = make(chan struct{})
 		c.mu.Unlock()
 
+		// A read that panics still lets the calls waiting for it go on
+		// (finding X6 2); this branch always returns.
+		finished := false
+		defer func() {
+			if !finished {
+				c.mu.Lock()
+				close(ent.loading)
+				ent.loading = nil
+				c.mu.Unlock()
+			}
+		}()
 		wts, err := d.readWorktrees(ctx, e, ref)
 		c.mu.Lock()
+		finished = true
 		if err != nil {
 			ent.err = proto.Printable(proto.Truncate(err.Error(), 300))
 			// Keep the last good list; ask again at the next request.
@@ -148,11 +160,14 @@ func (d *Daemon) apiProjects(ctx context.Context, _ *proto.Conn, params json.Raw
 		byWorktree[[2]string{v.Ref, wt}]++
 	}
 	out := make([]proto.ProjectView, len(refs))
+	done := make([]bool, len(refs))
 	sem := make(chan struct{}, projectWorkers)
 	var wg sync.WaitGroup
 	for i, ref := range refs {
 		wg.Add(1)
-		go func() {
+		// A worker that panics gives back its place, and the request fails
+		// (finding X6 2).
+		goTask(d.log, &task{box: names.BoxName(ref), what: proto.MethodProjectsList}, func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -163,10 +178,15 @@ func (d *Daemon) apiProjects(ctx context.Context, _ *proto.Conn, params json.Raw
 			for j := range v.Worktrees {
 				v.Worktrees[j].Sessions = byWorktree[[2]string{v.Ref, v.Worktrees[j].Name}]
 			}
-			out[i] = v
-		}()
+			out[i], done[i] = v, true
+		})
 	}
 	wg.Wait()
+	for _, ok := range done {
+		if !ok {
+			return nil, proto.Errorf(proto.CodeInternal, "internal error")
+		}
+	}
 	return proto.ProjectsListResult{Projects: out}, nil
 }
 

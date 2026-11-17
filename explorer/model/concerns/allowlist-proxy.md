@@ -38,6 +38,7 @@ tests = [
   "internal/netpolicy.TestProxyConnect",
   "internal/netpolicy.TestProxyRefusals",
   "internal/netpolicy.TestProxyDialChecksAddress",
+  "internal/daemon.TestHostAddrsFailClosed",
   "internal/netpolicy.TestProxyResponseHead",
   "internal/netpolicy.TestProxyHeadBudget",
   "internal/netpolicy.TestProxyTunnelsEnd",
@@ -57,9 +58,14 @@ tests = [
 related = ["security-model", "network-levels", "box-channel", "requests-and-approval", "daemon"]
 
 [[invariant]]
-text = "The proxy connects only to a public IPv4 address, checked again on the socket it actually connects, and not to one of the host's as last listed; before a first listing succeeds, it refuses none of them."
-refs = ["internal/netpolicy.Proxy.CheckAddr", "internal/netpolicy.Proxy.dial", "internal/daemon.hostAddrCache.contains"]
+text = "The proxy connects only to a public IPv4 address, checked again on the socket it actually connects, and not to one of the host's as last listed."
+refs = ["internal/netpolicy.Proxy.CheckAddr", "internal/netpolicy.Proxy.dial", "internal/daemon.hostAddrCache.forbidden"]
 tests = ["internal/netpolicy.TestProxyDialChecksAddress", "internal/netpolicy.TestProxyRefusals"]
+
+[[invariant]]
+text = "Until a listing of the host's own addresses has succeeded, the proxy connects nowhere: every destination is refused with the listing's error, and the next connection lists them again."
+refs = ["internal/daemon.hostAddrCache.forbidden", "internal/netpolicy.Proxy.CheckAddr"]
+tests = ["internal/daemon.TestHostAddrsFailClosed"]
 
 [[invariant]]
 text = "The proxy serves only a name and port that the allowlist allows both in the box's [[term:capability-record|capability record]] and now, or that an exception in force allows."
@@ -239,7 +245,7 @@ An exception that cannot be applied is removed from the record again. Kernel ele
 
 The box controls its agent, every byte of a proxy request and the names it asks for.
 
-- **Reaching the LAN or the host through a name.** Addresses are checked after resolution and on the connected socket. The host's own addresses are listed again every ten seconds, a failed listing keeping the last; while none has succeeded, the host's public addresses are not refused ([[internal/daemon.hostAddrCache.contains]]; [[doc:docs/dev/LEFTOVER.md#7]]).
+- **Reaching the LAN or the host through a name.** Addresses are checked after resolution and on the connected socket. The host's own addresses are listed every ten seconds, a failed listing keeping the last; until one succeeds, every destination is refused with its error and the next connection lists again ([[internal/daemon.hostAddrCache.forbidden]], [[doc:docs/dev/LEFTOVER.md#network-the-ssh-gate-secrets-x8]], item 3).
 - **Granting itself access.** The box channel has no method that writes an exception; `devc request net` creates a high-risk request, which only the CLI can approve; the daemon then runs `devc net allow --request <id>` ([[concern:requests-and-approval]]).
 - **Keeping a connection beyond its permission.** The watch closes it.
 - **Flooding.** Relay places, the agent's own limits and the channel's frame inspector; the log rotates.
@@ -248,7 +254,7 @@ Limits: the allowlist limits names, not content; CONNECT relays TLS unchanged, s
 
 ## Decisions that are not obvious
 
-- **The allowlist is a start capability, exceptions are not.** Growing the configured list waits until the capability record is written again (the box's next start, or devc finishing the start of a box that removed its readiness marker); removing an entry applies at once ([[finding:C1-02]]).
+- **The allowlist is a start capability, exceptions are not.** Growing the configured list waits for the box's next start ([[internal/box.CheckStarted]]); removing an entry applies at once ([[finding:C1-02]]).
 - **Names only at allowlist.** The proxy never connects to a private address, so a LAN host is reached at internet with an address exception, or through `host:<port>`.
 
 ## Where to start reading

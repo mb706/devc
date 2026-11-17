@@ -158,7 +158,7 @@ text = "Not found becomes 404."
 at = "browser"
 ref = "file:web/app/store.js~function finish(p, rec)"
 label = "finish"
-text = "A final receipt ends the pending command and updates the outbox (delivered, refused, not submitted). A 404 for a command never confirmed marks it \"did not arrive\"."
+text = "A final receipt ends the pending command and updates the outbox (delivered, refused, not submitted); the prompt leaves the outbox eight seconds later. A 404 for a command never confirmed marks it \"did not arrive\"."
 detail = "A 404 also comes for a command whose final receipt the daemon has already dropped (seven days after it became final): a pending command kept in local storage on a device that was away longer is then shown as \"did not arrive\", and **Send again** would have the daemon apply it as new."
 
 [[step]]
@@ -171,5 +171,5 @@ text = "**Send again** posts the command with its own ID; unless the machine sai
 at = "browser"
 ref = "file:web/app/store.js~function settleOutbox"
 label = "settleOutbox"
-text = "Meanwhile, a prompt event on the stream for an open session removes the first waiting prompt whose text begins with the event's text (without a `…[truncated]` mark, trimmed, its first 200 characters) from the outbox, and ends its pending command without a receipt."
-detail = "Prompt events come from the box's hooks, so a box can settle a waiting prompt with an event whose text is any prefix of it; an event whose text is only spaces settles the first waiting prompt, whatever its text ([[doc:docs/dev/LEFTOVER.md#7]])."
+text = "Meanwhile, a prompt event on the stream for an open session whose text is a waiting prompt's (trimmed; a truncated event: one the waiting text begins with) is noted beside that prompt, which stays in the outbox with its pending command: only a receipt settles it."
+detail = "Prompt events come from the box's hooks, so a box could otherwise settle a prompt that never arrived ([[doc:docs/dev/LEFTOVER.md#fleet-and-the-web-app-x12]], item 6). An event with no text, or only spaces, is ignored."

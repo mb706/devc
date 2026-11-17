@@ -207,7 +207,7 @@ func (m *termManager) open(ctx context.Context, c *proto.Conn, params json.RawMe
 		if err != nil && sctx.Err() == nil {
 			d.log.Warn("terminal client", "session", p.Session, "err", err)
 		}
-		go st.end("the terminal client exited")
+		st.goEnd("the terminal client exited")
 	})
 	d.goSafe("terminal reader", st.read)
 	d.goSafe("terminal watch", func() { st.watch(sctx) })
@@ -258,12 +258,12 @@ func (st *termStream) read() {
 		n, err := st.ptmx.Read(buf)
 		if n > 0 {
 			if nerr := st.conn.Notify(proto.NotifyTerminalData, proto.TerminalData{Stream: st.id, Data: append([]byte(nil), buf[:n]...)}); nerr != nil {
-				go st.end("the connection closed")
+				st.goEnd("the connection closed")
 				return
 			}
 		}
 		if err != nil {
-			go st.end("the terminal closed")
+			st.goEnd("the terminal closed")
 			return
 		}
 	}
@@ -302,6 +302,11 @@ func (st *termStream) watch(ctx context.Context) {
 			_ = st.conn.Notify(proto.NotifyTerminalSize, proto.TerminalSize{Stream: st.id, Cols: cols, Rows: rows})
 		}
 	}
+}
+
+// goEnd ends the stream from a goroutine of its own (goTask).
+func (st *termStream) goEnd(reason string) {
+	goTask(st.m.d.log, &task{box: names.BoxName(st.ref), what: "ending a terminal"}, func() { st.end(reason) })
 }
 
 // end stops the stream once: the grouped session is killed (the client
@@ -379,10 +384,10 @@ func (m *termManager) closeAll() {
 	var wg sync.WaitGroup
 	for _, st := range all {
 		wg.Add(1)
-		go func() {
+		goTask(m.d.log, &task{box: names.BoxName(st.ref), what: "ending a terminal"}, func() {
 			defer wg.Done()
 			st.end("the machine's daemon is stopping")
-		}()
+		})
 	}
 	wg.Wait()
 }

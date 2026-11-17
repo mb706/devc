@@ -100,9 +100,10 @@ type Proxy struct {
 	// Resolve looks up the IPv4 addresses of a name (the system resolver
 	// when nil).
 	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
-	// Forbidden reports addresses of this host besides the private ranges
-	// (the host's public addresses); nil forbids none.
-	Forbidden func(netip.Addr) bool
+	// Forbidden returns why an address is refused as one of this host's
+	// besides the private ranges (the host's public addresses), or nil; it
+	// fails closed when it cannot tell (finding X8 3). nil forbids none.
+	Forbidden func(netip.Addr) error
 	// Exempt are addresses treated as public. Only tests set them (a local
 	// server on the host's loopback); production never does.
 	Exempt []netip.AddrPort
@@ -176,8 +177,11 @@ func (p *Proxy) CheckAddr(ap netip.AddrPort) error {
 		return fmt.Errorf("%w: %s is not an IPv4 address", errRefusedAddr, a)
 	case Private(a):
 		return fmt.Errorf("%w: %s is a private address", errRefusedAddr, a)
-	case p.Forbidden != nil && p.Forbidden(a):
-		return fmt.Errorf("%w: %s is an address of this host", errRefusedAddr, a)
+	}
+	if p.Forbidden != nil {
+		if err := p.Forbidden(a); err != nil {
+			return fmt.Errorf("%w: %v", errRefusedAddr, err)
+		}
 	}
 	return nil
 }

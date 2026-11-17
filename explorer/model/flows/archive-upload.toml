@@ -20,7 +20,7 @@ detail = "Without credentials (the machine never joined this hub) the status say
 at = "daemon"
 ref = "internal/fleet.Uploader.Pass"
 text = "A pass takes this hub's lock in `local/archive/<hub-id>/` (another devc uploading from the same state directory makes it fail), loads the bookkeeping and goes through the realms with `[sync] hub` in name order."
-detail = "After a 507 (a quota reached) passes return at once for ten minutes. An error ends the pass where it happens: the rest of the realm and the realms after it wait for the next pass."
+detail = "A refusal the hub answers (507, or a 4xx) stays with its realm: a quota ends the realm's pass, another refusal only the kind it hit, and the realm rests ten minutes while the other realms go on; passes skip a resting realm and show its refusal. A server error, or an error the hub did not answer (the network), ends the pass where it happens: the rest waits for the next pass."
 
 [[step]]
 at = "daemon"

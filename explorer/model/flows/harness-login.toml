@@ -73,7 +73,7 @@ to = "vendors"
 via = "stream"
 label = "the vendor's login"
 external = true
-text = "The vendor's command runs its own login flow, typically a link to open in a browser. devc does not see or parse it."
+text = "The vendor's command runs its own login flow, typically a link to open in a browser. devc does not parse it, but passes what it prints through the escaping of box text on its way to the terminal ([[internal/proto.PrintableWriter]])."
 
 [[step]]
 from = "installer"

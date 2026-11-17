@@ -406,7 +406,7 @@ func (c *Conn) readLoop() {
 func (c *Conn) safeNotify(h NotifyHandler, params json.RawMessage) {
 	defer func() {
 		if r := recover(); r != nil {
-			c.logf("rpc: notification handler panicked", "panic", fmt.Sprint(r))
+			c.logf("rpc: notification handler panicked", "panic", PanicText(r), "at", PanicSite())
 		}
 	}()
 	h(c.ctx, c, params)
@@ -458,7 +458,7 @@ func (c *Conn) serve(m *RPCMessage) (resp *RPCMessage) {
 	resp = &RPCMessage{JSONRPC: "2.0", ID: m.ID}
 	defer func() {
 		if r := recover(); r != nil {
-			c.logf("rpc: handler panicked", "method", m.Method, "panic", fmt.Sprint(r))
+			c.logf("rpc: handler panicked", "method", Printable(Truncate(m.Method, 64)), "panic", PanicText(r), "at", PanicSite())
 			resp.Result, resp.Error = nil, &Error{Code: CodeInternal, Message: "internal error"}
 		}
 	}()

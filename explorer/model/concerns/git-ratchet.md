@@ -26,6 +26,7 @@ key = [
   "internal/cli.app.relayHook",
   "internal/gitx.CheckUpdate",
   "internal/gitx.Service.RecordUpdate",
+  "internal/gitx.Service.SettlePush",
   "internal/daemon.Daemon.runPush",
   "internal/gitx.Watch",
 ]
@@ -38,6 +39,8 @@ tests = [
   "internal/gitx.TestRecordPush",
   "internal/gitx.TestEndToEnd",
   "internal/cli.TestRelayHooksRecordFirst",
+  "internal/cli.TestRelayHooksSettle",
+  "internal/gitx.TestPendingRecords",
   "internal/daemon.TestRelayStreams",
   "internal/daemon.TestPushWatchdog",
   "internal/daemon.TestPushEndedDuringIndexPack",
@@ -51,9 +54,9 @@ tests = [
 related = ["security-model", "box-channel", "daemon", "box-lifecycle", "host-foundations"]
 
 [[invariant]]
-text = "Bank refs, snapshot refs and tag records are only ever created: every write of one requires that it does not exist yet, and no code deletes or moves them."
-refs = ["internal/gitx.Service.Bank", "internal/gitx.Service.RecordUpdate", "internal/gitx.Service.syncHeads", "internal/gitx.Relay.RestoreRefs", "internal/gitx.Relay.Update"]
-tests = ["internal/cli.TestRelayHooksRecordFirst", "test/integration.TestEscape"]
+text = "Bank refs, snapshot refs and tag records are only ever created: every write of one requires that it does not exist yet, and no code moves them; the only one deleted is a pending record whose push update git did not apply."
+refs = ["internal/gitx.Service.Bank", "internal/gitx.Service.RecordUpdate", "internal/gitx.Service.syncHeads", "internal/gitx.Relay.RestoreRefs", "internal/gitx.Relay.Update", "internal/gitx.Service.SettlePush"]
+tests = ["internal/cli.TestRelayHooksRecordFirst", "internal/cli.TestRelayHooksSettle", "test/integration.TestEscape"]
 
 [[invariant]]
 text = "Every tip a bank, a push, a pull or an adoption gives a relay branch is the target of one of that branch's bank refs."
@@ -69,6 +72,11 @@ tests = ["internal/gitx.TestCheckUpdate", "test/integration.TestEscape"]
 text = "git applies a pushed ref only after the update hook has recorded it; a record that cannot be written refuses the ref."
 refs = ["internal/cli.app.relayHook", "internal/gitx.Service.RecordUpdate"]
 tests = ["internal/cli.TestRelayHooksRecordFirst"]
+
+[[invariant]]
+text = "A record the update hook writes counts only once git applied its update: until then it carries a pending marker and banks, `devc push` and the archive ignore it; when receive-pack has ended the daemon confirms it or, for an update git refused, removes it, and the next push or bank settles any left, so a refused name keeps no record."
+refs = ["internal/gitx.Service.SettlePush", "internal/gitx.SortRefs", "internal/gitx.Relay.ArchiveRefs", "internal/daemon.Daemon.settlePush", "internal/gitx.Service.Bank"]
+tests = ["internal/cli.TestRelayHooksSettle", "internal/gitx.TestPendingRecords", "internal/gitx.TestRecordPush"]
 
 [[invariant]]
 text = "No git command devc runs on a relay collects garbage or runs maintenance, so no object that reached a relay is removed."
@@ -219,13 +227,13 @@ An agent in a box can do anything to the box's repository: rewrite history, dele
 
 **Three repositories.** The box repository is `/w/<realm>/<project>/.repo` with its worktrees ([[concern:worktrees-and-context]]); host git never opens it. The relay ([[term:relay]]) is a bare repository at `durable/realms/<realm>/relay/<project>.git`, which no box mounts; the box knows it as `origin`, `devc::<realm>/<project>`. The upstream is the URL in project.toml ([[concern:upstream]]). [[diagram:repositories]]
 
-**Host git.** Every git command on a relay goes through [[internal/gitx.Host.Cmd]]: `--git-dir=<relay>`, working directory `/`, `core.hooksPath` pointing at the empty `local/git/no-hooks` (checked empty by [[internal/gitx.EnsureEmptyDir]]), `core.fsmonitor=false`, `--no-replace-objects` and `GIT_NO_REPLACE_OBJECTS=1`. Commands that do not talk to the upstream also lose every `GIT_*` variable and read no global or system configuration (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`), so only the relay's configuration applies. [[internal/gitx.Relay.Configure]] sets it: `gc.auto=0`, `maintenance.auto=false`, `core.logAllRefUpdates=always`, object checks (fsck) on every fetch and receive, and `unpackLimit=1`, so an incoming pack is kept as it came.
+**Host git.** Every git command on a relay goes through [[internal/gitx.Host.Cmd]]: `--git-dir=<relay>`, working directory `/`, `core.hooksPath` pointing at the empty `local/git/no-hooks`, `core.fsmonitor=false`, `--no-replace-objects` and `GIT_NO_REPLACE_OBJECTS=1`. Commands that do not talk to the upstream also lose every `GIT_*` variable and read no global or system configuration (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`), so only the relay's configuration applies. [[internal/gitx.Relay.Configure]] sets it: `gc.auto=0`, `maintenance.auto=false`, `core.logAllRefUpdates=always`, object checks (fsck) on every fetch and receive, and `unpackLimit=1`, so an incoming pack is kept as it came.
 
-**Banking** ([[term:banking]], [[internal/gitx.Service.Bank]]) runs under the box lock. `devc box snapshot --all` commits each worktree's uncommitted work in the box. Of the branches, snapshot refs and tags `git for-each-ref` lists in the box ([[internal/gitx.Service.listBox]]), those the relay does not record yet are fetched by name ([[internal/gitx.bankFetch]]) over git's `ext::` transport, which runs a command and speaks git's protocol over its standard input and output: here `podman exec -i -u 1000:1000 <box> git-upload-pack <repo>` ([[internal/gitx.BoxURL]]), so whatever the box repository holds runs in the box. The fetch writes only below `refs/devc/incoming/`, emptied before and after. [[internal/gitx.PlanBank]] decides; each branch change is one `update-ref --stdin` transaction of head, bank ref and box tip, with old values checked ([[internal/gitx.Relay.Update]]). Banks run for `devc bank`, after turns, every five minutes, before a box stops, and before `push`, `pr create` and `wt rm` ([[flow:turn-snapshot]]).
+**Banking** ([[term:banking]], [[internal/gitx.Service.Bank]]) runs under the box lock. `devc box snapshot --all` commits each worktree's uncommitted work in the box. Of the branches, snapshot refs and tags `git for-each-ref` lists in the box ([[internal/gitx.Service.listBox]]), those the relay does not record yet are fetched by name ([[internal/gitx.bankFetch]]) over git's `ext::` transport, which speaks git's protocol with a command: `podman exec -i -u 1000:1000 <box> git-upload-pack <repo>` ([[internal/gitx.BoxURL]]), so whatever the box repository holds runs in the box. The fetch writes only below `refs/devc/incoming/`, emptied before and after. [[internal/gitx.PlanBank]] decides; each branch change is one `update-ref --stdin` transaction of head, bank ref and box tip, with old values checked ([[internal/gitx.Relay.Update]]). Banks run for `devc bank`, after turns, every five minutes, before a box stops, and before `push`, `pr create` and `wt rm` ([[flow:turn-snapshot]]).
 
-**The relay service** serves `git push` and `git fetch` in the box while a daemon is connected ([[flow:box-git-push]], [[flow:box-git-fetch]]). git starts the remote helper [[internal/boxside.RemoteHelperMain]] for `origin`; it asks the host for `host.git` through the agent, then relays bytes. [[internal/daemon.boxWorker.serveGit]] runs upload-pack or receive-pack on the relay of the channel's project with the settings of [[internal/gitx.ServeCall]] (upload-pack hides `refs/devc`); receive-pack runs devc's relay hooks ([[internal/cli.app.relayHook]]). With no host connected the helper is a stub whose push transfers nothing and says that a bank will.
+**The relay service** serves `git push` and `git fetch` in the box while a daemon is connected ([[flow:box-git-push]], [[flow:box-git-fetch]]). git starts the remote helper [[internal/boxside.RemoteHelperMain]] for `origin`; it asks the host for `host.git` through the agent, then relays bytes. [[internal/daemon.boxWorker.serveGit]] runs upload-pack or receive-pack on the relay of the channel's project with the settings of [[internal/gitx.ServeCall]] (upload-pack hides `refs/devc`); receive-pack runs devc's relay hooks ([[internal/cli.app.relayHook]]). With no host connected, the helper's push transfers nothing and says a bank will.
 
-**What git does at a push.** receive-pack writes the pack into a quarantine directory (`objects/tmp_objdir-incoming-*`) and checks every object. It runs `pre-receive` once with every `<old> <new> <ref>` line; a failure refuses the whole push and deletes the quarantine. Otherwise git moves the objects into the relay and runs `update <ref> <old> <new>` per ref, a failure refusing that ref only, before updating it. `post-receive` gets the applied lines; its exit status changes nothing.
+**What git does at a push.** receive-pack checks the pack in a quarantine directory (`objects/tmp_objdir-incoming-*`), runs `pre-receive` once with every `<old> <new> <ref>` line (a failure refuses the whole push), moves the objects into the relay and runs `update <ref> <old> <new>` per ref before updating it (a failure refuses that ref). `post-receive` gets the applied lines; its exit status changes nothing.
 
 **Ref namespaces** ([[internal/gitx.HeadsPrefix]] and its neighbours):
 
@@ -238,15 +246,16 @@ An agent in a box can do anything to the box's repository: rewrite history, dele
 | `refs/devc/snap/<w>/<time>` | snapshots of uncommitted work | nothing |
 | `refs/devc/tags/<t>/<time>` | tags created in the box | nothing |
 | `refs/devc/boxtip/<b>` | the box's tip at the last bank or push | nothing |
+| `refs/devc/pending/<kind>/<name>/<time>` | the marker of a record not settled yet ([[term:pending-record]]) | nothing |
 | `refs/devc/incoming/`, `refs/devc/restore/` | scratch of a bank, of a restore | nothing |
 
-In a relay, host code deletes only the two scratch namespaces, `refs/remotes/github/HEAD` after an adoption, and upstream branches the upstream deleted (fetch `--prune`). A restore from the archive ([[concern:state-restore]]) creates the archived refs a relay lacks, heads and records alike, and records nothing itself ([[internal/gitx.Relay.RestoreRefs]]): a restored tip has a bank ref only if the archive holds one.
+In a relay, host code deletes only the two scratch namespaces, `refs/remotes/github/HEAD` after an adoption, upstream branches the upstream deleted (fetch `--prune`), and pending records ([[internal/gitx.Service.SettlePush]]). A restore from the archive ([[concern:state-restore]]) creates the archived refs a relay lacks, heads and records alike, and records nothing itself ([[internal/gitx.Relay.RestoreRefs]]): a restored tip has a bank ref only if the archive holds one.
 
 ## What can go wrong, and what prevents it
 
 A box controls its repository, every ref and object it offers, every byte of its `host.git` stream, its snapshot report, and when it stops reading.
 
-- **Rewriting recorded history by push.** git itself refuses updates to the hidden `refs/devc` and `refs/remotes` (`receive.hideRefs`) and branch deletions (`receive.denyDeletes`). `pre-receive` refuses more than 1,000 refs, malformed input, a configuration with problems and a relay over budget. `update` applies [[internal/gitx.CheckUpdate]], then [[internal/gitx.Service.RecordUpdate]] writes the bank ref or tag record with `core.fsync=reference`, or the ref is refused ([[finding:C1-05]]).
+- **Rewriting recorded history by push.** git itself refuses updates to the hidden `refs/devc` and `refs/remotes` (`receive.hideRefs`) and branch deletions (`receive.denyDeletes`). `pre-receive` refuses more than 1,000 refs, malformed input, a configuration with problems and a relay over budget. `update` applies [[internal/gitx.CheckUpdate]], then [[internal/gitx.Service.RecordUpdate]] writes the bank ref or tag record, [[term:pending-record|pending]] until settled, with `core.fsync=reference`, or the ref is refused ([[finding:C1-05]]). A refused update's record (`main/<t>` while `main` exists) goes then, so it cannot block a later one ([[internal/daemon.Daemon.settlePush]], [[doc:docs/dev/LEFTOVER.md#git-x7]], item 3).
 - **Rewriting it by bank.** The fetch's refspecs name single refs and write only `refs/devc/incoming/`, with `--no-tags`; names that fail [[internal/names.CheckRef]] are not fetched. [[internal/gitx.PlanBank]] skips those that fail `git check-ref-format --branch`, keeps protected branches, deletes nothing, records box tags only as `refs/devc/tags/`, and applies at most 1,000 branches and 1,000 tags per run.
 - **Changing how history reads.** A `refs/replace/` ref could make a banked commit show other content; host git never interprets one, and a restore creates refs only in devc's namespaces ([[internal/gitx.ArchiveRef]], [[finding:D1-07]]).
 - **Code on the host.** `local/git/relay-hooks` is made to hold exactly three links to the daemon's devc binary before every push ([[internal/gitx.EnsureRelayHooks]]); every other git command devc runs on a relay runs none.
@@ -257,7 +266,7 @@ A box controls its repository, every ref and object it offers, every byte of its
 ## Decisions that are not obvious
 
 - **Record before accept.** git runs the update hook after the objects left quarantine, so a bank ref can point at them, and before it updates the ref.
-- **Box tips.** A pull can advance a relay branch the box never moved; a bank leaves a branch alone while the box's tip equals `refs/devc/boxtip/<b>` ([[finding:B8]]). A push moves the box tip only when the box's own branch has the pushed tip, so `git push origin wip:feature` says nothing about the box's `feature`.
+- **Box tips.** A pull can advance a relay branch the box never moved; a bank leaves a branch alone while the box's tip equals `refs/devc/boxtip/<b>` ([[finding:B8]]). A settled push moves the box tip only if the box's own branch has the pushed tip: `git push origin wip:feature` says nothing of the box's `feature`.
 - **Packs stay packs.** A small pack of deltas cannot expand into loose objects many times its size, so what the watchdog measures while a push arrives is what the relay keeps ([[finding:D1-05]]).
 
 ## Where to start reading

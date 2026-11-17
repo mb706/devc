@@ -56,9 +56,14 @@ text = "An open session keeps at most 1,000 events and draws at most 300 rows un
 refs = ["file:web/app/timeline.js~export const MAX_EVENTS", "file:web/app/session.js~const RENDER_STEP"]
 
 [[invariant]]
-text = "A command keeps its client-made ID through every retry; one whose outcome is unknown stays pending (an uncertain `seen` is dropped) until a receipt settles it, the user dismisses it, or, for a prompt, a matching prompt event arrives."
-refs = ["file:web/app/api.js~export async function command", "file:web/app/store.js~export async function run(", "file:web/app/store.js~function settleOutbox", "internal/hub.rpcStatus"]
+text = "A command keeps its client-made ID through every retry; one whose outcome is unknown stays pending (an uncertain `seen` is dropped) until a receipt settles it or the user dismisses it."
+refs = ["file:web/app/api.js~export async function command", "file:web/app/store.js~export async function run(", "internal/hub.rpcStatus"]
 tests = ["internal/hub.TestRPCErrors", "test/integration.TestWebApp"]
+
+[[invariant]]
+text = "Only a receipt settles a prompt: a prompt event, which the box writes, that matches a waiting prompt is noted beside it but never removes it from the outbox nor ends its pending command."
+refs = ["file:web/app/store.js~function settleOutbox", "file:web/app/store.js~function setOutbox"]
+tests = ["file:web/check.sh"]
 
 [[invariant]]
 text = "A stream message or a detail read never replaces a session summary with one older by stream position; a snapshot replaces the summaries without that check."
@@ -244,7 +249,7 @@ The owner follows recent sessions of every machine from a phone or a browser: th
 
 Paging back detaches the window from the live end: new events are counted ("N newer") until **Back to the latest** ([[finding:D1-13]], [[finding:E1-13]]). Machines, sessions and requests are as many as the hub keeps.
 
-**Commands with an uncertain outcome** ([[flow:web-send]]). Each command gets a UUID in the browser. [[file:web/app/api.js~export async function command|command]] retries a failure whose outcome is uncertain (no answer, an error that says `uncertain`, an answer that cannot be read or is not a receipt) with the same ID, four attempts in all; once one attempt was uncertain, a later definite refusal counts as uncertain too ([[finding:E1-11]]). [[file:web/app/store.js~export async function run(|run]] then keeps the command as pending, also in local storage, shown as unknown. Every ten seconds, when its machine comes online and after a snapshot, the app asks for its receipt: a final one settles it; if the machine has none, it "did not arrive", and **Send again** (same ID) or **Dismiss** is offered. A prompt waiting in the outbox also settles when a prompt event arrives whose text (first 200 characters) the waiting text begins with. A daemon applies an ID once while it keeps the receipt, until seven days after it is final ([[concern:input-and-receipts]]); after that a 404 reads as "did not arrive" too.
+**Commands with an uncertain outcome** ([[flow:web-send]]). Each command gets a UUID in the browser. [[file:web/app/api.js~export async function command|command]] retries a failure whose outcome is uncertain (no answer, an error that says `uncertain`, an answer that cannot be read or is not a receipt) with the same ID, four attempts in all; once one attempt was uncertain, a later definite refusal counts as uncertain too ([[finding:E1-11]]). [[file:web/app/store.js~export async function run(|run]] then keeps the command as pending, also in local storage, shown as unknown. Every ten seconds, when its machine comes online and after a snapshot, the app asks for its receipt: a final one settles it; if the machine has none, it "did not arrive", and **Send again** (same ID) or **Dismiss** is offered. Only a receipt settles a prompt ([[file:web/app/store.js~function setOutbox|setOutbox]]); a matching prompt event, which the box writes, is only noted ([[file:web/app/store.js~function settleOutbox|settleOutbox]], [[doc:docs/dev/LEFTOVER.md#fleet-and-the-web-app-x12]], item 6). A daemon applies an ID once while it keeps the receipt, until seven days after it is final ([[concern:input-and-receipts]]); after that a 404 reads as "did not arrive" too.
 
 **The terminal** ([[flow:hub-terminal]]). xterm.js is loaded when the tab opens, and a WebSocket to `/api/terminal/<machine>/<session>?mode=observe|control` carries the stream; the page sends `input` only in control mode. Control needs the hub's `[terminal] control` (the app learns it from `/api/me`), the same switch in the machine's config.toml, and a confirmation.
 

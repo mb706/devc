@@ -28,6 +28,12 @@ const (
 	// BoxTipPrefix records, per branch, the box's tip as the last bank saw
 	// it (finding B8).
 	BoxTipPrefix = "refs/devc/boxtip/"
+	// PendingPrefix marks a record the update hook wrote for a push
+	// update that git may still refuse (finding X7 3): the marker of
+	// refs/devc/<kind>/<name>/<time> is refs/devc/pending/<kind>/<name>/<time>
+	// at the same object. A record with a marker counts for nothing until
+	// SettlePush confirms it (removes the marker) or removes both.
+	PendingPrefix = "refs/devc/pending/"
 
 	incomingHeads = IncomingPrefix + "heads/"
 	incomingWIP   = IncomingPrefix + "wip/"
@@ -275,7 +281,9 @@ func PlanBank(in BankInput) BankPlan {
 	return p
 }
 
-// RefSet is the relay's refs sorted into its namespaces.
+// RefSet is the relay's refs sorted into its namespaces. Records with a
+// pending marker are left out of LastBank, NewestTag, DevcTags and
+// DevcTagNewest and listed in Pending (finding X7 3).
 type RefSet struct {
 	Heads        map[string]string
 	Github       map[string]string
@@ -292,6 +300,8 @@ type RefSet struct {
 	InWIP      map[string]string
 	InTags     map[string]string
 	Incoming   []string
+	// Pending are the records with a pending marker, by record name.
+	Pending map[string]string
 }
 
 // splitStamped splits "<name>/<unix-time>".
@@ -313,7 +323,7 @@ func SortRefs(refs []Ref) RefSet {
 		Heads: map[string]string{}, Github: map[string]string{}, UpstreamTags: map[string]string{},
 		LastBank: map[string]Stamped{}, LastSnap: map[string]Stamped{}, NewestTag: map[string]int64{},
 		DevcTags: map[string]map[string]bool{}, DevcTagNewest: map[string]Stamped{}, BoxTips: map[string]string{},
-		InBranches: map[string]string{}, InWIP: map[string]string{}, InTags: map[string]string{},
+		InBranches: map[string]string{}, InWIP: map[string]string{}, InTags: map[string]string{}, Pending: map[string]string{},
 	}
 	newer := func(m map[string]Stamped, name string, st Stamped) {
 		if cur, ok := m[name]; !ok || st.Time > cur.Time {
@@ -321,7 +331,15 @@ func SortRefs(refs []Ref) RefSet {
 		}
 	}
 	for _, r := range refs {
+		if rest, ok := strings.CutPrefix(r.Name, PendingPrefix); ok {
+			s.Pending["refs/devc/"+rest] = r.OID
+		}
+	}
+	for _, r := range refs {
 		n := r.Name
+		if _, ok := s.Pending[n]; ok {
+			continue // not settled: counts for nothing yet
+		}
 		switch {
 		case strings.HasPrefix(n, HeadsPrefix):
 			s.Heads[n[len(HeadsPrefix):]] = r.OID

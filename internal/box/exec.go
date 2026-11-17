@@ -25,9 +25,10 @@ type ExecOptions struct {
 	TTY bool
 }
 
-// EnsureRunning starts the box when it is not running and ready (through
-// the same path as Up, so drift and configuration problems stop it) and
-// returns its name. The box lock is released before the caller execs.
+// EnsureRunning starts the box when it is not running (through the same
+// path as Up, so drift and configuration problems stop it) and returns its
+// name; a running box whose start did not finish is refused (CheckStarted).
+// The box lock is released before the caller execs.
 func (m *Manager) EnsureRunning(ctx context.Context, ref names.ProjectRef) (string, error) {
 	if err := m.checkProblems(ref); err != nil {
 		return "", err
@@ -50,16 +51,22 @@ func (m *Manager) ensureRunning(ctx context.Context, ref names.ProjectRef) (*eng
 	if err != nil {
 		return nil, err
 	}
-	// For level internet the readiness marker is not enough: the host checks
-	// the binding and the rules (finding B1) and up restarts a box that
-	// fails.
-	if ci == nil || !ci.State.Running || !m.isReady(ref) || (m.needsRules(ref) && m.verifyRunning(ctx, ref, ci) != nil) {
-		if err := m.up(ctx, ref, UpOptions{}); err != nil {
+	// For level internet the host checks the binding and the rules
+	// (finding B1); up restarts a box that fails. A running box is used as
+	// it was started: one whose start did not finish (no readiness marker,
+	// no record for its container) is refused, never finished here with
+	// today's configuration (finding G1-01).
+	if ci != nil && ci.State.Running && !(m.needsRules(ref) && m.verifyRunning(ctx, ref, ci) != nil) {
+		if err := CheckStarted(m.Config.Paths, ref, ci.ID); err != nil {
 			return nil, err
 		}
-		if ci, err = m.Find(ctx, ref); err != nil {
-			return nil, err
-		}
+		return ci, nil
+	}
+	if err := m.up(ctx, ref, UpOptions{}); err != nil {
+		return nil, err
+	}
+	if ci, err = m.Find(ctx, ref); err != nil {
+		return nil, err
 	}
 	if ci == nil || !ci.State.Running {
 		return nil, fmt.Errorf("%s is not running", names.BoxName(ref))

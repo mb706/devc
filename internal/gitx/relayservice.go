@@ -21,7 +21,9 @@ package gitx
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +32,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mb706/devc/internal/paths"
@@ -222,15 +225,16 @@ var recordConfig = []string{"core.fsync=reference"}
 
 // RecordUpdate records one ref update of a push the way a bank would
 // (finding B8), before receive-pack applies it: a new branch tip gets a
-// bank ref unless it is the branch's last one; the box's observed tip moves
-// with it when the box's own branch of that name has the pushed tip (heads,
-// nil when unknown: a push of another local branch, as in "git push origin
-// wip:feature", is no observation of the box's feature); a new tag gets a
-// refs/devc/tags record. One transaction per ref. The update hook runs it
-// after the objects left the quarantine and refuses the update when it
-// fails, so an accepted push always has its records (finding C1-05). The
-// caller (the daemon) holds the box lock for the whole receive-pack run.
-func (s *Service) RecordUpdate(ctx context.Context, p *Project, u PushedRef, heads map[string]string) (PushRecord, error) {
+// bank ref unless it is the branch's last one; a new tag gets a
+// refs/devc/tags record. One transaction per ref, which also writes the
+// record's pending marker (PendingPrefix): git can still refuse the
+// update after the hook (a name that conflicts with an existing ref), so
+// the record counts only once SettlePush has confirmed it (finding X7 3).
+// The update hook runs it after the objects left the quarantine and
+// refuses the update when it fails, so an accepted push always has its
+// records (finding C1-05). The caller (the daemon) holds the box lock for
+// the whole receive-pack run and settles the push when it has ended.
+func (s *Service) RecordUpdate(ctx context.Context, p *Project, u PushedRef) (PushRecord, error) {
 	now := s.now().Unix()
 	switch {
 	case strings.HasPrefix(u.Ref, HeadsPrefix) && !isZeroOID(u.New):
@@ -238,7 +242,7 @@ func (s *Service) RecordUpdate(ctx context.Context, p *Project, u PushedRef, hea
 		if err := CheckName(b); err != nil {
 			return PushRecord{}, err
 		}
-		refs, err := p.Relay.Refs(ctx, BankPrefix+b+"/", BoxTipPrefix+b)
+		refs, err := p.Relay.Refs(ctx, BankPrefix+b+"/")
 		if err != nil {
 			return PushRecord{}, err
 		}
@@ -247,16 +251,11 @@ func (s *Service) RecordUpdate(ctx context.Context, p *Project, u PushedRef, hea
 		if !isZeroOID(u.Old) {
 			ch.Old = u.Old
 		}
-		var ups []RefUpdate
 		if last := set.LastBank[b]; last.OID != u.New {
 			ch.BankRef = BankPrefix + b + "/" + strconv.FormatInt(stamp(now, last.Time), 10)
-			ups = append(ups, RefUpdate{Ref: ch.BankRef, New: u.New, Old: Zero(u.New)})
-		}
-		if heads != nil && heads[b] == u.New && set.BoxTips[b] != u.New {
-			ups = append(ups, boxTipUpdate(set.BoxTips, b, u.New))
-		}
-		if err := p.Relay.update(ctx, ups, recordConfig); err != nil {
-			return PushRecord{}, err
+			if err := p.Relay.update(ctx, pendingRecord(ch.BankRef, u.New), recordConfig); err != nil {
+				return PushRecord{}, err
+			}
 		}
 		return PushRecord{Branch: &ch}, nil
 	case strings.HasPrefix(u.Ref, TagsPrefix) && isZeroOID(u.Old) && !isZeroOID(u.New):
@@ -273,12 +272,109 @@ func (s *Service) RecordUpdate(ctx context.Context, p *Project, u PushedRef, hea
 			return PushRecord{}, nil
 		}
 		rec := Recorded{Name: t, OID: u.New, Ref: DevcTagsPrefix + t + "/" + strconv.FormatInt(stamp(now, set.NewestTag[t]), 10)}
-		if err := p.Relay.update(ctx, []RefUpdate{{Ref: rec.Ref, New: rec.OID, Old: Zero(rec.OID)}}, recordConfig); err != nil {
+		if err := p.Relay.update(ctx, pendingRecord(rec.Ref, rec.OID), recordConfig); err != nil {
 			return PushRecord{}, err
 		}
 		return PushRecord{Tag: &rec}, nil
 	}
 	return PushRecord{}, nil
+}
+
+// pendingRecord creates a record and its pending marker, both new.
+func pendingRecord(record, oid string) []RefUpdate {
+	return []RefUpdate{{Ref: record, New: oid, Old: Zero(oid)}, {Ref: pendingMarker(record), New: oid, Old: Zero(oid)}}
+}
+
+// pendingMarker is the marker of a record below refs/devc/.
+func pendingMarker(record string) string {
+	return PendingPrefix + strings.TrimPrefix(record, "refs/devc/")
+}
+
+// SettleResult is what SettlePush did.
+type SettleResult struct {
+	// Confirmed and Removed count the records whose update git applied
+	// and those it did not.
+	Confirmed int `json:"confirmed"`
+	Removed   int `json:"removed"`
+	// Problems are records that could not be settled; they stay pending
+	// (ignored) until the next settling.
+	Problems []string `json:"problems"`
+}
+
+// maxReflogScan bounds how far back SettlePush looks in a branch's reflog.
+const maxReflogScan = 1000
+
+// SettlePush settles the records the update hook wrote (finding X7 3):
+// a record whose update git applied (the branch has, or had, that tip; the
+// tag has that object) is confirmed by removing its marker; one whose
+// update git refused is removed with its marker, so nothing keeps the
+// name, and a later record of that name can be created. Every pending
+// marker in the relay is settled, so records of a push the daemon did not
+// see end are settled by the next push or bank. pushed are the push's
+// update records and heads the box's own branches (nil when unknown):
+// a branch whose applied tip is the box's own moves its box tip, as an
+// observation of the box (finding B8). The caller holds the box lock and
+// no receive-pack runs on the relay.
+func (s *Service) SettlePush(ctx context.Context, p *Project, heads map[string]string, pushed []PushRecord) (SettleResult, error) {
+	res := SettleResult{Problems: []string{}}
+	refs, err := p.Relay.Refs(ctx, HeadsPrefix, TagsPrefix, BoxTipPrefix, PendingPrefix)
+	if err != nil {
+		return res, err
+	}
+	set := SortRefs(refs)
+	for _, record := range sortedKeys(set.Pending) {
+		oid := set.Pending[record]
+		marker := pendingMarker(record)
+		applied := false
+		switch {
+		case strings.HasPrefix(record, BankPrefix):
+			if b, _, ok := splitStamped(record[len(BankPrefix):]); ok {
+				applied = set.Heads[b] == oid || p.Relay.inReflog(ctx, HeadsPrefix+b, oid)
+			}
+		case strings.HasPrefix(record, DevcTagsPrefix):
+			if t, _, ok := splitStamped(record[len(DevcTagsPrefix):]); ok {
+				applied = set.UpstreamTags[t] == oid
+			}
+		}
+		ups := []RefUpdate{{Ref: marker, Old: oid}}
+		if !applied {
+			ups = append([]RefUpdate{{Ref: record, Old: oid}}, ups...)
+		}
+		if err := p.Relay.update(ctx, ups, recordConfig); err != nil {
+			// A record that is gone leaves only its marker.
+			if gone, lerr := p.Relay.Refs(ctx, record); lerr == nil && len(gone) == 0 && !applied {
+				if err := p.Relay.update(ctx, []RefUpdate{{Ref: marker, Old: oid}}, recordConfig); err == nil {
+					res.Removed++
+					continue
+				}
+			}
+			res.Problems = append(res.Problems, fmt.Sprintf("settling %s: %s", printableName(record), printable(err.Error())))
+			continue
+		}
+		if applied {
+			res.Confirmed++
+		} else {
+			res.Removed++
+		}
+	}
+	var tips []RefUpdate
+	for _, rec := range pushed {
+		if rec.Branch == nil {
+			continue
+		}
+		b, oid := rec.Branch.Branch, rec.Branch.New
+		if CheckName(b) == nil && heads != nil && heads[b] == oid && set.Heads[b] == oid && set.BoxTips[b] != oid {
+			tips = append(tips, boxTipUpdate(set.BoxTips, b, oid))
+			set.BoxTips[b] = oid
+		}
+	}
+	if len(tips) > 0 {
+		if err := p.Relay.update(ctx, tips, recordConfig); err != nil {
+			// Box tips are observations; the next bank makes them again.
+			res.Problems = append(res.Problems, "recording the box's tips: "+printable(err.Error()))
+		}
+	}
+	return res, nil
 }
 
 // BoxHeads lists the box's own branches for RecordUpdate (nil when the box
@@ -291,20 +387,26 @@ func (s *Service) BoxHeads(ctx context.Context, p *Project) map[string]string {
 	return heads
 }
 
-// RecordPush records every update of a push (RecordUpdate) and forwards
-// branches as post-receive does, for a push that was applied without the
-// hooks. Only tests call it; the relay service records in the update hook.
+// RecordPush records every update of a push (RecordUpdate), settles them
+// (SettlePush) and forwards branches as post-receive does, for a push that
+// was applied without the hooks. Only tests call it; the relay service
+// records in the update hook and the daemon settles.
 func (s *Service) RecordPush(ctx context.Context, p *Project, pushed []PushedRef) *PushReport {
 	heads := s.BoxHeads(ctx, p)
 	var recs []PushRecord
 	var problems []string
 	for _, u := range pushed {
-		rec, err := s.RecordUpdate(ctx, p, u, heads)
+		rec, err := s.RecordUpdate(ctx, p, u)
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("recording %s: %s", printableName(u.Ref), printable(err.Error())))
 			continue
 		}
 		recs = append(recs, rec)
+	}
+	if res, err := s.SettlePush(ctx, p, heads, recs); err != nil {
+		problems = append(problems, "settling: "+printable(err.Error()))
+	} else {
+		problems = append(problems, res.Problems...)
 	}
 	rep := s.ReportPush(ctx, p, pushed, recs)
 	rep.Problems = append(problems, rep.Problems...)
@@ -666,4 +768,67 @@ func RelayExists(dir string) bool {
 		return false
 	}
 	return err == nil && fi.Mode().IsRegular()
+}
+
+// Bounds of the notes the hooks of one push leave for each other and for
+// the daemon.
+const (
+	maxHeadsNote   = 4 << 20
+	maxRecordsNote = 8 << 20
+)
+
+// readNote reads a note of the relay hooks beside a push's report file
+// (bounded, nothing followed); a missing note is empty.
+func readNote(file string, max int64) ([]byte, error) {
+	f, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s is larger than %d bytes", file, max)
+	}
+	return b, nil
+}
+
+// ReadHeadsNote reads the box's own branches pre-receive noted for the
+// push of report (nil when it noted none).
+func ReadHeadsNote(report string) (map[string]string, error) {
+	b, err := readNote(HeadsFile(report), maxHeadsNote)
+	if err != nil || len(b) == 0 {
+		return nil, err
+	}
+	var heads map[string]string
+	if err := json.Unmarshal(b, &heads); err != nil {
+		return nil, err
+	}
+	return heads, nil
+}
+
+// ReadRecordsNote reads the records the update hooks of the push of report
+// noted, one JSON line each.
+func ReadRecordsNote(report string) ([]PushRecord, error) {
+	b, err := readNote(RecordsFile(report), maxRecordsNote)
+	if err != nil {
+		return nil, err
+	}
+	var out []PushRecord
+	for _, line := range bytes.Split(b, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var rec PushRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return out, err
+		}
+		out = append(out, rec)
+	}
+	return out, nil
 }

@@ -29,6 +29,7 @@ tests = [
   "internal/harness.TestPrepareAndCleanup",
   "internal/harness.TestClaudeSettingsMerge",
   "internal/harness.TestRefreshLaunches",
+  "internal/harness.TestLoginOutputEscaped",
   "test/integration.TestHarnessInstall",
   "test/integration.TestHarnessLaunchAndSecrets",
   "test/integration.TestHarnessState",
@@ -55,6 +56,11 @@ tests = ["internal/toolbox.TestInstallPublication"]
 text = "`harness gc` never removes the current version, the two newest, a version a launch description names, or one current at any time since the oldest running box started."
 refs = ["internal/toolbox.Toolbox.GC", "internal/cli.gcKeep"]
 tests = ["internal/toolbox.TestGCKeepsVersionsInUse", "internal/toolbox.TestGC"]
+
+[[invariant]]
+text = "What a vendor login or status command prints reaches the terminal escaped like other text from places a box can write: control and format characters become U+FFFD."
+refs = ["internal/harness.LoginRunner.Status", "internal/harness.LoginRunner.Interactive", "internal/proto.PrintableWriter"]
+tests = ["internal/harness.TestLoginOutputEscaped", "internal/proto.TestPrintableWriter"]
 
 [[invariant]]
 text = "Installing a harness never changes a box's definition: the mounts a harness contributes depend only on the configuration."
@@ -259,7 +265,7 @@ A box runs the project's own image, which knows nothing of devc. Yet every box n
 
 ## How it works
 
-**The toolbox.** [[term:toolbox]] is `<state>/toolbox`, mounted read-only at `/opt/devc` in every box. [[internal/toolbox.Toolbox.Sync]] makes it match the running devc: the binary under its build ID (`devc/<version>-<sha12>/devc`), the links `devc/current`, `bin/devc` and `bin/git-remote-devc`, a hard link (or copy) of the binary as the only file of `helper-rootfs/`, the box seccomp profile and the built-in skills. Sync runs whenever devc is about to rely on the toolbox (a box's start, a helper, context or installer container, `devc toolbox sync`, `devc doctor --fix`). Other parts are installed on request: a static tmux built from a pinned release in a throwaway Alpine container ([[internal/toolbox.Toolbox.BuildTmux]]), and pinned releases of restic and Node.js, downloaded once and verified against SHA-256 sums compiled into devc. Everything is world-readable, because in-box root without capabilities maps to a subordinate UID and must still run it. [[diagram:toolbox-parts|The picture below]] shows which part each container sees; the login container mounts the whole toolbox read-only, like a box.
+**The toolbox.** [[term:toolbox]] is `<state>/toolbox`, mounted read-only at `/opt/devc` in every box. [[internal/toolbox.Toolbox.Sync]] makes it match the running devc: the binary under its build ID (`devc/<version>-<sha12>/devc`), the links `devc/current`, `bin/devc` and `bin/git-remote-devc`, a hard link (or copy) of the binary as the only file of `helper-rootfs/`, the box seccomp profile and the built-in skills. Sync runs whenever devc is about to rely on the toolbox (a box's start, a helper, context or installer container, `devc toolbox sync`, `devc doctor --fix`). Other parts are installed on request: a static tmux built from a pinned release in a throwaway Alpine container ([[internal/toolbox.Toolbox.BuildTmux]]), and pinned releases of restic and Node.js, downloaded once and verified against SHA-256 sums compiled into devc. Everything is world-readable, because in-box root without capabilities maps to a subordinate UID and must still run it. [[diagram:toolbox-parts|The picture below]] shows which part each container sees.
 
 **Manifests.** A [[term:harness]] is described by a [[internal/config.Harness]] ([[surface:config-harness]]): how it is installed (`install`), where its state lives and whether a realm shares it (`home`), how it logs in (`auth`), what settings and instructions it must get (`baseline`), how it is started (`launch`, `env`), which hooks report its events, how input reaches it. Five manifests are built in ([[pkg:assets]]); the configuration chapter explains how a user file replaces one ([[concern:configuration]]).
 
@@ -280,15 +286,16 @@ A box runs the project's own image, which knows nothing of devc. Yet every box n
 - **A box changes its tools or settings.** The toolbox, `/etc/devc` (descriptions, seeds) and the baseline directory are read-only mounts of host directories. Validation refuses baseline directories devc or the system needs, such as `/etc/devc`, `/opt/devc`, `/home` or `/usr` ([[internal/config.reservedBaselineDir]]).
 - **A vendor installer misbehaves.** It runs with no new privileges, the box seccomp profile, `--http-proxy=false` and only its version directory (read-write) and the components it needs (read-only) mounted; its result is checked in a container without network. It does run with network and as the container's root, which rootless Podman maps to the host user: the user trusts the vendor's script as far as the container lets it act.
 - **Shared harness state.** With strategy `shared`, every box of a realm mounts the same home, so one box can change what the others read, the vendor's credential file included; the realm is the sharing boundary (spec rule R5). Homes that nest are refused ([[internal/harness.BoxHooks.Contribute]]), because a writable mount's source inside another box-writable tree could be redirected by a planted symlink.
+- **Box text on your terminal.** Login and status output is escaped like other box text ([[internal/harness.LoginRunner.Status]], [[internal/proto.PrintableWriter]]).
 - **Credentials leak.** Token and key credentials are written only to the box's secrets directory, which must be memory-backed unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`, as 0400 files by rename, and removed at `down` and `rm` ([[internal/harness.BoxHooks.Cleanup]]). A `shared-home` credential is the vendor's file in the shared harness home, durable state the realm's boxes can write (above). The agent can read its own model credential; the spec accepts that.
-- **gc removes a version a session runs.** See the invariants; the keep rules use the descriptions and the switch history.
+- **gc removes a version a session runs.** The keep rules (invariants) use the descriptions and the switch history.
 
 ## Decisions that are not obvious
 
 - **Concrete version directories.** Descriptions name `v/<stamp>`, not `current`, so an installation never changes the files a running session has open ([[finding:E1]]).
 - **Mounts from configuration only.** Whether a harness is installed changes the launch descriptions, never the box's mounts, so installing does not make every box drift.
 - **tmpfs at /home, /opt and /tmp in installer containers.** The directories above devc's bind mounts are then not image-layer directories, which also avoids a fuse-overlayfs bug in which `statx` hangs ([[internal/toolbox.InstallerTmpfs]]).
-- **Logins never run on the host.** The vendor's login command runs in the installer image with a temporary home, so it can leave nothing in the user's own home.
+- **Logins never run on the host**, but in the installer image with a temporary home, so they leave nothing in the user's own home.
 
 ## Where to start reading
 

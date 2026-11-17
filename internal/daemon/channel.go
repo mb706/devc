@@ -90,7 +90,7 @@ func (d *Daemon) startWorker(ref names.ProjectRef, containerID string) *boxWorke
 	wg.Add(2)
 	d.goSafe("channel "+ref.String(), func() { defer wg.Done(); w.channelLoop(ctx) })
 	d.goSafe("ingest "+ref.String(), func() { defer wg.Done(); w.ingestLoop(ctx) })
-	go func() { wg.Wait(); close(w.done) }()
+	goTask(d.log, &task{box: names.BoxName(ref), what: "the wait for the worker"}, func() { wg.Wait(); close(w.done) })
 	w.wake() // ingest what the box spooled while nobody watched
 	return w
 }
@@ -347,7 +347,8 @@ func (w *boxWorker) acceptStreams(ctx context.Context, sess *yamux.Session) {
 			_ = st.Close() // too many at once
 			continue
 		}
-		go w.serveStream(ctx, st, handlers, notify)
+		t := &task{box: names.BoxName(w.ref), what: "a stream", end: func() { rawStream{st: st}.abort() }}
+		goTask(w.d.log, t, func() { w.serveStream(ctx, st, handlers, notify, t) })
 	}
 }
 

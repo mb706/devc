@@ -53,7 +53,7 @@ at = "cli"
 ref = "internal/box.Manager.Find"
 checks = ["internal/box.Manager.Find"]
 text = "The container named `devc-<realm>-<project>` is looked up. One that lacks devc's labels for this project is never touched. With no container `up` creates one; a container with another hash has drifted, and `up` stops with exit status 1 unless `--recreate` was given."
-detail = "A running container with the same hash is left alone when its readiness marker is there; at level internet the host also checks that the rules devc installed are still bound to it, and otherwise stops it and starts it again. A running box without the marker gets the rest of its start (from the identity fix on, below) without being restarted and without anything written before it; a failure then leaves it running. A stopped container with the same hash is started again: it goes through the steps below except `podman create`."
+detail = "A running container with the same hash is left alone, and nothing is written for it; at level internet the host first checks that the rules devc installed are still bound to it, and otherwise stops it and starts it again. A running box without its readiness marker, or without a capability record of its container ID, is refused with a request to restart it ([[internal/box.CheckStarted]], [[doc:docs/dev/LEFTOVER.md#found-by-the-accuracy-review]], item 1): its start is never finished with today's configuration. A stopped container with the same hash is started again: it goes through the steps below except `podman create`."
 
 [[step]]
 section = "Only with --recreate"

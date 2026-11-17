@@ -141,7 +141,7 @@ text = "At most 1,000 well-formed lines; no configuration problems; the relay, q
 [[step]]
 at = "relay-hooks"
 ref = "internal/gitx.Service.BoxHeads"
-text = "The box's own branches are listed in the box and noted beside the report file, for the box-tip rule of the update hook."
+text = "The box's own branches are listed in the box and noted beside the report file, for the box-tip rule applied when the push is settled."
 
 [[step]]
 from = "host-git"
@@ -160,7 +160,7 @@ text = "Branches may be created and moved, also non-fast-forward, but not delete
 [[step]]
 at = "relay-hooks"
 ref = "internal/gitx.Service.RecordUpdate"
-text = "The ref is recorded before git applies it: a new branch tip gets a bank ref unless it is the branch's newest one, the box tip moves when the box's own branch has this tip, a new tag gets a `refs/devc/tags/` record; one transaction with `core.fsync=reference`. If it fails, the ref is refused."
+text = "The ref is recorded before git applies it: a new branch tip gets a bank ref unless it is the branch's newest one, a new tag gets a `refs/devc/tags/` record, each with a pending marker below `refs/devc/pending/`; one transaction with `core.fsync=reference`. If it fails, the ref is refused. A pending record counts for nothing until the push is settled."
 
 [[step]]
 at = "host-git"
@@ -196,6 +196,12 @@ text = "receive-pack has exited, and with it every process of its group."
 at = "daemon"
 ref = "internal/gitx.RemoveQuarantines"
 text = "What an ended push left in the quarantine is removed, only once the group is gone. A group still alive after 30 seconds instead leaves the relay held: quarantine and lock stay, and pushes are refused until its last process ends."
+
+[[step]]
+at = "daemon"
+ref = "internal/gitx.Service.SettlePush"
+text = "With the box lock still held, the push's records are settled: one whose update git applied (the branch has or had that tip, the tag that object) loses its marker; one whose update git refused, such as a name that clashes with an existing branch, is removed with its marker; box tips move for branches whose applied tip is the box's own ([[finding:B8]])."
+detail = "Before receive-pack starts, the same settling clears records an earlier push left pending because its daemon ended first; so does every bank. What cannot be settled stays pending and ignored, and is tried again then."
 
 [[step]]
 at = "daemon"

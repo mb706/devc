@@ -26,6 +26,7 @@ tests = [
   "internal/box.TestDriftWritesNothing",
   "internal/box.TestUpRollsBack",
   "internal/box.TestRunningButNotReady",
+  "internal/daemon.TestStartAndStop",
   "internal/box.TestBoxLock",
   "internal/box.TestStopRefused",
   "internal/box.TestRemoveWithHome",
@@ -63,9 +64,14 @@ refs = ["internal/box.LockBox"]
 tests = ["internal/box.TestBoxLock"]
 
 [[invariant]]
-text = "A grant a box gets on demand never exceeds what the configuration grants now, nor its capability record, which devc writes when it finishes a start of that container; without a record for its container ID it gets no grant."
+text = "A grant a box gets on demand never exceeds what the configuration grants now, nor its capability record, which only the start that ran that container writes; without a record for its container ID it gets no grant."
 refs = ["internal/box.Manager.recordCapabilities", "internal/box.Manager.cleanup", "internal/box.Capabilities.AllowsSecret", "internal/box.Capabilities.SSHGrant", "internal/daemon.Daemon.startedWith"]
 tests = ["internal/box.TestCapabilities", "internal/box.TestUpCreatesAndIsIdempotent"]
+
+[[invariant]]
+text = "No command that finds a box running writes its capability record, whatever the box did to its readiness marker; a running box without the marker, or without a record for its container, is refused with a request to restart it, by `up`, `sh`, `run`, `root` and every session start, and nothing runs in it."
+refs = ["internal/box.CheckStarted", "internal/box.Manager.up", "internal/box.Manager.ensureRunning", "internal/daemon.commander.startRefusal"]
+tests = ["internal/box.TestRunningButNotReady", "internal/daemon.TestStartAndStop"]
 
 [[invariant]]
 text = "`down`, `rm` and a recreation leave a running box running when banking its work fails, unless `--no-bank` was given; with configuration problems `down` and `rm` stop it unbanked, after a warning."
@@ -175,8 +181,8 @@ ref = "internal/box.Manager.startStopped"
 [[diagram.edge]]
 from = "starting"
 to = "starting"
-label = "finishing fails: kept"
-ref = "internal/box.Manager.up"
+label = "found running: refused, kept"
+ref = "internal/box.CheckStarted"
 
 [[diagram.edge]]
 from = "ready"
@@ -218,26 +224,26 @@ A box is a project's container, `devc-<realm>-<project>` ([[term:box]]). One com
 
 **The definition.** [[internal/box.BuildSpec]] renders a [[internal/box.Spec]] from [[internal/box.Inputs]]: the resolved configuration, the image the engine reports, the host's facts (whether SELinux is present, which cgroup controllers are delegated) and the seccomp profile. Nothing in it comes from a place a box can write. Other packages add mounts, environment and labels through [[internal/box.Contributor]]s (harness, gate, shares, data); `AddMount`, `AddEnv` and `AddLabel` validate what they add. [[internal/box.Spec.Args]] is the full argument vector of `podman create`, and [[internal/box.Spec.Hash]] the SHA-256 of the arguments, the image reference, the image ID and the profile; it becomes the label `devc.confighash`. The image comes from [[internal/box.SourceFor]]: the project's `image`, or its env's, built from a Containerfile (`localhost/devc-env/<env>:latest`) or pulled.
 
-**up.** [[flow:box-up]] shows it step by step. [[internal/box.Manager.Up]] refuses while the configuration has problems, takes the box lock and computes the plan (toolbox sync, image, definition). Then it decides from the existing container ([[internal/box.Manager.up]]): it creates a missing one and starts a stopped one; a drifted one (another hash) it refuses with exit status 1 unless `--recreate`, which stops and removes the old container first; a running and ready one it leaves alone (at level internet only after verifying its firewall rules, else it restarts it); one running without its readiness marker gets the rest of its start without a restart, including a capability record of the current configuration.
+**up.** [[flow:box-up]] shows it step by step. [[internal/box.Manager.Up]] refuses while the configuration has problems, takes the box lock and computes the plan (toolbox sync, image, definition). Then it decides from the existing container ([[internal/box.Manager.up]]): it creates a missing one and starts a stopped one; a drifted one (another hash) it refuses with exit status 1 unless `--recreate`, which stops and removes the old container first; a running one it leaves alone (at level internet only after verifying its firewall rules, else it restarts it) and writes nothing for, but refuses it without its readiness marker or a capability record of its container ID ([[internal/box.CheckStarted]]).
 
 Only a path that creates or starts the box writes anything ([[internal/box.Manager.publish]]): what the box will see, the mount sources and nested mount points; the capability record, the network binding and the readiness marker of the previous start are removed. Then come `podman create`, [[internal/box.Manager.startBox]] (at level internet `podman init` and the rules before `podman start`) and [[internal/box.Manager.afterStart]]: the identity fix, the wait for the readiness marker, the canary at level internet, the capability record and the start hooks. A failure is rolled back ([[internal/box.Manager.rollback]]): a container this command created is removed, one it started is stopped, the delivered secrets go. [[diagram:box-states]] shows the states; a box drifts in any state, drawn only from stopped.
 
 **The box lock** ([[term:box-lock]]). [[internal/box.LockBox]] serialises everything that starts, stops or changes a box, git operations and network exceptions included, waiting up to ten minutes, because an `up` may be building an image; `ls` takes no lock.
 
-**Running something in a box.** `sh`, `run` and `root` start the box through the same path as `up` when it is not running and ready, then release the lock and run `podman exec`: a login shell or a command as `dev`, in the box's equivalent of the current directory. A running, ready box is used even when it has drifted. [[internal/box.Manager.Root]] runs as root with full capabilities (`podman exec --user 0 --privileged`, in the environment [[concern:isolation]] describes) and logs the command in the env's directory ([[concern:configuration]]).
+**Running something in a box.** `sh`, `run` and `root` start the box through the same path as `up` when it is not running ([[internal/box.Manager.ensureRunning]]), then release the lock and run `podman exec`: a login shell or a command as `dev`, in the box's equivalent of the current directory. A running box is used as started, even when drifted, once [[internal/box.CheckStarted]] passes. [[internal/box.Manager.Root]] runs as root with full capabilities (`podman exec --user 0 --privileged`, in the environment [[concern:isolation]] describes) and logs the command in the env's directory ([[concern:configuration]]).
 
 **down and rm.** [[flow:box-down]] shows `down`, which works even while the configuration has problems: the stop hooks ingest the box's events and bank its work, and a bank that fails keeps the box running ([[internal/box.ErrKeepRunning]]), except with configuration problems, when nothing is banked ([[finding:B2]]). After the stop the open sessions end, and the capability record, the delivered secrets and the gate key go; home, project directory, durable state and network exceptions stay. [[internal/box.Manager.Remove]] does the same with `podman rm --force` and drops the network exceptions; for a container already gone it skips the after-stop hooks, so open sessions stay open ([[doc:docs/dev/LEFTOVER.md#boxes-and-the-box-side-x5]]). `--home` empties the home from a helper container; `rebuild` is `up --recreate --build`.
 
-**The capability record.** When devc finishes a start, [[internal/box.Manager.recordCapabilities]] writes `capabilities.json` beside the home ([[internal/box.CapabilitiesOf]]): the container ID and the secrets, SSH hosts, network level and allowlist, GitHub grant and services the configuration grants at that moment. The daemon and `gate-exec` hand grants out only for the intersection of that record and the current configuration ([[internal/box.Capabilities.AllowsSecret]], [[internal/box.Capabilities.SSHGrant]]), so removing a grant refuses the next hand-out while adding one waits for the next record ([[finding:C1-02]]): a new start, or finishing the start of a box running without its readiness marker. devc removes the record before every start and when it stops or removes the box. Intersecting keeps grants added while a box runs from reaching a box whose definition no longer matches.
+**The capability record.** When a start through devc that created or started the container succeeds, [[internal/box.Manager.afterStart]] has [[internal/box.Manager.recordCapabilities]] write `capabilities.json` beside the home ([[internal/box.CapabilitiesOf]]): the container ID and the secrets, SSH hosts, network level and allowlist, GitHub grant and services the configuration grants at that moment. The daemon and `gate-exec` hand grants out only for the intersection of that record and the current configuration ([[internal/box.Capabilities.AllowsSecret]], [[internal/box.Capabilities.SSHGrant]]), so removing a grant refuses the next hand-out while adding one waits for the next start ([[finding:C1-02]]). devc removes the record before every start and when it stops or removes the box. Intersecting keeps grants added while a box runs from reaching a box whose definition no longer matches.
 
 ## What can go wrong, and what prevents it
 
 - **A foreign container with a box's name.** [[internal/box.Manager.Find]] refuses a container without the labels `devc.realm`, `devc.project` and `devc.role=box` for the project; `ls` shows it as `conflict`.
 - **A changed definition.** The hash makes it drift; `up` refuses and writes nothing ([[finding:A3]]). A drifted box that is running keeps running with its old definition until the user recreates it.
-- **A start that fails half-way.** Rolled back, as above; a running box that `up` did not start itself is left running with a message ([[chunk:C03r]]).
+- **A start that fails half-way.** Rolled back, as above; a box left running without its marker or record (devc killed during a start) is refused until it is restarted.
 - **A plain `podman start` outside devc.** A box stopped outside devc keeps its capability record, and a restart keeps the container ID, so grants on demand go on. At level internet box init finds a binding for another start and ends the box. The identity fix and the mount-point check run only on starts through devc.
 - **The readiness marker is box-writable.** Every start through devc removes it first, so an old marker never counts, but who writes the new one is not checked; at level internet the host checks the binding and the rules itself ([[internal/box.Manager.verifyRunning]], [[finding:B1]]).
-- **A box that removes its marker.** The next `up`, `sh`, `run`, `root` or session start finishes its start ([[internal/box.Manager.ensureRunning]]) and records the current grants, so grants added since the container started reach it without a restart, if its definition is unchanged ([[doc:docs/dev/LEFTOVER.md#found-by-the-accuracy-review]], item 1).
+- **A box that removes its marker.** Nothing finishes its start with today's configuration: `up`, `sh`, `run`, `root`, `devc <harness>` and the daemon's session start ([[internal/daemon.commander.startRefusal]]) refuse through [[internal/box.CheckStarted]], asking for a restart, and the record keeps the grants of the start that ran the container ([[doc:docs/dev/LEFTOVER.md#found-by-the-accuracy-review]], item 1). After a host reboot the container is stopped, so `up` starts it properly.
 - **Deleting a box-written tree.** `rm --home` never walks the home on the host and refuses one not below the state directory.
 
 ## Decisions that are not obvious

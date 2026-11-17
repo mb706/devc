@@ -9,6 +9,7 @@ package gitx
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -36,15 +37,17 @@ func ArchiveRef(name string) bool {
 	return false
 }
 
-// ArchiveRefs lists the refs the archive carries (ArchiveRef).
+// ArchiveRefs lists the refs the archive carries (ArchiveRef). A record
+// still pending (finding X7 3) is left out until it is settled.
 func (r *Relay) ArchiveRefs(ctx context.Context) (map[string]string, error) {
-	refs, err := r.Refs(ctx, archiveSpaces...)
+	refs, err := r.Refs(ctx, append(slices.Clone(archiveSpaces), PendingPrefix)...)
 	if err != nil {
 		return nil, err
 	}
+	pending := SortRefs(refs).Pending
 	out := map[string]string{}
 	for _, ref := range refs {
-		if ArchiveRef(ref.Name) {
+		if _, ok := pending[ref.Name]; ArchiveRef(ref.Name) && !ok {
 			out[ref.Name] = ref.OID
 		}
 	}

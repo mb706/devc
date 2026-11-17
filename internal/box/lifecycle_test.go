@@ -804,37 +804,110 @@ func TestUpRollsBack(t *testing.T) {
 	})
 }
 
-// TestRunningButNotReady: a running box without the readiness marker is
-// not "already running"; up finishes its start (finding B1).
+// TestRunningButNotReady: no command that finds the box running rewrites
+// its capability record, whatever the box did to its readiness marker
+// (finding G1-01). A grant added while the box runs does not reach it; a
+// box without its marker, or without a record for its container, is
+// refused with a request to restart and nothing runs in it; the container
+// is left as it is. Controls: the ordinary running box is used, and a
+// restart records the new grant.
 func TestRunningButNotReady(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	rt, _ := r.m.Config.Paths.BoxRuntimeDir(names.BoxID(hello))
+	p := r.m.Config.Paths
+	record := func() []byte {
+		b, err := os.ReadFile(p.BoxCapabilitiesFile(hello))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	started := record()
+	// A grant added while the box runs; the definition stays the same.
+	r.writeConfig("realms/demo/projects/hello/project.toml", "harnesses = [\"claude\", \"codex\"]\ndefault_branch = \"main\"\n[grants]\nsecrets = [\"added-later\"]\n")
+	r.load()
+	// The ordinary case: a running box with its marker and record is used
+	// as it is.
+	r.out.Reset()
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil || !strings.Contains(r.out.String(), "already running") {
+		t.Fatalf("up of a running box: %v\n%s", err, r.out)
+	}
+	if _, err := r.m.Run(ctx, hello, []string{"true"}, ExecOptions{}); err != nil {
+		t.Fatalf("run in a running box: %v", err)
+	}
+	rt, _ := p.BoxRuntimeDir(names.BoxID(hello))
+	refused := func(what, reason string) {
+		t.Helper()
+		n := len(r.eng.Execs)
+		ops := map[string]func() error{
+			"up":   func() error { return r.m.Up(ctx, hello, UpOptions{}) },
+			"run":  func() error { _, err := r.m.Run(ctx, hello, []string{"true"}, ExecOptions{}); return err },
+			"root": func() error { _, err := r.m.Root(ctx, hello, []string{"true"}, ExecOptions{}); return err },
+			"sh":   func() error { _, err := r.m.Shell(ctx, hello, ExecOptions{}); return err },
+			"with": func() error {
+				return r.m.WithRunningBox(ctx, hello, func(*engine.ContainerInfo) error { t.Error("fn called"); return nil })
+			},
+		}
+		for name, op := range ops {
+			err := op()
+			var ue *UnfinishedError
+			if !errors.As(err, &ue) || !strings.Contains(err.Error(), reason) || !strings.Contains(err.Error(), "'devc down demo/hello' and 'devc up demo/hello'") {
+				t.Errorf("%s: %s: %v", what, name, err)
+			}
+		}
+		if len(r.eng.Execs) != n {
+			t.Errorf("%s: %d commands ran in the box", what, len(r.eng.Execs)-n)
+		}
+		if ci := r.eng.Containers["devc-demo-hello"]; !ci.State.Running {
+			t.Errorf("%s: the box was stopped", what)
+		}
+	}
+	// The box removes its marker: refused, the record stays the start's.
 	if err := os.Remove(filepath.Join(rt, "ready")); err != nil {
 		t.Fatal(err)
 	}
-	n := len(r.eng.Execs)
+	refused("without its marker", "has not reported ready")
+	if !bytes.Equal(record(), started) {
+		t.Error("the record was rewritten for a box without its marker")
+	}
+	// It writes the marker again: used as it was started, nothing new.
+	if err := os.WriteFile(filepath.Join(rt, "ready"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	r.out.Reset()
+	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil || !strings.Contains(r.out.String(), "already running") {
+		t.Errorf("up after the marker came back: %v\n%s", err, r.out)
+	}
+	if caps, err := ReadCapabilities(p, hello); err != nil || slices.Contains(caps.Secrets, "added-later") || !bytes.Equal(record(), started) {
+		t.Errorf("the record after the marker came back: %+v %v", caps, err)
+	}
+	// No record for its container, or one of another container: refused.
+	caps, _ := ReadCapabilities(p, hello)
+	other := *caps
+	other.ContainerID = "another"
+	if err := WriteCapabilities(p, hello, other); err != nil {
+		t.Fatal(err)
+	}
+	refused("with another container's record", "belongs to another container")
+	if err := RemoveCapabilities(p, hello); err != nil {
+		t.Fatal(err)
+	}
+	refused("without a record", "no record of what it was started with")
+	if _, err := os.Stat(p.BoxCapabilitiesFile(hello)); err == nil {
+		t.Error("a record was written for a box found running")
+	}
+	// Control: a restart records what the configuration grants now.
+	if err := r.m.Down(ctx, hello); err != nil {
+		t.Fatal(err)
+	}
 	if err := r.m.Up(ctx, hello, UpOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	// Identity fix and canary; the rules were verified from the host.
-	if strings.Contains(r.out.String(), "already running") || len(r.eng.Execs) != n+2 || !strings.Contains(r.out.String(), "is ready") {
-		t.Errorf("up on a running box that is not ready: %d execs\n%s", len(r.eng.Execs)-n, r.out)
-	}
-	// If it still does not become ready, up fails but leaves the container
-	// it did not start alone.
-	_ = os.Remove(filepath.Join(rt, "ready"))
-	r.eng.ExecFunc = nil
-	r.m.ReadyTimeout = 300 * time.Millisecond
-	if err := r.m.Up(ctx, hello, UpOptions{}); err == nil || !strings.Contains(err.Error(), "devc down") {
-		t.Errorf("up: %v", err)
-	}
-	if ci := r.eng.Containers["devc-demo-hello"]; !ci.State.Running {
-		t.Error("a box this invocation did not start was stopped")
+	if caps, err := ReadCapabilities(p, hello); err != nil || !slices.Contains(caps.Secrets, "added-later") {
+		t.Errorf("the record after a restart: %+v %v", caps, err)
 	}
 }
 

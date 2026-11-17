@@ -22,6 +22,7 @@ key = [
   "internal/github.Minter.verify",
   "internal/boxside.GitCredential",
   "internal/cli.app.prCreate",
+  "internal/cli.checkPRBranch",
   "internal/gitx.Service.ConfigureGitHub",
 ]
 spec = ["doc:specs-v2.md#10.1", "doc:docs/guide.md#github"]
@@ -36,6 +37,8 @@ tests = [
   "internal/daemon.TestGitHubFacade",
   "internal/daemon.TestGitHubToken",
   "internal/daemon.TestGitHubRequests",
+  "internal/cli.TestPRCreateChecksFirst",
+  "internal/config.TestGitHubSecretsNotGranted",
   "internal/box.TestGitHubCapabilities",
   "internal/boxside.TestGitCredential",
   "internal/gitx.TestConfigureGitHub",
@@ -78,6 +81,16 @@ tests = ["internal/github.TestMinter"]
 text = "Through devc, a box opens a pull request or comments only by a request the user approved on the host's CLI, carried out by devc pr with the host's credential."
 refs = ["internal/requests.MayDecide", "internal/daemon.requestCommands", "internal/cli.app.prCreate", "internal/cli.app.prComment"]
 tests = ["internal/daemon.TestGitHubRequests", "test/integration.TestGitHub"]
+
+[[invariant]]
+text = "`devc pr create`, also for an approved request, pushes nothing unless the branch is in the relay and is neither the pull request's base, nor the project's default branch, nor the upstream's as the relay records it, nor protected by git.protected."
+refs = ["internal/cli.checkPRBranch", "internal/cli.app.publishBranch"]
+tests = ["internal/cli.TestPRCreateChecksFirst"]
+
+[[invariant]]
+text = "No project receives the realm's GitHub credential or its App's private key as an ordinary secret: the configuration check refuses `grants.secrets`, or a harness's credential, that names `github-token` or the App's `key_secret`."
+refs = ["internal/config.validateGitHubSecrets"]
+tests = ["internal/config.TestGitHubSecretsNotGranted"]
 
 [[diagram]]
 id = "github-credentials"
@@ -238,13 +251,13 @@ label = "git, gh with the token"
 +++
 ## What it is for
 
-An agent on a GitHub project wants to read pull requests, issues and failed CI runs, open a pull request and answer a review. The user's own credential can do far more, on every repository the user reaches, so by default no GitHub credential enters the box ([[doc:specs-v2.md#10.1]]). Reads go through the daemon, which holds the user's credential and serves reads of the project's repositories only; pull requests and comments are requests the user approves; and a project that needs `git push` to GitHub from the box can be given a token of its own, at best an App installation token for the one repository. None of this has run against the real GitHub; what the code assumes about GitHub's answers is listed in [[doc:docs/dev/LEFTOVER.md#1]] under "GitHub (real account)".
+An agent on a GitHub project wants to read pull requests, issues and failed CI runs, open a pull request and answer a review. The user's own credential can do far more, on every repository, so by default no GitHub credential enters the box ([[doc:specs-v2.md#10.1]]). Reads go through the daemon, which holds the user's credential and serves reads of the project's repositories only; pull requests and comments are requests the user approves; and a project that needs `git push` to GitHub from the box can be given a token of its own, at best an App installation token for the one repository. None of this has run against the real GitHub; what the code assumes about GitHub's answers is listed in [[doc:docs/dev/LEFTOVER.md#1]] under "GitHub (real account)".
 
 ## How it works
 
 **Which repository.** [[internal/github.ParseRepo]] reads `owner/name` from the project's `upstream` (https, ssh, git or `host:owner/repo`), which must be on the web host of `DEVC_GITHUB_URL` (default github.com); any other upstream makes the project "not a GitHub project", and all three ways refuse. API calls go to `DEVC_GITHUB_API` (default api.github.com) through one client ([[internal/github.Client]]), which caps answers, follows at most four redirects and only to https, and replaces its own credential in every body and error with `[redacted]`.
 
-**The host's credential.** [[internal/github.HostToken]] reads the realm secret `github-token`, else runs `gh auth token --hostname <host>` from `/` (15 seconds, no terminal); the value must be one word of printable ASCII. It is read for each facade read by the daemon and for each `devc pr` command on the host, and nowhere else, unless a grant names it (below). [[diagram:github-credentials]]
+**The host's credential.** [[internal/github.HostToken]] reads the realm secret `github-token`, else runs `gh auth token --hostname <host>` from `/` (15 seconds, no terminal); the value must be one word of printable ASCII. It is read for each facade read by the daemon and each `devc pr` command on the host, and nowhere else, unless `token:` names it (below). [[diagram:github-credentials]]
 
 | | The box sends | The host does | The box gets |
 |---|---|---|---|
@@ -252,11 +265,11 @@ An agent on a GitHub project wants to read pull requests, issues and failed CI r
 | Requests | `devc request pr` or `comment` | after local approval, `devc pr create --yes` or `devc pr comment` | the request's outcome, with the URL |
 | Token modes (`app`, `token:<secret>`) | `host.github.token` | checks the capability record; mints or reads the token | the token itself |
 
-**Reading** ([[flow:gh-read]]). `devc gh pr|issue|run list|view` and `devc gh api <path>` validate locally, then open a `host.github` stream through the agent. [[internal/daemon.boxWorker.serveGitHub]] works for the project of the channel: its configuration must be free of problems; repositories of `grants.github_read` count only if the container's capability record lists them too ([[internal/box.Capabilities.GitHubReadRepos]]); [[internal/github.PlanRead]] accepts only the fields of a known operation and a repository that is the project's or listed. Then come the budget, the credential and [[internal/github.Client.Read]], with 150 seconds for all its requests. The answer is a JSON line announcing the body's length, then exactly that many bytes. `run view --log` keeps the last 5 MiB of the jobs' logs.
+**Reading** ([[flow:gh-read]]). `devc gh pr|issue|run list|view` and `devc gh api <path>` validate locally, then open a `host.github` stream through the agent. [[internal/daemon.boxWorker.serveGitHub]] works for the project of the channel: its configuration must be free of problems; repositories of `grants.github_read` count only if the container's capability record lists them too ([[internal/box.Capabilities.GitHubReadRepos]]); [[internal/github.PlanRead]] accepts only the fields of a known operation and a repository that is the project's or listed. Then come the budget, the credential and [[internal/github.Client.Read]], with 150 seconds for all its requests. The answer is a JSON line with the body's length, then the body. `run view --log` keeps the last 5 MiB of the jobs' logs.
 
-**Asking.** `devc request pr --title …` (the branch checked out, unless `--branch`) and `devc request comment <n> --body …` are high-risk requests ([[concern:requests-and-approval]]): only `devc requests approve` on the host decides them ([[flow:request-pr]]). The daemon then runs `devc pr create --yes …` or `devc pr comment …` as a child process; [[internal/cli.app.prCreate]] reads the host's credential first, banks and pushes the branch as `devc push` does ([[concern:upstream]]), and opens the pull request, whose URL the box can read in the outcome.
+**Asking.** `devc request pr --title …` (the branch checked out, unless `--branch`) and `devc request comment <n> --body …` are high-risk requests ([[concern:requests-and-approval]]): only `devc requests approve` on the host decides them ([[flow:request-pr]]). The daemon then runs `devc pr create --yes …` or `devc pr comment …` as a child process; [[internal/cli.app.prCreate]] reads the host's credential first, banks, checks the branch, pushes it as `devc push` does ([[concern:upstream]]) and opens the pull request, whose URL the box reads in the outcome.
 
-**Token modes** ([[flow:app-token]]). With `grants.github = "app"` or `"token:<secret>"`, the capability record holds the mode, the upstream, the App's ID and installation, and the permissions ([[internal/box.CapabilitiesOf]]). A start hook gives the box repository a remote `github` at the upstream's HTTPS URL with `devc box git-credential` as its only credential helper for the GitHub host ([[internal/gitx.Service.ConfigureGitHub]]); in relay mode it removes them. The launcher asks for the token at every harness start and exports `GH_TOKEN` ([[internal/boxside.addGitHubToken]]); the helper asks whenever git needs a credential. [[internal/daemon.Daemon.githubToken]] checks the budget, the mode, the capability record of this container and [[internal/box.Capabilities.GitHubToken]]: the same mode, repository and, for `app`, App and installation as at the start, with the permissions granted then and now, each at the lower level. `token:` answers the stored secret; `app` asks [[internal/github.Minter.Token]].
+**Token modes** ([[flow:app-token]]). With `grants.github = "app"` or `"token:<secret>"`, the capability record holds the mode, the upstream, the App's ID and installation, and the permissions ([[internal/box.CapabilitiesOf]]). A start hook gives the box repository a remote `github` at the upstream's HTTPS URL with `devc box git-credential` as its only GitHub credential helper ([[internal/gitx.Service.ConfigureGitHub]]); in relay mode it removes them. The launcher asks for the token at every harness start and exports `GH_TOKEN` ([[internal/boxside.addGitHubToken]]); the helper asks whenever git needs a credential. [[internal/daemon.Daemon.githubToken]] checks the budget, the mode, the capability record of this container and [[internal/box.Capabilities.GitHubToken]]: the same mode, repository and, for `app`, App and installation as at the start, with the permissions granted then and now, each at the lower level. `token:` answers the stored secret; `app` asks [[internal/github.Minter.Token]].
 
 **Minting.** The App's key is parsed before any cache lookup, and every cache key holds the project and a fingerprint of the key's public half. At most once a day per project and repository, and again after a failed mint, [[internal/github.Minter.verify]] checks with a JWT ([[internal/github.AppJWT]]) that the repository's installation belongs to its owner (and is the configured one) and learns the repository's ID through a probe token ([[flow:app-token]]). The token is minted for that ID and the permissions; an answer listing other repositories is revoked and refused. A token is reused until five minutes before its `expires_at`.
 
@@ -268,11 +281,11 @@ A box controls every field of a read and of a request, when and how often it ask
 - **Shaping the request.** Unknown parameter fields are refused when the parameters are decoded; [[internal/github.ParseAPIPath]] wants `repos/<owner>/<repo>[/…]` in printable ASCII without `%`, `\`, `#`, spaces, or empty, `.` and `..` segments. Every request is a GET built on the API base. What stays open is whatever the host's credential may GET below the allowed repositories.
 - **Getting the credential.** It is in no file, variable or argument of the box; answers, errors and the daemon's log never carry it.
 - **Spending the user's rate limit.** 120 reads and 120 token requests a minute per project, 5 MiB per answer.
-- **Publishing.** Only the local CLI may approve `pr` and `comment` ([[internal/requests.MayDecide]]). Branch, title, body and base are the box's: approving pushes that branch to the upstream under the same name, a fast-forward only. Box-chosen text goes only into `--flag=value` arguments before the `--` that ends the options, so none of it becomes an option or names the project ([[internal/daemon.requestCommands]]).
+- **Publishing.** Only the local CLI may approve `pr` and `comment` ([[internal/requests.MayDecide]]). Branch, title, body and base are the box's: approving pushes that branch to the upstream under the same name, a fast-forward only, unless it is not in the relay, is the base, a default branch or protected ([[internal/cli.checkPRBranch]], [[doc:docs/dev/LEFTOVER.md#github-service-logins-the-desktop-x10]], item 3). Box-chosen text goes only into `--flag=value` arguments before the `--` that ends the options, so none of it becomes an option or names the project ([[internal/daemon.requestCommands]]).
 - **A token in the box.** In the token modes the box holds a credential: GitHub, not the relay's branch policy, decides what it may do, and with `pull_requests` or `issues` write it opens pull requests and comments unasked ([[doc:docs/dev/LEFTOVER.md#5]]). A minted token covers one repository by ID; `workflows` is never granted ([[internal/github.CheckPermission]]). A stored `token:` secret is whatever the user made it. After a change of the mode, the upstream or the App a box gets no token until it is brought up again.
 - **The App's key.** It stays in the daemon; no project receives a token cached for another ([[finding:D2-09]]); an installation of another account, or a probe that sees another repository, is refused ([[finding:D2-03]]).
 
-Nothing in the configuration stops a project from naming `github-token` or the App's key secret in `grants.secrets` or as `token:<secret>`, which would hand that credential to the box ([[doc:docs/dev/LEFTOVER.md#7]]); `token:<secret>` returns any realm secret it names.
+The configuration check refuses `github-token` and the App's key secret in `grants.secrets` or as a harness's credential ([[internal/config.validateGitHubSecrets]]); `token:<secret>` still returns any realm secret ([[doc:docs/dev/LEFTOVER.md#7]]).
 
 ## Decisions that are not obvious
 

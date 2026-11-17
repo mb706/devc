@@ -993,6 +993,11 @@ func (c *commander) startRefusal(env *env, ref names.ProjectRef, cmd proto.Comma
 	if c.d.boxState(ref) != "running" {
 		return "the box " + names.BoxName(ref) + " is not running: start it with 'devc up " + ref.String() + "'"
 	}
+	// As for a session the command line starts: a box whose start did not
+	// finish is not used (finding G1-01). The daemon writes no record.
+	if err := box.CheckStarted(env.cfg.Paths, ref, c.d.boxContainer(ref)); err != nil {
+		return err.Error()
+	}
 	if !fileExists(env.cfg.Paths.BoxEtcDir(ref) + "/harness/" + cmd.Harness + ".json") {
 		return "the box " + names.BoxName(ref) + " has no launch description for " + cmd.Harness + ": install it and restart the box"
 	}

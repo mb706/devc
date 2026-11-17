@@ -148,6 +148,12 @@ type ArchiveRealmStatus struct {
 	// Incomplete says why the pass could not see all of the realm's
 	// durable state (the shared harness state could not be listed).
 	Incomplete string `json:"incomplete,omitempty"`
+	// Error is the hub's last refusal of the realm's uploads (Quota: a
+	// reached quota); the realm's uploads rest until RestsUntil while the
+	// other realms go on (finding X12 1).
+	Error      string     `json:"error,omitempty"`
+	Quota      bool       `json:"quota,omitempty"`
+	RestsUntil *time.Time `json:"rests_until,omitempty"`
 }
 
 // ArchiveStatusResult is the result of archive.status, in the order of the

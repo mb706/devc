@@ -12,7 +12,6 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"time"
 
 	"github.com/mb706/devc/internal/fleet"
@@ -63,7 +62,7 @@ func (l *hubLink) archiveLoop(ctx context.Context) {
 				return
 			}
 			msg := ""
-			if err != nil && !errors.Is(err, fleet.ErrPaused) {
+			if err != nil {
 				msg = err.Error()
 			}
 			if msg != lastErr {

@@ -13,11 +13,12 @@ package box
 // the box was started with, next to its other generated state (beside the
 // home, out of every box's reach), and the daemon and gate-exec authorise
 // against the intersection of that record and the current configuration:
-// removing a grant takes effect at once, adding one needs the record to be
-// written again. That happens when the box is brought up again, and also
-// when up finishes the start of a running box without its readiness
-// marker, which records the configuration of that moment. A box without
-// a record (started before this record existed, or a start that failed)
+// removing a grant takes effect at once, adding one needs a new start.
+// Only the operation that started the container writes the record; a
+// command that finds the box running never does, whatever the box did to
+// its readiness marker (finding G1-01), and refuses a box that has no
+// marker or no record for its container (CheckStarted). A box without a
+// record (started before this record existed, or a start that failed)
 // gets nothing on demand.
 //
 // Network exceptions (netpolicy, `devc net allow`) are different on
@@ -197,6 +198,46 @@ func ReadCapabilities(p *paths.Paths, ref names.ProjectRef) (*Capabilities, erro
 		return nil, fmt.Errorf("%s is corrupt", p.BoxCapabilitiesFile(ref))
 	}
 	return &c, nil
+}
+
+// UnfinishedError: a running box whose start through devc did not finish
+// as far as the host can tell. Nothing finishes it with today's
+// configuration (finding G1-01); the user restarts the box.
+type UnfinishedError struct {
+	Ref    names.ProjectRef
+	Reason string
+}
+
+func (e *UnfinishedError) Error() string {
+	return fmt.Sprintf("%s is running, but %s; devc does not finish a start it did not make (that would grant what the configuration says today): restart it with 'devc down %s' and 'devc up %s'",
+		names.BoxName(e.Ref), e.Reason, e.Ref, e.Ref)
+}
+
+// CheckStarted reports whether the running container containerID of ref's
+// box is a start devc finished: the readiness marker is in its runtime
+// directory and the capability record belongs to that container. The
+// marker is box-writable, so its presence proves little; its absence
+// means box init never reported ready or something in the box removed
+// it. Every command that finds the box running uses this instead of
+// finishing a start (finding G1-01).
+func CheckStarted(p *paths.Paths, ref names.ProjectRef, containerID string) error {
+	rt, err := p.BoxRuntimeDir(names.BoxID(ref))
+	if err != nil {
+		return err
+	}
+	if fi, err := os.Lstat(filepath.Join(rt, "ready")); err != nil || !fi.Mode().IsRegular() {
+		return &UnfinishedError{Ref: ref, Reason: "it has not reported ready since its last start through devc (box init never did, or something in the box removed /run/devc/ready)"}
+	}
+	c, err := ReadCapabilities(p, ref)
+	switch {
+	case errors.Is(err, ErrNoCapabilities):
+		return &UnfinishedError{Ref: ref, Reason: "there is no record of what it was started with (its start through devc did not finish, or it was started outside devc)"}
+	case err != nil:
+		return &UnfinishedError{Ref: ref, Reason: "the record of what it was started with cannot be read (" + err.Error() + ")"}
+	case c.ContainerID != containerID:
+		return &UnfinishedError{Ref: ref, Reason: "the record of what it was started with belongs to another container"}
+	}
+	return nil
 }
 
 // AllowsSecret reports whether the box may receive the secret: it was

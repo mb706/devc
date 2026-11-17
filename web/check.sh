@@ -452,6 +452,25 @@ checks = page.js("""(async () => {
     if (!d3.live || tl.lastSeq(d3) !== 3051 || d3.loading) out.push('back to the latest lost an event: ' + JSON.stringify({ live: d3.live, last: tl.lastSeq(d3) }));
     store.dropDetail(m3, s3);
     store.applyChange('session.removed', { machine: m3, session: s3 });
+
+    // A prompt event from the box never settles a waiting prompt (X12 6):
+    // a short or matching event is only noted; the outbox entry and the
+    // pending command stay until a receipt, which then settles them.
+    const m4 = 'nomachine', s4 = 's0000000000000000000x', k4 = m4 + '/' + s4;
+    store.state.details[k4] = tl.newDetail();
+    window.fetch = async () => new Response('{"command":', { status: 200 });
+    const rec4 = await store.sendPrompt({ machine: m4, session: s4, ref: 'demo/hello' }, 'yes, go ahead', 'queue');
+    const id4 = rec4 && rec4.command;
+    const entry4 = () => (store.state.outbox[k4] || []).find((i) => i.id === id4);
+    for (const [seq, text] of [[1, 'y'], [2, '   ']]) store.applyChange('event', { machine: m4, session: s4, event: { seq, type: 'prompt', data: { text } } }, 0);
+    if (!id4 || !store.state.pending[id4] || !entry4() || entry4().seen) out.push('a short prompt event settled a waiting prompt: ' + JSON.stringify({ id4, pending: !!store.state.pending[id4], entry: entry4() }));
+    store.applyChange('event', { machine: m4, session: s4, event: { seq: 3, type: 'prompt', data: { text: 'yes, go ahead' } } }, 0);
+    if (!store.state.pending[id4] || !entry4() || !entry4().seen) out.push('a matching prompt event settled a waiting prompt: ' + JSON.stringify({ pending: !!store.state.pending[id4], entry: entry4() }));
+    window.fetch = async () => new Response(JSON.stringify({ command: id4, outcome: 'delivered', final: true }), { status: 200 });
+    await store.retryPending(id4);
+    if (store.state.pending[id4] || !entry4() || entry4().outcome !== 'delivered') out.push('the final receipt did not settle the prompt: ' + JSON.stringify({ pending: !!store.state.pending[id4], entry: entry4() }));
+    store.dropDetail(m4, s4);
+    store.applyChange('session.removed', { machine: m4, session: s4 });
   } finally {
     window.fetch = realFetch;
   }

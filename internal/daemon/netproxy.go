@@ -105,26 +105,39 @@ func (c *relayConn) Close() error {
 type hostAddrCache struct {
 	mu    sync.Mutex
 	at    time.Time
+	known bool
 	addrs []netip.Addr
 	list  func() ([]netip.Addr, error)
 }
 
-// contains reports whether a is one of the host's addresses, listing them
-// again when the cache is older than hostAddrsEvery. A failed listing
-// keeps the previous list.
-func (h *hostAddrCache) contains(a netip.Addr) bool {
+// forbidden returns why the proxy must not connect to a as one of the
+// host's addresses, or nil. The addresses are listed again when the cache
+// is older than hostAddrsEvery; a failed listing keeps the previous list.
+// While no listing has succeeded, no address is provably outside the
+// host's, so every one is refused with what went wrong, and the listing
+// is tried again at the next check (finding X8 3).
+func (h *hostAddrCache) forbidden(a netip.Addr) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if time.Since(h.at) > hostAddrsEvery || h.addrs == nil {
+	var listErr error
+	if time.Since(h.at) > hostAddrsEvery || !h.known {
 		list := h.list
 		if list == nil {
 			list = netpolicy.HostAddrs
 		}
 		if as, err := list(); err == nil {
-			h.addrs, h.at = as, time.Now()
+			h.addrs, h.at, h.known = as, time.Now(), true
+		} else {
+			listErr = err
 		}
 	}
-	return slices.Contains(h.addrs, a)
+	switch {
+	case !h.known:
+		return fmt.Errorf("the host's own addresses cannot be listed (%v), so devc cannot tell whether %s is one of them; it refuses every destination until a listing succeeds, and tries again at the next connection", listErr, a)
+	case slices.Contains(h.addrs, a):
+		return fmt.Errorf("%s is an address of this host", a)
+	}
+	return nil
 }
 
 // netLog returns the proxy log of a project.
@@ -188,7 +201,7 @@ func (w *boxWorker) serveProxy(ctx context.Context, st *yamux.Stream, br *bufio.
 	px := &netpolicy.Proxy{
 		Policy:    func() (netpolicy.ProxyPolicy, error) { return d.proxyPolicy(ref, id) },
 		Resolve:   d.o.Resolve,
-		Forbidden: d.hostAddrs.contains,
+		Forbidden: d.hostAddrs.forbidden,
 		Exempt:    d.o.ProxyExempt,
 		Hint:      proxyHint,
 		Tunnels:   &w.tunnels,
@@ -262,13 +275,13 @@ func (w *boxWorker) serveDial(ctx context.Context, st *yamux.Stream, br *bufio.R
 	defer stop()
 	w.d.log.Debug("host connection", "box", names.BoxName(w.ref), "port", p.Port)
 	done := make(chan struct{})
-	go func() {
+	goTask(w.d.log, &task{box: names.BoxName(w.ref), what: proto.MethodHostDial, end: func() { _ = up.Close(); conn.Close() }}, func() {
 		defer close(done)
 		_, _ = io.Copy(up, conn)
 		if cw, ok := up.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
-	}()
+	})
 	_, _ = io.Copy(conn, up)
 	_ = conn.CloseWrite()
 	_ = conn.SetReadDeadline(time.Now().Add(time.Minute))

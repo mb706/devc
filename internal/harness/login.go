@@ -18,6 +18,7 @@ import (
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/paths"
+	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/toolbox"
 )
 
@@ -55,7 +56,10 @@ type LoginRunner struct {
 	// Term is the host's TERM, passed to interactive logins.
 	Term string
 	TTY  bool
-	Out  io.Writer
+	// Stdout and Out (standard error) receive what an interactive login
+	// prints, escaped (os.Stdout and os.Stderr when nil).
+	Stdout io.Writer
+	Out    io.Writer
 }
 
 // command maps a manifest command to the container: a first word equal to
@@ -146,7 +150,11 @@ func (l *LoginRunner) tempHome() (string, func(), error) {
 }
 
 // Interactive runs the manifest's login command attached to the terminal.
-// The vendor's output is shown to the user and not parsed.
+// The vendor's output is shown to the user and not parsed. It passes
+// through proto.PrintableWriter like other text from places a box can
+// write (finding X4 2): the command runs on the realm's shared harness
+// state, which boxes write, so its colours and cursor movements show as
+// replacement characters rather than reach the terminal.
 func (l *LoginRunner) Interactive(ctx context.Context, realm string, m *config.Harness, sharedHome bool) error {
 	home, cleanup, err := l.tempHome()
 	if err != nil {
@@ -158,7 +166,18 @@ func (l *LoginRunner) Interactive(ctx context.Context, realm string, m *config.H
 		return err
 	}
 	o.Interactive, o.TTY = true, l.TTY
+	stdout, stderr := l.Stdout, l.Out
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	ow, ew := proto.NewPrintableWriter(stdout), proto.NewPrintableWriter(stderr)
+	o.Stdout, o.Stderr = ow, ew
 	code, err := l.Engine.RunStream(ctx, o)
+	_ = ow.Close()
+	_ = ew.Close()
 	if err != nil {
 		return err
 	}
@@ -169,7 +188,8 @@ func (l *LoginRunner) Interactive(ctx context.Context, realm string, m *config.H
 }
 
 // Status runs the manifest's status command with the realm's shared home
-// and returns its output.
+// and returns its output, escaped for a terminal (proto.PrintableText,
+// finding X4 2): the command reads state that boxes write.
 func (l *LoginRunner) Status(ctx context.Context, realm string, m *config.Harness) (string, int, error) {
 	home, cleanup, err := l.tempHome()
 	if err != nil {
@@ -182,7 +202,7 @@ func (l *LoginRunner) Status(ctx context.Context, realm string, m *config.Harnes
 	}
 	o.Timeout = 2 * time.Minute
 	res, err := l.Engine.Run(ctx, o)
-	out := strings.TrimSpace(string(res.Stdout) + "\n" + string(res.Stderr))
+	out := proto.PrintableText(strings.TrimSpace(string(res.Stdout) + "\n" + string(res.Stderr)))
 	var ee *execx.ExitError
 	if errors.As(err, &ee) {
 		return out, ee.Result.ExitCode, nil

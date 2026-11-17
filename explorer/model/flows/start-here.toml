@@ -113,7 +113,7 @@ text = "The agent commits and runs `git push origin`. git's remote helper reache
 [[step]]
 at = "relay-hooks"
 ref = "internal/gitx.Service.RecordUpdate"
-text = "receive-pack starts devc's update hook, a process of its own, which checks each ref against the branch policy and records its new tip under `refs/devc/bank/` before git applies it. Records are only ever created, so no later push or rewrite in the box can make the relay forget this commit."
+text = "receive-pack starts devc's update hook, a process of its own, which checks each ref against the branch policy and records its new tip under `refs/devc/bank/` before git applies it; once the push has ended the daemon keeps the records of applied updates and drops those git refused ([[term:pending-record]]). Kept records are never moved or deleted, so no later push or rewrite in the box can make the relay forget this commit."
 
 [[step]]
 at = "daemon"

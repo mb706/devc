@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 
@@ -110,7 +111,7 @@ func (w *boxWorker) serveGate(ctx context.Context, st *yamux.Stream, br *bufio.R
 		return
 	}
 	start := time.Now()
-	code, stderr, err := runGateSSHD(ctx, d.o.Runner, srv.Command(conf), raw, br)
+	code, stderr, err := runGateSSHD(ctx, d.log, d.o.Runner, srv.Command(conf), raw, br)
 	// sshd is gone: its configuration goes, and the stream ends for both
 	// copies (finding C1-09).
 	_ = os.Remove(conf)
@@ -122,16 +123,16 @@ func (w *boxWorker) serveGate(ctx context.Context, st *yamux.Stream, br *bufio.R
 // runGateSSHD runs sshd with the stream as its standard input and output.
 // Standard input is fed through a pipe of the daemon's own, so the run
 // ends when sshd exits even while the box keeps its side open.
-func runGateSSHD(ctx context.Context, runner execx.Runner, cmd execx.Cmd, st io.Writer, br io.Reader) (int, string, error) {
+func runGateSSHD(ctx context.Context, log *slog.Logger, runner execx.Runner, cmd execx.Cmd, st io.Writer, br io.Reader) (int, string, error) {
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return -1, "", err
 	}
 	defer pr.Close()
-	go func() {
+	goTask(log, &task{what: "the input of the SSH gate"}, func() {
+		defer pw.Close()
 		_, _ = io.Copy(pw, br)
-		pw.Close()
-	}()
+	})
 	var stderr cappedBuffer
 	stderr.max = 16 << 10
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = pr, st, &stderr

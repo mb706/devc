@@ -327,13 +327,88 @@ func (d *Daemon) goSafe(what string, fn func()) {
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				d.log.Error("panic", "in", what, "panic", fmt.Sprint(r))
-			}
-		}()
+		defer func() { recoverTask(d.log, recover(), &task{what: what}) }()
 		fn()
 	}()
+}
+
+// task is work the daemon does in a goroutine of its own for input from
+// outside: a box's stream, a request of the web app, a hub link (finding
+// X6 2).
+type task struct {
+	// box is the box's container, "" when the input is not a box's.
+	box string
+	// what is the method or job; a stream names its method once its
+	// first line is read.
+	what string
+	// end ends that stream or fails that request only; nil when there is
+	// nothing to end.
+	end func()
+}
+
+// goTask runs fn in a goroutine that recovers a panic (recoverTask). Every
+// goroutine of the daemon starts through goTask or goSafe; a test checks
+// that no other go statement is left (TestNoBareGoroutines).
+func goTask(log *slog.Logger, t *task, fn func()) {
+	go func() {
+		defer func() { recoverTask(log, recover(), t) }()
+		fn()
+	}()
+}
+
+// taskBoxKey carries, in a request's context, the box the request came
+// from, for recoverHandler's log.
+type taskBoxKey struct{}
+
+// recoverHandler serves h for an HTTP server of the daemon (the service
+// proxy, the router). net/http survives a handler's panic, but these
+// servers discard its log, which would carry the panic's value: here a
+// panic is logged by recoverTask and ends that request's connection only
+// (http.ErrAbortHandler, which net/http neither logs nor answers)
+// (finding X6 2).
+func recoverHandler(log *slog.Logger, what string, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			v := recover()
+			if v == nil || v == http.ErrAbortHandler {
+				if v != nil {
+					panic(v)
+				}
+				return
+			}
+			box, _ := r.Context().Value(taskBoxKey{}).(string)
+			recoverTask(log, v, &task{box: box, what: what})
+			panic(http.ErrAbortHandler)
+		}()
+		h.ServeHTTP(w, r)
+	})
+}
+
+// recoverTask is the one place the daemon handles a panic of its
+// goroutines (finding X6 2). A function deferred at the top of the
+// goroutine calls it with recover()'s value; by then the goroutine's own
+// deferred calls have given back what it held (stream and relay places,
+// the box lock, pins). It logs the panic with the box, the method and
+// where it happened, then runs t.end, which ends only that stream or
+// fails only that request; the daemon goes on. The log has no secret: the
+// panic's value only for a runtime error, else its type
+// (proto.PanicText), and the frames without arguments (proto.PanicSite).
+func recoverTask(log *slog.Logger, r any, t *task) {
+	if r == nil {
+		return
+	}
+	log.Error("panic recovered; only this task ended", "box", t.box, "in", t.what, "panic", proto.PanicText(r), "at", proto.PanicSite())
+	if t.end != nil {
+		func() {
+			// Ending must not take the daemon down either.
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("panic while ending a task after a panic", "box", t.box, "in", t.what, "panic", proto.PanicText(r))
+				}
+			}()
+			t.end()
+		}()
+	}
 }
 
 // current returns the configuration in use and what was built from it.
@@ -413,7 +488,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.mu.Unlock()
 	waited := make(chan struct{})
-	go func() { d.wg.Wait(); close(waited) }()
+	goTask(d.log, &task{what: "the wait for the daemon's tasks"}, func() { d.wg.Wait(); close(waited) })
 	select {
 	case <-waited:
 	case <-time.After(15 * time.Second):
@@ -630,6 +705,17 @@ func (d *Daemon) boxState(ref names.ProjectRef) string {
 	defer d.mu.Unlock()
 	if bi := d.boxes[ref]; bi != nil {
 		return bi.state
+	}
+	return ""
+}
+
+// boxContainer is the container ID the last box-watch pass saw for ref's
+// box, or "".
+func (d *Daemon) boxContainer(ref names.ProjectRef) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if bi := d.boxes[ref]; bi != nil {
+		return bi.containerID
 	}
 	return ""
 }
@@ -941,9 +1027,9 @@ func (d *Daemon) serveAPI(ln *net.UnixListener) {
 			continue
 		}
 		conn := proto.NewConn(c, proto.Options{Handlers: handlers, ExposeErrors: true, Context: d.ctx, CallTimeout: time.Minute, Log: d.log})
-		go func() {
+		goTask(d.log, &task{what: "a local connection's place"}, func() {
 			<-conn.Done()
 			<-sem
-		}()
+		})
 	}
 }

@@ -98,7 +98,12 @@ func newProxyFixture(t *testing.T) *proxyFixture {
 			}
 			return nil, errors.New("no such host")
 		},
-		Forbidden: func(a netip.Addr) bool { return a == netip.MustParseAddr("203.0.113.7") },
+		Forbidden: func(a netip.Addr) error {
+			if a == netip.MustParseAddr("203.0.113.7") {
+				return fmt.Errorf("%s is an address of this host", a)
+			}
+			return nil
+		},
 		// The test server on the host's loopback stands in for a public
 		// server; nothing else on loopback is exempt.
 		Exempt: []netip.AddrPort{ap},
@@ -314,7 +319,12 @@ func TestProxyDialChecksAddress(t *testing.T) {
 	// The dialer itself refuses what CheckAddr refuses, whatever the caller
 	// asked for: a resolution that changed after the check cannot get
 	// through.
-	p := &Proxy{Forbidden: func(a netip.Addr) bool { return a == netip.MustParseAddr("198.51.100.9") }}
+	p := &Proxy{Forbidden: func(a netip.Addr) error {
+		if a == netip.MustParseAddr("198.51.100.9") {
+			return fmt.Errorf("%s is an address of this host", a)
+		}
+		return nil
+	}}
 	for _, s := range []string{"192.168.1.1:80", "10.1.2.3:443", "127.0.0.1:22", "169.254.169.254:80", "198.51.100.9:443", "0.0.0.0:80"} {
 		_, err := p.dial(context.Background(), netip.MustParseAddrPort(s))
 		if !errors.Is(err, errRefusedAddr) {

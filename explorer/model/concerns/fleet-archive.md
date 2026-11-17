@@ -18,6 +18,7 @@ files = [
 ]
 key = [
   "internal/fleet.Uploader.Pass",
+  "internal/fleet.kindError",
   "internal/fleet.Uploader.syncAppend",
   "internal/fleet.Uploader.syncMutable",
   "internal/fleet.Uploader.syncRepo",
@@ -32,6 +33,7 @@ key = [
 ]
 spec = ["doc:specs-v2.md#5", "doc:specs-v2.md#13", "doc:docs/hub-deployment.md#10", "doc:docs/guide.md#the-archive-on-the-hubs"]
 tests = [
+  "internal/fleet.TestRealmRefusalContained",
   "internal/hub.TestArchiveRatchet",
   "internal/hub.TestArchiveBudgets",
   "internal/hub.TestArchiveGenerations",
@@ -86,6 +88,11 @@ tests = ["internal/boxside.TestArchiveWorker", "internal/fleet.TestOffsetProtoco
 text = "The host never walks box-writable harness state or follows a link in it: the worker lists it in the helper container, and each listed file is opened through safefs."
 refs = ["internal/boxside.ArchiveWorker.Run", "internal/boxside.DecodeArchiveListing", "internal/fleet.Uploader.syncFile"]
 tests = ["internal/boxside.TestArchiveWorker"]
+
+[[invariant]]
+text = "A refusal the hub answers (507, or a 4xx) stays with its realm: a reached quota ends that realm's pass, another refusal only the kind it hit (the files, or one repository); the realm's uploads rest for ten minutes with the refusal in `devc sync status`, and the other realms go on in the same pass. A server error or a network error ends the pass, and nothing rests."
+refs = ["internal/fleet.Uploader.Pass", "internal/fleet.Uploader.realmPass", "internal/fleet.realmRefusalOf", "internal/fleet.kindError", "internal/cli.newSyncCmd"]
+tests = ["internal/fleet.TestRealmRefusalContained"]
 
 [[invariant]]
 text = "Every archive request is admitted before its bounded body is read, and every upload is checked against the quotas, file and realm limits and the free-space reserve before a file is created or extended."
@@ -223,7 +230,7 @@ Besides retention, the hub deletes secrets bundles beyond the newest ten per mac
 
 ## What can go wrong, and what prevents it
 
-- **A box**, through an honest machine, writes the shared harness state. It cannot make the host read outside that tree or follow a link, choose a file's class, or get a file at a path the manifest names as a credential archived, though a copy under another name is archived. It can fill the archive: 200,000 files of up to `max_file_size`, and a transcript it rewrites gets a new generation, kept for good, every hour. Once the realm's quota (20 GiB) or the machine's (50 GiB) is reached, the hub answers 507 ([[internal/hub.archiveStore.checkQuota]]); the uploader rests ten minutes for that hub, and since a pass ends at its first error, nothing after the refused file is uploaded: not the realm's relays or context repository, nor any realm later in name order ([[doc:docs/dev/LEFTOVER.md#7]]).
+- **A box**, through an honest machine, writes the shared harness state. It cannot make the host read outside that tree or follow a link, choose a file's class, or get a file at a path the manifest names as a credential archived, though a copy under another name is archived. It can fill the archive: 200,000 files of up to `max_file_size`, and a transcript it rewrites gets a new generation, kept for good, every hour. Once the realm's quota (20 GiB) or the machine's (50 GiB) is reached, the hub answers 507 ([[internal/hub.archiveStore.checkQuota]]). That ends this realm's pass, its repositories included, which share the quota; its uploads rest ten minutes, `devc sync status` names it, and the other realms go on ([[internal/fleet.kindError]], [[doc:docs/dev/LEFTOVER.md#fleet-and-the-web-app-x12]], item 1).
 - **A malicious machine** writes only below its own registry name ([[internal/hub.Server.apiArchivePut]]) and cannot overwrite, truncate or rename stored bytes. In its own archive it can append garbage and start generations; by completing mutable ones it pushes its older mutable generations out, but it cannot name a time, so the state at each checkpoint stays. It can read every machine's archive (index, files, prefix hashes: [[internal/hub.Server.apiArchiveFile]]). Towards others it holds at most two of eight upload and two of eight read places ([[internal/hub.archiveStore.admit]]), and on a hub whose disk is smaller than the quotas it can push free space down to the 2 GiB reserve, after which every machine gets 507.
 - **The hub** holds all of it unencrypted (secrets aside; credential files only as far as machines left them out); a compromised hub can read, alter or delete it and serve a hostile archive to a restore ([[concern:state-restore]]).
 - **Cost on the hub.** A body of at most `max_request` (8 MiB), two minutes to send it, 30 seconds per write of an answer; names checked against the file system's limit and every directory counted before anything is created; a failed upload removes what it created, except a generation whose completion record alone failed, which stays incomplete ([[internal/hub.archiveStore.planNew]], [[internal/hub.archiveStore.create]]).

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mb706/devc/internal/names"
@@ -36,5 +37,51 @@ func TestGitHubGrants(t *testing.T) {
 	}
 	if g := (Grants{GitHub: "token:pat"}); !g.GitHubTokenMode() || g.GitHubTokenSecret() != "pat" {
 		t.Errorf("token mode: %v %q", g.GitHubTokenMode(), g.GitHubTokenSecret())
+	}
+}
+
+// TestGitHubSecretsNotGranted: a project may not receive the realm's
+// GitHub credential or its App's private key as an ordinary secret,
+// through grants.secrets or as a harness's credential; the problem names
+// the key and says why, as for a service's credential (finding X10 1).
+// Control: another secret is granted without a problem.
+func TestGitHubSecretsNotGranted(t *testing.T) {
+	hello := "realms/demo/projects/hello/project.toml"
+	for _, tc := range []struct {
+		name, realm, project, key, want string
+	}{
+		{"control", "", "secrets = [\"pat\", \"app-key-2\"]", "", ""},
+		{"host credential", "", "secrets = [\"pat\", \"github-token\"]", "grants.secrets[1]", "the secret github-token holds the realm's GitHub credential, and the project also receives it (grants.secrets): the credential would enter the box"},
+		{"app key", "[github.app]\napp_id = 42\nkey_secret = \"app-key\"\n", "secrets = [\"app-key\"]", "grants.secrets[0]", "the secret app-key holds the private key of the realm's GitHub App (github.app.key_secret), and the project also receives it (grants.secrets): the key would enter the box"},
+		{"harness credential", "[harness.claude]\nsecret = \"github-token\"\n", "", "harnesses", "(as the credential of harness claude): the credential would enter the box"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := copyExample(t)
+			realm := filepath.Join(dir, "realms", "demo", "realm.toml")
+			b, _ := os.ReadFile(realm)
+			if strings.HasPrefix(tc.realm, "[harness.claude]") {
+				b = []byte(strings.Replace(string(b), "[harness.claude]               # per-harness overrides, keyed by harness id\nauth = \"\"                      # overrides the manifest's auth method\nsecret = \"\"                    # overrides the secret name\n", "", 1))
+			}
+			write(t, dir, "realms/demo/realm.toml", string(b)+"\n"+tc.realm)
+			hb, _ := os.ReadFile(filepath.Join(dir, hello))
+			write(t, dir, hello, string(hb)+"\n[grants]\n"+tc.project+"\n")
+			_, probs := load(t, dir)
+			var found []string
+			for _, p := range probs {
+				found = append(found, p.Key+": "+p.Message)
+			}
+			switch {
+			case tc.want == "" && len(probs) > 0:
+				t.Errorf("problems: %q", found)
+			case tc.want != "" && len(probs) == 0:
+				t.Errorf("no problem, want %s: %s", tc.key, tc.want)
+			}
+			// The realm's override reaches every project with the harness.
+			for _, p := range probs {
+				if tc.want != "" && (p.Key != tc.key || !strings.Contains(p.Message, tc.want)) {
+					t.Errorf("problem %s: %s, want %s: %s", p.Key, p.Message, tc.key, tc.want)
+				}
+			}
+		})
 	}
 }

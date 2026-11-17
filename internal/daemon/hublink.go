@@ -405,8 +405,8 @@ func (l *hubLink) connectOnce(ctx context.Context, creds *hubnode.Creds) (bool, 
 	l.setState(proto.HubConnected, "")
 	d.log.Info("connected to hub", "hub", l.url, "machine", reply.Machine)
 	l.m.recompute()
-	go l.pinger(cctx, wc, conn)
-	go l.roles(cctx, conn)
+	goTask(d.log, &task{what: "the pings of the hub link " + l.url, end: func() { _ = conn.Close() }}, func() { l.pinger(cctx, wc, conn) })
+	goTask(d.log, &task{what: "the roles of the hub link " + l.url, end: func() { _ = conn.Close() }}, func() { l.roles(cctx, conn) })
 	<-conn.Done()
 	l.mu.Lock()
 	l.conn, l.roleSent = nil, nil

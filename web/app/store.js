@@ -490,16 +490,20 @@ function addOutbox(k, item) {
   if (!list.some((i) => i.id === item.id)) state.outbox[k] = [...list, item];
 }
 
+// setOutbox records a prompt's outcome from its receipt. Only a receipt
+// settles a prompt (finding X12 6): once it is final (the command is no
+// longer pending), the prompt leaves the outbox after a moment, delivered
+// or not; the session's own prompt event shows it from then on.
 function setOutbox(k, id, outcome) {
   state.outbox[k] = (state.outbox[k] || []).map((i) => (i.id === id ? { ...i, outcome } : i));
-  if (outcome !== 'delivered' && outcome !== 'accepted' && outcome !== 'delivering' && outcome !== 'sending' && !state.pending[id]) {
+  if (outcome !== 'accepted' && outcome !== 'delivering' && outcome !== 'sending' && !state.pending[id]) {
     setTimeout(() => removeOutbox(k, id), 8000);
   }
 }
 
 // sendPrompt types a prompt into a session (queue or steer) and keeps it
-// in the outbox until its prompt event arrives, the receipt says it
-// failed, or (when its outcome is unknown) the user dismisses it.
+// in the outbox until its final receipt (or, when its outcome is unknown,
+// until the user dismisses it).
 export async function sendPrompt(s, text, mode) {
   const k = key(s.machine, s.session);
   const id = api.newID();
@@ -516,17 +520,20 @@ function removeOutbox(k, id) {
   changed();
 }
 
+// settleOutbox notes a prompt event that matches a waiting prompt: the
+// first one whose whole text it is (or, for a truncated event, whose text
+// begins with it). Prompt events come from the box's hooks, so a match is
+// only shown; it never removes the prompt from the outbox nor its pending
+// command, which only a receipt settles (finding X12 6).
 function settleOutbox(k, ev) {
   if (ev.type !== 'prompt' || !state.outbox[k]) return;
-  const text = (ev.data && ev.data.text) || '';
+  const raw = (ev.data && ev.data.text) || '';
+  const cut = / …\[truncated\]$/.test(raw);
+  const text = raw.replace(/ …\[truncated\]$/, '').trim();
+  if (!text) return;
   const list = state.outbox[k];
-  const i = list.findIndex((it) => text && it.text.trim().startsWith(text.replace(/ …\[truncated\]$/, '').trim().slice(0, 200)));
-  if (i >= 0) {
-    const id = list[i].id;
-    state.outbox[k] = list.filter((_, j) => j !== i);
-    // The prompt is in the session: whatever the receipt says later.
-    if (state.pending[id]) delete state.pending[id];
-  }
+  const i = list.findIndex((it) => !it.seen && (cut ? it.text.trim().startsWith(text) : it.text.trim() === text));
+  if (i >= 0) state.outbox[k] = list.map((it, j) => (j === i ? { ...it, seen: true } : it));
 }
 
 // markSeen marks a session seen, once per turn: a live session up to its

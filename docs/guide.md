@@ -114,6 +114,17 @@ recreated.
 image, or devc's hardening after an upgrade), `devc up` says so and stops;
 `devc up --recreate` recreates it. Home, project files and all state are kept.
 
+**What a running box was started with.** A box gets on demand (secrets from
+the daemon, SSH hosts, the allowlist proxy, GitHub tokens, services) only
+what its configuration granted when it was started and still grants; a grant
+you add reaches it after `devc down` and `devc up`. Only a start through
+devc records what that is. A command that finds the box running (`up`, `sh`,
+`run`, `root`, a session, from the command line or the web app) never records
+it again: if the box has not reported ready since its start through devc (or
+something in it removed `/run/devc/ready`), or there is no record of its
+start, the command refuses and asks you to restart the box with `devc down`
+and `devc up`.
+
 **Limits and capabilities.** `[box] memory` and `pids` set limits; they need
 the memory and pids cgroup controllers to be delegated to your user, and
 `devc up` fails if a configured limit cannot be applied (switch a limit off
@@ -406,9 +417,12 @@ logs come from the version in use then, with what was appended to it since
 command says so: relays and the context repository (their history is all
 there; refs are restored as they are now), and files archived before the
 hub recorded completion times. A
-hub that reports a full quota says so in `devc sync status` and
-`devc hub status`; uploads to it pause for ten minutes at a time until it
-has room.
+hub that reports a full quota, or refuses an upload otherwise (a 4xx answer), says so in
+`devc sync status` and `devc hub status`, for the realm concerned: that
+realm's uploads rest for ten minutes at a time until it has room, while the
+other realms go on. A quota stops all of the realm's uploads (its files and
+repositories share it); another refusal of its files lets its repositories
+go on.
 
 Every enrolled machine can read every machine's archive on a hub, so the
 hub holds all archived realm state of the fleet: treat it like the
@@ -461,7 +475,9 @@ opens the session in the app.
   while a command is on its way, the app cannot know whether it arrived: the
   prompt (or command) stays on screen as *unknown* and the app asks the
   machine for its receipt when it can; if it never arrived, **Send again**
-  sends it with the same ID, so it is typed at most once.
+  sends it with the same ID, so it is typed at most once. Only the receipt
+  settles a prompt: a prompt in the session that looks like it (the box
+  reports those) is noted next to it, but never takes it off the screen.
 - **Terminal** tab: the session's tmux window, live. It only observes: the
   phone never resizes the agent's pane, and the font shrinks to show the
   whole width (Zoom shows it larger, scrolling sideways). When both the hub
@@ -549,7 +565,10 @@ own project, whatever URL `origin` has. A push follows the bank's rules:
 branches can be created and rewritten, deletions and protected branches are
 refused, tags can be created but not moved, `refs/devc/*` and
 `refs/remotes/*` are refused. Every pushed tip gets a bank ref before the
-relay accepts it (an update whose bank ref cannot be written is refused), and
+relay accepts it (an update whose bank ref cannot be written is refused); it
+counts once the push has ended and git applied the update, and the record of
+an update git refused (a name that clashes with an existing branch) is
+removed then, or at the next push or bank if the daemon ended first. And
 branches matching `git.forward` are pushed on to the upstream (the push prints
 the result). A push may update at most 1000 refs (push in parts), its pack may
 be at most `git.max_push_size` (default `2g`), and it is refused as a whole
@@ -641,8 +660,11 @@ devc pr comment demo/app 12 --body "Looks good"
 `pr create` banks, pushes the branch to the upstream exactly as `devc push`
 does (it shows what the upstream lacks and asks, unless `--yes`), then opens
 the pull request and prints its URL. The title defaults to the subject of the
-branch's newest commit, the base to the project's default branch. Both refuse
-while the project's configuration has problems. An agent asks for the same
+branch's newest commit, the base to the project's default branch. Before
+anything is pushed it refuses a branch that is the base, the project's
+default branch or the upstream's (the relay's `HEAD`), a branch matching
+`git.protected`, and one the relay does not have. Both refuse while the
+project's configuration has problems. An agent asks for the same
 with `devc request pr` (its current branch unless `--branch`) or `devc
 request comment <n> --body …`; both are high-risk requests, approved only
 with `devc requests approve` on this machine, and an approved pull request
@@ -668,6 +690,12 @@ the box's start, and so are the repository and, for `app`, the realm's App
 and installation: changing any of them (the project's `upstream`, `app_id`,
 `installation_id`) stops tokens until `devc down` and `devc up`, and
 removing the mode stops them at once. Token delivery needs the daemon.
+
+Neither `github-token` nor the App's key secret can be granted to a project
+as an ordinary secret (`grants.secrets`, or a harness's credential): the
+configuration check refuses it, as it refuses a service's credential, since
+in the box the key would mint tokens for every repository of the
+installation.
 
 The App mode needs, in `realm.toml`:
 
@@ -968,7 +996,8 @@ absolute URL; several requests on one connection are each decided):
    addresses: never to the private ranges of level `internet` or to an
    address of the host, and it checks the address of the socket it actually
    connects, so a name that resolves to a private address, or whose answer
-   changes, reaches nothing;
+   changes, reaches nothing. While the host's own addresses cannot be
+   listed, it connects nowhere and says why, trying again at each request;
 4. the decision goes to `durable/realms/<realm>/netlog/<project>.jsonl`.
 
 Resolving and connecting take a moment: the rules are checked again once
@@ -1218,7 +1247,10 @@ devc login status demo
 How a harness logs in is part of its manifest: `env-token` stores a token and
 hands it to the harness in an environment variable, `shared-home` keeps the
 vendor's own credential file in a home directory shared by the realm's boxes,
-`api-key` stores a key you paste.
+`api-key` stores a key you paste. Boxes write that shared home, so what a
+login or status command prints reaches your terminal escaped: control
+characters show as `�`, so a login's colours and cursor movements appear as
+`�[…` while its text (a URL, a code) stays readable.
 
 **Secrets** are per realm and given to a project by name:
 

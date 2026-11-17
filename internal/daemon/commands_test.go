@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/boxside"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/proto"
@@ -668,11 +669,14 @@ func TestPromptHashes(t *testing.T) {
 
 // TestStartAndStop: session.start runs `box session start` in the box and
 // reports the new session; session.stop runs `box session stop` (neither
-// needs the box channel).
+// needs the box channel). A box whose start did not finish (no readiness
+// marker, no record of its start) gets no session, and the daemon writes
+// no record (finding G1-01).
 func TestStartAndStop(t *testing.T) {
 	shortTimes(t)
 	r := newRig(t)
 	r.boxUp(true)
+	r.recordStart()
 	r.start()
 	c := r.client(nil)
 	// Not listed, no launch description: refused.
@@ -684,6 +688,28 @@ func TestStartAndStop(t *testing.T) {
 	}
 	os.MkdirAll(filepath.Join(r.p.BoxEtcDir(hello), "harness"), 0o755)
 	os.WriteFile(filepath.Join(r.p.BoxEtcDir(hello), "harness", "claude.json"), []byte("{}"), 0o644)
+	unfinished := func(what, reason string) {
+		t.Helper()
+		n := len(r.eng.Execs)
+		rec := waitFinal(t, c, call(t, c, proto.MethodSessionStart, proto.StartParams{ID: newID(), Ref: "demo/hello", Harness: "claude"}).Command)
+		if rec.Outcome != proto.OutcomeRefused || !strings.Contains(rec.Detail, reason) || !strings.Contains(rec.Detail, "'devc down demo/hello' and 'devc up demo/hello'") {
+			t.Errorf("%s: %+v", what, rec)
+		}
+		if len(r.eng.Execs) != n {
+			t.Errorf("%s: %d commands ran in the box", what, len(r.eng.Execs)-n)
+		}
+	}
+	if err := box.RemoveCapabilities(r.p, hello); err != nil {
+		t.Fatal(err)
+	}
+	unfinished("without a record", "no record of what it was started with")
+	if _, err := box.ReadCapabilities(r.p, hello); !errors.Is(err, box.ErrNoCapabilities) {
+		t.Errorf("the daemon wrote a record: %v", err)
+	}
+	r.recordStart()
+	os.Remove(filepath.Join(r.runtimeDir(), "ready"))
+	unfinished("without the readiness marker", "has not reported ready")
+	os.WriteFile(filepath.Join(r.runtimeDir(), "ready"), nil, 0o644)
 	id := newID()
 	call(t, c, proto.MethodSessionStart, proto.StartParams{ID: id, Ref: "demo/hello", Harness: "claude", Worktree: "feature", Args: []string{"--x", "a; b"}})
 	rec := waitFinal(t, c, id)

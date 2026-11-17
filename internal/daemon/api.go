@@ -93,10 +93,10 @@ func (d *Daemon) apiStop(_ context.Context, _ *proto.Conn, params json.RawMessag
 	}
 	d.log.Info("stop requested by a client")
 	// Answer first, then stop.
-	go func() {
+	goTask(d.log, &task{what: proto.MethodDaemonStop}, func() {
 		time.Sleep(50 * time.Millisecond)
 		d.Stop()
-	}()
+	})
 	return struct{}{}, nil
 }
 

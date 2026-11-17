@@ -115,6 +115,12 @@ text = "Under the box lock, a running box is banked first ([[concern:git-ratchet
 
 [[step]]
 at = "cli"
+ref = "internal/cli.checkPRBranch"
+checks = ["internal/cli.checkPRBranch", "internal/gitx.Protected"]
+text = "Before anything is pushed: the relay must have the branch, and it must be neither the base (`--base`, else the project's `default_branch`, else the relay's HEAD, else `main`), nor the project's default branch, nor the upstream's as the relay's HEAD records it, nor protected by `git.protected`. Otherwise nothing is published."
+
+[[step]]
+at = "cli"
 ref = "internal/gitx.Service.Push"
 text = "As `devc push` does ([[concern:upstream]]): the relay must have the branch; the commits the upstream lacks are shown; a non-fast-forward is refused, since a request never passes `--force`; `--yes` stands for the confirmation the approval gave."
 
@@ -132,8 +138,7 @@ to = "github"
 via = "stream"
 label = "POST /repos/<o>/<r>/pulls {title, head, base, body, draft}"
 ref = "internal/github.Client.CreatePull"
-text = "With the host's credential. The base is `--base`, else the project's `default_branch`, else the relay's HEAD, else `main`; GitHub's answer gives the number and URL."
-detail = "Nothing compares the branch with the base before the push: a request whose branch is the base has already fast-forwarded that upstream branch when the pull request fails ([[doc:docs/dev/LEFTOVER.md#7]])."
+text = "With the host's credential, from the branch into the base checked above; GitHub's answer gives the number and URL."
 
 [[step]]
 from = "cli"

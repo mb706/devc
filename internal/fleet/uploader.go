@@ -51,9 +51,10 @@ const (
 	// per hour. Mutable files have their own interval ([sync]
 	// mutable_interval).
 	regenEvery = time.Hour
-	// quotaPause is how long uploads to a hub rest after it said a quota
-	// is reached.
-	quotaPause = 10 * time.Minute
+	// realmPause is how long the uploads of a realm rest after the hub
+	// refused one of them (a reached quota or another refusal); the other
+	// realms go on (finding X12 1).
+	realmPause = 10 * time.Minute
 	// maxRefLog bounds a ref log read back from the hub.
 	maxRefLog = 64 << 20
 	// maxConflicts bounds the offset conflicts of one file in one pass.
@@ -117,10 +118,18 @@ type Uploader struct {
 	store *stateStore
 	state *State
 
-	mu      sync.Mutex
-	status  proto.ArchiveHubStatus
-	pauseTo time.Time
+	mu     sync.Mutex
+	status proto.ArchiveHubStatus
+	// refused holds, per realm, the hub's last refusal and until when the
+	// realm's uploads rest (finding X12 1).
+	refused map[string]realmRefusal
 	chunk   int64
+}
+
+// realmRefusal is a realm's backing off after the hub refused an upload.
+type realmRefusal struct {
+	err   *HubError
+	until time.Time
 }
 
 // NewUploader prepares the uploader of one hub.
@@ -170,21 +179,18 @@ type passCtx struct {
 	bundles string
 }
 
-// ErrPaused is returned while a hub's quota pause lasts.
-var ErrPaused = errors.New("uploads to this hub are paused after it reported a full quota")
-
-// Pass uploads what the hub lacks of every realm with [sync] hub. It
-// returns the first error that ended it (network, quota, a refusal).
-// Realms go in name order, and in a realm the files before the
-// repositories; an error ends the pass there, and what comes after it
-// waits for the next pass.
+// Pass uploads what the hub lacks of every realm with [sync] hub. Realms
+// go in name order, and in a realm the files before the repositories. An
+// error the hub did not answer (the network, the end of ctx) or a server
+// error ends the pass; what comes after it waits for the next one. A
+// refusal the hub answers (a reached quota, a client error:
+// realmRefusalOf) belongs to its realm alone (finding X12 1): it ends that realm's part that depends on it (a quota
+// the whole realm, whose kinds share it; another refusal its kind: the
+// files, or one repository), is reported with the realm in the status,
+// and backs the realm off for realmPause; the other realms go on. Pass
+// returns the error that ended it, else the first realm's refusal,
+// including one still backing its realm off.
 func (u *Uploader) Pass(ctx context.Context, c *config.Config, cl *Client, w Workers) error {
-	u.mu.Lock()
-	paused := u.Now().Before(u.pauseTo)
-	u.mu.Unlock()
-	if paused {
-		return ErrPaused
-	}
 	unlock, err := u.store.lock(ctx)
 	if err != nil {
 		return fmt.Errorf("another devc uploads to %s from this state directory", u.URL)
@@ -204,7 +210,8 @@ func (u *Uploader) Pass(ctx context.Context, c *config.Config, cl *Client, w Wor
 		return err
 	}
 	var realms []proto.ArchiveRealmStatus
-	var passErr error
+	var passErr, refusal error
+	quota := false
 	rs := c.Realms()
 	sort.Slice(rs, func(i, j int) bool { return rs[i].Name < rs[j].Name })
 	for _, r := range rs {
@@ -212,8 +219,44 @@ func (u *Uploader) Pass(ctx context.Context, c *config.Config, cl *Client, w Wor
 			continue
 		}
 		st := proto.ArchiveRealmStatus{Realm: r.Name}
-		if passErr == nil {
-			passErr = u.realmPass(ctx, &passCtx{c: c, cl: cl, w: w, realm: r.Name, rs: u.state.realm(r.Name), status: &st, bundles: bundles})
+		u.mu.Lock()
+		rf, backing := u.refused[r.Name]
+		u.mu.Unlock()
+		backing = backing && u.Now().Before(rf.until)
+		switch {
+		case passErr != nil:
+		case backing:
+			// The realm rests; its last refusal stays in the status.
+		default:
+			err := u.realmPass(ctx, &passCtx{c: c, cl: cl, w: w, realm: r.Name, rs: u.state.realm(r.Name), status: &st, bundles: bundles})
+			he, refused := realmRefusalOf(err)
+			switch {
+			case refused:
+				rf, backing = realmRefusal{err: he, until: u.Now().Add(realmPause)}, true
+				u.Log.Warn("the hub refused an upload; the realm's uploads rest", "hub", u.URL, "realm", r.Name, "err", he, "until", rf.until)
+			case err != nil:
+				passErr = err
+			default:
+				backing = false
+			}
+			u.mu.Lock()
+			if u.refused == nil {
+				u.refused = map[string]realmRefusal{}
+			}
+			if backing {
+				u.refused[r.Name] = rf
+			} else if passErr == nil {
+				delete(u.refused, r.Name)
+			}
+			u.mu.Unlock()
+		}
+		if backing {
+			until := rf.until
+			st.Error, st.Quota, st.RestsUntil = proto.Printable(proto.Truncate(describeErr(rf.err), 500)), rf.err.Quota(), &until
+			quota = quota || st.Quota
+			if refusal == nil {
+				refusal = fmt.Errorf("realm %s: %w", r.Name, rf.err)
+			}
 		}
 		realms = append(realms, st)
 	}
@@ -223,7 +266,7 @@ func (u *Uploader) Pass(ctx context.Context, c *config.Config, cl *Client, w Wor
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.status.Realms, u.status.LastPass = realms, &now
-	u.status.State, u.status.Error, u.status.Quota = proto.ArchiveIdle, "", false
+	u.status.State, u.status.Error, u.status.Quota = proto.ArchiveIdle, "", quota
 	if u.status.Realms == nil {
 		u.status.Realms = []proto.ArchiveRealmStatus{}
 	}
@@ -237,13 +280,12 @@ func (u *Uploader) Pass(ctx context.Context, c *config.Config, cl *Client, w Wor
 	if passErr == nil {
 		passErr = saveErr
 	}
-	if passErr != nil {
+	switch {
+	case passErr != nil:
 		u.status.State, u.status.Error = proto.ArchiveError, proto.Printable(proto.Truncate(describeErr(passErr), 500))
-		var he *HubError
-		if errors.As(passErr, &he) && he.Quota() {
-			u.status.Quota = true
-			u.pauseTo = u.Now().Add(quotaPause)
-		}
+	case refusal != nil:
+		u.status.State, u.status.Error = proto.ArchiveError, proto.Printable(proto.Truncate(refusal.Error(), 500))
+		passErr = refusal
 	}
 	return passErr
 }
@@ -372,10 +414,15 @@ func (u *Uploader) realmPass(ctx context.Context, pc *passCtx) error {
 			delete(pc.rs.Files, rel)
 		}
 	}
-	if firstErr != nil {
-		return firstErr
+	// A refusal of the files goes on to the repositories unless it is the
+	// realm's quota, which they share (finding X12 1); anything the hub did
+	// not answer ends the pass.
+	refused, stop := kindError(firstErr)
+	if stop != nil {
+		return stop
 	}
-	// The relays, then the context repository.
+	// The relays, then the context repository; each is independent of the
+	// others.
 	des, _ := os.ReadDir(pc.c.Paths.RelayDir(pc.realm))
 	for _, de := range des {
 		p, ok := strings.CutSuffix(de.Name(), ".git")
@@ -388,16 +435,59 @@ func (u *Uploader) realmPass(ctx context.Context, pc *passCtx) error {
 		}
 		if err := u.syncRepo(ctx, pc, archive.RelayRepo(p), &relaySource{relay: relay}); err != nil {
 			pc.status.ReposBehind++
-			return err
+			r, stop := kindError(err)
+			if stop != nil {
+				return stop
+			}
+			if refused == nil {
+				refused = r
+			}
 		}
 	}
 	if fi, err := os.Lstat(filepath.Join(pc.c.Paths.ContextDir(pc.realm), ".git")); err == nil && fi.IsDir() {
 		if err := u.syncRepo(ctx, pc, archive.RepoContext, &contextSource{w: pc.w, c: pc.c, realm: pc.realm}); err != nil {
 			pc.status.ReposBehind++
-			return err
+			r, stop := kindError(err)
+			if stop != nil {
+				return stop
+			}
+			if refused == nil {
+				refused = r
+			}
 		}
 	}
+	if refused != nil {
+		return refused
+	}
 	return nil
+}
+
+// realmRefusalOf reports whether err is the hub's refusal of something of
+// one realm: a reached quota (507) or a client error (4xx) it answered. A
+// server error (5xx, also a reverse proxy's while the hub restarts) and
+// an error the hub did not answer concern every realm alike (finding
+// X12 1).
+func realmRefusalOf(err error) (*HubError, bool) {
+	var he *HubError
+	if !errors.As(err, &he) {
+		return nil, false
+	}
+	return he, he.Quota() || (he.Status >= 400 && he.Status < 500)
+}
+
+// kindError sorts the error that ended one kind of a realm's upload (its
+// files, one repository): a refusal of that kind (realmRefusalOf) leaves
+// the realm's other kinds alone and comes back as refused; a reached
+// quota, which every kind of the realm shares, and any other error come
+// back as stop (finding X12 1).
+func kindError(err error) (refused, stop error) {
+	if err == nil {
+		return nil, nil
+	}
+	if he, ok := realmRefusalOf(err); ok && !he.Quota() {
+		return err, nil
+	}
+	return nil, err
 }
 
 // --- Files ---

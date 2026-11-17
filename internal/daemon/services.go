@@ -121,14 +121,14 @@ func newServiceManager(d *Daemon) *serviceManager {
 		logs: map[string]*svclogin.Log{}, noted: map[string]map[names.ProjectRef]time.Time{},
 		flights: map[string]*loginFlight{}, lastAuto: map[string]time.Time{}, lastErr: map[string]error{}}
 	m.srv = &http.Server{
-		Handler:           m.proxy,
+		Handler:           recoverHandler(d.log, proto.MethodHostService, m.proxy),
 		ReadHeaderTimeout: serviceHeadTimeout,
 		MaxHeaderBytes:    svclogin.MaxHead,
 		IdleTimeout:       time.Second,
 		ErrorLog:          log.New(io.Discard, "", 0),
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			if sc, ok := c.(*svcConn); ok {
-				return svclogin.WithRequest(ctx, sc.req)
+				return svclogin.WithRequest(context.WithValue(ctx, taskBoxKey{}, sc.req.Box), sc.req)
 			}
 			return ctx
 		},
@@ -463,13 +463,18 @@ func (m *serviceManager) autoLogin(ctx context.Context, svc *config.Service) err
 		m.mu.Unlock()
 		realm, name := svc.Realm, svc.Name
 		m.d.goSafe("service login "+k, func() {
-			err := m.runLogin(realm, name)
-			m.mu.Lock()
-			f.err = err
-			m.lastErr[k] = err
-			delete(m.flights, k)
-			m.mu.Unlock()
-			close(f.done)
+			// The flight ends also when the login panics, so the requests
+			// that wait for it go on (finding X6 2).
+			err := errors.New("the automatic login failed inside the daemon; see its log")
+			defer func() {
+				m.mu.Lock()
+				f.err = err
+				m.lastErr[k] = err
+				delete(m.flights, k)
+				m.mu.Unlock()
+				close(f.done)
+			}()
+			err = m.runLogin(realm, name)
 		})
 	} else {
 		m.mu.Unlock()

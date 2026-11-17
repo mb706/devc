@@ -257,7 +257,7 @@ see = ["box-agent"]
 id = "capability-record"
 title = "Capability record"
 aka = ["capabilities.json", "start record"]
-text = "What a box was started with (container ID, secrets, SSH grants, network level and allowlist, GitHub grant, services), in `local/boxes/<realm>/<project>/capabilities.json`, taken from the configuration when devc finished the start, also of a running box without its readiness marker. The grants the daemon or the gate hands out on demand are the intersection of this record and the current configuration.\n\nReads of the project's own GitHub repository need no record: they follow the upstream configured now. devc removes the record when it stops the box; a box stopped outside devc keeps it."
+text = "What a box was started with (container ID, secrets, SSH grants, network level and allowlist, GitHub grant, services), in `local/boxes/<realm>/<project>/capabilities.json`, taken from the configuration by the start through devc that ran the container; a command that finds the box running never writes it, and refuses a box without its readiness marker or without a record for its container (`internal/box.CheckStarted`). The grants the daemon or the gate hands out on demand are the intersection of this record and the current configuration.\n\nReads of the project's own GitHub repository need no record: they follow the upstream configured now. devc removes the record when it stops the box; a box stopped outside devc keeps it."
 refs = ["internal/box.Capabilities", "internal/box.CapabilitiesOf"]
 see = ["grant"]
 
@@ -473,10 +473,18 @@ refs = ["internal/boxside.Repo.AddWorktree", "internal/gitx.Service.WorktreeNew"
 see = ["box-repository"]
 
 [[term]]
+id = "pending-record"
+title = "Pending record"
+aka = ["pending marker", "settling a push"]
+text = "A bank ref or tag record the update hook wrote for a push update git may still refuse, marked by `refs/devc/pending/<kind>/<name>/<time>` at the same object. It counts for nothing (banks, `devc push --tag` and the archive leave it out) until it is settled: confirmed when git applied the update (the marker goes), removed with its marker when git refused it. The daemon settles a push when receive-pack has ended; what is left pending is settled by the next push or bank."
+refs = ["internal/gitx.PendingPrefix", "internal/gitx.Service.SettlePush", "internal/gitx.SortRefs"]
+see = ["bank-ref"]
+
+[[term]]
 id = "bank-ref"
 title = "Bank ref"
-text = "`refs/devc/bank/<branch>/<unix time>` in a relay: created for every new tip of a relay branch by a bank, a push through the relay service, a pull or an adoption. Never moved or deleted, so a rewritten branch's old commits stay reachable. A push records the tip before git applies it, so an update git then refuses can leave a bank ref for a tip the branch never had."
-refs = ["internal/gitx.BankPrefix", "internal/gitx.PlanBank", "internal/gitx.Service.RecordUpdate"]
+text = "`refs/devc/bank/<branch>/<unix time>` in a relay: created for every new tip of a relay branch by a bank, a push through the relay service, a pull or an adoption. Never moved, so a rewritten branch's old commits stay reachable. A push records the tip before git applies it, with a pending marker; when the push has ended the record is confirmed if git applied the update and removed if git refused it, the only bank ref ever deleted."
+refs = ["internal/gitx.BankPrefix", "internal/gitx.PlanBank", "internal/gitx.Service.RecordUpdate", "internal/gitx.Service.SettlePush"]
 see = ["git-ratchet", "banking"]
 
 [[term]]
@@ -614,7 +622,7 @@ see = ["network-level"]
 id = "allowlist"
 title = "Allowlist"
 aka = ["preset"]
-text = "The names a box of level allowlist may reach: `[network.allowlist]` `domains` (a name or `*.suffix`, with an optional port, else 80 and 443) and built-in `presets`, of realm and project together. It is a capability of the box's start: growing it takes effect when the capability record is written again, at the box's next start or when devc finishes the start of a box running without its readiness marker."
+text = "The names a box of level allowlist may reach: `[network.allowlist]` `domains` (a name or `*.suffix`, with an optional port, else 80 and 443) and built-in `presets`, of realm and project together. It is a capability of the box's start: growing it takes effect at the box's next start, when the capability record is written again."
 refs = ["internal/netpolicy.Expand", "internal/netpolicy.Presets", "internal/box.Capabilities.ProxyAllowlist"]
 see = ["allowlist-proxy"]
 
@@ -1165,7 +1173,7 @@ see = ["uncertain-outcome", "receipt", "outbox"]
 [[term]]
 id = "outbox"
 title = "Outbox"
-text = "Prompts sent from the web app that have not yet appeared in the session: shown below the timeline with their state (sending, queued, typing, unknown, did not arrive) until a prompt event arrives whose text the waiting text begins with, or their receipt says they failed."
+text = "Prompts sent from the web app: shown below the timeline with their state (sending, queued, typing, unknown, did not arrive) until their final receipt, or until the user dismisses one whose outcome is unknown. A prompt event that matches one is only noted beside it."
 refs = ["file:web/app/store.js~export async function sendPrompt", "file:web/app/store.js~function settleOutbox"]
 see = ["pending-command"]
 

@@ -91,7 +91,7 @@ func (d *Daemon) startRouter() {
 		ResponseHeaderTimeout: 5 * time.Minute,
 		DisableCompression:    true,
 	}
-	rt.srv = &http.Server{Handler: rt, ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 64 << 10, IdleTimeout: 2 * time.Minute,
+	rt.srv = &http.Server{Handler: recoverHandler(d.log, "a request to a local URL", rt), ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 64 << 10, IdleTimeout: 2 * time.Minute,
 		ErrorLog: log.New(io.Discard, "", 0), BaseContext: func(net.Listener) context.Context { return d.ctx }}
 	d.router = rt
 	d.log.Info("router for local URLs", "listen", ln.Addr().String())

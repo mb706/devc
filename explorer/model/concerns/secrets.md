@@ -78,7 +78,7 @@ An agent needs some credentials to work: its model's token, an API key for a ser
 
 **The store** ([[internal/secrets.FileStore]]). Each secret is a file `durable/realms/<realm>/secrets/<name>`, mode 0600 in a 0700 directory, which no box mounts. Realm and secret names are validated before they become a path. A value is at most 64 KiB and not empty; it is written to a new temporary file and renamed into place, and read without following a symlink. `devc secret set <realm> <name>` reads the value from standard input when it is piped, else from a prompt with echo off; `devc login` stores harness tokens the same way ([[concern:toolbox-and-harnesses]]).
 
-**What a box is granted.** [[internal/box.GrantedSecrets]]: the project's `grants.secrets` ([[config:project.grants.secrets]]) and the secret of each of its harnesses that logs in with `env-token` or `api-key`. The capability record of a start keeps that list ([[term:capability-record|capability record]]). A secret named by `grants.github = "token:<name>"` reaches the box as a GitHub token instead ([[concern:github]]); nothing checks which secret that is.
+**What a box is granted.** [[internal/box.GrantedSecrets]]: the project's `grants.secrets` ([[config:project.grants.secrets]]) and the secret of each of its harnesses that logs in with `env-token` or `api-key`; neither may name the realm's GitHub credential or its App's key ([[internal/config.validateGitHubSecrets]]). The capability record of a start keeps that list ([[term:capability-record|capability record]]). A secret named by `grants.github = "token:<name>"` reaches the box as a GitHub token instead ([[concern:github]]); nothing checks which secret that is.
 
 **The two delivery modes** ([[config:config.secrets.delivery]], machine-wide, `files` by default):
 
@@ -104,7 +104,7 @@ A box controls the processes that receive secrets, its agent, and every request 
 
 - **Asking for another project's secret.** The daemon answers for the channel's project only, and only for granted names.
 - **Keeping a grant the owner removed.** In daemon mode the daemon checks the current configuration, reloaded within three seconds; in files mode the file remains until the box stops.
-- **A grant added while the box runs.** Refused until the capability record is written again, in both modes ([[finding:C1-02]]): at the box's next start, but also when a command finishes the start of the running box after the box removed its own readiness marker ([[concern:box-lifecycle]], `docs/dev/LEFTOVER.md` part 7).
+- **A grant added while the box runs.** Refused until the box's next start, in both modes ([[finding:C1-02]]): only the start that ran the container writes its capability record, and a command that finds the box running, without its readiness marker or not, never writes it again ([[internal/box.CheckStarted]], [[concern:box-lifecycle]]).
 - **A copy on disk.** Delivery and the gate's key generation refuse storage that is not memory-backed, unless the user set `DEVC_ALLOW_PERSISTENT_SECRETS=1`.
 - **A value in a log or command line.** The store and delivery use files; the daemon's answer carries the value in the response body only; the command runner hides the values a caller lists in errors and logs ([[concern:host-foundations]]).
 

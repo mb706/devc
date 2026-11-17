@@ -231,6 +231,22 @@ func (r *Relay) update(ctx context.Context, ups []RefUpdate, config []string) er
 	return nil
 }
 
+// inReflog reports whether ref had oid among its last maxReflogScan values
+// (the relay logs every ref update, core.logAllRefUpdates=always). A ref
+// without a reflog has had no value.
+func (r *Relay) inReflog(ctx context.Context, ref, oid string) bool {
+	res, err := r.run(ctx, "log", "--walk-reflogs", "--format=%H", "-n", strconv.Itoa(maxReflogScan), ref, "--")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(res.Stdout), "\n") {
+		if strings.TrimSpace(line) == oid {
+			return true
+		}
+	}
+	return false
+}
+
 // ClearIncoming deletes the scratch refs of a bank.
 func (r *Relay) ClearIncoming(ctx context.Context) error {
 	refs, err := r.Refs(ctx, IncomingPrefix)

@@ -556,7 +556,7 @@ func newSecretCmd(a *app) *cobra.Command {
 // host's TERM is passed on so the vendor's login screen draws correctly.
 func (a *app) loginRunner(e *toolEnv) *harness.LoginRunner {
 	return &harness.LoginRunner{Config: e.cfg, Toolbox: e.tb, Engine: e.eng, SecurityOpts: e.auxSecurityOpts(),
-		Term: a.getenv("TERM"), TTY: a.isTerminal(), Out: a.stderr}
+		Term: a.getenv("TERM"), TTY: a.isTerminal(), Stdout: a.stdout, Out: a.stderr}
 }
 
 func newLoginCmd(a *app) *cobra.Command {

@@ -26,9 +26,9 @@ tests = [
 related = ["isolation", "host-foundations", "box-channel", "git-ratchet", "network-levels", "secrets", "hub-access", "hub-commands-and-terminal", "testing-and-tools"]
 
 [[invariant]]
-text = "Rule 1. Policy comes only from the configuration directory, which no box mounts; a grant handed out on demand must be in the box's capability record and the configuration of now (reading its own GitHub repository needs no record)."
-refs = ["internal/config.Load", "internal/paths.Resolve", "internal/box.Capabilities.AllowsSecret", "internal/box.Capabilities.SSHGrant", "internal/daemon.boxWorker.serveGitHub", "internal/daemon.Daemon.reload"]
-tests = ["internal/box.TestCapabilities", "test/integration.TestEscape"]
+text = "Rule 1. Policy comes only from the configuration directory, which no box mounts; a grant handed out on demand must be in the box's capability record, which only the start that ran its container writes, and the configuration of now (reading its own GitHub repository needs no record)."
+refs = ["internal/config.Load", "internal/paths.Resolve", "internal/box.Capabilities.AllowsSecret", "internal/box.Capabilities.SSHGrant", "internal/box.CheckStarted", "internal/daemon.boxWorker.serveGitHub", "internal/daemon.Daemon.reload"]
+tests = ["internal/box.TestCapabilities", "internal/box.TestRunningButNotReady", "test/integration.TestEscape"]
 
 [[invariant]]
 text = "Rule 2. The host reads a box-writable file only beneath a directory descriptor, without following links and with a size cap, and walks such trees only in helper and context containers, but for `restorecon -R` on SELinux hosts."
@@ -56,9 +56,9 @@ refs = ["internal/secrets.Deliver", "internal/secrets.CheckMemoryFS", "internal/
 tests = ["internal/secrets.TestDeliver", "internal/secrets.TestFileStore"]
 
 [[invariant]]
-text = "Rule 6. A protection that cannot be applied stops the operation: an undelegated limit, an unexpected seccomp base, unverified rules, a secrets directory on disk (unless the user allows it), a configuration with problems."
-refs = ["internal/box.BuildSpec", "internal/toolbox.DeriveProfile", "internal/netpolicy.Installer.Verify", "internal/secrets.CheckMemoryFS", "internal/box.Manager.checkProblems"]
-tests = ["internal/box.TestSpecLimits", "internal/toolbox.TestSeccompRejectsUnexpectedBase", "internal/box.TestInternetLevel", "internal/box.TestProblemsBlockLifecycle"]
+text = "Rule 6. A protection that cannot be applied stops the operation: an undelegated limit, an unexpected seccomp base, unverified rules, a secrets directory on disk (unless the user allows it), a configuration with problems, a proxy that cannot list the host's addresses."
+refs = ["internal/box.BuildSpec", "internal/toolbox.DeriveProfile", "internal/netpolicy.Installer.Verify", "internal/secrets.CheckMemoryFS", "internal/box.Manager.checkProblems", "internal/daemon.hostAddrCache.forbidden"]
+tests = ["internal/box.TestSpecLimits", "internal/toolbox.TestSeccompRejectsUnexpectedBase", "internal/box.TestInternetLevel", "internal/box.TestProblemsBlockLifecycle", "internal/daemon.TestHostAddrsFailClosed"]
 
 [[invariant]]
 text = "What a box sends makes the host store and run only bounded amounts: pushes and banks within `git.relay_quota`, journals within their budgets, savepoints it requests within `requested_keep`, each keeping 1 GiB free on the state file system where it writes there, and at most 64 connections per forward and 256 through the router."
@@ -126,24 +126,17 @@ The development rules ([[doc:docs/dev/README.md#security-rules-for-code]]) turn 
 
 ## Where the code falls short today
 
-The authors of these pages read the code area by area, and a second reader checked the pages; together they found defects that no test catches. The four rated high that let a box exhaust the host or push out the owner's savepoints are fixed: journals have budgets ([[concern:sessions-and-events]]), a bank lists and bounds what it fetches and runs under the push watchdog ([[concern:git-ratchet]]), savepoints a box requests are a class of their own ([[concern:savepoints]]), and forwards admit a bounded number of connections ([[concern:forwards-and-local-urls]]). The rest are open: [[doc:docs/dev/LEFTOVER.md#7]] lists each with where to look, and the pages linked here describe the code as it is. The severities are part 7's; its findings from the accuracy review carry none, and the one about the capability record is marked high here because it hands a box grants it was not started with.
+The authors of these pages read the code area by area, and a second reader checked the pages; together they found defects that no test catches. The four rated high that let a box exhaust the host or push out the owner's savepoints are fixed: journals have budgets ([[concern:sessions-and-events]]), a bank lists and bounds what it fetches and runs under the push watchdog ([[concern:git-ratchet]]), savepoints a box requests are a class of their own ([[concern:savepoints]]), and forwards admit a bounded number of connections ([[concern:forwards-and-local-urls]]). So are those that broke a rule of the project: only the start that ran a container writes its capability record ([[concern:box-lifecycle]]); a panic ends one stream or request, not the daemon ([[concern:daemon]]); the proxy connects nowhere while it cannot list the host's addresses ([[concern:allowlist-proxy]]); a push's records of updates git refused are removed ([[concern:git-ratchet]]); a pull request is checked before its branch is pushed, and the GitHub credentials cannot be granted as secrets ([[concern:github]]); a refused realm no longer stops the others' archive ([[concern:fleet-archive]]); only a receipt settles a prompt in the web app ([[concern:web-app]]); login output is escaped ([[concern:toolbox-and-harnesses]]). The rest are open: [[doc:docs/dev/LEFTOVER.md#7]] lists each with where to look, and the pages linked here describe the code as it is. The severities are part 7's; its findings from the accuracy review carry none.
 
 | Gap | Severity | Page |
 |---|---|---|
-| A running box that removes its readiness marker gets its capability record rewritten, with grants added since its start | high | [[concern:box-lifecycle]] |
-| A grant can name the host's GitHub credential or the App's key as a secret, and `token:<secret>` any realm secret | medium | [[concern:github]] |
-| An approved pull request pushes its branch before anything checks it, so a request for the base branch fast-forwards it | medium | [[concern:github]] |
-| The update hook keeps records of refused updates, which lets a box block a branch's records | medium | [[concern:git-ratchet]] |
-| A panic while serving a raw box stream ends the daemon | medium | [[concern:daemon]] |
-| The proxy refuses none of the host's public addresses until it first lists them | medium | [[concern:allowlist-proxy]] |
+| `grants.github = "token:<secret>"` can name any realm secret, the host's GitHub credential and the App's key included | medium | [[concern:github]] |
 | A trash restore that fails part-way strands the rest of the entry | medium | [[concern:data-and-sealing]] |
 | A regular file's seal can be recorded for a file that was swapped in and out during the seal | not graded | [[concern:data-and-sealing]] |
 | The CLI reads only the first JSON value of a live-session report, so `[]` and anything after it ends the box's open sessions; decoders that end with `Decoder.More` pass a stray `]` or `}` | not graded | [[concern:sessions-and-events]], [[concern:data-and-sealing]] |
 | `devc wt rm` removes ignored files and what snapshots leave out | not graded | [[concern:worktrees-and-context]] |
-| A full archive quota stops the upload of other realms too | medium | [[concern:fleet-archive]] |
 | `devc secret pull` takes any machine's newest bundle and shows the hub's labels | medium | [[concern:secret-transfer]] |
 | Nothing bounds how often a session notifies; behind a proxy a local process can pose with a copy of a certificate | medium | [[concern:hub-inbox-and-notifications]], [[concern:hub-access]] |
-| A box can settle a prompt the web app still waits for, by a prefix of its text | medium | [[concern:web-app]] |
 | tmux in a box passes escape sequences and clipboard writes to an attached terminal | medium | [[concern:isolation]] |
 
 ## Every page's defences

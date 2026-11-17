@@ -77,7 +77,7 @@ function Outbox({ k }) {
   const st = useStore();
   const list = st.outbox[k] || [];
   return list.map((it) => html`<li class=${'tl tl-prompt pending' + (it.outcome === 'unknown' || it.outcome === 'unsent' ? ' uncertain' : '')} key=${it.id}><div class="bubble">${it.text}</div>
-    <div class="when">${it.mode === 'steer' ? 'steer · ' : ''}${outboxLabel[it.outcome] || it.outcome}</div>
+    <div class="when">${it.mode === 'steer' ? 'steer · ' : ''}${outboxLabel[it.outcome] || it.outcome}${it.seen ? ' · a prompt like it is in the session (the receipt decides)' : ''}</div>
     ${st.pending[it.id] ? html`<${PendingActions} id=${it.id} outcome=${it.outcome} />` : null}</li>`);
 }
 

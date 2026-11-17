@@ -199,7 +199,7 @@ text = "The capability record names level internet; `devc net allow` and the dae
 at = "cli"
 ref = "internal/box.NetExceptionHook.AfterStart"
 text = "Exceptions still valid go back into the sets, after the canary, which in this flow therefore tested the rules alone ([[flow:net-allow]]). A failure here is a warning."
-detail = "The table was just replaced, so its sets were empty. When `up` finishes the start of a box that runs but never reported ready ([[internal/box.Manager.up]]), nothing is installed again: the canary runs with whatever exceptions the sets hold, tries the host's own addresses only, and a failure leaves the box running."
+detail = "The table was just replaced, so its sets were empty. A box that runs but never reported ready is not finished here: `up` refuses it ([[internal/box.CheckStarted]])."
 
 [[step]]
 from = "cli"

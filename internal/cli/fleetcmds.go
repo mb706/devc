@@ -502,7 +502,8 @@ func newSyncCmd(a *app) *cobra.Command {
 		Short: "Show, per hub, what of the durable state is not archived yet",
 		Long: "Ask the daemon what its uploads to every hub's archive have not sent yet (files and bytes, repositories), " +
 			"what of the shared harness state was left out (links, special files, files above [sync] max_file_size) and " +
-			"the last error, such as a reached quota. --now starts a pass at once.",
+			"the last error, such as a reached quota. A realm the hub refused (its quota, or a 4xx refusal) rests for " +
+			"ten minutes while the other realms go on. --now starts a pass at once.",
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, probs, err := a.load()
@@ -553,6 +554,13 @@ func newSyncCmd(a *app) *cobra.Command {
 					fmt.Fprintf(a.stdout, "%s: %s\n", h.URL, oneLine(h.Error, 400))
 				}
 				for _, r := range h.Realms {
+					if r.Error != "" {
+						rest := ""
+						if r.RestsUntil != nil {
+							rest = "; its uploads rest until " + r.RestsUntil.Local().Format("15:04:05") + ", the other realms go on"
+						}
+						fmt.Fprintf(a.stdout, "%s: %s: refused: %s%s\n", h.URL, r.Realm, oneLine(r.Error, 400), rest)
+					}
 					if r.Incomplete != "" {
 						fmt.Fprintf(a.stdout, "%s: %s: the pass was incomplete: %s\n", h.URL, r.Realm, oneLine(r.Incomplete, 300))
 					}

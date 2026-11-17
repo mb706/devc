@@ -292,7 +292,7 @@ ref = "internal/paths.Paths.BoxLockFile"
 
 [[tree.entry]]
 path = "local/boxes/<realm>/<project>/capabilities.json"
-text = "What the box was started with: its container ID and the secrets, SSH grants, network level and allowlist, GitHub grant and services the configuration granted when devc finished the start (also when it finished the start of a running box without its readiness marker). Removed before every start and whenever devc stops or removes the box; a box stopped outside devc keeps it. Grants on demand are checked against it."
+text = "What the box was started with: its container ID and the secrets, SSH grants, network level and allowlist, GitHub grant and services the configuration granted when the start through devc that ran the container succeeded; no command that finds the box running writes it. Removed before every start and whenever devc stops or removes the box; a box stopped outside devc keeps it. Grants on demand are checked against it."
 writer = "host"
 ref = "internal/paths.Paths.BoxCapabilitiesFile"
 
@@ -406,7 +406,7 @@ ref = "internal/data.Service.resticRestore"
 
 [[tree.entry]]
 path = "local/tmp/relay-report-<random>.json"
-text = "One push through the relay service: post-receive writes its report here for the daemon, and the hooks keep their notes beside it (`.heads`, the box's branches from pre-receive; `.records`, what each update hook recorded). Created empty (0600) by the daemon, removed when the push is over."
+text = "One push through the relay service: post-receive writes its report here for the daemon, and the hooks keep their notes beside it (`.heads`, the box's branches from pre-receive; `.records`, what each update hook recorded; the daemon reads both when it settles the push). Created empty (0600) by the daemon, removed when the push is over."
 writer = "host"
 ref = "internal/daemon.newReportFile"
 

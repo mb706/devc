@@ -329,23 +329,17 @@ func (m *Manager) up(ctx context.Context, ref names.ProjectRef, o UpOptions) err
 			return fmt.Errorf("stopping %s: %w", name, err)
 		}
 		return m.startStopped(ctx, pl)
-	case ci.State.Running && m.isReady(ref):
-		m.printf("devc: %s is already running\n", name)
-		return nil
 	case ci.State.Running:
-		// Started outside this invocation but never reported ready; for
-		// level internet its rules and binding were verified above.
-		if pl.spec.NetRules {
-			// The rules are there. Its hosts file is box-writable by now,
-			// so the canary tries the host's own addresses only.
-			pl.net = &netpolicy.Facts{Namespace: ci.NetworkSettings.SandboxKey}
+		// This command did not start the container, so it writes nothing
+		// for it: the capability record is written only by the start that
+		// ran the container (finding G1-01). A box without its readiness
+		// marker or without a record for its container is not finished
+		// here with today's configuration, whatever happened to the
+		// marker: the user restarts it.
+		if err := CheckStarted(m.Config.Paths, ref, ci.ID); err != nil {
+			return err
 		}
-		// Finish the start, but leave a container this invocation did not
-		// start alone if that fails.
-		m.printf("devc: %s is running but has not reported ready; finishing its start\n", name)
-		if err := m.afterStart(ctx, pl); err != nil {
-			return fmt.Errorf("%w\n%s is still running; restart it with 'devc down %s' and 'devc up %s'", err, name, ref, ref)
-		}
+		m.printf("devc: %s is already running\n", name)
 		return nil
 	default:
 		return m.startStopped(ctx, pl)
@@ -647,8 +641,10 @@ func (m *Manager) isReady(ref names.ProjectRef) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
-// afterStart fixes the in-box identity and waits for box init to report
-// that it is ready.
+// afterStart fixes the in-box identity, waits for box init to report that
+// it is ready and records what the box was started with. Only the two
+// paths that start the container call it (createAndStart, startStopped),
+// after publish removed the previous record and marker (finding G1-01).
 func (m *Manager) afterStart(ctx context.Context, pl *plan) error {
 	name := pl.spec.Name
 	eo := rootExec(name, []string{paths.InBoxHelper, "box", "fix-identity"})
@@ -693,6 +689,7 @@ func (m *Manager) afterStart(ctx context.Context, pl *plan) error {
 }
 
 // recordCapabilities writes the record of this start (capabilities.go).
+// It is the only writer of the record; afterStart calls it.
 func (m *Manager) recordCapabilities(ctx context.Context, pl *plan) error {
 	ci, err := m.Find(ctx, pl.spec.Ref)
 	if err != nil {

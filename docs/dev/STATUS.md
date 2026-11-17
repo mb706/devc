@@ -49,7 +49,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | Accuracy review G1 to G5 + X15 corrections | done | 43f43df |
 | X13 Explorer content: synthesis | done | 68af4f6 |
 | Accuracy review G6 + corrections | done | 4ef8ae2 |
-| C20a Defects found while writing the explorer: high severity | done | |
+| C20a Defects found while writing the explorer: high severity | done | b4f63da |
+| C20b Defects: rule violations of medium severity | done | |
 
 ## Resuming
 
@@ -1439,3 +1440,19 @@ The four confirmed findings of the closing check (`docs/dev/reviews/F1-review.md
 - **Explorer model.** `sessions-and-events`, `git-ratchet`, `forwards-and-local-urls`, `savepoints`, `requests-and-approval` and `security-model` (the four rows removed from its gaps table, a new invariant); flows `event-ingestion`, `turn-snapshot`, `data-save`, `local-url`, `trust-boundaries`; glossary (`journal-budget`, `requested-savepoint` new; `journal`, `session-owner`, `banking`, `push-watchdog`, `savepoint`); `layout.toml`; `system.toml` checks. Eight new invariants with code and tests. `./dev explore --check`: 0 errors, 0 warnings.
 - **Docs.** `docs/guide.md`: journal budgets and `devc sessions prune`, requested savepoints, the bank's bounds, forward limits.
 - **Exercise it.** `./dev test ./internal/session/ ./internal/gitx/ ./internal/netpolicy/ ./internal/data/ ./internal/daemon/`; `./dev itest -run 'TestJournalBudgets|TestBankBudget|TestRequestedSavepoints' -v`.
+
+### C20b Defects found while writing the explorer: the rule violations of medium severity
+
+- **Done.** G1-01, X4 2, X6 2, X7 3, X8 3, X10 1, X10 3, X12 1 and X12 6 fixed as the work order's table decides; per item in `reviews/C20-response.md`, marked in `LEFTOVER.md` part 7 (X8 2 marked moot: `up` no longer finishes a start).
+- **Capability record** (`internal/box`): only `afterStart` on the create and start paths writes it; `box.CheckStarted` (marker and a record of the running container) guards `up`, `ensureRunning` and the daemon's session start, which refuse with `box.UnfinishedError` ("restart it with 'devc down' and 'devc up'").
+- **Login output**: `proto.PrintableWriter` (streaming PrintableText, CR LF kept) for interactive logins; `LoginRunner.Status` escapes.
+- **Panics**: `daemon.goTask`/`goSafe` → `daemon.recoverTask`; `proto.PanicText`/`PanicSite` (no panic values in logs); `daemon.recoverHandler` for the two HTTP servers; deferred releases of stream places, the push's box lock, login flights and worktree reads. `TestNoBareGoroutines` keeps it so.
+- **Push records**: `refs/devc/pending/` markers, `gitx.Service.SettlePush` (daemon after and before receive-pack, `Bank` first); box tips move at settling; `gitx.ReadHeadsNote`/`ReadRecordsNote` moved from the CLI.
+- **Proxy**: `Proxy.Forbidden` returns an error; `hostAddrCache.forbidden` fails closed while the host's addresses are unknown.
+- **GitHub**: `config.validateGitHubSecrets`; `cli.checkPRBranch` before `Push` in `pr create`.
+- **Archive**: per-realm refusals and rest (`realmPause`), `fleet.kindError`, realm `error`/`quota`/`rests_until` in `archive.status` and `devc sync status`; `ErrPaused` removed.
+- **Web app**: only receipts settle prompts (`settleOutbox` marks, `setOutbox` removes after a final receipt).
+- **Decided within the table.** A running, ready box without a record of its container is refused like one without its marker. An interactive login's colours show as `�` (the same escaping, as the table says). The deletion of a refused update's record is the one exception to "records are never deleted". Box tips move at settling, not in the update hook. A non-quota refusal of a realm's files lets its repositories go on; a quota stops the realm.
+- **Explorer model.** `box-lifecycle`, `daemon`, `git-ratchet`, `allowlist-proxy`, `github`, `fleet-archive`, `web-app`, `toolbox-and-harnesses`, `secrets`, `configuration`, `network-levels`, `security-model` (seven rows out of its gaps table, one narrowed to `token:`; rules 1 and 6); flows `box-up`, `box-git-push`, `request-pr`, `web-send`, `archive-upload`, `harness-login`, `allowlist-connect`, `network-install`, `secret-request`, `start-here`; glossary (`pending-record` new; `capability-record`, `allowlist`, `bank-ref`, `outbox`); `layout.toml`. Nine new invariants with code and tests. `./dev explore --check`: 0 errors, 0 warnings.
+- **Docs.** `docs/guide.md`: running boxes and restarts, login output, pr create checks, GitHub secrets, pending push records, proxy fail-closed, realm refusals in the archive, prompt settling in the web app.
+- **Exercise it.** `./dev test ./internal/box/ ./internal/daemon/ ./internal/gitx/ ./internal/cli/ ./internal/fleet/ ./internal/config/ ./internal/harness/ ./internal/proto/`; `web/check.sh` (after `./dev build`); `./dev itest -run '^(TestBoxLifecycle|TestNetworkPlainStart|TestSessions|TestHarnessLaunchAndSecrets|TestHarnessState|TestSecretsDaemon|TestDaemon|TestDaemonHostileEndpoints|TestRelayService|TestEscape|TestGit|TestNetworkAllowlist|TestGitHub|TestFleet|TestWebApp)$' -v`.

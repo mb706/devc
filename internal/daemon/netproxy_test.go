@@ -406,3 +406,44 @@ func TestRouterRefusals(t *testing.T) {
 		}
 	}
 }
+
+// TestHostAddrsFailClosed: while the host's own addresses cannot be
+// listed, the proxy refuses every destination, saying why, and lists them
+// again at the next check; once a listing succeeds, an address outside
+// them passes and the host's own is refused, also when a later listing
+// fails (finding X8 3).
+func TestHostAddrsFailClosed(t *testing.T) {
+	calls, fail := 0, true
+	host, outside := netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("93.184.215.14")
+	h := &hostAddrCache{list: func() ([]netip.Addr, error) {
+		calls++
+		if fail {
+			return nil, errors.New("netlink: permission denied")
+		}
+		return []netip.Addr{host}, nil
+	}}
+	px := &netpolicy.Proxy{Forbidden: h.forbidden}
+	for i := 0; i < 2; i++ {
+		err := px.CheckAddr(netip.AddrPortFrom(outside, 443))
+		if err == nil || !strings.Contains(err.Error(), "cannot be listed (netlink: permission denied)") {
+			t.Errorf("check %d while the addresses are unknown: %v", i, err)
+		}
+	}
+	if calls != 2 {
+		t.Errorf("the listing was tried %d times, want 2", calls)
+	}
+	fail = false
+	if err := px.CheckAddr(netip.AddrPortFrom(outside, 443)); err != nil {
+		t.Errorf("an outside address once the addresses are known: %v", err)
+	}
+	if err := px.CheckAddr(netip.AddrPortFrom(host, 443)); err == nil || !strings.Contains(err.Error(), "an address of this host") {
+		t.Errorf("the host's own address: %v", err)
+	}
+	fail, h.at = true, time.Time{}
+	if err := px.CheckAddr(netip.AddrPortFrom(outside, 443)); err != nil {
+		t.Errorf("an outside address after a failed relisting: %v", err)
+	}
+	if err := px.CheckAddr(netip.AddrPortFrom(host, 443)); err == nil {
+		t.Error("the host's own address after a failed relisting")
+	}
+}

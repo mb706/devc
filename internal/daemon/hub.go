@@ -680,7 +680,7 @@ func (h *hub) subscribe(conn *proto.Conn, p proto.SubscribeParams) error {
 		}
 		return a.ref.String() < b.ref.String()
 	})
-	go s.run()
+	goTask(h.log, &task{what: "a subscription", end: func() { _ = s.conn.Close() }}, s.run)
 	return nil
 }
 
@@ -709,13 +709,8 @@ func (s *subscriber) done(b batch) {
 // run is the subscriber's goroutine: the replay, caught_up, then live
 // batches and heartbeats until the connection closes.
 func (s *subscriber) run() {
+	// A panic closes the connection (goTask, finding X6 2).
 	defer s.h.unsubscribe(s)
-	defer func() {
-		if r := recover(); r != nil {
-			s.h.log.Error("subscription panicked", "panic", r)
-			_ = s.conn.Close()
-		}
-	}()
 	for _, it := range s.replay {
 		if err := s.replayOne(it); err != nil {
 			return

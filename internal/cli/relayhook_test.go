@@ -1,15 +1,20 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/gitx"
+	"github.com/mb706/devc/internal/names"
 )
 
 // TestMain lets the test binary stand in for devc as a relay hook: the
@@ -158,5 +163,131 @@ func TestRelayHooksRecordFirst(t *testing.T) {
 	}
 	if b := banks("big"); b != nil {
 		t.Errorf("bank refs of a push over the budget: %q", b)
+	}
+}
+
+// TestRelayHooksSettle pushes through real git receive-pack with devc's
+// relay hooks and settles as the daemon does when receive-pack has ended
+// (finding X7 3). An update git refuses after the update hook recorded it
+// (refs/heads/main/<t> while refs/heads/main exists) leaves a pending
+// record that counts for nothing and is removed at settling, so the name
+// refs/devc/bank/main/<t> stays free; an accepted update's record is
+// confirmed. Records nobody settled (the daemon ended first) are settled
+// later: an applied one by the branch's reflog, also after the branch
+// moved on.
+func TestRelayHooksSettle(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := copyConfig(t)
+	state := t.TempDir()
+	relay := filepath.Join(state, "durable", "realms", "demo", "relay", "hello.git")
+	hooks := filepath.Join(state, "local", "git", "relay-hooks")
+	gitEnv := append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@x",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@x", "HOME="+state, "DEVC_CONFIG_DIR="+cfg, "DEVC_STATE_DIR="+state,
+		"DEVC_RUNTIME_DIR="+filepath.Join(state, "run"), gitx.EnvRelayProject+"=demo/hello")
+	git := func(dir string, args ...string) (string, error) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	must := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := git(dir, args...)
+		if err != nil {
+			t.Fatalf("git %q: %v\n%s", args, err, out)
+		}
+		return out
+	}
+	os.MkdirAll(filepath.Dir(relay), 0o700)
+	must(state, "init", "-q", "--bare", "-b", "main", relay)
+	must(state, "--git-dir="+relay, "config", "core.logAllRefUpdates", "always")
+	if err := gitx.EnsureRelayHooks(hooks, exe); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(state, "work")
+	must(state, "init", "-q", "-b", "main", work)
+	must(work, "commit", "-q", "--allow-empty", "-m", "c1")
+	push := func(args ...string) (string, error) {
+		rp := fmt.Sprintf("git -c core.hooksPath=%s receive-pack", hooks)
+		cmd := exec.Command("git", append([]string{"push", "--porcelain", "--receive-pack=" + rp, relay}, args...)...)
+		cmd.Dir, cmd.Env = work, gitEnv
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	noHooks := filepath.Join(state, "no-hooks")
+	os.MkdirAll(noHooks, 0o700)
+	host := &gitx.Host{Runner: execx.Real{}, HooksDir: noHooks, Background: true}
+	gs := &gitx.Service{Host: host}
+	p := &gitx.Project{Ref: names.ProjectRef{Realm: "demo", Project: "hello"}, Relay: &gitx.Relay{Host: host, Dir: relay}}
+	ctx := context.Background()
+	refs := func(prefix string) string {
+		out, _ := git(state, "--git-dir="+relay, "for-each-ref", "--format=%(refname)", prefix)
+		return out
+	}
+	settle := func(confirmed, removed int) {
+		t.Helper()
+		res, err := gs.SettlePush(ctx, p, nil, nil)
+		if err != nil || res.Confirmed != confirmed || res.Removed != removed || len(res.Problems) != 0 {
+			t.Fatalf("settle: %+v %v, want %d confirmed, %d removed", res, err, confirmed, removed)
+		}
+		if left := refs(gitx.PendingPrefix); left != "" {
+			t.Errorf("markers left after settling: %q", left)
+		}
+	}
+	if out, err := push("main:refs/heads/main"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	settle(1, 0)
+	c1 := must(work, "rev-parse", "HEAD")
+
+	// A name in a future second below main: the update hook records it,
+	// git refuses the update when it applies it.
+	future := strconv.FormatInt(time.Now().Unix()+100000, 10)
+	out, err := push("main:refs/heads/main/" + future)
+	if err == nil {
+		t.Fatalf("git accepted main/%s:\n%s", future, out)
+	}
+	if got := refs("refs/devc/bank/main/" + future + "/"); got == "" {
+		t.Fatalf("the update hook recorded nothing for the refused update (git refused it before the hook):\n%s", out)
+	}
+	// Until it is settled the record counts for nothing.
+	set, err := p.Relay.RefSet(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := set.LastBank["main/"+future]; ok || len(set.Pending) != 1 {
+		t.Errorf("a pending record counts: last bank %v, pending %v", set.LastBank, set.Pending)
+	}
+	settle(0, 1)
+	if got := refs("refs/devc/bank/main/" + future + "/"); got != "" {
+		t.Errorf("the refused update's record is left: %q", got)
+	}
+	// The name the box tried to take is free for main's record in that
+	// second.
+	must(state, "--git-dir="+relay, "update-ref", "refs/devc/bank/main/"+future, c1, strings.Repeat("0", len(c1)))
+
+	// Records nobody settled: an accepted update whose branch then moved
+	// on is confirmed by its reflog, the newest by the branch, a refused
+	// one removed.
+	must(work, "commit", "-q", "--allow-empty", "-m", "c2")
+	if out, err := push("main:refs/heads/feature"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	must(work, "commit", "-q", "--allow-empty", "-m", "c3")
+	if out, err := push("main:refs/heads/feature"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	if _, err := push("main:refs/heads/main/" + future + "x"); err == nil {
+		t.Fatal("git accepted a name below main")
+	}
+	settle(2, 1)
+	if got := strings.Count(refs("refs/devc/bank/feature/"), "\n") + 1; got != 2 {
+		t.Errorf("feature has %d records, want 2", got)
 	}
 }
