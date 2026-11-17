@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/mb706/devc/internal/boxside"
+	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/engine"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/names"
@@ -57,12 +58,25 @@ type Savepoint struct {
 	Commit string `json:"commit,omitempty"`
 	// Snapshot is the restic snapshot ID.
 	Snapshot string `json:"snapshot,omitempty"`
+	// Class is ClassRequested for a savepoint made on a box's request,
+	// with Request its request's ID (C20a, X9 1); empty for the owner's
+	// own savepoints and devc's (before_session). Savepoints recorded
+	// before classes existed have none and count as the owner's: they were
+	// all kept under the rule for the owner's savepoints.
+	Class   string `json:"class,omitempty"`
+	Request string `json:"request,omitempty"`
 }
 
 const (
 	opSave = "save"
 	opDrop = "drop"
 )
+
+// ClassRequested marks a savepoint made on a box's request.
+const ClassRequested = "requested"
+
+// Requested reports whether the savepoint was made on a box's request.
+func (sp *Savepoint) Requested() bool { return sp.Class == ClassRequested }
 
 // BeforeSessionWindow is how recent a savepoint must be for
 // before_session to skip taking another.
@@ -153,16 +167,17 @@ func NewID(now time.Time, name string, used map[string]bool) string {
 	}
 }
 
-// Retention returns the unnamed savepoints to drop so that at most keep
-// remain, oldest first. keep 0 keeps all; named savepoints are never
-// dropped by retention.
+// Retention returns the owner's unnamed savepoints to drop so that at
+// most keep remain, oldest first. keep 0 keeps all. Named savepoints are
+// never dropped by it, and savepoints made on a box's request are neither
+// counted nor dropped (RequestedRetention keeps those).
 func Retention(sps []Savepoint, keep int) []Savepoint {
 	if keep <= 0 {
 		return nil
 	}
 	var unnamed []Savepoint
 	for _, sp := range sps {
-		if sp.Name == "" {
+		if sp.Name == "" && !sp.Requested() {
 			unnamed = append(unnamed, sp)
 		}
 	}
@@ -172,6 +187,71 @@ func Retention(sps []Savepoint, keep int) []Savepoint {
 	return unnamed[:len(unnamed)-keep]
 }
 
+// RequestedRetention returns the savepoints made on a box's request to
+// drop so that at most keep of them remain, oldest first, named or not:
+// a box chooses the name, and a name is a label, not a promise to keep
+// (C20a, X9 1). The owner's savepoints are neither counted nor dropped.
+func RequestedRetention(sps []Savepoint, keep int) []Savepoint {
+	if keep < 1 {
+		keep = 1
+	}
+	var req []Savepoint
+	for _, sp := range sps {
+		if sp.Requested() {
+			req = append(req, sp)
+		}
+	}
+	if len(req) <= keep {
+		return nil
+	}
+	return req[:len(req)-keep]
+}
+
+// requestedWait is how long a new requested savepoint must still wait:
+// at most one is made per interval, counted from the newest requested
+// one by the host's clock (one recorded in the future counts as made
+// now). Zero when one may be made.
+func requestedWait(sps []Savepoint, now time.Time, interval time.Duration) time.Duration {
+	var newest time.Time
+	for _, sp := range sps {
+		if !sp.Requested() {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339Nano, sp.Time); err == nil && t.After(newest) {
+			newest = t
+		}
+	}
+	if newest.IsZero() {
+		return 0
+	}
+	if newest.After(now) {
+		newest = now
+	}
+	if wait := newest.Add(interval).Sub(now); wait > 0 {
+		return wait
+	}
+	return 0
+}
+
+// RequestedRefusal says why a box of ref may not have a savepoint now,
+// or "" (the daemon asks before it stores a savepoint request; Save checks
+// again under the box lock).
+func (s *Service) RequestedRefusal(ref names.ProjectRef, sv config.Savepoints) (string, error) {
+	sps, _, err := ReadIndex(s.Config.Paths.SavepointIndex(ref))
+	if err != nil {
+		return "", err
+	}
+	return requestedRefusal(sps, ref, s.now(), sv.RequestedEvery()), nil
+}
+
+func requestedRefusal(sps []Savepoint, ref names.ProjectRef, now time.Time, every time.Duration) string {
+	if wait := requestedWait(sps, now, every); wait > 0 {
+		return fmt.Sprintf("a savepoint was made on request for %s less than %s ago, and at most one is made per %s (data.savepoints.requested_interval): ask again in %s",
+			ref, every, every, wait.Round(time.Second))
+	}
+	return ""
+}
+
 // ErrNoRestic is returned when restic is needed and not installed.
 var ErrNoRestic = errors.New("restic is not installed: run 'devc toolbox install restic'")
 
@@ -179,6 +259,22 @@ var ErrNoRestic = errors.New("restic is not installed: run 'devc toolbox install
 // left out (work order C06 section 5), then applies retention. The caller
 // holds the box lock.
 func (s *Service) Save(ctx context.Context, p *Project, name string) (*Savepoint, error) {
+	return s.save(ctx, p, name, "")
+}
+
+// SaveRequested takes a savepoint on the box's request (the daemon runs
+// it for an approved savepoint request, request): of class requested,
+// refused within data.savepoints.requested_interval of the previous
+// requested one, and followed by the retention of requested savepoints
+// only (C20a, X9 1). The caller holds the box lock.
+func (s *Service) SaveRequested(ctx context.Context, p *Project, name, request string) (*Savepoint, error) {
+	if !proto.ValidRequestID(request) {
+		return nil, fmt.Errorf("%q is not a request ID", proto.Printable(request))
+	}
+	return s.save(ctx, p, name, request)
+}
+
+func (s *Service) save(ctx context.Context, p *Project, name, request string) (*Savepoint, error) {
 	if name != "" {
 		if err := names.Check("savepoint name", name); err != nil {
 			return nil, err
@@ -201,13 +297,19 @@ func (s *Service) Save(ctx context.Context, p *Project, name string) (*Savepoint
 	if err := s.Config.Paths.Ensure(filepath.Dir(index)); err != nil {
 		return nil, err
 	}
-	_, used, err := ReadIndex(index)
+	existing, used, err := ReadIndex(index)
 	if err != nil {
 		return nil, err
 	}
 	now := s.now()
 	sp := &Savepoint{V: 1, Op: opSave, ID: NewID(now, name, used), Name: name, Time: now.Format(time.RFC3339Nano),
 		Paths: []string{"."}, Commit: s.commit(ctx, p.Ref)}
+	if request != "" {
+		if msg := requestedRefusal(existing, p.Ref, now, p.Resolved.Data.Savepoints.RequestedEvery()); msg != "" {
+			return nil, errors.New(msg)
+		}
+		sp.Class, sp.Request = ClassRequested, request
+	}
 	// The manifest record (work order C14) describes what was saved.
 	var digests []boxside.EntryDigest
 	if driver != DriverRestic {
@@ -241,7 +343,13 @@ func (s *Service) Save(ctx context.Context, p *Project, name string) (*Savepoint
 	if err != nil {
 		return sp, err
 	}
-	if drop := Retention(sps, p.Resolved.Data.Savepoints.Keep); len(drop) > 0 {
+	// Each class's retention runs after a save of its class only: a box's
+	// request never makes the owner's savepoints go (X9 1).
+	drop := Retention(sps, p.Resolved.Data.Savepoints.Keep)
+	if sp.Requested() {
+		drop = RequestedRetention(sps, p.Resolved.Data.Savepoints.RequestedKept())
+	}
+	if len(drop) > 0 {
 		if err := s.drop(ctx, p, drop); err != nil {
 			return sp, fmt.Errorf("applying retention: %w", err)
 		}
@@ -260,8 +368,10 @@ func (s *Service) reportSkipped(skipped []string) {
 }
 
 // BeforeSession takes an unnamed savepoint when the project asks for one
-// before sessions (data.savepoints.before_session) and none was taken in
-// the last 30 minutes. It reports whether it took one.
+// before sessions (data.savepoints.before_session) and none of the
+// owner's was taken in the last 30 minutes: a savepoint a box requested
+// does not count, as retention of requested ones may drop it soon (C20a).
+// It reports whether it took one.
 func (s *Service) BeforeSession(ctx context.Context, p *Project) (*Savepoint, error) {
 	sv := p.Resolved.Data.Savepoints
 	if !sv.BeforeSession || sv.Driver == DriverNone {
@@ -273,6 +383,9 @@ func (s *Service) BeforeSession(ctx context.Context, p *Project) (*Savepoint, er
 	}
 	now := s.now()
 	for _, sp := range sps {
+		if sp.Requested() {
+			continue
+		}
 		if t, err := time.Parse(time.RFC3339Nano, sp.Time); err == nil && now.Sub(t) < BeforeSessionWindow && now.Sub(t) >= -time.Minute {
 			return nil, nil
 		}
@@ -330,8 +443,9 @@ func (s *Service) Restore(ctx context.Context, p *Project, sp *Savepoint, rels [
 	return nil, fmt.Errorf("the savepoint %s was taken with the driver %q, which this devc cannot restore", sp.ID, sp.Driver)
 }
 
-// GC applies retention, drops the savepoints named in drop, and prunes the
-// restic repository (work order C06 section 4).
+// GC applies both retentions (the owner's and that of requested
+// savepoints), drops the savepoints named in drop, and prunes the restic
+// repository (work order C06 section 4).
 func (s *Service) GC(ctx context.Context, p *Project, drop []string) ([]string, error) {
 	sps, err := s.Savepoints(p)
 	if err != nil {
@@ -349,7 +463,8 @@ func (s *Service) GC(ctx context.Context, p *Project, drop []string) ([]string, 
 			seen[sp.ID] = true
 		}
 	}
-	for _, sp := range Retention(sps, p.Resolved.Data.Savepoints.Keep) {
+	auto := append(Retention(sps, p.Resolved.Data.Savepoints.Keep), RequestedRetention(sps, p.Resolved.Data.Savepoints.RequestedKept())...)
+	for _, sp := range auto {
 		if !seen[sp.ID] {
 			victims = append(victims, sp)
 			seen[sp.ID] = true

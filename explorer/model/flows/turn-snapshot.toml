@@ -99,12 +99,20 @@ ref = "internal/gitx.Relay.ClearIncoming"
 text = "The relay's scratch namespace `refs/devc/incoming/` is emptied, before the fetch and again after the bank."
 
 [[step]]
+at = "cli"
+ref = "internal/gitx.Service.listBox"
+checks = ["internal/gitx.Service.listBox", "internal/gitx.bankFetch"]
+text = "`git for-each-ref` in the box lists its branches, snapshot refs and tags, at most 50,000; only refs whose value the relay does not record yet are to be fetched, and more than 1000 changed branches, new snapshots or new tags refuse the bank before anything is fetched."
+
+[[step]]
 from = "cli"
 to = "host-git"
 via = "exec"
-label = "git fetch ext::… heads, wip, tags → refs/devc/incoming/*"
+label = "git fetch --stdin ext::… <one refspec per listed ref> → refs/devc/incoming/*"
 ref = "internal/gitx.Service.fetchFromBox"
-text = "Host git fetches the box's branches, snapshot refs and tags, each into its part of `refs/devc/incoming/`, with `--no-tags` and no garbage collection."
+checks = ["internal/gitx.Watch"]
+text = "With 1 GiB free and the relay within `git.relay_quota`, host git fetches those refs by name, each into its part of `refs/devc/incoming/`, with `--no-tags` and no garbage collection, in a process group of its own."
+detail = "The push watchdog measures the relay's objects every 200 ms and ends the fetch when the relay would exceed its budget or less than 512 MiB would stay free; once git's processes are gone, temporary packs and lock files are removed."
 
 [[step]]
 from = "host-git"

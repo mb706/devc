@@ -27,6 +27,7 @@ key = [
   "internal/gitx.CheckUpdate",
   "internal/gitx.Service.RecordUpdate",
   "internal/daemon.Daemon.runPush",
+  "internal/gitx.Watch",
 ]
 spec = ["doc:specs-v2.md#9.2", "doc:specs-v2.md#9.3"]
 tests = [
@@ -41,7 +42,10 @@ tests = [
   "internal/daemon.TestPushWatchdog",
   "internal/daemon.TestPushEndedDuringIndexPack",
   "internal/daemon.TestPushGroupLeft",
+  "internal/gitx.TestBankListsAndFetchesByName",
+  "internal/gitx.TestBankFetchBudget",
   "test/integration.TestRelayService",
+  "test/integration.TestBankBudget",
   "test/integration.TestEscape",
 ]
 related = ["security-model", "box-channel", "daemon", "box-lifecycle", "host-foundations"]
@@ -77,8 +81,18 @@ tests = ["internal/gitx.TestHostCmd", "internal/gitx.TestEnsureRelayHooks", "tes
 
 [[invariant]]
 text = "A push whose pack would take the relay over git.relay_quota, or the state file system below 512 MiB free, is refused or ended, and its git processes are gone before the box lock is released."
-refs = ["internal/daemon.Daemon.watchPush", "internal/gitx.CheckPushSize", "internal/daemon.Daemon.runPush", "internal/daemon.Daemon.holdRelay"]
+refs = ["internal/daemon.Daemon.watchPush", "internal/gitx.Watch", "internal/gitx.CheckPushSize", "internal/daemon.Daemon.runPush", "internal/daemon.Daemon.holdRelay"]
 tests = ["internal/daemon.TestPushWatchdog", "internal/daemon.TestPushEndedDuringIndexPack", "internal/daemon.TestPushGroupLeft"]
+
+[[invariant]]
+text = "A bank fetches only refs the box listed first, each by its full name and only when the relay does not record its value; more than 1000 changed branches, new snapshots or new tags, or a listing over 50,000 refs or with a malformed line, refuses the bank before anything is fetched."
+refs = ["internal/gitx.Service.listBox", "internal/gitx.bankFetch", "internal/gitx.Service.fetchFromBox"]
+tests = ["internal/gitx.TestBankListsAndFetchesByName", "test/integration.TestBankBudget"]
+
+[[invariant]]
+text = "A bank's fetch starts only with 1 GiB free and the relay within git.relay_quota, and is ended, with every git process it started, when the relay would exceed that budget or less than 512 MiB would stay free; an ended fetch leaves no temporary pack or lock file, and the bank refs from before are untouched."
+refs = ["internal/gitx.Service.fetchFromBox", "internal/gitx.Watch", "internal/gitx.RemoveFetchLeftovers"]
+tests = ["internal/gitx.TestBankFetchBudget", "test/integration.TestBankBudget"]
 
 [[invariant]]
 text = "The relay a push or fetch is served on is that of the channel's project; nothing the box sends selects it."
@@ -199,7 +213,7 @@ ref = "internal/gitx.Service.pushUpstream"
 +++
 ## What it is for
 
-An agent in a box can do anything to the box's repository: rewrite history, delete branches, wipe a worktree, plant hooks. The owner still wants to leave it alone for hours. The ratchet makes that safe: every tip a bank, a push, a pull or an adoption gives a relay branch, every snapshot of uncommitted work and every tag created in the box that the host records stays reachable from a ref the box can neither move nor delete, and the relay never collects garbage. The box still moves branch heads in the relay, since that is how its work arrives; it cannot make the host forget a value a branch once had.
+An agent in a box can do anything to the box's repository: rewrite history, delete branches, wipe a worktree, plant hooks. The ratchet makes that safe: every tip a bank, a push, a pull or an adoption gives a relay branch, every snapshot of uncommitted work and every tag created in the box that the host records stays reachable from a ref the box can neither move nor delete, and the relay never collects garbage. The box still moves branch heads in the relay, since that is how its work arrives; it cannot make the host forget a value a branch once had.
 
 ## How it works
 
@@ -207,11 +221,11 @@ An agent in a box can do anything to the box's repository: rewrite history, dele
 
 **Host git.** Every git command on a relay goes through [[internal/gitx.Host.Cmd]]: `--git-dir=<relay>`, working directory `/`, `core.hooksPath` pointing at the empty `local/git/no-hooks` (checked empty by [[internal/gitx.EnsureEmptyDir]]), `core.fsmonitor=false`, `--no-replace-objects` and `GIT_NO_REPLACE_OBJECTS=1`. Commands that do not talk to the upstream also lose every `GIT_*` variable and read no global or system configuration (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`), so only the relay's configuration applies. [[internal/gitx.Relay.Configure]] sets it: `gc.auto=0`, `maintenance.auto=false`, `core.logAllRefUpdates=always`, object checks (fsck) on every fetch and receive, and `unpackLimit=1`, so an incoming pack is kept as it came.
 
-**Banking** ([[term:banking]], [[internal/gitx.Service.Bank]]) runs under the box lock. `devc box snapshot --all` commits each worktree's uncommitted work in the box. Host git then fetches over git's `ext::` transport, which runs a command and speaks git's protocol over its standard input and output: here `podman exec -i -u 1000:1000 <box> git-upload-pack <repo>` ([[internal/gitx.BoxURL]]), so whatever the box repository holds runs in the box. The fetch writes only below `refs/devc/incoming/`, emptied before and after. [[internal/gitx.PlanBank]] decides; each branch change is one `update-ref --stdin` transaction of head, bank ref and box tip, with old values checked ([[internal/gitx.Relay.Update]]). Banks run for `devc bank`, after turns, every five minutes, before a box stops, and before `push`, `pr create` and `wt rm` ([[flow:turn-snapshot]]).
+**Banking** ([[term:banking]], [[internal/gitx.Service.Bank]]) runs under the box lock. `devc box snapshot --all` commits each worktree's uncommitted work in the box. Of the branches, snapshot refs and tags `git for-each-ref` lists in the box ([[internal/gitx.Service.listBox]]), those the relay does not record yet are fetched by name ([[internal/gitx.bankFetch]]) over git's `ext::` transport, which runs a command and speaks git's protocol over its standard input and output: here `podman exec -i -u 1000:1000 <box> git-upload-pack <repo>` ([[internal/gitx.BoxURL]]), so whatever the box repository holds runs in the box. The fetch writes only below `refs/devc/incoming/`, emptied before and after. [[internal/gitx.PlanBank]] decides; each branch change is one `update-ref --stdin` transaction of head, bank ref and box tip, with old values checked ([[internal/gitx.Relay.Update]]). Banks run for `devc bank`, after turns, every five minutes, before a box stops, and before `push`, `pr create` and `wt rm` ([[flow:turn-snapshot]]).
 
 **The relay service** serves `git push` and `git fetch` in the box while a daemon is connected ([[flow:box-git-push]], [[flow:box-git-fetch]]). git starts the remote helper [[internal/boxside.RemoteHelperMain]] for `origin`; it asks the host for `host.git` through the agent, then relays bytes. [[internal/daemon.boxWorker.serveGit]] runs upload-pack or receive-pack on the relay of the channel's project with the settings of [[internal/gitx.ServeCall]] (upload-pack hides `refs/devc`); receive-pack runs devc's relay hooks ([[internal/cli.app.relayHook]]). With no host connected the helper is a stub whose push transfers nothing and says that a bank will.
 
-**What git does at a push.** receive-pack writes the pack into a quarantine directory (`objects/tmp_objdir-incoming-*`) and checks every object. It runs `pre-receive` once with every `<old> <new> <ref>` line; a failure refuses the whole push and deletes the quarantine. Otherwise git moves the objects into the relay and runs `update <ref> <old> <new>` per ref, a failure refusing that ref only, before updating it. `post-receive` gets the applied lines; its exit status changes nothing. Hook output reaches the pusher as `remote:` lines.
+**What git does at a push.** receive-pack writes the pack into a quarantine directory (`objects/tmp_objdir-incoming-*`) and checks every object. It runs `pre-receive` once with every `<old> <new> <ref>` line; a failure refuses the whole push and deletes the quarantine. Otherwise git moves the objects into the relay and runs `update <ref> <old> <new>` per ref, a failure refusing that ref only, before updating it. `post-receive` gets the applied lines; its exit status changes nothing.
 
 **Ref namespaces** ([[internal/gitx.HeadsPrefix]] and its neighbours):
 
@@ -233,13 +247,12 @@ In a relay, host code deletes only the two scratch namespaces, `refs/remotes/git
 A box controls its repository, every ref and object it offers, every byte of its `host.git` stream, its snapshot report, and when it stops reading.
 
 - **Rewriting recorded history by push.** git itself refuses updates to the hidden `refs/devc` and `refs/remotes` (`receive.hideRefs`) and branch deletions (`receive.denyDeletes`). `pre-receive` refuses more than 1,000 refs, malformed input, a configuration with problems and a relay over budget. `update` applies [[internal/gitx.CheckUpdate]], then [[internal/gitx.Service.RecordUpdate]] writes the bank ref or tag record with `core.fsync=reference`, or the ref is refused ([[finding:C1-05]]).
-- **Rewriting it by bank.** The fetch's refspecs write only `refs/devc/incoming/`, with `--no-tags`. [[internal/gitx.PlanBank]] skips names that fail [[internal/names.CheckRef]] or `git check-ref-format --branch`, keeps protected branches, deletes nothing, records box tags only as `refs/devc/tags/`, and applies at most 1,000 branches and 1,000 tags per run.
+- **Rewriting it by bank.** The fetch's refspecs name single refs and write only `refs/devc/incoming/`, with `--no-tags`; names that fail [[internal/names.CheckRef]] are not fetched. [[internal/gitx.PlanBank]] skips those that fail `git check-ref-format --branch`, keeps protected branches, deletes nothing, records box tags only as `refs/devc/tags/`, and applies at most 1,000 branches and 1,000 tags per run.
 - **Changing how history reads.** A `refs/replace/` ref could make a banked commit show other content; host git never interprets one, and a restore creates refs only in devc's namespaces ([[internal/gitx.ArchiveRef]], [[finding:D1-07]]).
 - **Code on the host.** `local/git/relay-hooks` is made to hold exactly three links to the daemon's devc binary before every push ([[internal/gitx.EnsureRelayHooks]]); every other git command devc runs on a relay runs none.
-- **The cost of a push.** The daemon waits at most two minutes for the box lock, and refuses when the state file system has less than 1 GiB free or the relay exceeds `git.relay_quota` (default 20 GiB). git refuses a pack over `git.max_push_size` (default 2 GiB, `receive.maxInputSize`); the daemon stops feeding it 64 MiB later. Every 200 ms a watchdog measures the quarantine and ends the push when the relay would exceed its budget or less than 512 MiB stays free ([[internal/daemon.Daemon.watchPush]], [[finding:D1-05]]); `pre-receive` measures the relay with the whole pack once more ([[internal/gitx.CheckPushSize]]). What the update hooks then write (records and their reflog entries) is not counted, so an accepted push can leave the relay a little over its budget; the next push is refused. receive-pack gets 30 minutes, each hook 15; a box that stops reading for two minutes loses the stream. Sizes must be positive, so no limit can be switched off.
+- **The cost of a push.** The daemon waits at most two minutes for the box lock, and refuses when the state file system has less than 1 GiB free or the relay exceeds `git.relay_quota` (default 20 GiB). git refuses a pack over `git.max_push_size` (default 2 GiB, `receive.maxInputSize`); the daemon stops feeding it 64 MiB later. Every 200 ms a watchdog ([[term:push-watchdog]]) measures the quarantine and ends the push when the relay would exceed its budget or less than 512 MiB stays free ([[internal/daemon.Daemon.watchPush]], [[finding:D1-05]]); `pre-receive` measures the relay with the whole pack once more ([[internal/gitx.CheckPushSize]]). What the update hooks then write is not counted, so an accepted push can leave the relay a little over its budget. receive-pack gets 30 minutes, each hook 15; a box that stops reading for two minutes loses the stream. Sizes must be positive, so no limit can be switched off.
 - **A push that is ended.** receive-pack runs in a process group of its own; ending it kills index-pack and the hooks too and waits until none is left ([[internal/daemon.Daemon.runPush]], [[finding:E1-16]]). Only then is the quarantine removed and the lock released. A group still alive after 30 seconds leaves the relay held, refusing pushes until its last process ends ([[internal/daemon.Daemon.holdRelay]], [[finding:F1-01]]).
-
-The budget and the free-space reserve guard the relay service only: a bank's fetch has neither, nor a size limit ([[doc:docs/dev/LEFTOVER.md#7]]).
+- **The cost of a bank.** A listing over 50,000 refs or malformed, or over 1000 changed branches, new snapshots or new tags, refuses it unfetched. The fetch is bounded as a push is ([[internal/gitx.Service.fetchFromBox]], [[internal/gitx.Watch]]); once its process group is gone, temporary packs and locks are removed ([[internal/gitx.RemoveFetchLeftovers]]), a completed pack stays.
 
 ## Decisions that are not obvious
 

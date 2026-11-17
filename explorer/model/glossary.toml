@@ -62,9 +62,17 @@ see = ["journal", "session"]
 [[term]]
 id = "journal"
 title = "Journal"
-text = "The host's record of a session's events, `durable/realms/<realm>/journal/<project>/<session>.jsonl`: ingestion validates each spool line, gives it the next `seq` and the host's time, and appends it. No box can reach the journals; the daemon's views are rebuilt from them."
+text = "The host's record of a session's events, `durable/realms/<realm>/journal/<project>/<session>.jsonl`: ingestion validates each spool line, gives it the next `seq` and the host's time, and appends it, within the journal budgets. No box can reach the journals; the daemon's views are rebuilt from them."
 refs = ["internal/paths.Paths.JournalFile", "internal/session.Store.Ingest"]
-see = ["spool"]
+see = ["spool", "journal-budget"]
+
+[[term]]
+id = "journal-budget"
+title = "Journal budget"
+aka = ["session_journal_max", "journal_quota"]
+text = "What ingestion may append: a session's journal stays within `sessions.session_journal_max` (128 MiB), a project's journals within `sessions.journal_quota` (2 GiB, each journal counted in whole 4 KiB blocks plus one for its owner record), and the state file system keeps 1 GiB free. Events that do not fit stay in the spool; the host notes the stop once in the session's journal and reads the file again once there is room. `devc sessions prune` makes room by removing journals of sessions that ended."
+refs = ["internal/session.room.fits", "internal/session.Store.ingestFile", "internal/session.Store.Prune"]
+see = ["journal", "ingestion"]
 
 [[term]]
 id = "receipt"
@@ -101,7 +109,7 @@ see = ["banking"]
 id = "banking"
 title = "Banking"
 aka = ["bank"]
-text = "Copying a running box's commits and uncommitted work into its relay: snapshot commits in the box, a fetch into the relay's incoming refs, the branch policy, records under `refs/devc/bank/`."
+text = "Copying a running box's commits and uncommitted work into its relay: snapshot commits in the box, a bounded listing of the box's refs, a fetch by name of those the relay does not record into its incoming refs (under the push watchdog and the free-space reserve), the branch policy, records under `refs/devc/bank/`."
 refs = ["internal/gitx.Service.Bank"]
 see = ["relay"]
 
@@ -319,7 +327,7 @@ see = ["spool", "journal", "reconciliation"]
 id = "session-owner"
 title = "Session owner"
 aka = ["session ownership"]
-text = "The project a session ID belongs to: the first project that claimed it, which ingestion does for a spool file of that ID before reading what it holds; written once to `durable/session-owners/<id>`. A box's spool file for a session another project owns is refused, so a box cannot add events to, or receive commands for, another project's session."
+text = "The project a session ID belongs to: the first project that claimed it, which ingestion does when it first appends an event of a spool file of that ID (the host does when it first writes an event of its own); written once to `durable/session-owners/<id>`, and removed with the journal by `devc sessions prune`. A box's spool file for a session another project owns is refused before it is read, so a box cannot add events to, or receive commands for, another project's session."
 refs = ["internal/session.Store.Claim", "internal/paths.Paths.SessionOwnersDir"]
 see = ["session", "ingestion"]
 
@@ -518,8 +526,8 @@ see = ["push-watchdog"]
 [[term]]
 id = "push-watchdog"
 title = "Push watchdog"
-text = "The daemon's check every 200 ms during a box's push: the push is ended when the relay would exceed `git.relay_quota` or the state file system has less than 512 MiB free."
-refs = ["internal/daemon.Daemon.watchPush", "internal/daemon.Daemon.runPush"]
+text = "The check every 200 ms during a box's push, and during a bank's fetch from a box: the transfer is ended when the relay would exceed `git.relay_quota` or the state file system has less than 512 MiB free."
+refs = ["internal/gitx.Watch", "internal/daemon.Daemon.watchPush", "internal/daemon.Daemon.runPush", "internal/gitx.Service.fetchFromBox"]
 see = ["quarantine", "held-relay"]
 
 [[term]]
@@ -748,7 +756,15 @@ id = "savepoint"
 title = "Savepoint"
 text = "A copy of the data root without its input zones and sealed entries that no box can reach, taken by `devc save`, before sessions `devc <harness>` starts (with `before_session`) or on a box's request: a vault-owned reflink copy in `.devc/savepoints/` or a restic snapshot in the state directory. `devc restore` brings it back as a copy or in place."
 refs = ["internal/data.Savepoint", "internal/data.Service.Save"]
-see = ["reflink-copy", "data-trash"]
+see = ["reflink-copy", "data-trash", "requested-savepoint"]
+
+[[term]]
+id = "requested-savepoint"
+title = "Requested savepoint"
+aka = ["requested_keep", "requested_interval"]
+text = "A savepoint made on a box's request (`devc request savepoint`), recorded with the class `requested` and the request's ID. At most one is made per `data.savepoints.requested_interval` (10 minutes); only the newest `requested_keep` (10) are kept, named or not; the owner's retention (`keep`) and `before_session` never count them. Savepoints recorded before classes existed count as the owner's."
+refs = ["internal/data.Service.SaveRequested", "internal/data.RequestedRetention", "internal/data.Retention"]
+see = ["savepoint", "request"]
 
 [[term]]
 id = "reflink-copy"

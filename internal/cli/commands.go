@@ -23,6 +23,7 @@ import (
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/doctor"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/session"
 	"github.com/mb706/devc/internal/toolbox"
 	"github.com/mb706/devc/internal/version"
 )
@@ -70,6 +71,7 @@ func newDoctorCmd(a *app) *cobra.Command {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Minute)
 			defer cancel()
 			checks := doctor.Run(ctx, h)
+			checks = append(checks, journalCheck(c))
 			if asJSON {
 				if err := writeJSON(a.stdout, checks); err != nil {
 					return err
@@ -93,6 +95,33 @@ func newDoctorCmd(a *app) *cobra.Command {
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the checks as JSON")
 	cmd.Flags().BoolVar(&fix, "fix", false, "apply the fixes that need no root and print the rest as a script")
 	return cmd
+}
+
+// journalCheck reports projects whose session journals a budget stops
+// (C20a): a project's journals at sessions.journal_quota, a session's at
+// sessions.session_journal_max, or the state file system at its reserve.
+func journalCheck(c *config.Config) doctor.Check {
+	ch := doctor.Check{ID: "journals", Title: "Session journals within their budgets", Status: doctor.OK}
+	st := sessionStore(c)
+	var lines []string
+	n := 0
+	for _, ref := range allRefs(c) {
+		br, err := st.Budget(ref)
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("%s: checking the journal budgets: %s", ref, errText(err)))
+			continue
+		}
+		n++
+		lines = append(lines, session.BudgetText(br)...)
+	}
+	if len(lines) == 0 {
+		ch.Detail = fmt.Sprintf("%d project(s), journals within their budgets", n)
+		return ch
+	}
+	ch.Status = doctor.Warn
+	ch.Detail = fmt.Sprintf("%d journal budget(s) reached: session events are not recorded", len(lines))
+	ch.Hint = strings.Join(lines, "\n")
+	return ch
 }
 
 // selinuxDisabled reports whether boxes and auxiliary containers run with

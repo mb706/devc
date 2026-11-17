@@ -34,7 +34,9 @@ tests = [
   "internal/daemon.TestRequestsInterrupted",
   "internal/daemon.TestRequestExecutor",
   "internal/daemon.TestRequestLogs",
+  "internal/daemon.TestSavepointRequestWindow",
   "test/integration.TestRequests",
+  "test/integration.TestRequestedSavepoints",
 ]
 related = ["security-model", "daemon", "box-channel", "sessions-and-events"]
 
@@ -160,7 +162,7 @@ An agent in a box sometimes needs something it cannot do from inside: seal a fin
 | Kind | Risk | Carried out as |
 |---|---|---|
 | `seal` | low | `devc seal -- <path> <project>` |
-| `savepoint` | low | `devc save -- [<name>] <project>` |
+| `savepoint` | low | `devc save --request <id> -- [<name>] <project>` |
 | `note` | low | nothing: done when approved |
 | `package` | high | `devc root <project> -- …` with `apt-get update` and `apt-get install -y --no-install-recommends`, `dnf install -y` or `apk add` |
 | `net` | high | `devc net allow --request <id> --for <d> -- <target> <project>` |
@@ -170,7 +172,7 @@ An agent in a box sometimes needs something it cannot do from inside: seal a fin
 
 **Asking.** In the box, [[internal/cli.newRequestCmd]] validates the request as the host will, adds the session from `DEVC_SESSION`, and sends [[rpc:host.request]] through the agent. The daemon's handler ([[internal/daemon.requestService.create]]) has the project of the channel the stream arrived on. It decodes strictly and runs [[internal/requests.Validate]]: only the fields of the kind; package names, managers, host aliases, secret and branch names matched against patterns; text without control characters (newline and tab only where multi-line) and within limits; paths without `..`; `host:port` with a host name or IPv4 address, or `lan`; durations from one minute to seven days. The project's configuration must be free of problems, and a seal path is resolved against its data root. A refusal goes back to the box and is stored nowhere.
 
-Under the service's lock, the project's log must be below 16 MiB, fewer than 100 requests outstanding (pending or approved) and fewer than 20 made in the last minute. The request is stored as `pending` with a new ID (`r` and 20 time-ordered characters) and a `request` event goes into the session's journal when the session has one in this project. A kind in the project's `[requests] auto` (default `seal`, `savepoint`, `note`; configuration refuses high-risk kinds there) is approved at once with origin `auto`.
+Under the service's lock, the project's log must be below 16 MiB, fewer than 100 requests outstanding (pending or approved) and fewer than 20 made in the last minute. A savepoint request is refused, with the reason, while another savepoint request of the project is outstanding or a savepoint made on request is younger than `data.savepoints.requested_interval` ([[internal/daemon.requestService.savepointRefusal]]); the save, run with `--request`, is of the class requested ([[concern:savepoints]]). The request is stored as `pending` with a new ID (`r` and 20 time-ordered characters) and a `request` event goes into the session's journal when the session has one in this project. A kind in the project's `[requests] auto` (default `seal`, `savepoint`, `note`; configuration refuses high-risk kinds there) is approved at once with origin `auto`.
 
 **Deciding.** `devc requests` lists requests; `devc requests approve|deny <id>` sends [[rpc:requests.decide]]. The origin is the connection's: `local` on the daemon's socket, `hub` on a hub link; a local client may declare `hub`, never the reverse ([[internal/requests.EffectiveOrigin]]). [[internal/requests.MayDecide]] is the only place that says who decides what: `local` decides anything, `auto` and `hub` low-risk requests only. [[internal/daemon.requestService.decideLocked]] decides only a pending request; an approval first takes a place in the executor (two workers, 32 waiting, for the whole daemon), and without one it is refused as busy and stays pending ([[finding:C1-11]]).
 
@@ -189,7 +191,7 @@ Under the service's lock, the project's log must be below 16 MiB, fewer than 100
 - **Forged or extra fields.** Strict decoding and the per-kind field list.
 - **Box-chosen values as options.** They come after `--` or as `--flag=value`, in argument vectors.
 - **A seal outside the data.** The path is resolved against the project's data root before the request is stored ([[internal/data.Normalize]]).
-- **Floods.** The per-project limits, the log cap and the executor's places.
+- **Floods.** The per-project limits, the log cap and the executor's places; for savepoints also the interval and the separate retention of requested ones, so requests cannot push out the owner's savepoints.
 - **Another project's requests.** The channel names the project; a log line naming another project is skipped.
 - **A decision racing an expiry.** Expiry reads the log again under the lock and changes only a request still pending.
 - **Text on a terminal.** Summaries and results are made printable.

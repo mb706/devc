@@ -23,12 +23,14 @@ key = [
   "internal/daemon.crossOrigin",
   "internal/daemon.ParseLocalHost",
   "internal/daemon.router.pin",
+  "internal/netpolicy.Admission",
 ]
 spec = ["doc:specs-v2.md#11"]
 tests = [
   "internal/netpolicy.TestPin",
   "internal/netpolicy.TestForwarder",
   "internal/netpolicy.TestForwarderDial",
+  "internal/netpolicy.TestForwarderAdmission",
   "internal/netpolicy.TestListen",
   "internal/netpolicy.TestRegistry",
   "internal/netpolicy.TestProcessAlive",
@@ -48,6 +50,11 @@ tests = ["internal/netpolicy.TestPin", "internal/netpolicy.TestForwarder"]
 text = "The dial process runs the host's devc binary in the box's user and network namespaces only, never in its mount namespace, so nothing from the box is executed."
 refs = ["internal/netpolicy.Forwarder.DialArgs", "internal/boxside.Dial"]
 tests = ["internal/netpolicy.TestForwarder", "internal/netpolicy.TestForwarderDial"]
+
+[[invariant]]
+text = "A forward runs at most 64 dial processes at once and the router at most 256 across every box; a connection beyond that is closed at once, without a dial process."
+refs = ["internal/netpolicy.Admission.Acquire", "internal/netpolicy.Forwarder.Serve", "internal/netpolicy.Forwarder.Dial", "internal/daemon.router.dial"]
+tests = ["internal/netpolicy.TestForwarderAdmission"]
 
 [[invariant]]
 text = "The router routes only to a port listed in the project's box.ports or forwarded now, of the running box of a configured project."
@@ -84,7 +91,7 @@ with the connection as standard input and output, the calling process's environm
 
 **Pinning** ([[internal/netpolicy.Pin]]). The descriptors are opened once, from `/proc/<pid>/ns/user` and `/proc/<pid>/ns/net` of the box's main process. Between two engine reports of the same PID and start time, and two reads of that PID's start time in `/proc`, they are proven to belong to this box, not to a process that reused its PID ([[finding:B5]]). Every connection uses the pinned descriptors, so it reaches this box generation or nothing.
 
-**`devc forward`** ([[internal/cli.app.forward]]). It starts the box if needed (as `sh` does), then listens on `--bind` (default `127.0.0.1`) at the box port's number, or a free one when that is taken and `--host-port` was not given ([[internal/netpolicy.Listen]]); another address than loopback is allowed with a warning. [[internal/netpolicy.Forwarder.Serve]] hands every accepted socket to a dial process and polls the engine every two seconds: a missing container, another PID or start time ends the forward. In the foreground it runs until Ctrl-C; with `--detach` it passes the listener to `devc forward serve --id <id>` as descriptor 3, in a session of its own, logging to `<runtime>/forwards/<id>.log`; that process pins the box again itself. Both kinds leave a record in `<runtime>/forwards/<id>.json` ([[internal/netpolicy.Registry]]), which no box can reach; `devc forward ls` and `stop` work from the records, and [[internal/netpolicy.ProcessAlive]] counts a record as live only while its process is that forward.
+**`devc forward`** ([[internal/cli.app.forward]]). It starts the box if needed (as `sh` does), then listens on `--bind` (default `127.0.0.1`) at the box port's number, or a free one when that is taken and `--host-port` was not given ([[internal/netpolicy.Listen]]); another address than loopback is allowed with a warning. [[internal/netpolicy.Forwarder.Serve]] hands every accepted socket to a dial process, at most 64 at once ([[internal/netpolicy.Admission]]): a connection beyond that is closed at once, and the refusals are logged at most once a minute with their number. It polls the engine every two seconds: a missing container, another PID or start time ends the forward. In the foreground it runs until Ctrl-C; with `--detach` it passes the listener to `devc forward serve --id <id>` as descriptor 3, in a session of its own, logging to `<runtime>/forwards/<id>.log`; that process pins the box again itself. Both kinds leave a record in `<runtime>/forwards/<id>.json` ([[internal/netpolicy.Registry]]), which no box can reach; `devc forward ls` and `stop` work from the records, and [[internal/netpolicy.ProcessAlive]] counts a record as live only while its process is that forward.
 
 **The router** ([[term:local-url]], [[flow:local-url]]). The daemon listens on `router.listen` ([[config:config.router.listen]], default `127.0.0.1:7480`; validation accepts only a loopback address with a port, or `off`), read once at start. For each request [[internal/daemon.router.ServeHTTP]]:
 
@@ -93,7 +100,7 @@ with the connection as standard input and output, the calling process's environm
 3. reloads the configuration if it changed and requires a configured project without problems (`404`);
 4. requires the port in the project's `box.ports` ([[config:project.box.ports]]) or a live forward of that port (`404` with both ways to allow it);
 5. requires the daemon's box table to show the box running (`502`) and one of 128 places (`503`);
-6. proxies with `httputil.ReverseProxy`: the box sees the local URL as Host and `X-Forwarded-*`; WebSocket upgrades pass. The transport dials through [[internal/daemon.router.pin]], which pins the box once per container ID and start time, and [[internal/netpolicy.Forwarder.Dial]], which gives the dial process one end of a socket pair. Nothing answering is `502`.
+6. proxies with `httputil.ReverseProxy`: the box sees the local URL as Host and `X-Forwarded-*`; WebSocket upgrades pass. The transport dials through [[internal/daemon.router.pin]], which pins the box once per container ID and start time, and [[internal/netpolicy.Forwarder.Dial]], which gives the dial process one end of a socket pair. Nothing answering is `502`. The router's dial processes, idle ones of the transport's pool included, share one limit of 256; a dial beyond it starts no process and the request gets `503`.
 
 ## What can go wrong, and what prevents it
 
@@ -103,7 +110,7 @@ with the connection as standard input and output, the calling process's environm
 - **DNS rebinding.** Routing only by a Host below `.localhost` means a page that rebinds its own name to `127.0.0.1` matches no route.
 - **A planted forward record.** Records live in the runtime directory outside every box's mount, are decoded strictly, must name the project's box, and count only while their process is the forward.
 
-Limits: the router has no authentication, so any process on the host that can connect to its loopback address reaches the routed ports, and so does anyone who can reach a forward's `--bind` address; a forward starts a dial process for every connection it accepts, with no limit ([[doc:docs/dev/LEFTOVER.md#7]]). Local URLs share the parent name `localhost`, so one box's page can set cookies for another's. A change of `router.listen` needs a daemon restart ([[doc:docs/dev/LEFTOVER.md#5]]).
+Limits: the router has no authentication, so any process on the host that can connect to its loopback address reaches the routed ports, and so does anyone who can reach a forward's `--bind` address, up to the connection limits. Local URLs share the parent name `localhost`, so one box's page can set cookies for another's. A change of `router.listen` needs a daemon restart ([[doc:docs/dev/LEFTOVER.md#5]]).
 
 ## Decisions that are not obvious
 

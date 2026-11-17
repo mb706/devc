@@ -52,6 +52,9 @@ type router struct {
 	port int
 	sem  chan struct{}
 	tr   *http.Transport
+	// adm bounds the dial processes (connections to boxes, idle ones in
+	// the transport's pool included) across every box (C20a).
+	adm *netpolicy.Admission
 
 	mu   sync.Mutex
 	pins map[names.ProjectRef]*routerPin
@@ -79,7 +82,8 @@ func (d *Daemon) startRouter() {
 		return
 	}
 	rt := &router{d: d, ctx: d.ctx, ln: ln, port: ln.Addr().(*net.TCPAddr).Port, sem: make(chan struct{}, maxRouted),
-		pins: map[names.ProjectRef]*routerPin{}}
+		pins: map[names.ProjectRef]*routerPin{},
+		adm:  netpolicy.NewAdmission(netpolicy.MaxRouterConns, func(line string) { d.log.Warn("router: " + line) })}
 	rt.tr = &http.Transport{
 		DialContext:           rt.dial,
 		MaxIdleConnsPerHost:   4,
@@ -235,6 +239,10 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Transport: rt.tr,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			rt.d.log.Debug("router", "ref", ref.String(), "port", port, "err", err)
+			if errors.Is(err, netpolicy.ErrBusy) {
+				rt.fail(w, http.StatusServiceUnavailable, "too many connections to boxes at once (at most %d)", netpolicy.MaxRouterConns)
+				return
+			}
 			rt.fail(w, http.StatusBadGateway, "nothing answered on port %d in the box of %s (does the server listen on 127.0.0.1:%d there?)", port, ref, port)
 		},
 	}
@@ -314,7 +322,7 @@ func (rt *router) dial(ctx context.Context, _, addr string) (net.Conn, error) {
 	}
 	e := rt.d.current()
 	f := &netpolicy.Forwarder{Runner: rt.d.o.Runner, Engine: e.eng, Nsenter: nsenter, Exe: rt.d.o.Executable,
-		Container: names.BoxName(ref), Box: pin, Port: port}
+		Container: names.BoxName(ref), Box: pin, Port: port, Admission: rt.adm}
 	return f.Dial(rt.ctx)
 }
 

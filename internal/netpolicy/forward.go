@@ -28,6 +28,67 @@ import (
 // ErrBoxGone ends a forward whose box stopped, was removed or restarted.
 var ErrBoxGone = errors.New("the box is no longer running")
 
+// ErrBusy is returned by Forwarder.Dial when its Admission has no place:
+// no dial process is started.
+var ErrBusy = errors.New("too many connections to boxes at once")
+
+// Admission limits (C20a, X8 4): every connection is one dial process on
+// the host, and anyone who reaches a forward's listener chooses how many
+// connections it opens.
+const (
+	// MaxForwardConns bounds the connections one forward serves at once.
+	MaxForwardConns = 64
+	// MaxRouterConns bounds the connections the daemon's router keeps open
+	// to all boxes together.
+	MaxRouterConns = 256
+	// refusalLogEvery is the least time between two log lines about
+	// refused connections.
+	refusalLogEvery = time.Minute
+)
+
+// Admission bounds the connections that run at once. A connection that
+// finds no place is refused at once, before any process is started, and
+// refusals are logged at most once per interval, with their number.
+type Admission struct {
+	slots chan struct{}
+	every time.Duration
+	log   func(string)
+
+	mu      sync.Mutex
+	last    time.Time
+	refused int
+}
+
+// NewAdmission returns an Admission with max places; log receives the
+// lines about refusals (nil discards them).
+func NewAdmission(max int, log func(string)) *Admission {
+	return &Admission{slots: make(chan struct{}, max), every: refusalLogEvery, log: log}
+}
+
+// Acquire takes a place; ok is false when there is none. release gives the
+// place back and may be called more than once.
+func (a *Admission) Acquire() (release func(), ok bool) {
+	select {
+	case a.slots <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-a.slots }) }, true
+	default:
+	}
+	a.mu.Lock()
+	a.refused++
+	now := time.Now()
+	var line string
+	if now.Sub(a.last) >= a.every {
+		line = fmt.Sprintf("refused %d connection(s) since the last report: at most %d run at once", a.refused, cap(a.slots))
+		a.last, a.refused = now, 0
+	}
+	a.mu.Unlock()
+	if line != "" && a.log != nil {
+		a.log(line)
+	}
+	return func() {}, false
+}
+
 // Forwarder relays connections accepted on a host listener to a TCP port
 // on the box's loopback interface. For each connection it runs
 //
@@ -57,6 +118,10 @@ type Forwarder struct {
 	Log io.Writer
 	// Poll is how often the box is checked (default 2 s).
 	Poll time.Duration
+	// Admission bounds the connections served at once: Serve uses a new
+	// one with MaxForwardConns places when it is nil; Dial uses it when it
+	// is set (the router shares one across its boxes).
+	Admission *Admission
 }
 
 // Descriptors of the pinned namespaces in each dial process.
@@ -97,6 +162,10 @@ func (f *Forwarder) Serve(ctx context.Context, ln net.Listener) error {
 		<-ctx.Done()
 		ln.Close()
 	}()
+	adm := f.Admission
+	if adm == nil {
+		adm = NewAdmission(MaxForwardConns, func(line string) { f.logf("%s", line) })
+	}
 	var wg sync.WaitGroup
 	for {
 		conn, err := ln.Accept()
@@ -108,9 +177,17 @@ func (f *Forwarder) Serve(ctx context.Context, ln net.Listener) error {
 			conn.Close()
 			break
 		}
+		// Beyond the limit a connection is closed at once, without a dial
+		// process (C20a).
+		release, ok := adm.Acquire()
+		if !ok {
+			conn.Close()
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer release()
 			f.relay(ctx, conn)
 		}()
 	}
@@ -276,8 +353,16 @@ func (f *Forwarder) Dial(ctx context.Context) (net.Conn, error) {
 	if f.Box == nil || f.Box.PID <= 0 || f.Box.UserNS == nil || f.Box.NetNS == nil || f.Port <= 0 || f.Port > 65535 || f.Nsenter == "" || f.Exe == "" {
 		return nil, errors.New("dial: incomplete settings")
 	}
+	release := func() {}
+	if f.Admission != nil {
+		var ok bool
+		if release, ok = f.Admission.Acquire(); !ok {
+			return nil, ErrBusy
+		}
+	}
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
+		release()
 		return nil, fmt.Errorf("dial: %w", err)
 	}
 	local := os.NewFile(uintptr(fds[0]), "dial-local")
@@ -286,6 +371,7 @@ func (f *Forwarder) Dial(ctx context.Context) (net.Conn, error) {
 	local.Close()
 	if err != nil {
 		remote.Close()
+		release()
 		return nil, fmt.Errorf("dial: %w", err)
 	}
 	pctx, cancel := context.WithCancel(ctx)
@@ -294,6 +380,7 @@ func (f *Forwarder) Dial(ctx context.Context) (net.Conn, error) {
 		stderr = io.Discard
 	}
 	go func() {
+		defer release()
 		defer cancel()
 		defer remote.Close()
 		code, err := f.Runner.Interactive(pctx, execx.Cmd{

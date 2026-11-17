@@ -44,9 +44,17 @@ type Store struct {
 	Now   func() time.Time
 	// LockTimeout bounds the wait for the per-box ingestion lock.
 	LockTimeout time.Duration
+	// Limits returns a project's journal budgets (C20a); the defaults
+	// apply when it is nil or leaves a budget zero.
+	Limits func(names.ProjectRef) Budgets
+	// Free measures the free space of a path (paths.FreeSpace when nil).
+	Free func(path string) (int64, error)
 	// claims caches the sessions this store found owned by the project
 	// that ingests them (Claim).
 	claims sync.Map
+	// usage caches each project's counted journal total (projectUsage).
+	usageMu sync.Mutex
+	usage   map[names.ProjectRef]journalUsage
 }
 
 // NewStore returns a store with the real clock.
@@ -73,11 +81,15 @@ func (s *Store) offsetsFile(ref names.ProjectRef) string {
 // Refused names the project that owns the file's session when it is not
 // the box's own (finding C1-01): nothing of the file is ingested, and the
 // refusal is reported once.
+//
+// Stopped names the budget that stopped the session's ingestion (C20a):
+// the file is not read again until that budget has room.
 type spoolPos struct {
 	Offset  int64  `json:"offset"`
 	Discard bool   `json:"discard,omitempty"`
 	Seq     int64  `json:"seq,omitempty"`
 	Refused string `json:"refused,omitempty"`
+	Stopped string `json:"stopped,omitempty"`
 }
 
 // loadOffsets reads how far ingestion got in each of a box's spool files.
@@ -151,7 +163,11 @@ type IngestReport struct {
 	Dropped int // valid events of sessions that had already ended
 	Skipped int // spool entries that are not session files
 	Removed int // spool files removed after their session ended
-	Notes   int // host notes written (truncated spool files)
+	Notes   int // host notes written (truncated spool files, budgets)
+	// Stopped counts the spool files left unread because a budget stopped
+	// their session; Stops are the sessions a budget stopped in this run.
+	Stopped int
+	Stops   []Stop
 	// More is set when a file held more than one run may take: another
 	// run should follow at once.
 	More bool
@@ -167,6 +183,8 @@ func (r *IngestReport) add(o IngestReport) {
 	r.Skipped += o.Skipped
 	r.Removed += o.Removed
 	r.Notes += o.Notes
+	r.Stopped += o.Stopped
+	r.Stops = append(r.Stops, o.Stops...)
 	r.More = r.More || o.More
 	r.Refused = append(r.Refused, o.Refused...)
 }
@@ -249,25 +267,47 @@ func (s *Store) Ingest(ref names.ProjectRef) (IngestReport, error) {
 // holds events appended after pos was recorded (the offsets were not saved,
 // or an append went through only in part), ingestion resumes after the
 // last of them, so nothing is read twice.
+//
+// The journal budgets are checked before anything is appended (C20a): of
+// the events read, only those that fit the session's budget, the
+// project's and the free-space reserve are appended; the rest stay in the
+// spool. The budget that stopped the session is noted once in its journal
+// and kept in pos, and the file is not read again until that budget has
+// room. Nothing already in a journal is removed.
 func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid string, pos spoolPos) (spoolPos, IngestReport, bool, error) {
 	var rep IngestReport
 	if pos.Refused != "" {
 		rep.Skipped++
 		return pos, rep, false, nil
 	}
-	// The session must be this project's (finding C1-01).
-	owner, mine, err := s.Claim(ref, sid)
-	if err != nil {
-		return pos, rep, false, err
-	}
-	if !mine {
+	// The session must be this project's (finding C1-01). It is claimed
+	// only once something is appended, so a box cannot make the host
+	// record owners for empty spool files (C20a).
+	refuse := func(owner names.ProjectRef) (spoolPos, IngestReport, bool, error) {
 		pos.Refused = owner.String()
 		rep.Skipped++
 		rep.Refused = append(rep.Refused, Refusal{Session: sid, Owner: owner.String()})
 		return pos, rep, false, nil
 	}
+	if owner, found, err := s.Owner(sid); err != nil {
+		return pos, rep, false, err
+	} else if found && owner != ref {
+		return refuse(owner)
+	}
 	rel := "spool/" + name
 	jfile := s.Paths.JournalFile(ref, sid)
+	jsize := journalSize(jfile)
+	rm, err := s.room(ref, jsize)
+	if err != nil {
+		return pos, rep, false, err
+	}
+	if pos.Stopped != "" {
+		if !rm.resumes(pos.Stopped) {
+			rep.Stopped++
+			return pos, rep, false, nil
+		}
+		pos.Stopped = ""
+	}
 	js, err := loadJournalState(jfile)
 	if err != nil {
 		return pos, rep, false, err
@@ -277,6 +317,7 @@ func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid st
 		pos = spoolPos{Offset: js.mark, Seq: js.lastSeq}
 	}
 	start := pos
+	seq0, ended0 := js.lastSeq, js.ended
 	now := s.now()
 	stamp := func(e proto.Event, off int64) proto.Event {
 		js.lastSeq++
@@ -291,12 +332,14 @@ func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid st
 		rep.Skipped++
 		return pos, rep, false, nil
 	}
+	truncated := false
 	if size < pos.Offset {
 		if !js.ended {
 			ev, _ := proto.New(sid, proto.TypeNote, proto.Note{Text: fmt.Sprintf(
 				"devc: the spool file of this session was truncated (it has %d bytes, %d had been ingested); continuing at its end", size, pos.Offset)}, now)
 			batch = append(batch, stamp(ev, size))
 			rep.Notes++
+			truncated = true
 		}
 		pos = spoolPos{Offset: size}
 	}
@@ -362,13 +405,78 @@ func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid st
 	if taken >= MaxBytesPerFile || events >= MaxEventsPerFile {
 		rep.More = true
 	}
-	if err := appendJournal(s.Paths, ref, sid, batch); err != nil {
+
+	// The budgets (C20a): append the events that fit, in order.
+	lines, err := encodeEvents(batch)
+	if err != nil {
+		return start, IngestReport{}, false, err
+	}
+	n, total, stop := 0, int64(0), ""
+	for n < len(lines) {
+		if stop = rm.fits(total + int64(len(lines[n]))); stop != "" {
+			break
+		}
+		total += int64(len(lines[n]))
+		n++
+	}
+	if n < len(batch) {
+		batch, lines = batch[:n], lines[:n]
+		rep.More = false
+		js.lastSeq, js.ended = seq0+int64(n), ended0
+		for _, e := range batch {
+			if e.Type == proto.TypeSessionEnd {
+				js.ended = true
+			}
+		}
+		rep.Events, rep.Notes = n, 0
+		if truncated && n > 0 {
+			rep.Events, rep.Notes = n-1, 1
+		}
+		if n == 0 {
+			pos = start
+		} else {
+			pos = spoolPos{Offset: *batch[n-1].Spool, Seq: start.Seq}
+		}
+	}
+	if stop != "" {
+		pos.Stopped = stop
+		rep.Stops = append(rep.Stops, Stop{Session: sid, Budget: stop})
+		// One note per stop, into a journal that exists or gets events now:
+		// a box cannot make the host create journals for notes alone.
+		text := StopText(stop, ref, rm.b)
+		if (js.exists || n > 0) && (n > 0 || !endsWithNote(jfile, text)) {
+			ev, err := proto.New(sid, proto.TypeNote, proto.Note{Text: text}, now)
+			if err != nil {
+				return start, IngestReport{}, false, err
+			}
+			js.lastSeq++
+			ev.Seq, ev.At = js.lastSeq, now.UTC().Format(time.RFC3339Nano)
+			b, err := json.Marshal(ev)
+			if err != nil {
+				return start, IngestReport{}, false, err
+			}
+			batch, lines = append(batch, ev), append(lines, append(b, '\n'))
+			rep.Notes++
+		}
+	}
+	if len(batch) > 0 {
+		if _, mine, err := s.Claim(ref, sid); err != nil {
+			return start, IngestReport{}, false, err
+		} else if !mine {
+			owner, _, _ := s.Owner(sid)
+			pos, rep = start, IngestReport{}
+			return refuse(owner)
+		}
+	}
+	if err := appendLines(s.Paths, ref, sid, lines); err != nil {
 		rep.Events, rep.Notes = 0, 0
+		start.Stopped = ""
 		return start, rep, false, err
 	}
+	s.grew(ref, jsize, jsize+sumLen(lines))
 	pos.Seq = js.lastSeq
 	// A file whose session has ended and that holds nothing more is done.
-	if js.ended && !pos.Discard {
+	if js.ended && !pos.Discard && pos.Stopped == "" {
 		if size, err := root.Size(rel); err == nil && size == pos.Offset {
 			if err := root.RemoveFile(rel); err == nil {
 				rep.Removed++
@@ -416,11 +524,42 @@ func (s *Store) SpoolSnapshot(ref names.ProjectRef) (map[string]int64, error) {
 }
 
 // AppendHost appends events the host itself writes (notes, reconciliation)
-// to a session's journal. The caller holds the lock.
+// to a session's journal. The caller holds the lock. Events a box causes
+// (a request, a note about a push) are refused with ErrBudget when they do
+// not fit the journal budgets (C20a); session.end, seen and answer are not
+// a box's doing and always go in.
 func (s *Store) AppendHost(ref names.ProjectRef, sid string, ps ...hostEvent) error {
-	js, err := loadJournalState(s.Paths.JournalFile(ref, sid))
+	file := s.Paths.JournalFile(ref, sid)
+	js, err := loadJournalState(file)
 	if err != nil {
 		return err
+	}
+	now := s.now()
+	var evs []proto.Event
+	budgeted := false
+	for _, p := range ps {
+		ev, err := proto.New(sid, p.typ, p.data, now)
+		if err != nil {
+			return err
+		}
+		js.lastSeq++
+		ev.Seq, ev.At = js.lastSeq, now.UTC().Format(time.RFC3339Nano)
+		evs = append(evs, ev)
+		budgeted = budgeted || !exemptHost[p.typ]
+	}
+	lines, err := encodeEvents(evs)
+	if err != nil {
+		return err
+	}
+	jsize := journalSize(file)
+	if budgeted {
+		rm, err := s.room(ref, jsize)
+		if err != nil {
+			return err
+		}
+		if stop := rm.fits(sumLen(lines)); stop != "" {
+			return fmt.Errorf("%w: %s", ErrBudget, StopText(stop, ref, rm.b))
+		}
 	}
 	// The host may add to a journal ref already has (also one from before
 	// ownership was recorded, so reconciliation can end it), but never
@@ -432,18 +571,11 @@ func (s *Store) AppendHost(ref names.ProjectRef, sid string, ps ...hostEvent) er
 			return fmt.Errorf("session %s belongs to %s, not %s", sid, owner, ref)
 		}
 	}
-	now := s.now()
-	var evs []proto.Event
-	for _, p := range ps {
-		ev, err := proto.New(sid, p.typ, p.data, now)
-		if err != nil {
-			return err
-		}
-		js.lastSeq++
-		ev.Seq, ev.At = js.lastSeq, now.UTC().Format(time.RFC3339Nano)
-		evs = append(evs, ev)
+	if err := appendLines(s.Paths, ref, sid, lines); err != nil {
+		return err
 	}
-	return appendJournal(s.Paths, ref, sid, evs)
+	s.grew(ref, jsize, jsize+sumLen(lines))
+	return nil
 }
 
 // hostEvent is an event the host appends itself: its type and data.

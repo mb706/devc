@@ -491,7 +491,7 @@ title = "Ingestion"
 transport = "The host reads the spool beneath the box's runtime directory through safefs: no symlinks, regular files only, from the offset reached last time."
 carries = "Session events, which become journal lines with seq and the host's time."
 boundary = true
-checks = ["internal/proto.ParseSpoolLine", "internal/session.Store.Claim"]
+checks = ["internal/proto.ParseSpoolLine", "internal/session.Store.Claim", "internal/session.room.fits"]
 concerns = ["sessions-and-events"]
 
 [[channel]]
@@ -806,7 +806,7 @@ title = "Relay service"
 transport = "git upload-pack or receive-pack on the project's relay, with the box's host.git stream as standard input and output."
 carries = "Fetches and pushes of the box's git remote helper; the project is the one the channel is bound to."
 boundary = true
-checks = ["internal/daemon.boxWorker.serveGit", "internal/gitx.ServeCall", "internal/daemon.Daemon.watchPush"]
+checks = ["internal/daemon.boxWorker.serveGit", "internal/gitx.ServeCall", "internal/daemon.Daemon.watchPush", "internal/gitx.Watch"]
 concerns = ["git-ratchet"]
 
 [[channel]]
@@ -825,9 +825,9 @@ from = "host-git"
 to = "box-git"
 title = "Box transport"
 transport = "git's ext:: transport: `podman exec -i -u 1000:1000 <box> git-upload-pack|git-receive-pack /w/<realm>/<project>/.repo`, allowed for these calls only (`protocol.ext.allow`)."
-carries = "A bank's fetch of the box's branches, snapshots and tags into `refs/devc/incoming/`; the push of the relay's branches, the upstream's branches and tags into the box (origin/*, github/*)."
+carries = "A bank's fetch, by name, of the box's branches, snapshots and tags that the relay does not record yet, into `refs/devc/incoming/`; the push of the relay's branches, the upstream's branches and tags into the box (origin/*, github/*)."
 boundary = true
-checks = ["internal/gitx.Host.Cmd", "internal/gitx.PlanBank"]
+checks = ["internal/gitx.Host.Cmd", "internal/gitx.Service.listBox", "internal/gitx.bankFetch", "internal/gitx.Service.fetchFromBox", "internal/gitx.PlanBank"]
 concerns = ["git-ratchet", "upstream", "worktrees-and-context"]
 
 [[channel]]

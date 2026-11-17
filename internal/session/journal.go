@@ -105,13 +105,35 @@ func loadJournalState(file string) (journalState, error) {
 	return st, err
 }
 
-// appendJournal appends events to a journal file (mode 0600) in one write
-// and makes them durable (fsync) before it returns: callers record spool
-// offsets only afterwards (finding B6). A write that fails part-way is cut
-// off again; should that fail too, the torn line stays behind, and the
-// next append starts on a new line so readJournal skips just the torn one.
-func appendJournal(p *paths.Paths, ref names.ProjectRef, session string, evs []proto.Event) error {
-	if len(evs) == 0 {
+// encodeEvents renders events as journal lines.
+func encodeEvents(evs []proto.Event) ([][]byte, error) {
+	lines := make([][]byte, 0, len(evs))
+	for _, e := range evs {
+		b, err := json.Marshal(e)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, append(b, '\n'))
+	}
+	return lines, nil
+}
+
+func sumLen(lines [][]byte) int64 {
+	var n int64
+	for _, l := range lines {
+		n += int64(len(l))
+	}
+	return n
+}
+
+// appendLines appends encoded events (encodeEvents) to a journal file
+// (mode 0600) in one write and makes them durable (fsync) before it
+// returns: callers record spool offsets only afterwards (finding B6). A
+// write that fails part-way is cut off again; should that fail too, the
+// torn line stays behind, and the next append starts on a new line so
+// readJournal skips just the torn one.
+func appendLines(p *paths.Paths, ref names.ProjectRef, session string, lines [][]byte) error {
+	if len(lines) == 0 {
 		return nil
 	}
 	dir := p.JournalDir(ref)
@@ -119,13 +141,8 @@ func appendJournal(p *paths.Paths, ref names.ProjectRef, session string, evs []p
 		return err
 	}
 	var buf bytes.Buffer
-	for _, e := range evs {
-		b, err := json.Marshal(e)
-		if err != nil {
-			return err
-		}
-		buf.Write(b)
-		buf.WriteByte('\n')
+	for _, l := range lines {
+		buf.Write(l)
 	}
 	f, err := openJournal(p.JournalFile(ref, session))
 	if err != nil {
@@ -157,7 +174,7 @@ var openJournal = func(file string) (journalFile, error) {
 	return os.OpenFile(file, os.O_RDWR|os.O_APPEND|os.O_CREATE|noFollow, 0o600)
 }
 
-// journalFile is what appendJournal needs of an open journal.
+// journalFile is what appendLines needs of an open journal.
 type journalFile interface {
 	io.ReadWriteCloser
 	io.ReaderAt

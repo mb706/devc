@@ -173,6 +173,16 @@ func (h *hub) scanLocked(ref names.ProjectRef, publish bool) {
 		return
 	}
 	ds.listed = h.now()
+	// Journals removed by `devc sessions prune` (C20a) leave the views.
+	listed := map[sessionKey]bool{}
+	for _, id := range ids {
+		listed[keyOf(ref, id)] = true
+	}
+	for k := range h.sessions {
+		if k.ref == ref && !listed[k] {
+			delete(h.sessions, k)
+		}
+	}
 	cutoff := h.now().Add(-h.window)
 	for _, id := range ids {
 		k := keyOf(ref, id)

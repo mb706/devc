@@ -153,7 +153,35 @@ cannot write into, or take over, another project's session by reusing its ID
 (devc warns when one tries). Commands that take a session accept its ID, a
 unique prefix, or `<realm>/<project>/<id>`. A
 harness runs with its permission prompts switched off: the box is the
-sandbox. Each harness also gets a generated description of the box (paths,
+sandbox.
+
+Journals have budgets, because a box decides how many events it writes:
+
+```toml
+# project.toml
+[sessions]
+session_journal_max = "128m"   # one session's journal (default)
+journal_quota = "2g"           # all journals of the project (default)
+```
+
+Before devc appends events to a journal it checks both budgets and keeps
+1 GiB free on the state file system. Each journal counts at least 8 KiB
+toward `journal_quota` (its blocks and the session's owner record), so many
+small sessions use up the budget as one large one does. Events that do not
+fit stay in the box's spool (within the spool's own limits, the runtime
+directory); devc writes one note into the session's journal saying which
+budget was reached, `devc ps` warns about it and `devc doctor` reports it
+(check `journals`). Nothing already in a journal is removed, and ingestion
+goes on by itself once there is room. Make room by raising a budget, or
+remove the journals of sessions that ended long ago:
+
+```sh
+devc sessions prune demo/hello --before 30d          # ended more than 30 days ago
+devc sessions prune demo/hello --before 2026-10-01   # ended before that date
+```
+
+`prune` never removes a session that has not ended and does nothing without
+`--before`; what a hub has archived stays there. Each harness also gets a generated description of the box (paths,
 network level, git and data rules) in its instructions.
 
 ### The daemon
@@ -273,6 +301,15 @@ allow` (see [Network](#network-levels-exceptions-and-port-forwarding)); an
 approved pull request runs `devc pr create --yes` and a comment `devc pr
 comment` (see [GitHub](#github)). Requests need the daemon; without it, `devc request` tells the agent to ask
 you directly.
+
+A savepoint a box requests is of its own class (`requested` in `devc data
+ls`): at most one is made per `data.savepoints.requested_interval` (default
+`10m`), and a request inside that interval, or while another savepoint
+request of the project is waiting, is refused with the reason. Only the
+newest `data.savepoints.requested_keep` (default 10) requested savepoints
+are kept, whatever name the box gave them. They never count toward
+`data.savepoints.keep`, and nothing a box requests makes your own savepoints
+go.
 
 ### Hubs
 
@@ -526,7 +563,16 @@ what the push left and lets the next one in. If one of them cannot be
 ended (stuck in the kernel, for example on a hung file system), the daemon
 logs it, leaves the relay as the push left it and refuses further pushes to
 it with a message saying why; once the last of those processes has ended,
-it removes what the push left and takes pushes again, without a restart. Before serving a fetch, the daemon fetches the upstream into the
+it removes what the push left and takes pushes again, without a restart.
+A bank is bounded the same way: it first lists the box's branches, snapshot
+refs and tags (at most 50,000), and fetches by name only those the relay
+does not record yet. More than 1000 changed branches, new snapshots or new
+tags refuse the bank before anything is fetched (remove some in the box).
+The fetch starts only with 1 GiB free and the relay within
+`git.relay_quota`, and is ended like a push when the relay would exceed its
+budget or less than 512 MiB would stay free; it leaves no temporary pack,
+earlier bank refs stay, and the bank reports that the work was not
+preserved. Before serving a fetch, the daemon fetches the upstream into the
 relay (at most once a minute, 20 seconds at most, without prompts; turn it off
 with `git.fetch_through = false`), so `git fetch origin` brings new upstream
 commits as `origin/*` and `github/*` without `devc pull`. Without the daemon,
@@ -731,8 +777,12 @@ The driver is set by `data.savepoints.driver`: `reflink` makes instant copies
 inside the project when its filesystem can clone files (XFS, btrfs); `restic`
 keeps an incremental repository on the host (install it with `devc toolbox
 install restic`); `auto` picks `reflink` when a probe succeeds, else `restic`.
-`keep` limits the number of unnamed savepoints; `before_session = true` takes
-one before a session starts (at most one per 30 minutes). All data
+`keep` limits the number of your unnamed savepoints; `before_session = true` takes
+one before a session starts (at most one per 30 minutes; a savepoint the box
+requested does not count). Savepoints a box requests are kept apart, with
+their own limits (`requested_keep`, `requested_interval`; see [Requests from
+a box](#requests-from-a-box)); savepoints taken before devc had these
+classes count as yours. All data
 operations run in a throwaway helper container that sees only the project.
 
 ## Moving data between machines
@@ -1010,7 +1060,10 @@ chosen and printed if that one is taken) and relays each connection to
 in the image. A forward ends when its box stops. A loopback port can be used
 by every user and program on the host; `--bind <address>` with a
 non-loopback address makes it reachable from the network, and devc warns
-about that.
+about that. Each connection runs one small process on the host, so a
+forward serves at most 64 connections at once and the router of local URLs
+at most 256 to all boxes together; a connection beyond that is closed at
+once (the forward's log, or the daemon's, says so once a minute).
 
 **Local URLs.** While the daemon runs, it serves
 `http://<port>.<project>.<realm>.localhost:7480/` for every port listed in

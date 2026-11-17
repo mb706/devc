@@ -190,7 +190,7 @@ ref = "internal/paths.Paths.GateLog"
 
 [[tree.entry]]
 path = "durable/realms/<realm>/savepoints/<project>.jsonl"
-text = "The index of a project's savepoints."
+text = "The index of a project's savepoints: a `save` and a `drop` record per savepoint, the save with its driver, what it covers and, for one a box requested, the class `requested` and the request's ID."
 writer = "host"
 ref = "internal/paths.Paths.SavepointIndex"
 
@@ -202,7 +202,7 @@ ref = "internal/paths.Paths.ServiceLogFile"
 
 [[tree.entry]]
 path = "durable/session-owners"
-text = "One file per session ID naming the project that claimed it first: the first whose spool file of that ID was ingested, whatever the file held (or, for an ID from before these records, the project whose journal of it began first). A box cannot claim another project's session."
+text = "One file per session ID naming the project that claimed it first: the first that appended an event of that ID to a journal (or, for an ID from before these records, the project whose journal of it began first). A box cannot claim another project's session. `devc sessions prune` removes a session's file with its journal."
 writer = "host"
 ref = "internal/paths.Paths.SessionOwnersDir"
 
@@ -310,7 +310,7 @@ ref = "internal/paths.Paths.ReceiptsDir"
 
 [[tree.entry]]
 path = "local/boxes/<realm>/<project>/spool-offsets.json"
-text = "How far ingestion got in each of the box's spool files, and the files refused because their session belongs to another project."
+text = "How far ingestion got in each of the box's spool files, the files refused because their session belongs to another project, and the journal budget that stopped a file's session."
 writer = "host"
 ref = "internal/session.Store.offsetsFile"
 

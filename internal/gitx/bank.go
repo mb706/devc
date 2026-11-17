@@ -9,8 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/paths"
 )
 
 // SnapResult is one worktree's snapshot in a bank.
@@ -121,12 +125,130 @@ func Preserved(err error, worktree string) bool {
 	return !failed
 }
 
-// bankRefspecs fetch the box's branches, snapshot refs and tags into the
-// relay's scratch namespace.
-var bankRefspecs = []string{
-	"+refs/heads/*:" + incomingHeads + "*",
-	"+" + WIPPrefix + "*:" + incomingWIP + "*",
-	"+refs/tags/*:" + incomingTags + "*",
+// Limits of what a bank takes from a box (C20a). A bank lists the refs
+// the box offers before it fetches anything, and fetches only the listed
+// refs whose value the relay does not record yet, each by its name.
+// Variables so that tests can lower them.
+var (
+	// maxBankListing bounds the refs of the box's listing (its branches,
+	// snapshot refs and tags, changed or not); the listing's output is
+	// also capped by the engine's output limit.
+	maxBankListing = 50000
+	// maxBankFetch bounds each of the changed branches, new snapshots and
+	// new tags one bank fetches: the bank policy's limit (PlanBank).
+	maxBankFetch = DefaultMaxChanges
+)
+
+// maxBankRefName bounds one full ref name in the listing; a longer one
+// makes the listing malformed.
+const maxBankRefName = 1024
+
+// boxListing is what a box offers a bank: its branches, snapshot refs
+// and tags by name, and the refs with names the relay cannot take.
+type boxListing struct {
+	branches, wip, tags map[string]string
+	skipped             []Skip
+}
+
+// listBox lists the refs a bank may take from the box, with git in the
+// box (as dev), and validates the answer like every report from a box.
+// A listing over its bounds refuses the bank before anything is fetched.
+func (s *Service) listBox(ctx context.Context, p *Project) (boxListing, error) {
+	l := boxListing{branches: map[string]string{}, wip: map[string]string{}, tags: map[string]string{}}
+	res, err := s.boxExec(ctx, p, "/", nil, 0, "git", "--git-dir="+paths.InBoxRepoDir(p.Ref), "for-each-ref",
+		"--count="+strconv.Itoa(maxBankListing+1), "--format=%(objectname) %(refname)", HeadsPrefix, WIPPrefix, TagsPrefix)
+	if err != nil {
+		return l, fmt.Errorf("listing the refs of %s: %s%s", p.Container, printable(err.Error()), printable(tail(res.Stderr)))
+	}
+	if res.Truncated {
+		return l, fmt.Errorf("%s offers a list of refs larger than devc reads (%s): a bank takes at most %d refs; nothing was fetched",
+			p.Container, SizeText(int64(len(res.Stdout))), maxBankListing)
+	}
+	lines := strings.Split(strings.TrimRight(string(res.Stdout), "\n"), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		lines = nil
+	}
+	if len(lines) > maxBankListing {
+		return l, fmt.Errorf("%s offers more than %d refs (branches, snapshots and tags), the most a bank lists: nothing was fetched; remove branches or tags in the box", p.Container, maxBankListing)
+	}
+	for _, line := range lines {
+		oid, name, ok := strings.Cut(line, " ")
+		if !ok || !ValidOID(oid) || len(name) > maxBankRefName || strings.ContainsAny(name, " \t\r") {
+			return l, fmt.Errorf("%s offers a malformed list of refs (a line of %d bytes; ref names may have at most %d): nothing was fetched", p.Container, len(line), maxBankRefName)
+		}
+		switch {
+		case strings.HasPrefix(name, HeadsPrefix):
+			b := name[len(HeadsPrefix):]
+			if err := CheckName(b); err != nil {
+				l.skipped = append(l.skipped, Skip{Kind: "branch", Name: b, Reason: "invalid name: " + err.Error()})
+				continue
+			}
+			l.branches[b] = oid
+		case strings.HasPrefix(name, WIPPrefix):
+			w := name[len(WIPPrefix):]
+			if !names.ValidKind(names.KindWorktree, w) {
+				l.skipped = append(l.skipped, Skip{Kind: "snapshot", Name: w, Reason: "invalid worktree name"})
+				continue
+			}
+			l.wip[w] = oid
+		case strings.HasPrefix(name, TagsPrefix):
+			t := name[len(TagsPrefix):]
+			if err := CheckName(t); err != nil {
+				l.skipped = append(l.skipped, Skip{Kind: "tag", Name: t, Reason: "invalid name: " + err.Error()})
+				continue
+			}
+			l.tags[t] = oid
+		default:
+			return l, fmt.Errorf("%s offers a ref outside the listed namespaces (%q): nothing was fetched", p.Container, printableName(name))
+		}
+	}
+	return l, nil
+}
+
+// bankFetch splits a listing into the refs to fetch (exact refspecs into
+// refs/devc/incoming/, one per ref, no wildcard) and the refs whose value
+// the relay already records (a branch at its box tip or relay head, a
+// snapshot equal to the worktree's last one, a tag equal to the upstream's
+// or already recorded): those are taken from the listing, and their
+// objects are in the relay because a relay ref points at them. More
+// changed branches, snapshots or new tags than the bank policy applies at
+// once (max) refuse the bank.
+func bankFetch(l boxListing, set RefSet, max int) (specs []string, known boxListing, err error) {
+	known = boxListing{branches: map[string]string{}, wip: map[string]string{}, tags: map[string]string{}}
+	var branches, wip, tags []string
+	for _, b := range sortedKeys(l.branches) {
+		oid := l.branches[b]
+		if set.BoxTips[b] == oid || set.Heads[b] == oid {
+			known.branches[b] = oid
+			continue
+		}
+		branches = append(branches, "+"+HeadsPrefix+b+":"+incomingHeads+b)
+	}
+	for _, w := range sortedKeys(l.wip) {
+		oid := l.wip[w]
+		if last, ok := set.LastSnap[w]; ok && last.OID == oid {
+			known.wip[w] = oid
+			continue
+		}
+		wip = append(wip, "+"+WIPPrefix+w+":"+incomingWIP+w)
+	}
+	for _, t := range sortedKeys(l.tags) {
+		oid := l.tags[t]
+		if set.UpstreamTags[t] == oid || set.DevcTags[t][oid] {
+			known.tags[t] = oid
+			continue
+		}
+		tags = append(tags, "+"+TagsPrefix+t+":"+incomingTags+t)
+	}
+	for _, c := range []struct {
+		n    int
+		what string
+	}{{len(branches), "changed branches"}, {len(wip), "new snapshots"}, {len(tags), "new tags"}} {
+		if c.n > max {
+			return nil, known, fmt.Errorf("the box offers %d %s, more than the %d a bank takes at once: nothing was fetched; remove some in the box, then bank again", c.n, c.what, max)
+		}
+	}
+	return append(append(branches, wip...), tags...), known, nil
 }
 
 // Bank copies a running box's commits into the relay (work order C05
@@ -175,14 +297,40 @@ func (s *Service) Bank(ctx context.Context, p *Project) (*BankResult, error) {
 			res.Problems = append(res.Problems, "clearing refs/devc/incoming: "+err.Error())
 		}
 	}()
-	if err := s.fetchFromBox(ctx, p, bankRefspecs...); err != nil {
+	// The box's refs are listed and counted first; only refs the relay
+	// does not record yet are fetched, by name (C20a).
+	before, err := p.Relay.RefSet(ctx)
+	if err != nil {
 		return fail(err)
+	}
+	listing, err := s.listBox(ctx, p)
+	if err != nil {
+		return fail(err)
+	}
+	res.Skipped = append(res.Skipped, listing.skipped...)
+	specs, known, err := bankFetch(listing, before, maxBankFetch)
+	if err != nil {
+		return fail(err)
+	}
+	if len(specs) > 0 {
+		if err := s.fetchFromBox(ctx, p, specs); err != nil {
+			return fail(err)
+		}
 	}
 
 	// 3. Apply the policy.
 	set, err := p.Relay.RefSet(ctx)
 	if err != nil {
 		return fail(err)
+	}
+	for b, oid := range known.branches {
+		set.InBranches[b] = oid
+	}
+	for w, oid := range known.wip {
+		set.InWIP[w] = oid
+	}
+	for t, oid := range known.tags {
+		set.InTags[t] = oid
 	}
 	// A snapshot the box made must have arrived.
 	for _, w := range rep.Worktrees {

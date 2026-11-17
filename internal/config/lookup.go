@@ -272,6 +272,8 @@ type Resolved struct {
 	Shares   []string `toml:"shares" json:"shares"`
 	SyncHub  bool     `toml:"sync_hub" json:"sync_hub"`
 	Requests Requests `toml:"requests" json:"requests"`
+	// Sessions are the journal budgets (C20a).
+	Sessions ResolvedSessions `toml:"sessions" json:"sessions"`
 	// SecretsDelivery is the global secrets.delivery.
 	SecretsDelivery string `toml:"secrets_delivery" json:"secrets_delivery"`
 	// GitHubApp is the realm's [github.app] (work order C15).
@@ -302,6 +304,12 @@ type ResolvedGit struct {
 	// MaxPushSize and RelayQuota are in bytes.
 	MaxPushSize int64 `toml:"max_push_size" json:"max_push_size"`
 	RelayQuota  int64 `toml:"relay_quota" json:"relay_quota"`
+}
+
+// ResolvedSessions are the journal budgets in bytes.
+type ResolvedSessions struct {
+	SessionJournalMax int64 `toml:"session_journal_max" json:"session_journal_max"`
+	JournalQuota      int64 `toml:"journal_quota" json:"journal_quota"`
 }
 
 type ResolvedData struct {
@@ -385,6 +393,10 @@ func (c *Config) Resolved(ref names.ProjectRef) (*Resolved, error) {
 		Shares:   union(realm.Shares, p.Shares),
 		SyncHub:  realm.Sync.Hub,
 		Requests: Requests{Auto: nonNil(p.Requests.Auto)},
+		Sessions: ResolvedSessions{
+			SessionJournalMax: sizeOr(p.Sessions.SessionJournalMax, DefaultSessionJournalMax),
+			JournalQuota:      sizeOr(p.Sessions.JournalQuota, DefaultJournalQuota),
+		},
 
 		SecretsDelivery: g.Secrets.Delivery,
 	}

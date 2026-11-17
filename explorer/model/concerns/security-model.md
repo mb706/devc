@@ -61,6 +61,11 @@ refs = ["internal/box.BuildSpec", "internal/toolbox.DeriveProfile", "internal/ne
 tests = ["internal/box.TestSpecLimits", "internal/toolbox.TestSeccompRejectsUnexpectedBase", "internal/box.TestInternetLevel", "internal/box.TestProblemsBlockLifecycle"]
 
 [[invariant]]
+text = "What a box sends makes the host store and run only bounded amounts: pushes and banks within `git.relay_quota`, journals within their budgets, savepoints it requests within `requested_keep`, each keeping 1 GiB free on the state file system where it writes there, and at most 64 connections per forward and 256 through the router."
+refs = ["internal/gitx.Watch", "internal/gitx.Service.fetchFromBox", "internal/session.room.fits", "internal/data.RequestedRetention", "internal/netpolicy.Admission.Acquire"]
+tests = ["internal/gitx.TestBankFetchBudget", "internal/session.TestJournalProjectBudget", "internal/data.TestRequestedSavepoints", "internal/netpolicy.TestForwarderAdmission", "test/integration.TestBankBudget", "test/integration.TestJournalBudgets", "test/integration.TestRequestedSavepoints"]
+
+[[invariant]]
 text = "A box's request is served for the project of the channel it arrived on, and a hub reaches a machine only through the methods its daemon allowlists, deciding low-risk requests only."
 refs = ["internal/daemon.boxWorker.acceptStreams", "internal/daemon.CheckPeer", "internal/daemon.hubMethods", "internal/requests.MayDecide"]
 tests = ["test/integration.TestDaemonHostileEndpoints", "internal/daemon.TestHubAllowlist", "internal/daemon.TestHubOrigin"]
@@ -111,9 +116,9 @@ The development rules ([[doc:docs/dev/README.md#security-rules-for-code]]) turn 
 |---|---|---|
 | Realms | a realm is one trust domain: a box can plant hooks in a shared harness home that run in other boxes | [[doc:docs/dev/LEFTOVER.md#isolation-and-realms]] |
 | Network | DNS to trusted resolvers is a channel out; the allowlist limits names, not content | [[doc:docs/dev/LEFTOVER.md#network]] |
-| Git | a box can make the host store what it pushes within `git.relay_quota`; relays are never pruned | [[doc:docs/dev/LEFTOVER.md#git-and-relays]] |
+| Git | a box can make the host store what it pushes or a bank takes within `git.relay_quota`; relays are never pruned | [[doc:docs/dev/LEFTOVER.md#git-and-relays]] |
 | Data | a push chooses files by size and time, which the box controls; sealing protects against the box only | [[doc:docs/dev/LEFTOVER.md#data-and-sync]] |
-| Sessions | journals are never rotated; box text is escaped for terminals but untrusted elsewhere | [[doc:docs/dev/LEFTOVER.md#sessions-harnesses-and-input]] |
+| Sessions | journals are never rotated, only bounded by their budgets; box text is escaped for terminals but untrusted elsewhere | [[doc:docs/dev/LEFTOVER.md#sessions-harnesses-and-input]] |
 | Channel | the agent's peer check assumes no box shares the host's PID namespace | [[doc:docs/dev/LEFTOVER.md#daemon-and-channel]] |
 | Hub | a compromised machine fills its own part of the hub; the development mode has no authentication | [[doc:docs/dev/LEFTOVER.md#hub-and-web-app]] |
 | Brokered access | a token in a box does what its permissions allow; a service acts with your account within its rules | [[doc:docs/dev/LEFTOVER.md#github]], [[doc:docs/dev/LEFTOVER.md#services]] |
@@ -121,14 +126,10 @@ The development rules ([[doc:docs/dev/README.md#security-rules-for-code]]) turn 
 
 ## Where the code falls short today
 
-The authors of these pages read the code area by area, and a second reader checked the pages; together they found defects that no test catches. None is fixed yet: [[doc:docs/dev/LEFTOVER.md#7]] lists each with where to look, and the pages linked here describe the code as it is. The most serious let a box exhaust or undo what the host keeps. The severities are part 7's; its findings from the accuracy review carry none, and the one about the capability record is marked high here because it hands a box grants it was not started with.
+The authors of these pages read the code area by area, and a second reader checked the pages; together they found defects that no test catches. The four rated high that let a box exhaust the host or push out the owner's savepoints are fixed: journals have budgets ([[concern:sessions-and-events]]), a bank lists and bounds what it fetches and runs under the push watchdog ([[concern:git-ratchet]]), savepoints a box requests are a class of their own ([[concern:savepoints]]), and forwards admit a bounded number of connections ([[concern:forwards-and-local-urls]]). The rest are open: [[doc:docs/dev/LEFTOVER.md#7]] lists each with where to look, and the pages linked here describe the code as it is. The severities are part 7's; its findings from the accuracy review carry none, and the one about the capability record is marked high here because it hands a box grants it was not started with.
 
 | Gap | Severity | Page |
 |---|---|---|
-| Nothing bounds how much a box makes the host write to its journals | high | [[concern:sessions-and-events]] |
-| A bank has no storage budget and no bound on the refs it fetches | high | [[concern:git-ratchet]] |
-| A box's approved savepoint requests push out every older unnamed savepoint; named ones accumulate | high | [[concern:savepoints]] |
-| `devc forward` starts a dial process per connection without a bound | high | [[concern:forwards-and-local-urls]] |
 | A running box that removes its readiness marker gets its capability record rewritten, with grants added since its start | high | [[concern:box-lifecycle]] |
 | A grant can name the host's GitHub credential or the App's key as a secret, and `token:<secret>` any realm secret | medium | [[concern:github]] |
 | An approved pull request pushes its branch before anything checks it, so a request for the base branch fast-forwards it | medium | [[concern:github]] |
@@ -163,19 +164,19 @@ The authors of these pages read the code area by area, and a second reader check
 | [[concern:input-and-receipts]] | typing twice or into the wrong session; typing over a person, for about a minute (then it types anyway) |
 | [[concern:watching-sessions]] | box text on terminals; terminal input without consent |
 | [[concern:requests-and-approval]] | approving its own requests; box values as options |
-| [[concern:git-ratchet]] | rewriting recorded history; code on the host; the cost of a push |
+| [[concern:git-ratchet]] | rewriting recorded history; code on the host; the cost of a push or a bank |
 | [[concern:upstream]] | a box publishing; pushing what you did not see |
 | [[concern:worktrees-and-context]] | hostile reports; planted git metadata in the context |
 | [[concern:network-levels]] | a start without rules; planted resolvers; reaching the host |
 | [[concern:allowlist-proxy]] | reaching the LAN through a name; granting itself access |
-| [[concern:forwards-and-local-urls]] | executing on the host; one box's page driving another's server |
+| [[concern:forwards-and-local-urls]] | executing on the host; one box's page driving another's server; floods of connections |
 | [[concern:secrets]] | another project's secret; a grant added while the box runs; a removed grant, from the next request in daemon mode (a delivered file stays until the box stops, and no mode takes back a value already read); copies on disk, unless you allow them |
 | [[concern:ssh-gate]] | taking a credential; forwarding into the host's network |
 | [[concern:github]] | reading other repositories; shaping requests; getting the credential |
 | [[concern:service-logins]] | another service or path; smuggled requests; the credential |
 | [[concern:desktop]] | reaching further through the sidecar; impersonating it |
 | [[concern:data-and-sealing]] | tricking a worker; a directory swapped during a seal (a regular file can be: see the gaps above) |
-| [[concern:savepoints]] | reaching a savepoint |
+| [[concern:savepoints]] | reaching a savepoint; pushing the owner's savepoints out |
 | [[concern:data-sync]] | a pull destroying data here, a push destroying data there |
 | [[concern:shares]] | hostile trees; changing a share from a box |
 | [[concern:dependency-sources]] | tampered archives; registries naming paths |

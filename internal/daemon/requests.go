@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/data"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/names"
@@ -248,6 +249,11 @@ func (rs *requestService) create(ctx context.Context, ref names.ProjectRef, para
 	}
 	if outstanding >= maxOutstanding || recent >= maxPerMinute {
 		return nil, proto.Errorf(proto.CodeBusy, "too many requests from %s: wait for the user to decide the pending ones", ref)
+	}
+	if p.Kind == proto.RequestSavepoint {
+		if msg := rs.savepointRefusal(e, ref, r, list); msg != "" {
+			return nil, proto.Errorf(proto.CodeRefused, "%s", msg)
+		}
 	}
 	auto := slices.Contains(r.Requests.Auto, p.Kind) && requests.MayDecide(proto.OriginAuto, proto.RequestRisk(p.Kind)) == nil
 	if auto && p.Kind != proto.RequestNote && rs.full() {
@@ -500,6 +506,28 @@ func (rs *requestService) transitionLocked(ctx context.Context, ref names.Projec
 	return fmt.Errorf("request %s is gone from the log", id)
 }
 
+// savepointRefusal says why a savepoint request is refused before it is
+// stored, or "": at most one savepoint is made on request per
+// data.savepoints.requested_interval, so a request inside that window, or
+// while another savepoint request of the project is outstanding, is
+// refused with the reason (C20a, X9 1). `devc save --request` checks the
+// window again under the box lock, where it counts.
+// The caller holds rs.mu; list is the project's log.
+func (rs *requestService) savepointRefusal(e *env, ref names.ProjectRef, r *config.Resolved, list []proto.Request) string {
+	for _, q := range list {
+		if q.Kind == proto.RequestSavepoint && (q.Status == proto.RequestPending || q.Status == proto.RequestApproved) {
+			return fmt.Sprintf("the savepoint request %s of %s is still %s: at most one savepoint is made on request per %s (data.savepoints.requested_interval)",
+				q.ID, ref, q.Status, r.Data.Savepoints.RequestedEvery())
+		}
+	}
+	msg, err := (&data.Service{Config: e.cfg}).RequestedRefusal(ref, r.Data.Savepoints)
+	if err != nil {
+		rs.d.log.Error("reading the savepoint index", "ref", ref.String(), "err", err)
+		return "the host could not read its savepoint index"
+	}
+	return msg
+}
+
 // requestCommands are the devc commands (without the global flags) that
 // carry out an approved request, or the answer for kinds that cannot be
 // carried out yet.
@@ -511,10 +539,12 @@ func requestCommands(ref names.ProjectRef, req proto.Request) ([][]string, strin
 	case proto.RequestSeal:
 		return [][]string{{"seal", "--", p.Path, ref.String()}}, ""
 	case proto.RequestSavepoint:
+		// --request makes it a requested savepoint, with a retention and a
+		// rate of its own (C20a, X9 1).
 		if p.Name != "" {
-			return [][]string{{"save", "--", p.Name, ref.String()}}, ""
+			return [][]string{{"save", "--request", req.ID, "--", p.Name, ref.String()}}, ""
 		}
-		return [][]string{{"save", "--", ref.String()}}, ""
+		return [][]string{{"save", "--request", req.ID, "--", ref.String()}}, ""
 	case proto.RequestPackage:
 		root := []string{"root", ref.String(), "--"}
 		var steps [][]string

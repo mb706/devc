@@ -88,6 +88,10 @@ func (k checker) size(key, v string) {
 const (
 	DefaultMaxPushSize = 2 << 30
 	DefaultRelayQuota  = 20 << 30
+	// DefaultSessionJournalMax and DefaultJournalQuota are the defaults of
+	// sessions.session_journal_max and sessions.journal_quota.
+	DefaultSessionJournalMax = 128 << 20
+	DefaultJournalQuota      = 2 << 30
 )
 
 // ParseSize reads a size such as 512m or 16g (units b, k, m, g; powers of
@@ -738,6 +742,12 @@ func validateProject(c *Config, p *Project, ps *problems) {
 	if p.Git.RelayQuota != "" {
 		k.size("git.relay_quota", p.Git.RelayQuota)
 	}
+	if p.Sessions.SessionJournalMax != "" {
+		k.size("sessions.session_journal_max", p.Sessions.SessionJournalMax)
+	}
+	if p.Sessions.JournalQuota != "" {
+		k.size("sessions.journal_quota", p.Sessions.JournalQuota)
+	}
 	for i, kind := range p.Requests.Auto {
 		switch proto.RequestRisk(kind) {
 		case proto.RiskLow:
@@ -899,6 +909,14 @@ func validateData(k checker, d *Data) {
 	k.enum("data.savepoints.driver", d.Savepoints.Driver, savepointDrivers)
 	if d.Savepoints.Keep < 0 {
 		k.bad("data.savepoints.keep", "must not be negative (0 keeps all)")
+	}
+	if d.Savepoints.RequestedKeep < 1 {
+		k.bad("data.savepoints.requested_keep", "must be at least 1: savepoints a box requests are always bounded")
+	}
+	if v := d.Savepoints.RequestedInterval; v != "" {
+		if dur, err := time.ParseDuration(v); err != nil || dur < time.Second {
+			k.bad("data.savepoints.requested_interval", "%q is not a duration of at least one second, such as 10m or 1h", v)
+		}
 	}
 
 	for _, name := range sortedKeys(d.Remotes) {

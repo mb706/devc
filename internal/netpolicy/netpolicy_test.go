@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -760,4 +761,187 @@ func TestForwarderDial(t *testing.T) {
 	if _, err := (&Forwarder{}).Dial(context.Background()); err == nil {
 		t.Error("dial without settings")
 	}
+}
+
+// blockingRunner stands in for nsenter: each dial process runs until its
+// connection's other end is closed, and the number running is counted.
+type blockingRunner struct {
+	mu      sync.Mutex
+	running int
+	started int
+}
+
+func (r *blockingRunner) Run(context.Context, execx.Cmd) (execx.Result, error) {
+	return execx.Result{}, errors.New("unexpected Run")
+}
+
+func (r *blockingRunner) Interactive(ctx context.Context, c execx.Cmd) (int, error) {
+	r.mu.Lock()
+	r.running++
+	r.started++
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.running--
+		r.mu.Unlock()
+	}()
+	_, _ = io.Copy(io.Discard, c.Stdin.(*os.File))
+	return 0, nil
+}
+
+func (r *blockingRunner) counts() (int, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.running, r.started
+}
+
+// TestForwarderAdmission: a forward serves at most MaxForwardConns
+// connections at once; one beyond that is closed at once and starts no
+// dial process, and the refusals are logged once per interval. Below the
+// limit, and again once a connection has ended, connections are served.
+// Dial with an Admission refuses the same way (X8 4).
+func TestForwarderAdmission(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot listen: %v", err)
+	}
+	eng := engine.NewFake()
+	eng.Containers["devc-demo-hello"] = engine.ContainerInfo{Name: "devc-demo-hello", State: engine.ContainerState{Running: true, Pid: 777, Started: time.Now().UTC()}}
+	fs, _ := fakeProc(t, map[string]uint64{"777": 5000}, testBoot)
+	box, err := Pin(context.Background(), eng, "devc-demo-hello", fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+	runner := &blockingRunner{}
+	var log safeBuffer
+	f := &Forwarder{Runner: runner, Engine: eng, Nsenter: "/usr/bin/nsenter", Exe: "/usr/local/bin/devc", Container: "devc-demo-hello",
+		Box: box, Port: 8888, Poll: time.Hour, Log: &log}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.Serve(ctx, ln) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	waitRunning := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if n, _ := runner.counts(); n == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				n, _ := runner.counts()
+				t.Fatalf("%d dial processes run, want %d", n, want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	var conns []net.Conn
+	for range MaxForwardConns {
+		c, err := net.Dial("tcp4", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+	}
+	waitRunning(MaxForwardConns)
+	// Beyond the limit: closed at once, no process.
+	for range 3 {
+		c, err := net.Dial("tcp4", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
+			t.Errorf("a connection beyond the limit: %v", err)
+		}
+		c.Close()
+	}
+	if _, started := runner.counts(); started != MaxForwardConns {
+		t.Errorf("%d dial processes were started for %d admitted connections", started, MaxForwardConns)
+	}
+	if got := strings.Count(log.String(), "refused"); got != 1 || !strings.Contains(log.String(), fmt.Sprintf("at most %d run at once", MaxForwardConns)) {
+		t.Errorf("refusals logged %d times:\n%s", got, log.String())
+	}
+	// A connection ends: a new one is served (its place is given back just
+	// after the dial process ends, so the first try may still be refused).
+	conns[0].Close()
+	waitRunning(MaxForwardConns - 1)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.Dial("tcp4", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if n, _ := runner.counts(); n == MaxForwardConns {
+			conns[0] = c
+			break
+		}
+		c.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("no connection was served after one ended")
+		}
+	}
+	for _, c := range conns {
+		c.Close()
+	}
+	waitRunning(0)
+
+	// Dial with a shared Admission of two places.
+	f.Admission = NewAdmission(2, nil)
+	d1, err := f.Dial(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d2, err := f.Dial(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitRunning(2)
+	if _, err := f.Dial(context.Background()); !errors.Is(err, ErrBusy) {
+		t.Errorf("a dial beyond the limit: %v", err)
+	}
+	_, startedBefore := runner.counts()
+	if _, err := f.Dial(context.Background()); !errors.Is(err, ErrBusy) {
+		t.Errorf("a second dial beyond the limit: %v", err)
+	}
+	if _, started := runner.counts(); started != startedBefore {
+		t.Errorf("a refused dial started a process: %d started, %d before", started, startedBefore)
+	}
+	d1.Close()
+	waitRunning(1)
+	var d3 net.Conn
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if d3, err = f.Dial(context.Background()); err == nil || time.Now().After(deadline) {
+			break
+		}
+	}
+	if err != nil {
+		t.Errorf("a dial after one ended: %v", err)
+	} else {
+		d3.Close()
+	}
+	d2.Close()
+	waitRunning(0)
+}
+
+// safeBuffer is a bytes.Buffer for concurrent writers.
+type safeBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

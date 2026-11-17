@@ -6,6 +6,8 @@
 
 package config
 
+import "time"
+
 // Global is config.toml.
 type Global struct {
 	ProjectsRoot string         `toml:"projects_root" json:"projects_root"`
@@ -241,6 +243,7 @@ type Project struct {
 	Box           ProjectBox     `toml:"box" json:"box"`
 	Mounts        []Mount        `toml:"mounts" json:"mounts"`
 	Requests      Requests       `toml:"requests" json:"requests"`
+	Sessions      Sessions       `toml:"sessions" json:"sessions"`
 	// Shares names published shares mounted read-only at
 	// /opt/shares/<name> (work order C16); the realm's are added.
 	Shares []string `toml:"shares" json:"shares"`
@@ -314,6 +317,45 @@ type Savepoints struct {
 	Driver        string `toml:"driver" json:"driver"`
 	BeforeSession bool   `toml:"before_session" json:"before_session"`
 	Keep          int    `toml:"keep" json:"keep"`
+	// RequestedKeep is how many savepoints made on a box's request
+	// (`devc request savepoint`) are kept, named or not, and
+	// RequestedInterval the least time between two of them (C20a, X9 1).
+	// Both are positive; neither counts the owner's savepoints.
+	RequestedKeep     int    `toml:"requested_keep" json:"requested_keep"`
+	RequestedInterval string `toml:"requested_interval" json:"requested_interval"`
+}
+
+// Defaults of the savepoints made on a box's request.
+const (
+	DefaultRequestedKeep     = 10
+	DefaultRequestedInterval = 10 * time.Minute
+)
+
+// RequestedEvery is data.savepoints.requested_interval as a duration
+// (the default when it is empty or invalid; validation reports the latter).
+func (s Savepoints) RequestedEvery() time.Duration {
+	if d, err := time.ParseDuration(s.RequestedInterval); err == nil && d > 0 {
+		return d
+	}
+	return DefaultRequestedInterval
+}
+
+// RequestedKept is data.savepoints.requested_keep, or the default when it
+// is not positive (validation reports that).
+func (s Savepoints) RequestedKept() int {
+	if s.RequestedKeep > 0 {
+		return s.RequestedKeep
+	}
+	return DefaultRequestedKeep
+}
+
+// Sessions are the journal budgets of a project's sessions (C20a, X6 3):
+// ingestion stops before a session's journal would exceed
+// SessionJournalMax or the project's journals JournalQuota (sizes as for
+// git.relay_quota; both positive).
+type Sessions struct {
+	SessionJournalMax string `toml:"session_journal_max" json:"session_journal_max,omitempty"`
+	JournalQuota      string `toml:"journal_quota" json:"journal_quota,omitempty"`
 }
 
 // Remote is a place data is pulled from and pushed to with rsync (work
@@ -359,7 +401,7 @@ func defaultProject() Project {
 		Requests:  Requests{Auto: []string{"seal", "savepoint", "note"}},
 		Data: Data{
 			Root:       "data",
-			Savepoints: Savepoints{Driver: "auto", Keep: 10},
+			Savepoints: Savepoints{Driver: "auto", Keep: 10, RequestedKeep: DefaultRequestedKeep},
 		},
 	}
 }

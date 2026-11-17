@@ -1,7 +1,10 @@
 package data
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -482,4 +485,138 @@ func TestBoxHooksContribute(t *testing.T) {
 			t.Errorf("%s: no .devc after Prepare: %v", ref, err)
 		}
 	}
+}
+
+// TestRequestedSavepoints: a savepoint made on a box's request is of the
+// class requested, with both drivers. Its retention keeps the newest
+// requested ones only (named or not) and never drops the owner's; the
+// owner's retention never counts requested ones; a second requested
+// savepoint inside the interval is refused, and one after it is taken.
+// Savepoints recorded before classes existed count as the owner's.
+// before_session does not count a requested savepoint (X9 1).
+func TestRequestedSavepoints(t *testing.T) {
+	for _, driver := range []string{DriverRestic, DriverReflink} {
+		t.Run(driver, func(t *testing.T) {
+			w := newWorldExtra(t, driver, "requested_keep = 2\nrequested_interval = \"10m\"\n")
+			ctx := context.Background()
+			var dropped []string
+			if driver == DriverReflink {
+				// The worker as it answers on a filesystem that clones files.
+				w.eng.RunFunc = func(o engine.RunOptions) (execx.Result, error) {
+					if slices.Equal(o.Cmd, []string{"/bin/devc", "box", "data-worker"}) {
+						req, err := boxside.ReadDataRequest(o.Stdin)
+						if err != nil {
+							return execx.Result{}, err
+						}
+						switch req.Op {
+						case boxside.OpReflinkSave:
+							b, _ := boxside.MarshalReport(&boxside.DataResult{V: 1, Op: req.Op, Files: 1, Size: 1})
+							return execx.Result{Stdout: b}, nil
+						case boxside.OpSavepointDrop:
+							dropped = append(dropped, req.IDs...)
+							b, _ := boxside.MarshalReport(&boxside.DataResult{V: 1, Op: req.Op, Removed: req.IDs})
+							return execx.Result{Stdout: b}, nil
+						}
+						o.Stdin = bytes.NewReader(mustRequest(t, req))
+					}
+					return w.run(o)
+				}
+			} else {
+				w.installRestic()
+			}
+			if _, err := w.svc.Setup(ctx, w.p); err != nil {
+				t.Fatal(err)
+			}
+			clock := time.Now().UTC()
+			w.svc.Now = func() time.Time { return clock }
+			// An owner's savepoint from before classes existed, and named and
+			// unnamed ones of the owner.
+			index := w.svc.Config.Paths.SavepointIndex(w.p.Ref)
+			os.MkdirAll(filepath.Dir(index), 0o700)
+			legacy := Savepoint{V: 1, Op: opSave, ID: NewID(clock.Add(-time.Hour), "", nil), Time: clock.Add(-time.Hour).Format(time.RFC3339Nano), Driver: driver, Snapshot: "00000000aaaaaaaa"}
+			if err := appendIndex(index, legacy); err != nil {
+				t.Fatal(err)
+			}
+			named, err := w.svc.Save(ctx, w.p, "mine")
+			if err != nil {
+				t.Fatal(err)
+			}
+			clock = clock.Add(time.Second)
+			owner, err := w.svc.Save(ctx, w.p, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if owner.Requested() || named.Requested() {
+				t.Errorf("an owner's savepoint has the class requested: %+v %+v", owner, named)
+			}
+			// Requested savepoints, ten minutes apart, named or not.
+			var req []*Savepoint
+			for i, name := range []string{"", "keepme", "", ""} {
+				clock = clock.Add(10 * time.Minute)
+				sp, err := w.svc.SaveRequested(ctx, w.p, name, fmt.Sprintf("r0123456789abcdefgh%02d", i))
+				if err != nil {
+					t.Fatalf("requested savepoint %d: %v", i, err)
+				}
+				if !sp.Requested() || sp.Request != fmt.Sprintf("r0123456789abcdefgh%02d", i) || sp.Driver != driver {
+					t.Errorf("requested savepoint %d: %+v", i, sp)
+				}
+				req = append(req, sp)
+				// Inside the interval: refused, with the reason.
+				clock = clock.Add(5 * time.Minute)
+				if _, err := w.svc.SaveRequested(ctx, w.p, "", "r0123456789abcdefgh98"); err == nil || !strings.Contains(err.Error(), "requested_interval") {
+					t.Errorf("a requested savepoint inside the interval: %v", err)
+				}
+				clock = clock.Add(-5 * time.Minute)
+			}
+			sps, _ := w.svc.Savepoints(w.p)
+			var ids []string
+			for _, sp := range sps {
+				ids = append(ids, sp.ID)
+			}
+			// The two newest requested ones stay, the named "keepme" goes; the
+			// owner's three (legacy, named, unnamed) are all there.
+			want := []string{legacy.ID, named.ID, owner.ID, req[2].ID, req[3].ID}
+			if !slices.Equal(ids, want) {
+				t.Errorf("after requested retention:\n%q\nwant\n%q", ids, want)
+			}
+			if driver == DriverReflink && !slices.Equal(dropped, []string{req[0].ID, req[1].ID}) {
+				t.Errorf("reflink copies dropped: %q", dropped)
+			}
+			// The owner's retention (keep = 2) does not count requested ones:
+			// another unnamed owner's savepoint drops only the legacy one.
+			clock = clock.Add(time.Minute)
+			if _, err := w.svc.Save(ctx, w.p, ""); err != nil {
+				t.Fatal(err)
+			}
+			sps, _ = w.svc.Savepoints(w.p)
+			left := map[string]bool{}
+			for _, sp := range sps {
+				left[sp.ID] = true
+			}
+			if left[legacy.ID] || !left[owner.ID] || !left[named.ID] || !left[req[2].ID] || !left[req[3].ID] || len(sps) != 5 {
+				t.Errorf("after the owner's retention: %+v", sps)
+			}
+			// before_session does not count a requested savepoint.
+			w.p.Resolved.Data.Savepoints.BeforeSession = true
+			clock = clock.Add(31 * time.Minute)
+			if _, err := w.svc.SaveRequested(ctx, w.p, "", "r0123456789abcdefgh97"); err != nil {
+				t.Fatal(err)
+			}
+			if sp, err := w.svc.BeforeSession(ctx, w.p); err != nil || sp == nil || sp.Requested() {
+				t.Errorf("before_session after a requested savepoint: %+v %v", sp, err)
+			}
+			if _, err := w.svc.SaveRequested(ctx, w.p, "", "../x"); err == nil {
+				t.Error("an invalid request ID was accepted")
+			}
+		})
+	}
+}
+
+func mustRequest(t *testing.T, req boxside.DataRequest) []byte {
+	t.Helper()
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(b, '\n')
 }

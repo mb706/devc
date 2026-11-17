@@ -138,7 +138,7 @@ func TestRequests(t *testing.T) {
 	if got := r.waitRequest(t, rep.ID); got.Status != proto.RequestDone || got.Result != "ok" {
 		t.Errorf("savepoint outcome: %+v", got)
 	}
-	if calls := r.devcCalls("save"); len(calls) != 1 || strings.Join(calls[0], " ") != "--config-dir /cfg save -- before demo/hello" {
+	if calls := r.devcCalls("save"); len(calls) != 1 || strings.Join(calls[0], " ") != "--config-dir /cfg save --request "+rep.ID+" -- before demo/hello" {
 		t.Errorf("save calls: %q", calls)
 	}
 
@@ -644,9 +644,13 @@ func TestRequestCommands(t *testing.T) {
 	if len(steps) != 1 || strings.Join(steps[0], " ") != "seal -- --help demo/hello" {
 		t.Errorf("seal: %q", steps)
 	}
-	steps, _ = requestCommands(hello, proto.Request{Kind: "savepoint"})
-	if strings.Join(steps[0], " ") != "save -- demo/hello" {
+	steps, _ = requestCommands(hello, proto.Request{ID: "r0123456789abcdefghij", Kind: "savepoint"})
+	if strings.Join(steps[0], " ") != "save --request r0123456789abcdefghij -- demo/hello" {
 		t.Errorf("savepoint: %q", steps)
+	}
+	steps, _ = requestCommands(hello, proto.Request{ID: "r0123456789abcdefghij", Kind: "savepoint", Params: proto.RequestParams{Name: "--help"}})
+	if strings.Join(steps[0], " ") != "save --request r0123456789abcdefghij -- --help demo/hello" {
+		t.Errorf("named savepoint: %q", steps)
 	}
 	for _, m := range []string{"dnf", "apk"} {
 		steps, _ = requestCommands(hello, proto.Request{Kind: "package", Params: proto.RequestParams{Manager: m, Packages: []string{"a", "b"}}})
@@ -699,12 +703,14 @@ func TestRequestExecutor(t *testing.T) {
 	oldW, oldQ, oldO := requestWorkers, requestQueue, maxOutstanding
 	requestWorkers, requestQueue, maxOutstanding = 1, 2, 4
 	t.Cleanup(func() { requestWorkers, requestQueue, maxOutstanding = oldW, oldQ, oldO })
-	r := boxRig(t, "[requests]\nauto = [\"savepoint\"]\n", "")
+	// Seal requests: a box may have only one savepoint request outstanding
+	// (C20a).
+	r := boxRig(t, "[requests]\nauto = [\"seal\"]\n[data]\nwork = [\"w\"]\n", "")
 	r.d.o.Global = []string{"--config-dir", "/cfg"}
 	release := make(chan struct{})
 	var mu sync.Mutex
 	running := 0
-	r.runner.On("/fake/devc", "--config-dir", "/cfg", "save").Do(func(execx.Cmd) {
+	r.runner.On("/fake/devc", "--config-dir", "/cfg", "seal").Do(func(execx.Cmd) {
 		mu.Lock()
 		running++
 		mu.Unlock()
@@ -712,16 +718,16 @@ func TestRequestExecutor(t *testing.T) {
 	})
 	var ids []string
 	for i := 0; i < 3; i++ {
-		rep, err := r.request(t, proto.RequestParams{Kind: "savepoint"})
+		rep, err := r.request(t, proto.RequestParams{Kind: "seal", Path: fmt.Sprintf("w/run%d", i)})
 		if err != nil || rep.Status != proto.RequestApproved {
-			t.Fatalf("savepoint %d: %+v %v", i, rep, err)
+			t.Fatalf("seal %d: %+v %v", i, rep, err)
 		}
 		ids = append(ids, rep.ID)
 	}
 	// The executor is full: an automatic approval is refused as busy, and
 	// a local approval leaves the request pending.
-	if _, err := r.request(t, proto.RequestParams{Kind: "savepoint"}); !proto.IsCode(err, proto.CodeBusy) || !strings.Contains(err.Error(), "busy carrying out") {
-		t.Errorf("savepoint with the executor full: %v", err)
+	if _, err := r.request(t, proto.RequestParams{Kind: "seal", Path: "w/run3"}); !proto.IsCode(err, proto.CodeBusy) || !strings.Contains(err.Error(), "busy carrying out") {
+		t.Errorf("seal with the executor full: %v", err)
 	}
 	pkg, err := r.request(t, proto.RequestParams{Kind: "package", Manager: "apk", Packages: []string{"jq"}})
 	if err != nil {
@@ -820,9 +826,9 @@ func (r *rig) recordStart() {
 // the relay above its budget, or the file system below half the reserve,
 // and leaves an ordinary push alone (finding D1-05).
 func TestPushWatchdog(t *testing.T) {
-	old := pushWatchEvery
-	pushWatchEvery = 20 * time.Millisecond
-	t.Cleanup(func() { pushWatchEvery = old })
+	old := gitx.WatchEvery
+	gitx.WatchEvery = 20 * time.Millisecond
+	t.Cleanup(func() { gitx.WatchEvery = old })
 	d := &Daemon{freeSpace: func(string) (int64, error) { return 100 << 30, nil }}
 	relay := filepath.Join(t.TempDir(), "p.git")
 	q := filepath.Join(relay, "objects", gitx.QuarantinePrefix+"abc123", "pack")
@@ -876,5 +882,49 @@ func TestPushWatchdog(t *testing.T) {
 	gitx.RemoveQuarantines(relay)
 	if _, err := os.Stat(filepath.Dir(q)); !os.IsNotExist(err) {
 		t.Errorf("the quarantine is still there: %v", err)
+	}
+}
+
+// TestSavepointRequestWindow: a box gets at most one savepoint made on
+// request per data.savepoints.requested_interval. A savepoint request is
+// refused, with the reason, while another one of the project is
+// outstanding or when a requested savepoint is younger than the
+// interval; the owner's own savepoints do not count, and once the
+// interval has passed a request is taken (X9 1).
+func TestSavepointRequestWindow(t *testing.T) {
+	r := boxRig(t, "[requests]\nauto = []\n[data.savepoints]\nrequested_interval = \"10m\"\n", "")
+	first, err := r.request(t, proto.RequestParams{Kind: "savepoint"})
+	if err != nil || first.Status != proto.RequestPending {
+		t.Fatalf("first savepoint request: %+v %v", first, err)
+	}
+	if _, err := r.request(t, proto.RequestParams{Kind: "savepoint", Name: "again"}); !proto.IsCode(err, proto.CodeRefused) || !strings.Contains(err.Error(), first.ID) {
+		t.Errorf("a second savepoint request while one is pending: %v", err)
+	}
+	c := r.client(nil)
+	var dec proto.DecideResult
+	if err := c.Call(context.Background(), proto.MethodRequestsDecide, proto.DecideParams{ID: first.ID, Approve: false, Reason: "no"}, &dec); err != nil {
+		t.Fatal(err)
+	}
+	// A requested savepoint made five minutes ago, and an owner's one made
+	// a minute ago.
+	index := r.p.SavepointIndex(hello)
+	os.MkdirAll(filepath.Dir(index), 0o700)
+	now := time.Now().UTC()
+	write := func(lines ...string) {
+		if err := os.WriteFile(index, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := func(id string, at time.Time, class string) string {
+		return fmt.Sprintf(`{"v":1,"op":"save","id":%q,"time":%q,"files":0,"size":0,"class":%q}`, id, at.Format(time.RFC3339Nano), class)
+	}
+	write(rec("20260101T000000Z", now.Add(-5*time.Minute), "requested"), rec("20260101T000001Z", now.Add(-time.Minute), ""))
+	if _, err := r.request(t, proto.RequestParams{Kind: "savepoint"}); !proto.IsCode(err, proto.CodeRefused) || !strings.Contains(err.Error(), "requested_interval") {
+		t.Errorf("a savepoint request inside the interval: %v", err)
+	}
+	// The control: the requested one is eleven minutes old.
+	write(rec("20260101T000000Z", now.Add(-11*time.Minute), "requested"), rec("20260101T000001Z", now.Add(-time.Minute), ""))
+	if rep, err := r.request(t, proto.RequestParams{Kind: "savepoint"}); err != nil || rep.Status != proto.RequestPending {
+		t.Errorf("a savepoint request after the interval: %+v %v", rep, err)
 	}
 }

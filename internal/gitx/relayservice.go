@@ -424,6 +424,89 @@ func RemoveQuarantines(relay string) {
 	}
 }
 
+// WatchEvery is how often Watch measures a running transfer. git writes
+// an incoming pack as it arrives (about what the box sends; measured: a
+// 300 MB push grew the quarantine by 304 MB, and 20 one-byte variants of
+// a 50 MB object by 50 MB, the thin pack's base), so a fifth of a second
+// lets a transfer overshoot its budget by at most what the disk writes in
+// that time. Tests shorten it.
+var WatchEvery = 200 * time.Millisecond
+
+// Watch is the watchdog of everything a box sends into a relay: a push
+// through the relay service (grown measures its quarantine) and a bank's
+// fetch (grown measures the relay's new objects). Every WatchEvery until
+// ctx ends it measures, and it returns why the transfer must be ended: the
+// relay would exceed quota (used is its size before the transfer), or the
+// state file system keeps less than half of paths.StateMinFree. It
+// returns "" when ctx ends first. free measures the free space of a path
+// (paths.FreeSpace when nil). A measurement that fails ends the transfer.
+func Watch(ctx context.Context, relay string, used, quota int64, grown func() (int64, error), free func(string) (int64, error)) string {
+	if free == nil {
+		free = paths.FreeSpace
+	}
+	t := time.NewTicker(WatchEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-t.C:
+		}
+		n, err := grown()
+		if err != nil {
+			return "the transfer's size could not be measured: " + err.Error()
+		}
+		if quota > 0 && used+n > quota {
+			return fmt.Sprintf("the relay would hold more than its budget of %s (git.relay_quota)", SizeText(quota))
+		}
+		f, err := free(relay)
+		if err != nil {
+			return "the free space could not be measured: " + err.Error()
+		}
+		if f < paths.StateMinFree/2 {
+			return fmt.Sprintf("the state file system has only %s free", SizeText(f))
+		}
+	}
+}
+
+// ObjectsUsage is the size of a relay's object store. A bank's fetch adds
+// to it only: index-pack writes objects/pack/tmp_pack_* as the pack
+// arrives and renames it when it is complete, and with unpackLimit=1 no
+// loose objects are written.
+func ObjectsUsage(relay string) (int64, error) {
+	n, err := RelayUsage(filepath.Join(relay, "objects"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return n, nil
+	}
+	return n, err
+}
+
+// RemoveFetchLeftovers removes what an ended fetch can leave in a relay:
+// index-pack's temporary files (objects/pack/tmp_*) and the lock files of
+// ref updates and of packed-refs. Only the bank that holds the box lock
+// writes the relay while it fetches, and its git processes are gone when
+// this runs, so nothing removed here is in use. A pack that was complete
+// before the fetch was ended stays: its objects are valid, and the relay's
+// size, which counts it, decides whether the next transfer may start.
+func RemoveFetchLeftovers(relay string) {
+	if des, err := os.ReadDir(filepath.Join(relay, "objects", "pack")); err == nil {
+		for _, de := range des {
+			if strings.HasPrefix(de.Name(), "tmp_") && de.Type().IsRegular() {
+				_ = os.Remove(filepath.Join(relay, "objects", "pack", de.Name()))
+			}
+		}
+	}
+	for _, f := range []string{"packed-refs.lock", "shallow.lock"} {
+		_ = os.Remove(filepath.Join(relay, f))
+	}
+	_ = filepath.WalkDir(filepath.Join(relay, "refs"), func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() && strings.HasSuffix(d.Name(), ".lock") {
+			_ = os.Remove(p)
+		}
+		return nil
+	})
+}
+
 // SizeText writes a byte count for messages.
 func SizeText(n int64) string {
 	switch {

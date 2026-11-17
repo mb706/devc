@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
-	"golang.org/x/sys/unix"
 
 	"github.com/mb706/devc/internal/box"
 	"github.com/mb706/devc/internal/config"
@@ -58,60 +57,23 @@ const (
 	pushSlack = 64 << 20
 	// pushMinFree is the free space the state file system must have when
 	// a push starts; the watchdog ends a push that leaves less than half
-	// of it (finding D1-05).
-	pushMinFree = 1 << 30
+	// of it (finding D1-05). Banks and ingestion keep the same reserve.
+	pushMinFree = paths.StateMinFree
 )
-
-// pushWatchEvery is how often the push watchdog measures the relay's
-// growth. git writes the incoming pack as it arrives (about what the box
-// sends; measured: a 300 MB push grew the quarantine by 304 MB, and 20
-// one-byte variants of a 50 MB object by 50 MB, the thin pack's base),
-// so a fifth of a second lets a push overshoot its budget by at most what
-// the disk writes in that time. Tests shorten it.
-var pushWatchEvery = 200 * time.Millisecond
-
-func statfsFree(path string) (int64, error) {
-	var st unix.Statfs_t
-	if err := unix.Statfs(path, &st); err != nil {
-		return 0, err
-	}
-	return int64(st.Bavail) * int64(st.Bsize), nil
-}
 
 func (d *Daemon) free(path string) (int64, error) {
 	if d.freeSpace != nil {
 		return d.freeSpace(path)
 	}
-	return statfsFree(path)
+	return paths.FreeSpace(path)
 }
 
 // watchPush measures a running push until ctx ends and returns why it
 // must be ended: the relay would exceed git.relay_quota (quota, with used
-// bytes before the push), or the state file system runs short.
+// bytes before the push), or the state file system runs short. It is
+// gitx.Watch on the push's quarantine, the watchdog banks use as well.
 func (d *Daemon) watchPush(ctx context.Context, relay string, used, quota int64) string {
-	t := time.NewTicker(pushWatchEvery)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ""
-		case <-t.C:
-		}
-		grown, err := gitx.QuarantineUsage(relay)
-		if err != nil {
-			return "the push's size could not be measured: " + err.Error()
-		}
-		if quota > 0 && used+grown > quota {
-			return fmt.Sprintf("the relay would hold more than its budget of %s (git.relay_quota)", gitx.SizeText(quota))
-		}
-		free, err := d.free(relay)
-		if err != nil {
-			return "the free space could not be measured: " + err.Error()
-		}
-		if free < pushMinFree/2 {
-			return fmt.Sprintf("the state file system has only %s free", gitx.SizeText(free))
-		}
-	}
+	return gitx.Watch(ctx, relay, used, quota, func() (int64, error) { return gitx.QuarantineUsage(relay) }, d.free)
 }
 
 // streamStall bounds one write to a raw box stream: a box that stops

@@ -142,7 +142,7 @@ section = "Recording"
 [[step]]
 at = "cli"
 ref = "internal/data.appendIndex"
-text = "A `save` record goes into `durable/realms/<realm>/savepoints/<project>.jsonl`: ID, name, time, driver, what it covers and leaves out, counts, the relay's tip, the restic snapshot."
+text = "A `save` record goes into `durable/realms/<realm>/savepoints/<project>.jsonl`: ID, name, time, driver, what it covers and leaves out, counts, the relay's tip, the restic snapshot; for `devc save --request <id>` (a box's request) also the class `requested` and the request's ID."
 
 [[step]]
 at = "cli"
@@ -152,7 +152,7 @@ text = "The manifest gets a `save` record with path `.` and the digest; a failur
 [[step]]
 at = "cli"
 ref = "internal/data.Retention"
-text = "Unnamed savepoints beyond `keep` (default 10) are dropped, oldest first; named ones never by retention."
+text = "The owner's unnamed savepoints beyond `keep` (default 10) are dropped, oldest first; named ones never by retention, and requested ones are not counted. After a requested save, RequestedRetention drops instead the requested ones beyond `requested_keep`, named or not."
 
 [[step]]
 at = "cli"

@@ -97,9 +97,10 @@ text = "The box's runtime directory is opened as a safefs root and `spool` liste
 
 [[step]]
 at = "daemon"
-ref = "internal/session.Store.Claim"
-checks = ["internal/session.Store.Claim"]
-text = "The session must be this project's: the first project to record an ID owns it, in `durable/session-owners/<id>`. A spool file of another project's session is refused whole and reported once ([[finding:C1-01]])."
+ref = "internal/session.Store.Owner"
+checks = ["internal/session.Store.Owner"]
+text = "The session must be this project's: the first project to record an ID owns it, in `durable/session-owners/<id>`. A spool file of another project's session is refused whole, before it is read, and reported once ([[finding:C1-01]])."
+detail = "A file whose session a journal budget stopped is not read at all until that budget has room again."
 
 [[step]]
 from = "spool"
@@ -118,11 +119,17 @@ checks = ["internal/proto.ParseSpoolLine", "internal/proto.ValidateData"]
 text = "Each line is decoded strictly and validated field by field; host-only types, another session's ID and lines over 64 KiB are refused and counted, never stored. A valid event is re-encoded, gets the next `seq` of its session, the host's time `at` and its spool offset."
 
 [[step]]
+at = "daemon"
+ref = "internal/session.room.fits"
+unchecked = "ingestFile asks the budgets about the batch it built"
+text = "Only the leading events that keep the session's journal, the project's journals and the free space within their budgets are kept; if one does not fit, the host adds one note naming the budget, and the rest stays in the spool. An unowned session is claimed now, when something is appended."
+
+[[step]]
 from = "daemon"
 to = "state-dir"
 via = "file"
 label = "durable/realms/<realm>/journal/<project>/<session>.jsonl"
-ref = "internal/session.appendJournal"
+ref = "internal/session.appendLines"
 text = "The batch is appended in one write and synced before the spool offset is saved, so an event reaches the journal at most once ([[finding:B6]])."
 detail = "A write that fails part-way is cut off again; a torn line left behind is skipped by readers, and the next append starts on a new line. After `session.end`, further events of the session are dropped, and a spool file whose session has ended and that holds nothing more is removed."
 

@@ -485,6 +485,7 @@ func (d *Daemon) reload(force bool) error {
 	mgr := box.NewManager(c, eng, d.o.Runner, d.o.Executable, d.version, io.Discard)
 	store := session.NewStore(c.Paths)
 	store.LockTimeout = 2 * time.Second
+	store.Limits = session.ConfigBudgets(c)
 	var refs []names.ProjectRef
 	for _, p := range c.Projects("") {
 		refs = append(refs, p.Ref())
@@ -711,6 +712,7 @@ func (d *Daemon) ingest(ctx context.Context, e *env, ref names.ProjectRef) (sess
 	unlock()
 	d.noteInvalid(ref, rep.Invalid, "")
 	d.noteRefused(ref, rep.Refused)
+	d.noteStops(ref, rep.Stops)
 	if rep.Events > 0 || rep.Notes > 0 {
 		d.hub.poll(&ref)
 	}
@@ -731,6 +733,7 @@ func (d *Daemon) recordHost(ctx context.Context, ref names.ProjectRef, sid, typ 
 	rep, ierr := e.store.Ingest(ref)
 	d.noteInvalid(ref, rep.Invalid, "")
 	d.noteRefused(ref, rep.Refused)
+	d.noteStops(ref, rep.Stops)
 	err = e.store.AppendHostEvent(ref, sid, typ, data)
 	unlock()
 	d.hub.poll(&ref)
@@ -788,6 +791,14 @@ func (d *Daemon) noteRefused(ref names.ProjectRef, refused []session.Refusal) {
 	}
 }
 
+// noteStops logs the sessions a journal budget stopped in an ingestion run
+// (C20a); `devc ps` and `devc doctor` show the budgets' state themselves.
+func (d *Daemon) noteStops(ref names.ProjectRef, stops []session.Stop) {
+	for _, st := range stops {
+		d.log.Warn("a journal budget stopped the ingestion of a session", "ref", ref.String(), "session", st.Session, "budget", st.Budget)
+	}
+}
+
 // takeWarnings returns and clears the pending warnings of refs.
 func (d *Daemon) takeWarnings(refs []names.ProjectRef) []proto.Warning {
 	d.mu.Lock()
@@ -824,6 +835,7 @@ func (d *Daemon) refresh(ctx context.Context, e *env, ref names.ProjectRef) (ses
 	res, err := e.store.Refresh(ctx, ref, observe, e.eng)
 	d.noteInvalid(ref, res.Report.Invalid, res.Warning)
 	d.noteRefused(ref, res.Report.Refused)
+	d.noteStops(ref, res.Report.Stops)
 	d.mu.Lock()
 	if res.Live != nil {
 		wins := map[string]string{}

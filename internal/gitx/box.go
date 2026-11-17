@@ -33,6 +33,9 @@ type Service struct {
 	Out io.Writer
 	// Now is the clock for timestamped refs.
 	Now func() time.Time
+	// Free measures the free space of a path (paths.FreeSpace when nil);
+	// tests replace it.
+	Free func(path string) (int64, error)
 }
 
 // Project is one project as the git operations see it.
@@ -150,18 +153,98 @@ func (s *Service) boxURL(p *Project) (string, error) {
 	return BoxURL(s.Engine.Binary(), p.Container, paths.InBoxRepoDir(p.Ref))
 }
 
-// fetchFromBox fetches refspecs from the box repository into the relay.
-// git-upload-pack runs in the box; the relay checks every object.
-func (s *Service) fetchFromBox(ctx context.Context, p *Project, refspecs ...string) error {
+func (s *Service) free(path string) (int64, error) {
+	if s.Free != nil {
+		return s.Free(path)
+	}
+	return paths.FreeSpace(path)
+}
+
+// fetchFromBox fetches refspecs, each naming one ref (no wildcard), from
+// the box repository into the relay; git-upload-pack runs in the box, and
+// the relay checks every object. It is bounded like a push through the
+// relay service (C20a; findings D1-05, E1-16, F1-01): it does not start
+// when the state file system has less than paths.StateMinFree free or the
+// relay is over git.relay_quota, and Watch ends it when the relay's new
+// objects would take it over the budget or the file system below half
+// the reserve. git runs in a process group of its own, which is ended as
+// a whole; only once none of its processes is left are its temporary
+// packs and lock files removed (RemoveFetchLeftovers), so an ended fetch
+// leaves the relay as it was apart from packs it completed. Refs are
+// written only below refs/devc/incoming/, which the bank empties.
+func (s *Service) fetchFromBox(ctx context.Context, p *Project, refspecs []string) error {
 	if !p.Running {
 		return fmt.Errorf("%s: %w", p.Container, ErrNotRunning)
+	}
+	for _, rs := range refspecs {
+		if strings.ContainsAny(rs, "*\n\x00") || !strings.HasPrefix(rs, "+refs/") || !strings.Contains(rs, ":"+IncomingPrefix) {
+			return fmt.Errorf("internal error: refspec %q is not one ref into %s", printableName(rs), IncomingPrefix)
+		}
 	}
 	url, err := s.boxURL(p)
 	if err != nil {
 		return err
 	}
-	args := append([]string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--no-auto-gc", url}, refspecs...)
-	res, err := s.Host.Run(ctx, Call{Relay: p.Relay.Dir, Args: args, Box: true})
+	relay := p.Relay.Dir
+	free, err := s.free(relay)
+	if err != nil {
+		return fmt.Errorf("checking the free space of the state file system: %w", err)
+	}
+	if free < paths.StateMinFree {
+		return fmt.Errorf("the state file system has only %s free and devc keeps %s free, so nothing was fetched from %s: free space on the host",
+			SizeText(free), SizeText(paths.StateMinFree), p.Container)
+	}
+	var quota int64
+	if p.Resolved != nil {
+		quota = p.Resolved.Git.RelayQuota
+	}
+	used, err := RelayUsage(relay)
+	if err != nil {
+		return fmt.Errorf("measuring the relay: %w", err)
+	}
+	if quota > 0 && used > quota {
+		return fmt.Errorf("the relay holds %s, its budget is %s (git.relay_quota), so nothing was fetched from %s: raise the budget or clean up the relay",
+			SizeText(used), SizeText(quota), p.Container)
+	}
+	base, err := ObjectsUsage(relay)
+	if err != nil {
+		return fmt.Errorf("measuring the relay: %w", err)
+	}
+	gctx, end := context.WithCancel(ctx)
+	defer end()
+	watched := make(chan string, 1)
+	go func() {
+		why := Watch(gctx, relay, used, quota, func() (int64, error) {
+			n, err := ObjectsUsage(relay)
+			return n - base, err
+		}, s.free)
+		if why != "" {
+			end()
+		}
+		watched <- why
+	}()
+	args := []string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--no-auto-gc", "--stdin", url}
+	res, err := s.Host.Run(gctx, Call{Relay: relay, Args: args, Box: true, Group: true, Stdin: strings.NewReader(strings.Join(refspecs, "\n") + "\n")})
+	end()
+	why := <-watched
+	var left *execx.GroupLeftError
+	if errors.As(err, &left) {
+		// As holdRelay does for a push (finding F1-01): the caller holds
+		// the box lock, and keeps it until git's processes are gone.
+		s.printf("devc: git processes of the fetch from %s did not end; devc keeps the box locked until they have\n", p.Container)
+		select {
+		case <-left.Gone:
+			RemoveFetchLeftovers(relay)
+		case <-ctx.Done():
+		}
+		return fmt.Errorf("fetching from %s: %w", p.Container, err)
+	}
+	if why != "" || err != nil {
+		RemoveFetchLeftovers(relay)
+	}
+	if why != "" {
+		return fmt.Errorf("devc ended the fetch from %s: %s", p.Container, why)
+	}
 	if err != nil {
 		return fmt.Errorf("fetching from %s: %s%s", p.Container, printable(err.Error()), printable(tail(res.Stderr)))
 	}

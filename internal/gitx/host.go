@@ -91,6 +91,11 @@ type Call struct {
 	Env []string
 	// Config holds key=value settings given as -c options for this call.
 	Config []string
+	// Group runs the command in a process group of its own that is ended
+	// and waited for as a whole (execx.Cmd.KillGroup), also on a host that
+	// is not Background: a bank's fetch, which its watchdog may end while
+	// index-pack writes (C20a, as for pushes in finding E1-16).
+	Group bool
 }
 
 // Host runs git on the host. Apart from `devc init`'s clone of the
@@ -223,7 +228,7 @@ func (h *Host) Cmd(c Call) (execx.Cmd, error) {
 	// index-pack or pack-objects that outlived an ended fetch would go on
 	// writing into the relay (finding E1-16). Commands of the command line
 	// stay in the terminal's foreground group, which an interrupt ends.
-	cmd.KillGroup = h.Background
+	cmd.KillGroup = h.Background || c.Group
 	return cmd, nil
 }
 

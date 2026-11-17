@@ -48,7 +48,7 @@ func (a *app) refresh(ctx context.Context, e *boxEnv, ref names.ProjectRef) (ses
 		_, running, ready, err := e.mgr.State(ctx, ref)
 		return session.BoxState{Running: running, Ready: ready, Container: names.BoxName(ref)}, err
 	}
-	res, err := session.NewStore(e.cfg.Paths).Refresh(ctx, ref, observe, e.mgr.Engine)
+	res, err := sessionStore(e.cfg).Refresh(ctx, ref, observe, e.mgr.Engine)
 	if res.Warning != "" {
 		fmt.Fprintf(a.stderr, "devc: warning: %s: %s\n", ref, proto.PrintableText(res.Warning))
 	}
@@ -59,6 +59,30 @@ func (a *app) refresh(ctx context.Context, e *boxEnv, ref names.ProjectRef) (ses
 		fmt.Fprintf(a.stderr, "devc: warning: %s: %s\n", ref, session.RefusalText(rf))
 	}
 	return res, err
+}
+
+// sessionStore is the session store of a configuration, with its
+// projects' journal budgets (C20a).
+func sessionStore(c *config.Config) *session.Store {
+	st := session.NewStore(c.Paths)
+	st.Limits = session.ConfigBudgets(c)
+	return st
+}
+
+// warnBudgets prints a warning for every journal budget that stops the
+// ingestion of refs' sessions (C20a).
+func (a *app) warnBudgets(c *config.Config, refs []names.ProjectRef) {
+	st := sessionStore(c)
+	for _, ref := range refs {
+		br, err := st.Budget(ref)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "devc: warning: %s: checking the journal budgets: %s\n", ref, errText(err))
+			continue
+		}
+		for _, line := range session.BudgetText(br) {
+			fmt.Fprintf(a.stderr, "devc: warning: %s\n", line)
+		}
+	}
 }
 
 // ingest brings a box's session events into the durable journal (and
@@ -415,6 +439,7 @@ func newSessionCmds(a *app) []*cobra.Command {
 			if err != nil {
 				return err
 			}
+			a.warnBudgets(e.cfg, refs)
 			if psJSON {
 				return writeJSON(a.stdout, sums)
 			}
@@ -476,7 +501,7 @@ func newSessionCmds(a *app) []*cobra.Command {
 			return nil
 		},
 	}
-	return []*cobra.Command{ps, attach, stop, newIngestCmd(a), newContextCmd(a), newEventsCmd(a), newDaemonCmd(a)}
+	return []*cobra.Command{ps, attach, stop, newIngestCmd(a), newContextCmd(a), newEventsCmd(a), newDaemonCmd(a), newSessionsCmd(a)}
 }
 
 func printableTail(b []byte) string {
@@ -907,7 +932,7 @@ func (h *sessionHooks) AfterStop(ctx context.Context, ref names.ProjectRef, stop
 		reason = proto.ReasonBoxDown
 	}
 	var errs []error
-	if _, err := session.NewStore(h.e.cfg.Paths).RefreshStopped(ctx, ref, reason); err != nil {
+	if _, err := sessionStore(h.e.cfg).RefreshStopped(ctx, ref, reason); err != nil {
 		errs = append(errs, fmt.Errorf("ingesting the sessions of %s: %w", ref, err))
 	}
 	if stopped {

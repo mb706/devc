@@ -63,8 +63,8 @@ text = "receive-pack starts devc's hooks, each a process of its own (`devc relay
 [[step]]
 at = "cli"
 ref = "internal/gitx.PlanBank"
-checks = ["internal/gitx.Service.snapshot", "internal/gitx.Relay.Update"]
-text = "A bank (`devc bank`, which the daemon too starts as a child process) takes what the box offers: the snapshot report is decoded strictly, the fetch runs git's server side in the box and writes only scratch refs, every object passes fsck, and the plan skips bad names, keeps protected branches and deletes nothing ([[flow:turn-snapshot]]). A bank has no storage budget yet ([[doc:docs/dev/LEFTOVER.md#git-x7]])."
+checks = ["internal/gitx.Service.snapshot", "internal/gitx.Service.listBox", "internal/gitx.Watch", "internal/gitx.Relay.Update"]
+text = "A bank (`devc bank`, which the daemon too starts as a child process) takes what the box offers: the snapshot report is decoded strictly, the box's refs are listed and counted first and only new ones fetched by name, the fetch runs git's server side in the box, writes only scratch refs and is bounded like a push, every object passes fsck, and the plan skips bad names, keeps protected branches and deletes nothing ([[flow:turn-snapshot]])."
 
 [[step]]
 section = "What a box sends the host: network and brokered access"
@@ -117,8 +117,8 @@ section = "What a box writes where the host reads"
 [[step]]
 at = "daemon"
 ref = "internal/session.Store.Ingest"
-checks = ["internal/safefs.Root.ReadFrom", "internal/session.Store.Claim", "internal/proto.ParseSpoolLine"]
-text = "Spool files are read beneath the box's runtime directory without following links, in bounded runs; the session must belong to this project, and each line is parsed strictly and re-encoded into the journal. A journal's total size has no bound yet ([[flow:event-ingestion]], [[doc:docs/dev/LEFTOVER.md#the-daemon-sessions-input-requests-x6]])."
+checks = ["internal/safefs.Root.ReadFrom", "internal/session.Store.Claim", "internal/proto.ParseSpoolLine", "internal/session.room.fits"]
+text = "Spool files are read beneath the box's runtime directory without following links, in bounded runs; the session must belong to this project, each line is parsed strictly and re-encoded into the journal, and only what fits the journal budgets is appended ([[flow:event-ingestion]])."
 
 [[step]]
 at = "cli"
@@ -168,7 +168,7 @@ text = "The desktop sidecar's X server, on the loopback it shares with the box, 
 at = "dialer"
 ref = "internal/boxside.Dial"
 checks = ["internal/netpolicy.Pin"]
-text = "A forward or a local URL reaches a box's server through a dial process: the host's own devc in the user and network namespaces of the box's main process, which the host pinned and proved to be the box's, but in the host's mount namespace. It relays bytes unparsed and reads nothing of the box; a forward starts one per connection, without a bound ([[flow:local-url]], [[concern:forwards-and-local-urls]])."
+text = "A forward or a local URL reaches a box's server through a dial process: the host's own devc in the user and network namespaces of the box's main process, which the host pinned and proved to be the box's, but in the host's mount namespace. It relays bytes unparsed and reads nothing of the box; a forward runs at most 64 at once, the router 256 ([[flow:local-url]], [[concern:forwards-and-local-urls]])."
 
 [[step]]
 section = "What reaches the hub without a credential"

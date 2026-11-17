@@ -84,9 +84,9 @@ func TestPushEndedDuringIndexPack(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
 	}
-	old := pushWatchEvery
-	pushWatchEvery = 10 * time.Millisecond
-	t.Cleanup(func() { pushWatchEvery = old })
+	old := gitx.WatchEvery
+	gitx.WatchEvery = 10 * time.Millisecond
+	t.Cleanup(func() { gitx.WatchEvery = old })
 	dir := t.TempDir()
 	env := append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@x",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@x")
