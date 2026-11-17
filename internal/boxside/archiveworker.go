@@ -1,3 +1,15 @@
+// The archive worker (work order C17) runs in the helper container with a
+// realm's shared harness state (durable/realms/<realm>/harness) read-only
+// at HelperTarget. That state is box-writable, so the host never walks it:
+// this worker does, descriptor by descriptor without following anything,
+// and either lists the regular files the archive may carry (op "list"; the
+// daemon then reads each through safefs) or packs them into a tar stream
+// on standard output (op "tar", for devc state export). Symlinks, FIFOs,
+// sockets, devices, names outside the archive's character set, files
+// above the size cap and the manifests' credential files are left out;
+// the others are counted as skipped, with up to a hundred named, and
+// credential files are only counted.
+
 package boxside
 
 import (
@@ -19,17 +31,6 @@ import (
 	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/safefs"
 )
-
-// The archive worker (work order C17) runs in the helper container with a
-// realm's shared harness state (durable/realms/<realm>/harness) read-only
-// at HelperTarget. That state is box-writable, so the host never walks it:
-// this worker does, descriptor by descriptor without following anything,
-// and either lists the regular files the archive may carry (op "list"; the
-// daemon then reads each through safefs) or packs them into a tar stream
-// on standard output (op "tar", for devc state export). Symlinks, FIFOs,
-// sockets, devices, names outside the archive's character set, files
-// above the size cap and the manifests' credential files are left out;
-// all but the credential files are counted and reported.
 
 // ArchiveProtoVersion is the version of the worker's request and report.
 const ArchiveProtoVersion = 1
@@ -239,7 +240,9 @@ func (w *archiveWalk) run(root string) error {
 	return nil
 }
 
-// Run carries out a request.
+// Run carries out a request: it walks the requested harnesses' state and
+// writes the listing, or the tar stream with the report as its last
+// entry, to Out.
 func (aw *ArchiveWorker) Run(req *ArchiveRequest) error {
 	w := &archiveWalk{req: req, report: ArchiveListing{V: ArchiveProtoVersion, Files: []ArchiveFile{}, Skipped: []ArchiveSkip{}}}
 	if req.Op == "list" {

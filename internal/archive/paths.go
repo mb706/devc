@@ -5,12 +5,18 @@
 // credential files are excluded. The machine side lives in
 // internal/fleet, the hub side in internal/hub.
 //
-// Durable state of a realm (durable/realms/<realm>/) is: session journals,
-// request, network and gate logs, the savepoint index (host-written,
-// append-only or rewritten and then archived again as a new generation),
-// the relays and the context repository (git: bundles in sequence and a
-// log of their refs), and the shared harness state (transcripts and
-// shared homes). Secrets never travel in the archive.
+// What the archive carries of a realm (durable/realms/<realm>/): the
+// host-written session journals, request, network and gate logs and the
+// savepoint index; the shared harness state (transcripts and shared
+// homes), which boxes write; and the relays and the context repository as
+// git bundles in sequence with a log of their refs. Each file is stored in
+// generations: a file that changes other than by growing gets a new one.
+// Secrets never travel in the archive, and neither does anything ValidRel
+// does not name (service logs, for example).
+//
+// Files: paths.go names archived files and checks them, and holds the
+// credential and transcript patterns; wire.go the endpoints, classes and
+// answers; sealed.go the encrypted secrets bundles.
 //
 // Security rules: every archive path is validated by ParsePath before it
 // names a file on a hub or a machine; it accepts only the kinds of durable
@@ -40,7 +46,7 @@ const (
 
 // Kinds of archive paths.
 const (
-	KindFile   = "file"   // files/<rel>[~<gen>]: append-only copy of a durable file
+	KindFile   = "file"   // files/<rel>[~<gen>]: one generation of a durable file
 	KindBundle = "bundle" // bundles/<repo>/<seq>-<id>.bundle
 	KindRefs   = "refs"   // bundles/<repo>/refs.jsonl: the refs after each bundle
 )

@@ -1,3 +1,7 @@
+// This file implements the containers the archive needs: the archive
+// worker in the helper container, which lists or packs the box-writable
+// harness state so the host never walks it, and the context worker.
+
 package fleet
 
 import (

@@ -1,5 +1,3 @@
-package hub
-
 // Invented machines for the development mode (devmode.go). Each plays a
 // machine daemon on a pipe to the hub's own machine-link code, so the web
 // app sees exactly what a real hub would show: sessions in every inbox
@@ -7,6 +5,8 @@ package hub
 // a diff and a terminal. Commands work in a simple way (a prompt starts a
 // short scripted turn, answers and stops take effect) so the screens can be
 // tried. Nothing here touches a box or a real machine.
+
+package hub
 
 import (
 	"context"

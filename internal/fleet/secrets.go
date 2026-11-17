@@ -1,3 +1,7 @@
+// This file implements what a secrets bundle holds once it is decrypted:
+// a realm's secrets, read from the store for devc secret push and checked
+// one by one before devc secret pull stores them.
+
 package fleet
 
 import (

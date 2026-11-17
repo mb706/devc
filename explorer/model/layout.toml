@@ -333,6 +333,30 @@ writer = "host"
 ref = "internal/paths.Paths.ArchiveHubDir"
 
 [[tree.entry]]
+path = "local/archive/<hub-id>/state.json"
+text = "The uploader's bookkeeping of one hub: per realm, each file's class, generation, bytes sent and completion, and each repository's bundle sequence and recorded refs. Only a cache of what the hub says: when it is lost, the hub's lengths, index and prefix hashes rebuild it."
+writer = "host"
+ref = "internal/fleet.State"
+
+[[tree.entry]]
+path = "local/archive/<hub-id>/lock"
+text = "Held (flock) during a pass, so two devc processes sharing this state directory never upload to one hub at once."
+writer = "host"
+ref = "internal/fleet.stateStore.lock"
+
+[[tree.entry]]
+path = "local/archive/<hub-id>/bundles"
+text = "Bundles made for this hub and not yet complete there; they survive a restart, and are removed once the hub has them or no bookkeeping names them."
+writer = "host"
+ref = "internal/fleet.stateStore.bundleDir"
+
+[[tree.entry]]
+path = "local/archive/<hub-id>/snap"
+text = "Snapshots of mutable files being uploaded to this hub, at most `[sync] max_file_size` each; a snapshot is the generation, so a file that keeps changing can still complete."
+writer = "host"
+ref = "internal/fleet.stateStore.snapDir"
+
+[[tree.entry]]
 path = "local/gate"
 text = "The SSH gate's host key and the public keys of boxes, with the lock under which the host key is made."
 writer = "host"
@@ -376,7 +400,7 @@ ref = "internal/paths.Paths.TmpDir"
 
 [[tree.entry]]
 path = "local/tmp/restore-<random>"
-text = "What restic restored for `devc restore`, before a worker copies it into the project; written by restic as the box user, emptied by the rm worker in a helper container (box-written data), then removed."
+text = "What restic restored for `devc restore`, before a worker copies it into the project; written by restic as the box user, emptied by the rm worker in a helper container (box-written data), then removed. `devc state pull` and `import` use directories of the same prefix for the bundles of one repository being restored, removed afterwards ([[internal/fleet.Restorer.Restore]])."
 writer = "host"
 ref = "internal/data.Service.resticRestore"
 
@@ -385,6 +409,18 @@ path = "local/tmp/relay-report-<random>.json"
 text = "One push through the relay service: post-receive writes its report here for the daemon, and the hooks keep their notes beside it (`.heads`, the box's branches from pre-receive; `.records`, what each update hook recorded). Created empty (0600) by the daemon, removed when the push is over."
 writer = "host"
 ref = "internal/daemon.newReportFile"
+
+[[tree.entry]]
+path = "local/tmp/import-<random>/tree"
+text = "An export extracted by `devc state import` through the safe extractor (at most a million entries, 16 GiB per file, 256 GiB in all), read from there as the archive to restore; the whole directory is removed afterwards."
+writer = "host"
+ref = "internal/fleet.ReadExport"
+
+[[tree.entry]]
+path = "local/tmp/export-<random>"
+text = "The full bundles of the relays and the context repository while `devc state export` writes its tar file; removed afterwards."
+writer = "host"
+ref = "internal/fleet.Exporter.repos"
 
 [[tree.entry]]
 path = "local/tmp/service-login-<random>"
@@ -913,3 +949,38 @@ path = "hub.toml"
 text = "The hub's settings, written by the user: the public URL, ntfy server, topic and token, whether terminals may be controlled, the archive's limits. Decoded strictly; the server warns when others can read it."
 writer = "user"
 ref = "internal/hub.Layout.ConfigFile"
+
+[[tree.entry]]
+path = "archive"
+text = "Every machine's archive, one tree per machine by its certificate's registry name. Written only by the server, from validated names: appends at the stored length, exclusive creation without following links, every write synced before the answer. Every enrolled machine may read all of it."
+ref = "internal/hub.Layout.ArchiveDir"
+
+[[tree.entry]]
+path = "archive/<machine>/<realm>/files/<path>"
+text = "Generation 0 of an archived file; `<path>~<n>` is generation n. Only appended to; a complete mutable generation takes no more bytes. Mutable generations outside the retention window are removed by the server when a newer one completes."
+ref = "internal/hub.archiveStore.putFile"
+
+[[tree.entry]]
+path = "archive/<machine>/<realm>/files/<path>~meta"
+text = "The record of a generation (`~<n>~meta` for generation n): class, permission bits, the length it was last completed at and when it first completed, by the hub's clock. Replaced whole through `~meta.tmp` and a rename; not counted in the usage."
+ref = "internal/hub.genMeta"
+
+[[tree.entry]]
+path = "archive/<machine>/<realm>/bundles/relay/<project>/<seq>-<id>.bundle"
+text = "Bundle `<seq>` of a relay, uploaded as `.part` and renamed, replacing nothing, when the machine makes it final; bundle n is taken only after n−1 is complete. `bundles/context/` holds the context repository's."
+ref = "internal/hub.archiveStore.put"
+
+[[tree.entry]]
+path = "archive/<machine>/<realm>/bundles/relay/<project>/refs.jsonl"
+text = "The repository's ref log: one JSON line per change of refs, only appended to."
+ref = "internal/archive.RefLine"
+
+[[tree.entry]]
+path = "archive/.pruned"
+text = "Touched by `devc hub archive prune` so a running server counts the machines' usage again."
+ref = "internal/hub.PruneArchive"
+
+[[tree.entry]]
+path = "secrets/<machine>/<realm>/<n>.json"
+text = "An encrypted secrets bundle pushed by that machine, with the hub's version number and time; the newest ten per machine and realm are kept, counted against the machine's quotas. The hub cannot open them."
+ref = "internal/hub.Server.apiSecretsPut"

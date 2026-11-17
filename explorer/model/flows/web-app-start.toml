@@ -1,0 +1,184 @@
+id = "web-app-start"
+kind = "flow"
+title = "Opening the web app"
+summary = "A browser with a device certificate opens the hub: the page and its modules under the content security policy, the saved data shown at once, the login checked, a snapshot of inbox, machines and requests, and one event stream from the snapshot's position that keeps the inbox live, with a reset when the hub's change log no longer reaches back."
+concern = "web-app"
+trigger = "Opening https://hub.example.org/ on the phone (or a notification's link #/s/<machine>/<session>)"
+actors = ["user", "browser", "hub", "hub-db"]
+
+[[step]]
+section = "The page"
+
+[[step]]
+from = "user"
+to = "browser"
+external = true
+label = "open https://<hub>/"
+text = "The browser holds the device certificate from `devc hub enroll device` and offers it in the TLS handshake (or to the reverse proxy)."
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:GET /{$}"
+external = true
+label = "GET / (device certificate)"
+text = "The page itself may be opened from another site's link, such as a web ntfy client; its parts may not."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.serveFile"
+checks = ["internal/hub.Server.identify", "internal/hub.Server.guard", "internal/hub.Server.setHeaders"]
+text = "Class device: a registered device certificate, no login needed, since the login screen is part of the app. Every response carries the content security policy and `nosniff`."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "index.html, CSP"
+ref = "internal/hub.Server.serveFile"
+text = "`index.html` names the stylesheet, three vendored modules to preload and `/app/main.js`; nothing inline."
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:GET /app/{file...}"
+external = true
+label = "GET /app/*.js, /vendor/…"
+text = "The browser loads the ES modules; the policy lets it take scripts from this origin only."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "modules (ETag; vendor cached a year)"
+ref = "internal/hub.Server.serveFile"
+text = "The app's own files are revalidated on every load (304 when unchanged); vendored files carry their version in the path and are cached as immutable."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/main.js~loadCache();"
+label = "loadCache"
+text = "Before anything is asked, `main.js` shows what local storage kept (machines, session summaries, requests, pending commands). It also registers the service worker, which keeps the app's files for opening offline."
+
+[[step]]
+section = "Who is this?"
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:GET /api/me"
+label = "GET /api/me"
+ref = "file:web/app/store.js~const me = await api.get('/api/me');"
+text = "The first API call tells whether the device is logged in."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiMe"
+checks = ["internal/hub.Server.identify", "internal/hub.Server.checkSession"]
+text = "Class user: the device certificate and a login session bound to it. Without a login the answer is 401, saying whether a TOTP code is needed; a request without a certificate gets 404 from the front, and one whose certificate is unknown, expired or revoked 403."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "{device, session, expires, terminal_control}"
+ref = "internal/hub.Server.apiMe"
+text = "On 401, 403 or 404 the app shows the login screen or explains the certificate problem; on a network failure it keeps the saved data on screen and tries again."
+
+[[step]]
+section = "Snapshot, then the stream"
+
+[[step]]
+at = "browser"
+ref = "file:web/app/stream.js~async function resync()"
+label = "resync"
+text = "With no stream position yet, the stream module first reads a snapshot; of overlapping reads only the newest is applied."
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:GET /api/inbox"
+label = "GET /api/inbox, /api/machines, /api/requests"
+ref = "file:web/app/store.js~api.get('/api/inbox')"
+text = "Three reads at once."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiInbox"
+text = "Each answer notes the change log's position before it reads the database, so a change made meanwhile is also in the stream after that position."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "{sections, stream_id}"
+ref = "internal/hub.Server.apiInbox"
+text = "The inbox's sections with session summaries; the machines and requests likewise."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/store.js~export async function loadSnapshot"
+label = "loadSnapshot"
+text = "The store takes the snapshot, keeps sessions a screen has open, gives each summary the snapshot's position as its version and starts from the lowest of the three positions."
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:GET /api/stream"
+label = "GET /api/stream?last_id=<pos>&session=…"
+ref = "file:web/app/stream.js~const src = new EventSource(url());"
+text = "One `EventSource`, naming up to 32 open sessions. On its own reconnects the browser also sends `Last-Event-ID`, which the hub prefers."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiStream"
+checks = ["internal/hub.Server.checkSession"]
+text = "The sessions must be `<machine>/<session>` names. A stream that names a session keeps that session from being notified; every 15 seconds a comment goes out and the login is checked again."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Store.changesAfter"
+text = "The changes after the position, from the change log in the database, in order; a page whose first ID is not the next one means pruning overtook the stream."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "stream"
+label = "id: N, event: session, data: {…}"
+ref = "internal/hub.Server.apiStream"
+text = "Session summaries, machines, requests and removals for everyone; events and `session.reset` only for the named sessions."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/store.js~export function applyChange"
+label = "applyChange"
+text = "Each message updates the store. A summary older than the one held (by stream position) is ignored; an event is added to an open session's window only if it is the next one, else the session is read again."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/inbox.js~export function Inbox"
+label = "Inbox"
+text = "Every screen re-renders through `useStore`; summaries and texts from boxes become text nodes, never HTML."
+
+[[step]]
+section = "When the stream breaks"
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "stream"
+label = "event: reset"
+ref = "internal/hub.Server.apiStream"
+text = "When the position is ahead of the hub (another hub's ID, a new database) or behind what the change log still holds, the hub sends `reset` instead of changes."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/stream.js~src.addEventListener('reset'"
+label = "on reset"
+text = "The app closes the stream, forgets its position, reads the snapshot again with every open session's latest events, and reopens from the new position: no change is applied twice or lost."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/stream.js~function onVisibility()"
+label = "onVisibility"
+text = "Thirty seconds after the page is hidden the stream closes, so notifications are not held back; it reopens when the page is visible. Errors reconnect with backoff up to a minute, after asking `/api/me` whether the login still holds."

@@ -1,11 +1,9 @@
-package hub
-
 // The archive of durable state (work order C17 section 2): machines append
 // to their own tree below archive/<machine>/<realm>/ and read every
 // machine's. It is a ratchet: an upload names its offset, which must equal
-// the stored length; nothing a machine sends can overwrite, truncate,
-// rename or delete what is stored (no such route exists), and only a
-// machine's own registry name ever selects the tree it writes. Bundles are
+// the stored length; no route overwrites, truncates, renames or deletes
+// what is stored (retention, below, is the hub's own decision), and only
+// a machine's own registry name ever selects the tree it writes. Bundles are
 // stored in sequence: bundle n is accepted only after bundle n-1 is
 // complete, is written to a ".part" file and becomes visible (renamed
 // without replacing anything) when the machine says it is final.
@@ -40,6 +38,8 @@ package hub
 // Encrypted secrets bundles (section 4) are kept below
 // secrets/<machine>/<realm>/, the last ten of each; they count against the
 // machine's quotas.
+
+package hub
 
 import (
 	"container/list"
@@ -1337,7 +1337,7 @@ func (a *archiveStore) retain(m *machineArchive, u *archiveUsage, realm, dir, na
 
 // --- Handlers ---
 
-// archiveTarget validates the machine and realm a request names.
+// archiveNames validates the machine and realm a request names.
 func archiveNames(machine, realm string) error {
 	if !names.Valid(machine) {
 		return fmt.Errorf("invalid machine name %q", machine)
@@ -1946,8 +1946,9 @@ type PruneResult struct {
 // PruneArchive deletes, from one machine's archive, the files last written
 // before cutoff, and the bundle chains and ref logs of repositories whose
 // newest bundle and ref log are older (a bundle cannot be used without
-// those before it). It is the only way anything leaves the archive, and it
-// runs on the hub. With dryRun nothing is deleted.
+// those before it). It runs on the hub (devc hub archive prune); besides
+// it only retention (archiveStore.retain) removes stored generations.
+// With dryRun nothing is deleted.
 func PruneArchive(l Layout, machine string, cutoff time.Time, dryRun bool) (PruneResult, error) {
 	var res PruneResult
 	if !names.Valid(machine) {

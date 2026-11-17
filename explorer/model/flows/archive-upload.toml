@@ -1,0 +1,189 @@
+id = "archive-upload"
+kind = "flow"
+title = "One file into the archive"
+summary = "One pass of a daemon's uploader for one mutable file of the shared harness state: the worker lists the box-writable tree, the class comes from this machine's manifest, a snapshot is uploaded at the hub's stored length, the hub records the completion by its own clock and applies retention to the file's older generations."
+concern = "fleet-archive"
+trigger = "The daemon's uploader wakes (every minute, or devc sync status --now) and a harness database in the realm's shared state has changed"
+actors = ["hub-archive", "hub", "daemon", "state-dir", "helper"]
+
+[[step]]
+section = "The pass begins"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.hubLink.archiveLoop"
+unchecked = "started as a goroutine by hubManager.sync for every hub in config.toml, beside the hub's machine link"
+text = "Each listed hub has its own uploader, on its own goroutine and HTTPS connections, so uploads never hold up the machine link. It loads the machine certificate for this hub and runs a pass."
+detail = "Without credentials (the machine never joined this hub) the status says so and nothing is sent. Between passes it waits `ArchiveInterval` (one minute) or for `archive.status` with `wake`, which only the local socket offers."
+
+[[step]]
+at = "daemon"
+ref = "internal/fleet.Uploader.Pass"
+text = "A pass takes this hub's lock in `local/archive/<hub-id>/` (another devc uploading from the same state directory makes it fail), loads the bookkeeping and goes through the realms with `[sync] hub` in name order."
+detail = "After a 507 (a quota reached) passes return at once for ten minutes. An error ends the pass where it happens: the rest of the realm and the realms after it wait for the next pass."
+
+[[step]]
+at = "daemon"
+ref = "internal/fleet.Uploader.realmPass"
+text = "The host-written files (journals, request, savepoint, network and gate logs) are listed directly; nothing in those directories is box-writable. The shared harness state is."
+
+[[step]]
+from = "daemon"
+to = "helper"
+via = "exec"
+label = "podman run … devc box archive-worker"
+ref = "internal/fleet.ContainerWorkers.ListHarness"
+text = "At most every five minutes per realm ([[internal/fleet.HarnessScanner]], shared by every hub's uploader), the helper container lists the state: no network, every capability dropped but `DAC_READ_SEARCH`, the realm's `harness/` read-only, the request on stdin."
+detail = "The request names every harness this machine has a manifest for, with its credential patterns ([[internal/fleet.HarnessRequest]]); directories of other harnesses are not read. The worker has 30 minutes."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.ArchiveWorker.Run"
+unchecked = "a process podman starts in the helper container with devc box archive-worker"
+checks = ["internal/boxside.ReadArchiveRequest"]
+text = "The worker reads the request strictly and walks each harness's directory descriptor by descriptor."
+
+[[step]]
+at = "helper"
+ref = "internal/boxside.archiveWalk.walk"
+checks = ["internal/archive.ValidComponent", "internal/archive.Excluded", "internal/archive.ValidRel"]
+text = "Credential files are left out and counted; links, special files, names outside the archive's character set and files above `max_file_size` are skipped and counted, up to a hundred named. It stops at 200,000 files, 500,000 entries or a 63 MiB listing."
+
+[[step]]
+from = "helper"
+to = "daemon"
+via = "reply"
+label = "listing: path, size, mtime per file"
+ref = "internal/boxside.ArchiveWorker.Run"
+text = "The listing is JSON on stdout, captured up to 64 MiB; a cut capture is an error, never a shorter listing."
+
+[[step]]
+at = "daemon"
+ref = "internal/boxside.DecodeArchiveListing"
+checks = ["internal/boxside.DecodeArchiveListing"]
+text = "Decoded strictly; every path must be one the archive carries and skipped names are made printable. A failed listing marks the realm's pass incomplete and the pass goes on with the host-written files."
+
+[[step]]
+at = "daemon"
+ref = "internal/archive.ClassOf"
+text = "Credential files are left out again; the class comes from this machine's manifest: append-only where a transcript glob matches, mutable otherwise. The database is mutable."
+
+[[step]]
+section = "One file"
+
+[[step]]
+from = "daemon"
+to = "state-dir"
+via = "file"
+label = "durable/realms/<realm>/harness/<id>/…"
+ref = "internal/fleet.Uploader.syncFile"
+checks = ["internal/safefs.Root.Open"]
+text = "The file is opened through safefs beneath the realm's durable directory: no link followed, a regular file only. A file above `max_file_size` is skipped."
+
+[[step]]
+at = "daemon"
+ref = "internal/fleet.Uploader.syncMutable"
+text = "The source's inode, modification time, size and mode differ from the generation the hub completed, and the last generation began more than `[sync] mutable_interval` ago (six hours), so a new generation begins."
+detail = "Within the interval the file is counted as waiting (`devc sync status`). For an append-only file [[internal/fleet.Uploader.syncAppend]] instead hashes the whole uploaded prefix again and, while it is unchanged, appends what is new to the same generation; a changed prefix starts a new generation, at most one an hour."
+
+[[step]]
+at = "daemon"
+ref = "internal/fleet.Uploader.snapshot"
+text = "The file is copied to `local/archive/<hub-id>/snap/`, at most `max_file_size` bytes, and copied again (three tries) if it changed meanwhile; the generation is that copy, with its length and stat."
+
+[[step]]
+at = "daemon"
+ref = "internal/fleet.Uploader.upload"
+text = "The snapshot goes up in chunks of about a second's worth at `[sync] upload_rate` (64 KiB to 4 MiB), each waiting for the hub's rate limiter."
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "http:PUT /machine/archive/{realm}/{path...}"
+label = "PUT files/harness/…~7?offset=0&class=mutable&mode=600"
+ref = "internal/fleet.Client.Put"
+text = "Each chunk is sent at the offset the hub holds; the first names the class and the permission bits."
+detail = "A 409 with a length is reconciled ([[internal/fleet.Uploader.fileConflict]]): the upload resumes at the hub's length when that prefix is this generation's (confirmed before, or the hub's prefix hash equals the local one), else it moves to a new generation. A 413 halves the chunk; a 409 naming a class adopts it; a 400 skips the file."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiArchivePut"
+checks = ["internal/hub.Server.identify", "internal/hub.Server.guard", "internal/archive.ParsePath", "internal/hub.onlyQuery", "internal/archive.MutableAllowed"]
+text = "A machine certificate and `X-Devc-Request: 1`. The tree is the one of the certificate's registry name; the path must parse; mutable is refused outside `files/harness/`."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.archiveStore.admit"
+text = "One of eight upload places, and one of the machine's two, before the body is read; otherwise 429 at once. The body may be up to `max_request` (8 MiB) and has two minutes."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.archiveStore.putFile"
+checks = ["internal/hub.archiveStore.planNew", "internal/hub.archiveStore.checkQuota", "internal/hub.recordedClass"]
+text = "A new generation: every name it will write must fit the file system, the bytes, the file and its new directories must fit the quotas and the free-space reserve, it must be newer than every generation held, and its class that of the file."
+
+[[step]]
+from = "hub"
+to = "hub-archive"
+via = "file"
+label = "<file>~7~meta, <file>~7"
+ref = "internal/hub.appendFile"
+text = "The directories are made and counted, the record (class, mode) is written and synced, the bytes appended with `O_APPEND` and synced, the new directory entry synced; on any failure all of it is removed again."
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "reply"
+label = "{length}"
+ref = "internal/hub.Server.apiArchivePut"
+text = "The stored length after the append; the uploader checks it is the one it expected."
+
+[[step]]
+section = "Completion and retention"
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "http:PUT /machine/archive/{realm}/{path...}"
+label = "PUT …~7?offset=<length>&final=1"
+ref = "internal/fleet.Uploader.commit"
+text = "When the whole snapshot is on the hub, the uploader marks the generation complete at its length (an empty file is created this way)."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.completionTime"
+text = "The first completion of a generation records the hub's time, never earlier than an older generation's; a generation cannot complete once a newer one has. The machine cannot name a time."
+
+[[step]]
+from = "hub"
+to = "hub-archive"
+via = "file"
+label = "<file>~7~meta: committed, completed"
+ref = "internal/hub.writeMeta"
+text = "The record is written whole, synced, renamed into place and its directory synced. From now on the generation takes no more bytes."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.retentionDrops"
+text = "Only now, with the record durable, retention looks at this file's generations: it keeps the newest three complete ones and the newest completed at or before each checkpoint, and drops other mutable ones (and incomplete ones older than the newest complete)."
+
+[[step]]
+from = "hub"
+to = "hub-archive"
+via = "file"
+label = "unlinkat <file>~3, <file>~3~meta"
+ref = "internal/hub.archiveStore.retain"
+text = "Each chosen generation's record is read again and must say mutable; the file must be a regular file beneath the file's directory. It is removed with its record and taken off the usage."
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "reply"
+label = "{length, complete: true}"
+ref = "internal/hub.archiveStore.putFile"
+text = "The uploader notes the completion and drops its snapshot. After the files come the relays and the context repository ([[internal/fleet.Uploader.syncRepo]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/fleet.stateStore.save"
+text = "The bookkeeping is saved atomically at the end of the pass (and every few seconds during it); snapshots and bundles no state names are removed. `devc sync status` and `devc hub status` show the result."

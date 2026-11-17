@@ -1,10 +1,10 @@
-package hub
-
 // The API the web app needs beyond C11a (work order C12 section 3):
 // projects and changes, forwarded to the machine's projects.list and
 // changes.get. Like everything a machine sends, the answers are decoded
 // strictly and checked before they reach a browser; invalid entries are
 // dropped and texts made printable.
+
+package hub
 
 import (
 	"context"
@@ -39,6 +39,10 @@ type MachineProjects struct {
 	Error    string              `json:"error,omitempty"`
 }
 
+// apiProjects is GET /api/projects[?machine=]: every machine the hub
+// knows with its projects, asked of the connected machines at once
+// (projects.list) and cleaned; an offline machine is listed with an
+// error and no projects.
 func (s *Server) apiProjects(w http.ResponseWriter, r *http.Request) {
 	machine := r.URL.Query().Get("machine")
 	if machine != "" && !validMachine(machine) {
@@ -147,6 +151,9 @@ type ChangesReply struct {
 	proto.ChangesResult
 }
 
+// apiChanges is GET /api/changes/{machine}/{session}?scope=: what the
+// session's worktree changed, computed by the machine on its relay
+// (changes.get) and checked before it is passed on.
 func (s *Server) apiChanges(w http.ResponseWriter, r *http.Request) {
 	machine, sid := r.PathValue("machine"), r.PathValue("session")
 	if !validMachine(machine) || !names.ValidSessionID(sid) {

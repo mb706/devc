@@ -5,6 +5,12 @@
 // hub or an export, the export format, and carrying encrypted secrets
 // between machines.
 //
+// Files: client.go talks to a hub; uploader.go is the upload pass (files,
+// then bundles and ref logs); state.go its bookkeeping and the rate
+// limiter; workers.go the containers it needs; restore.go and export.go
+// restore, export and import; secrets.go the plaintext of a secrets
+// bundle.
+//
 // Security rules: shared harness state is box-writable (README rule 2).
 // The host never walks it: the helper container's archive worker lists or
 // packs it, and the host reads each listed file only through safefs
@@ -91,7 +97,8 @@ func (e *HubError) Error() string {
 }
 
 // Conflict reports a 409: the stored length (when given) and whether the
-// bundle is complete.
+// bundle, or the mutable file generation, is complete and takes no more
+// bytes.
 func (e *HubError) Conflict() (length int64, known, complete bool) {
 	if e.Status != http.StatusConflict {
 		return 0, false, false

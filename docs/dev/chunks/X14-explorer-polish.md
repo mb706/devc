@@ -1,6 +1,23 @@
 # X14 — Explorer: polish after the content chunks
 
-Small problems in the tool and the app that the content authors met. This list grows until the content is written; then one chunk works through it.
+Nine authors have written the model with the tool and the app, and each reported what stood in their way. This chunk works through their list. Read `explorer/README.md` (design and format reference, binding), the "X1" to "X3" sections of `docs/dev/STATUS.md`, and the constraints and design direction in `docs/dev/chunks/X2-explorer-app-code.md`; they apply unchanged.
+
+The model now holds about forty concerns and sixty flows. Build the site and look at it before changing anything: several items below are about how real content reads, which nobody could judge when the app was built.
+
+## How to work
+
+- Group the items by what they touch (the connection check, the queries, `check.sh`, the app's rendering, the documents) and fix them group by group.
+- Where an item changes the connection check, run `./dev explore --check` before and after and compare: every flow that connected must still connect, and every path that changes must be at least as direct as before. If a change makes a flow's `unchecked` unnecessary, leave the model as it is and list the flow in your report; the next chunk edits the model.
+- After the list, look at the whole app with the full model as the owner would: every view, both themes, 1280 and 1920 pixels. Fix what reads badly now that the content is real: concern pages with long side columns, the flows index with sixty entries, the runtime map with more actors and channels than it was designed with, the glossary with a hundred terms, search results across everything. Use your judgment and say what you changed.
+- Update `explorer/README.md` ("Writing for the explorer" and the reference tables) and `docs/dev/chunks/X-content-guide.md` where an item says the documents should say something.
+- Extend `explorer/check.sh` for what you add. It must pass.
+- Do not change the model's content, and do not change the format in a way that would invalidate it.
+
+Rules as always: plain HTML, CSS and JavaScript from `file://`; no dependencies; never `rm` with an unguarded variable; no commits; no background processes left behind; run the tool's unit tests if you change the tool.
+
+At the end add an "X14" section to `docs/dev/STATUS.md` and report in at most 300 words: what you fixed, by group; what you chose not to do and why; which flows could now drop an `unchecked`; what you changed after looking at the whole with real content.
+
+# The list
 
 ## From X4
 
@@ -53,4 +70,11 @@ Small problems in the tool and the app that the content authors met. This list g
 - The call graph cannot follow net/http's router into the hub's `guard`, so the front's checks can appear only as `checks`. A way to declare such a hand-over in the model (a route's handler is reached through a named wrapper) would let flows verify it.
 - The guide should say that a step naming the function that holds a command's literal does connect when it is the actor's first step.
 - A word counter in `--check` (second request).
+
+## From X12
+
+- `unchecked` does nothing on a step whose reference is a `file:` reference, so steps in JavaScript show no connection status at all. Show the author's reason there, marked as not verified.
+- A method constant used as a map value counts as "listed" rather than "sent", so the hub's forwarding of commands needed `unchecked`. Classify a method that is looked up in a map and then passed to a call as sent by the function that does the call.
+- The shortest-path rule sometimes reports a misleading connection (third report).
+- A diagram edge from a node to itself shows no label.
 

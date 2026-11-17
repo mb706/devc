@@ -1,11 +1,11 @@
-package hub
-
 // The web app's files (work order C12 section 4), embedded from web/ and
 // served to device certificates without a login (the login screen is part
 // of the app; its code is no secret). Vendored files carry their version
 // in the path and are cached for a year; the app's own files are
 // revalidated (ETag) on every load. The content security policy of the
 // front applies to them as to everything else.
+
+package hub
 
 import (
 	"crypto/sha256"
@@ -78,14 +78,21 @@ func StaticPaths() []string {
 	return out
 }
 
+// serveIndex serves the app's page for / (the only part of the app another
+// site may link to).
 func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	s.serveFile(w, r, "/index.html")
 }
 
+// serveStatic serves an embedded file by its URL path.
 func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
 	s.serveFile(w, r, r.URL.Path)
 }
 
+// serveFile serves one embedded file, or 404 for any path that is not
+// one: with its content type and ETag, cached for a year when it is
+// vendored (its version is in the path), revalidated on every load
+// otherwise.
 func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, p string) {
 	f, ok := loadStatic()[p]
 	if !ok || path.Clean(p) != p {

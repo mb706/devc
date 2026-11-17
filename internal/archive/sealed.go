@@ -1,3 +1,7 @@
+// This file implements the encrypted secrets bundle that devc secret push
+// stores on a hub and devc secret pull opens on another machine, so the
+// hub keeps a realm's secrets without being able to read them.
+
 package archive
 
 import (

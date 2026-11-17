@@ -1,8 +1,8 @@
-package cli
-
 // The fleet commands (work order C17): devc sync status, devc state
 // pull|export|import, devc secret push|pull on a machine, and devc hub
 // archive ls|du|prune on the hub.
+
+package cli
 
 import (
 	"bytes"
@@ -93,6 +93,9 @@ func (a *app) readPassphrase(confirm bool) ([]byte, error) {
 	return pw, nil
 }
 
+// newSecretFleetCmds builds devc secret push and pull, which carry a
+// realm's secrets between machines through a hub, encrypted under a
+// passphrase the hub never sees.
 func newSecretFleetCmds(a *app) []*cobra.Command {
 	var to string
 	push := &cobra.Command{
@@ -232,6 +235,8 @@ func parseAsOf(v string) (time.Time, error) {
 	return time.Time{}, usageErrorf("--as-of %q is not a time: give RFC 3339 (2026-11-02T08:00:00Z) or a date (2026-11-02, the start of that day in UTC)", v)
 }
 
+// newStateCmd builds devc state pull, export and import, which restore a
+// realm from a hub's archive or an export file and write such a file.
 func newStateCmd(a *app) *cobra.Command {
 	var from, machine, asOf string
 	var list, merge bool
@@ -439,6 +444,8 @@ func newStateCmd(a *app) *cobra.Command {
 	return group("state", "Restore, export and import a realm's durable state", false, pull, export, imp)
 }
 
+// printRestore prints a restore's report: problems on stderr, the summary
+// on stdout.
 func (a *app) printRestore(rep *fleet.RestoreReport) {
 	for _, s := range rep.Skipped {
 		fmt.Fprintf(a.stderr, "devc: left out %s\n", s)
@@ -486,6 +493,8 @@ func (a *app) printRestore(rep *fleet.RestoreReport) {
 		rep.Files, rep.Existing, len(rep.Relays), rep.RefsCreated, ctx, rep.Excluded)
 }
 
+// newSyncCmd builds devc sync status, which asks the daemon what its
+// uploaders have not archived yet.
 func newSyncCmd(a *app) *cobra.Command {
 	var asJSON, now bool
 	status := &cobra.Command{
@@ -594,6 +603,8 @@ func archiveSummary(s *proto.ArchiveHubStatus) string {
 	return fmt.Sprintf("%d files (%s), %d repos behind", files, humanSize(size), repos)
 }
 
+// newHubArchiveCmd builds devc hub archive ls, du and prune, which work on
+// the hub directory itself, not through the server.
 func newHubArchiveCmd(a *app, dirFlag *string) *cobra.Command {
 	var lsJSON bool
 	ls := &cobra.Command{

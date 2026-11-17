@@ -1,9 +1,9 @@
-package hub
-
 // The development mode's invented terminal: a screen in the style of a
 // harness's TUI (24-bit and 256 colours, box drawing, a diff with coloured
 // backgrounds), with a spinner that moves every second and, in control
 // mode, a prompt line that shows what is typed.
+
+package hub
 
 import (
 	"context"

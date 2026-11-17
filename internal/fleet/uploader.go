@@ -1,3 +1,8 @@
+// This file implements the upload pass the daemon runs for each hub: the
+// durable files of every realm with [sync] hub in generations, then each
+// relay and the context repository as bundles in sequence with a ref log.
+// It works from the hub's stored lengths, so an interrupted pass resumes.
+
 package fleet
 
 import (
@@ -170,6 +175,9 @@ var ErrPaused = errors.New("uploads to this hub are paused after it reported a f
 
 // Pass uploads what the hub lacks of every realm with [sync] hub. It
 // returns the first error that ended it (network, quota, a refusal).
+// Realms go in name order, and in a realm the files before the
+// repositories; an error ends the pass there, and what comes after it
+// waits for the next pass.
 func (u *Uploader) Pass(ctx context.Context, c *config.Config, cl *Client, w Workers) error {
 	u.mu.Lock()
 	paused := u.Now().Before(u.pauseTo)
@@ -879,6 +887,8 @@ type repoSource interface {
 	next(ctx context.Context, rs *RepoState, dir string) (refs map[string]string, file, stamp string, unchanged bool, err error)
 }
 
+// relaySource is a project's relay: host git lists the refs the archive
+// carries and bundles the objects the hub's recorded tips do not reach.
 type relaySource struct{ relay *gitx.Relay }
 
 func values(m map[string]string) []string {
@@ -921,6 +931,8 @@ func (s *relaySource) next(ctx context.Context, rs *RepoState, dir string) (map[
 	return refs, file, "", false, nil
 }
 
+// contextSource is the realm's context repository, which the context
+// worker bundles in its container; the host does not run git on it.
 type contextSource struct {
 	w     Workers
 	c     *config.Config

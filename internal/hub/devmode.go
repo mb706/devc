@@ -1,5 +1,3 @@
-package hub
-
 // The development mode of the hub (work order C12 section 5): `devc hub
 // serve --dev-no-auth` serves the web app and the API without certificates
 // or a login, backed by machines that exist only in this process
@@ -8,6 +6,8 @@ package hub
 // a loopback address over plain HTTP, keeps the Host check (against DNS
 // rebinding), and keeps its database in a temporary directory that is
 // removed when it stops. No real machine can connect to it.
+
+package hub
 
 import (
 	"errors"

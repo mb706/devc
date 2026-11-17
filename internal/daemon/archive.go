@@ -1,5 +1,3 @@
-package daemon
-
 // The archive of durable state (work order C17 section 2): for every hub
 // in the list an uploader runs beside the machine link, on its own
 // goroutine and its own HTTP connections, so uploads never hold up event
@@ -8,6 +6,8 @@ package daemon
 // config.toml), and resumes where the hub's stored lengths say. The work
 // that needs containers (listing the box-writable harness state, bundling
 // the context repository) runs through fleet.ContainerWorkers.
+
+package daemon
 
 import (
 	"context"

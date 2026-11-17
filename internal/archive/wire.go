@@ -1,3 +1,7 @@
+// This file holds the wire format of the hub's archive and secrets
+// endpoints: the routes and an upload's parameters, the classes of files,
+// and the hub's answers.
+
 package archive
 
 import (
@@ -37,7 +41,7 @@ const (
 const RequestHeader = "X-Devc-Request"
 
 // MaxChunk is the largest upload a hub accepts in one request by default
-// (hub.toml [archive] max_request may lower it).
+// (hub.toml [archive] max_request changes it, within 64k and 64m).
 const MaxChunk = 8 << 20
 
 // Classes of archived files (findings D1-14, E1-04). A machine proposes

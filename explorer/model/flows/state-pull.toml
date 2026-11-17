@@ -1,0 +1,178 @@
+id = "state-pull"
+kind = "flow"
+title = "A new machine restores a realm"
+summary = "devc state pull on a machine that joined the hub: the realm must be configured and empty, the archive's index is read and checked, a generation is chosen per file, files are created only where none exists, relays get their bundles through fsck and only the refs they lack, and the context worker restores the context repository."
+concern = "state-restore"
+trigger = "devc state pull work --from https://hub.example.org --machine laptop"
+actors = ["user", "hub", "cli", "state-dir", "host-git", "context-worker"]
+
+[[step]]
+section = "Before anything is read"
+
+[[step]]
+from = "user"
+to = "cli"
+via = "cmd:devc state pull"
+label = "devc state pull work --from <hub> --machine laptop"
+external = true
+text = "The new machine has joined the hub (`devc join`) and has realm `work` in its configuration. `--machine` names the archive to restore; without it, this machine's own."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.parseAsOf"
+checks = ["internal/names.Valid", "internal/cli.parseAsOf"]
+text = "The run function of the command ([[internal/cli.newStateCmd]]) checks the machine name; `--as-of`, if given, must be RFC 3339 or a date, meaning the start of that day in UTC."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.hubClient"
+checks = ["internal/cli.app.realmArg"]
+text = "The realm must be configured here. The client uses this hub's machine certificate from `durable/node/hubs/<hub-id>/`, on connections of its own."
+
+[[step]]
+at = "cli"
+ref = "internal/fleet.Restorer.Restore"
+text = "A source of another realm is refused ([[finding:D1-19]])."
+
+[[step]]
+at = "cli"
+ref = "internal/fleet.ExistingState"
+text = "Without `--merge` the realm must hold no durable state: no journals, relays, context repository, request, savepoint or network logs, gate log, or non-empty harness directory. Box-writable harness directories are only listed one level, through safefs."
+
+[[step]]
+section = "The index"
+
+[[step]]
+from = "cli"
+to = "hub"
+via = "http:GET /machine/archive-index/{machine}/{realm}"
+label = "GET /machine/archive-index/laptop/work?after=…"
+ref = "internal/fleet.Client.Index"
+text = "Pages of at most 2,000 entries, each asked for after the last path of the one before."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiArchiveIndex"
+checks = ["internal/hub.Server.identify", "internal/hub.archiveNames", "internal/archive.ParsePath", "internal/hub.archiveStore.admit"]
+text = "Any machine certificate may read any machine's archive. Names and the cursor are checked; the request takes one of eight read places, two per machine, and every write of the answer has 30 seconds."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.ArchiveIndex"
+text = "A walk of `archive/laptop/work/` in name order, skipping what lies before the cursor: each file generation with its length and record (class, mode, committed length, completion time), each bundle complete or not, each ref log."
+
+[[step]]
+from = "hub"
+to = "cli"
+via = "reply"
+label = "index page"
+ref = "internal/hub.Server.apiArchiveIndex"
+text = "A page, with `more` and `next` when another follows."
+
+[[step]]
+at = "cli"
+ref = "internal/fleet.Client.Index"
+checks = ["internal/archive.ParsePath"]
+text = "Every entry's path must parse and its lengths make sense; pages must advance, hold at most 2,000 entries and a million in all. A file generation marked complete without a committed length counts as incomplete."
+
+[[step]]
+at = "cli"
+ref = "internal/fleet.chooseGenerations"
+text = "Per file the newest complete generation, at its committed length; with `--as-of`, the newest completed by then by the hub's clock. Incomplete newer generations, untimed ones and files left out are reported."
+
+[[step]]
+section = "Files"
+
+[[step]]
+from = "cli"
+to = "hub"
+via = "http:GET /machine/archive-file/{machine}/{realm}/{path...}"
+label = "GET …/files/journal/<p>/<s>.jsonl (Range)"
+ref = "internal/fleet.Client.FetchPrefix"
+text = "Exactly the chosen length is asked for with a Range header; an append-only file may have grown since."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiArchiveFile"
+checks = ["internal/archive.ParsePath", "internal/hub.archiveStore.admit"]
+text = "Opened without following a link, served with Range support; the answer stalls at most 30 seconds per write."
+
+[[step]]
+from = "hub"
+to = "cli"
+via = "reply"
+label = "bytes"
+ref = "internal/hub.Server.apiArchiveFile"
+text = "Fewer bytes than asked is an error."
+
+[[step]]
+from = "cli"
+to = "state-dir"
+via = "file"
+label = "durable/realms/work/journal/…"
+ref = "internal/fleet.Restorer.restoreFiles"
+checks = ["internal/archive.Excluded"]
+text = "Harness files need a manifest here and are never credential files. Each file is created beneath the durable directory without following a link, exclusively: an existing one is kept. At most 4 GiB; an incomplete one is removed and the restore stops."
+
+[[step]]
+section = "Relays and the context repository"
+
+[[step]]
+at = "cli"
+ref = "internal/fleet.ReplayRefs"
+text = "Each repository's ref log (at most 64 MiB) is replayed up to the bundles that are complete in sequence; lines that need a missing bundle, invalid refs and a cut last line are skipped."
+
+[[step]]
+at = "cli"
+ref = "internal/fleet.Restorer.restoreRepo"
+text = "The complete bundles, from sequence 0 to the first gap, at most 16 GiB each, are downloaded to `local/tmp/restore-*`; a gap is reported."
+
+[[step]]
+from = "cli"
+to = "host-git"
+via = "exec"
+label = "git fetch <bundle> +refs/*:refs/devc/restore/*"
+ref = "internal/gitx.Relay.FetchBundle"
+text = "The relay is created (or an existing one configured again) and each bundle fetched with fsck into the scratch namespace. Host git runs with devc's hardened settings and no hooks."
+
+[[step]]
+at = "host-git"
+external = true
+label = "fetch with fsck"
+text = "git checks every object of the bundle and writes only `refs/devc/restore/*`."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Relay.RestoreRefs"
+checks = ["internal/gitx.ArchiveRef"]
+text = "The refs the relay lacks are created in one transaction, only in devc's namespaces and only where the objects are present; refs with another value are kept and reported. The scratch refs are deleted, and a fresh relay's HEAD is set to `main` when the archive has it."
+
+[[step]]
+from = "cli"
+to = "context-worker"
+via = "exec"
+label = "podman run … devc box context-worker restore"
+ref = "internal/ctxrepo.Repo.Restore"
+text = "The context repository's bundles and its wanted refs (only valid context refs) go to the context worker, which alone runs git on the context repository."
+
+[[step]]
+at = "context-worker"
+ref = "internal/boxside.ContextWorker.Restore"
+unchecked = "a process podman starts in the context container with devc box context-worker"
+text = "It fetches the bundles with fsck, creates the refs that are missing and, if it created `main`, writes main's missing files through safefs, replacing nothing."
+
+[[step]]
+from = "context-worker"
+to = "cli"
+via = "reply"
+label = "created, conflicts, files"
+ref = "internal/boxside.ContextWorker.Restore"
+text = "Its report is decoded strictly and its texts made printable."
+
+[[step]]
+from = "cli"
+to = "user"
+via = "reply"
+label = "restored N files, M relays …"
+ref = "internal/fleet.RestoreReport"
+text = "What was restored, what existed, credential files left out, ref conflicts, incomplete generations and, with `--as-of`, what was taken as it is now."

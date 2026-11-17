@@ -1062,3 +1062,107 @@ title = "Uncertain outcome"
 text = "A command the hub forwarded whose answer never came back: the machine went away, did not answer in time, or sent an invalid receipt. The API says `\"uncertain\": true`, and the client asks for the receipt or retries with the same command ID."
 refs = ["internal/hub.rpcStatus", "internal/hub.writeRPCError"]
 see = ["receipt", "command"]
+
+[[term]]
+id = "archive"
+title = "Archive"
+aka = ["hub archive", "archive of durable state"]
+text = "The backup of a realm's durable state that a daemon uploads to every hub it joined, for realms with `[sync] hub`: journals and logs, shared harness state, and the relays and the context repository as git bundles. Each machine writes its own tree on the hub; every enrolled machine can read all of them."
+refs = ["internal/fleet.Uploader.Pass", "internal/hub.archiveStore.put", "internal/archive.ValidRel"]
+see = ["archive-generation", "file-class", "retention-window", "ref-log"]
+
+[[term]]
+id = "archive-generation"
+title = "Generation"
+aka = ["file generation"]
+text = "One version of an archived file on a hub: `files/<path>` is generation 0, `files/<path>~<n>` generation n. Bytes are only ever appended to a generation at its stored length; a file that changes other than by growing gets a new one. A generation is complete when the machine marks it so; the hub records the length and, the first time, its own time."
+refs = ["internal/archive.FilePath", "internal/hub.archiveStore.putFile", "internal/hub.completionTime"]
+see = ["archive", "file-class"]
+
+[[term]]
+id = "file-class"
+title = "File class"
+aka = ["append-only", "mutable"]
+text = "How the archive treats a file. Append-only (journals, logs, transcripts): uploaded from the file itself, every generation kept. Mutable (other shared harness state): uploaded from a snapshot, at most one new generation per `[sync] mutable_interval`, older generations subject to retention. The machine proposes the class from its manifests; the hub allows mutable only in shared harness state and keeps a file's class."
+refs = ["internal/archive.ClassOf", "internal/archive.MutableAllowed", "internal/hub.recordedClass"]
+see = ["archive-generation", "retention-window"]
+
+[[term]]
+id = "retention-window"
+title = "Retention window"
+aka = ["checkpoint", "retention"]
+text = "Which generations of a mutable file a hub keeps: the newest three complete ones and, for each checkpoint (the starts of the last `keep_daily` days and `keep_weekly` weeks, UTC, by the hub's clock), the newest one completed at or before it. Other mutable generations are dropped when a newer one completes."
+refs = ["internal/hub.retentionDrops", "internal/hub.checkpoints", "internal/hub.archiveStore.retain"]
+see = ["file-class", "archive-generation"]
+
+[[term]]
+id = "ref-log"
+title = "Ref log"
+aka = ["refs.jsonl", "bundle sequence"]
+text = "How a repository travels in the archive: bundles numbered in sequence, each holding the objects the earlier ones lack, and `refs.jsonl`, one line per change of refs saying which refs were set or deleted and how many bundles they need. A restore replays the lines whose bundles are all present."
+refs = ["internal/archive.RefLine", "internal/fleet.Uploader.syncRepo", "internal/fleet.ReplayRefs"]
+see = ["archive", "relay", "context-repository"]
+
+[[term]]
+id = "archive-worker"
+title = "Archive worker"
+text = "`devc box archive-worker` in the helper container: it walks a realm's box-writable shared harness state without following anything and lists (or, for an export, packs) the regular files the archive may carry, leaving out credential files, links, special files, odd names and files above the size cap."
+refs = ["internal/boxside.ArchiveWorker.Run", "internal/fleet.ContainerWorkers.ListHarness"]
+see = ["helper-container", "archive"]
+
+[[term]]
+id = "secrets-bundle"
+title = "Secrets bundle"
+text = "A realm's secrets sealed on a machine for `devc secret push`: a key derived from a passphrase with argon2id, XChaCha20-Poly1305 with the realm as additional data. The hub stores the ten newest of each machine and realm and cannot read them; `devc secret pull` opens one on another machine."
+refs = ["internal/archive.Sealed", "internal/archive.Seal", "internal/fleet.OpenSecrets"]
+see = ["realm-secret"]
+
+[[term]]
+id = "state-export"
+title = "State export"
+text = "One tar file with a realm's durable state in the archive's layout (`devc state export`): the current files, one full bundle and a one-line ref log per repository, no secrets and no credential files. `devc state import` restores it like a hub's archive."
+refs = ["internal/fleet.Exporter.Export", "internal/fleet.ReadExport"]
+see = ["archive"]
+
+[[term]]
+id = "event-stream"
+title = "Event stream"
+text = "`GET /api/stream`: the hub's change log as server-sent events, each with its change ID. The web app keeps one open, names the sessions a screen shows, resumes from the last ID and reads its snapshot again when the hub answers `reset`."
+refs = ["internal/hub.Server.apiStream", "file:web/app/stream.js~function open()"]
+see = ["change-log"]
+
+[[term]]
+id = "pending-command"
+title = "Pending command"
+text = "In the web app, a command whose final outcome is not known: its answer was lost, or the receipt so far is not final. It keeps its ID and parameters (also in local storage) and the app asks for its receipt until one settles it; one the machine never received can be sent again with the same ID."
+refs = ["file:web/app/store.js~function addPending", "file:web/app/store.js~export async function resolvePending"]
+see = ["uncertain-outcome", "receipt", "outbox"]
+
+[[term]]
+id = "outbox"
+title = "Outbox"
+text = "Prompts sent from the web app that have not yet appeared in the session: shown below the timeline with their state (sending, queued, typing, unknown, did not arrive) until their prompt event arrives or their receipt says they failed."
+refs = ["file:web/app/store.js~export async function sendPrompt", "file:web/app/store.js~function settleOutbox"]
+see = ["pending-command"]
+
+[[term]]
+id = "timeline-window"
+title = "Timeline window"
+text = "The at most 1,000 events the web app holds of an open session, with the entries drawn from them. Live events push the oldest out; paging back detaches the window from the live end until Back to the latest."
+refs = ["file:web/app/timeline.js~export const MAX_EVENTS", "file:web/app/timeline.js~export function detach"]
+see = ["event-stream"]
+
+[[term]]
+id = "content-security-policy"
+title = "Content security policy"
+aka = ["CSP"]
+text = "The header the hub sends with every response, which the browser enforces: scripts, styles and connections from the hub's own origin only, no inline code, no eval, never framed. It is why the web app has no inline script or style and why xterm.js runs through a shim."
+refs = ["internal/hub.contentSecurityPolicy", "file:web/app/cspshim.js~export function installCspShim"]
+see = ["hub"]
+
+[[term]]
+id = "development-mode"
+title = "Development mode"
+text = "`devc hub serve --dev-no-auth`, only with `DEVC_DEV=1` and on a loopback address: the hub without certificates or login, with three invented machines that speak the machine link over pipes, for working on the web app. `web/check.sh` drives it in a headless browser."
+refs = ["internal/hub.newDev", "internal/hub.Server.runDevMachines"]
+see = ["hub"]

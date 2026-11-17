@@ -1,8 +1,10 @@
-// The app's state: what the hub last told us, kept in memory and in local
-// storage so that the screens show the last data even offline, and the
-// actions that change it. Components re-render through useStore whenever
-// anything changes (the data is small; an open session's timeline is a
-// bounded window, timeline.js).
+// The app's state: what the hub last told us, kept in memory, and the
+// actions that change it. Machines, session summaries, requests and
+// commands whose outcome is not known yet are also kept in local storage,
+// so the screens show the last data offline and an unconfirmed command is
+// still asked about after a reload. Components re-render through useStore
+// whenever anything changes (the data is small; an open session's
+// timeline is a bounded window, timeline.js).
 
 import { useState, useEffect } from './lib.js';
 import * as api from './api.js';

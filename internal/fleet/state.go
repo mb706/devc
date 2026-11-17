@@ -1,3 +1,7 @@
+// This file implements the uploader's bookkeeping per hub
+// (local/archive/<hub-id>/), which only saves asking the hub again, and
+// the rate limit of uploads to a hub.
+
 package fleet
 
 import (
@@ -20,7 +24,7 @@ import (
 // local/archive/<hub-id>/state.json: per realm, how much of each durable
 // file and which bundles and refs the hub holds. It is a cache of what the
 // hub says: when it is lost or behind, the hub's answers (stored lengths,
-// the index, prefix hashes) put it right without uploading anything
+// the index, prefix hashes) put it right without the hub storing anything
 // twice.
 type State struct {
 	V       int                    `json:"v"`
@@ -39,10 +43,10 @@ type RealmState struct {
 // and how much of it the hub holds, and what is needed to notice a change.
 //
 // An append-only file (ClassAppend) is uploaded from the file itself:
-// Hash is the SHA-256 of the Sent bytes, and when the file's inode or
-// modification time changed, the whole uploaded prefix is hashed again; a
-// mismatch (or a file shorter than Sent) starts a new generation (finding
-// D1-14). A mutable file (ClassMutable) is uploaded from a snapshot copied
+// Hash is the SHA-256 of the Sent bytes, and when the file's inode,
+// modification time or size changed, the whole uploaded prefix is hashed
+// again; a mismatch (or a file shorter than Sent) starts a new generation
+// (finding D1-14), at most one an hour. A mutable file (ClassMutable) is uploaded from a snapshot copied
 // when its generation began (Snap, SnapSize), so a generation is one
 // consistent state of the file; any change of the source (Src) starts a
 // new generation, at most one per mutable interval.

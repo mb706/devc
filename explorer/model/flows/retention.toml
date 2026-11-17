@@ -1,0 +1,89 @@
+id = "retention"
+kind = "tour"
+title = "How the hub chooses what to drop"
+summary = "A reading order through the only code with which the hub deletes archived data on its own: which files can be mutable at all, how completion times are recorded, when retention runs, the rule that chooses, how a removal is checked again, and the deletions that are not retention."
+concern = "fleet-archive"
+
+[[step]]
+section = "Which generations can ever be dropped"
+
+[[step]]
+ref = "internal/archive.MutableAllowed"
+text = "Only shared harness state may be mutable. Journals, request, network and gate logs are append-only whatever a machine says, so no rule below ever reaches them."
+
+[[step]]
+ref = "internal/hub.Server.apiArchivePut"
+text = "The request's `class` is checked before anything else: mutable outside `files/harness/` is a 400, and `class` or `mode` on a bundle or ref log is refused."
+
+[[step]]
+ref = "internal/hub.recordedClass"
+text = "A new generation must have the class recorded for the file's newest generation with a record, so a file archived as append-only cannot become mutable later (409, naming the class)."
+
+[[step]]
+ref = "internal/hub.readMeta"
+text = "The record beside a generation. A record that cannot be read or names an unknown class counts as an incomplete append-only one: damage never makes a generation droppable. A generation without a record (from before records existed) is never mutable either."
+
+[[step]]
+section = "When retention runs"
+
+[[step]]
+ref = "internal/hub.archiveStore.putFile"
+text = "Retention runs only here, at the first completion of a mutable generation, and only for that file. A machine that stops uploading, or a file that stops changing, loses nothing more."
+detail = "A complete mutable generation is sealed: more bytes are refused (409 `complete`), and completing it again at its length is answered as complete. Completing a generation after a newer one completed is refused, so completion times follow the generation numbers."
+
+[[step]]
+ref = "internal/hub.completionTime"
+text = "The time recorded is the hub's clock, raised to the time of the newest older generation that has one. A machine cannot name a time, and a clock that steps back cannot make times decrease."
+
+[[step]]
+ref = "internal/hub.writeMeta"
+text = "The record with the committed length and the time is synced and renamed into place, and its directory synced, before retention runs: a crash cannot leave older generations removed while the newer one's completion is lost ([[finding:E1-05]])."
+
+[[step]]
+section = "The rule"
+
+[[step]]
+ref = "internal/hub.archiveStore.retain"
+text = "Reads the file's generations (from the listing cache or the directory) and each one's record into the facts the rule needs: mutable, complete, time."
+
+[[step]]
+ref = "internal/hub.retentionDrops"
+text = "Nothing when any recorded time lies after now (the clock is behind the file's own records). Otherwise it keeps the newest three complete generations and, for each checkpoint, the newest generation complete with a time at or before it, and returns the other mutable ones: complete with a time, or incomplete and older than the newest complete one."
+detail = "Complete generations without a time (completed on a hub older than C19r3) and incomplete ones newer than the newest complete one are never returned."
+
+[[step]]
+ref = "internal/hub.checkpoints"
+text = "Checkpoints are the starts of the last `keep_daily` days, today included, and of the last `keep_weekly` weeks, this one included, in UTC with weeks starting on Monday."
+
+[[step]]
+ref = "internal/hub.ArchiveConfig.Limits"
+text = "`[archive] keep_daily` (default 7, at most 366) and `keep_weekly` (default 4, at most 520) in hub.toml; both may be 0, which leaves only the newest three."
+
+[[step]]
+section = "The removal"
+
+[[step]]
+ref = "internal/hub.archiveStore.retain"
+text = "Each chosen generation's record is read once more and must still say mutable; the file's directory is opened without following a link, and the name, looked up in it without following one, must be a regular file. Then it and its record are unlinked and taken off the machine's usage."
+
+[[step]]
+section = "Deletions that are not retention"
+
+[[step]]
+ref = "internal/hub.Server.apiSecretsPut"
+text = "A machine's secrets bundles of a realm beyond the newest ten are deleted when it pushes another."
+
+[[step]]
+ref = "internal/hub.archiveStore.create"
+text = "A failed upload removes the files and directories it created in that request, and nothing older."
+
+[[step]]
+ref = "internal/hub.PruneArchive"
+text = "`devc hub archive prune --machine <m> --before <date>`, run by the owner on the hub, deletes files last written before the date and repositories whose newest bundle and ref log are older, after a confirmation unless `--yes`."
+
+[[step]]
+section = "What a restore makes of it"
+
+[[step]]
+ref = "internal/fleet.chooseGenerations"
+text = "`devc state pull --as-of` takes the newest generation completed at or before the time, the same rule as a checkpoint, so as of any checkpoint in the window it finds the state retention kept."

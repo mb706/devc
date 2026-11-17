@@ -1,5 +1,3 @@
-package hub
-
 // Retention of mutable file generations (finding E1-04). The archive is
 // the user's backup: neither a box (which writes shared harness state)
 // nor an enrolled machine (which says what it uploads) may empty it. So
@@ -18,6 +16,8 @@ package hub
 // When the hub's clock is behind a time it recorded for the file (the
 // clock stepped back), nothing is dropped until it catches up: a window
 // that moved back could otherwise give up a checkpoint still in force.
+
+package hub
 
 import (
 	"sort"

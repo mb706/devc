@@ -96,6 +96,13 @@ title = "Hub database"
 kind = "store"
 summary = "SQLite (pure Go) in the hub directory: the certificate registry, the machines, the latest view of every session with its cursor, a bounded tail of events per session, pending requests, a change log that event streams and the notifier follow, and the access state: the password hash and TOTP secret, login sessions, enrolment, action and notification records."
 
+[[actor]]
+id = "hub-archive"
+zone = "hub"
+title = "Hub archive"
+kind = "store"
+summary = "The archive's files in the hub directory: `archive/<machine>/<realm>/` (file generations with their records, bundles, ref logs) and `secrets/<machine>/<realm>/` (encrypted secrets bundles). Only the hub server writes them; `devc hub archive prune` deletes from them."
+
 # ----- actors: outside services
 
 [[actor]]
@@ -647,7 +654,7 @@ transport = "HTTPS with a device certificate, and for the API a login session bo
 carries = "The inbox, sessions, commands, decisions, the terminal ([[surface:hub-routes]]); a device's enrolment bundle."
 boundary = true
 checks = ["internal/hub.Server.identify", "internal/hub.Server.gate", "internal/hub.Server.guard", "internal/hub.Server.checkSession"]
-concerns = ["hub-access", "hub-commands-and-terminal", "hub-inbox-and-notifications"]
+concerns = ["hub-access", "hub-commands-and-terminal", "hub-inbox-and-notifications", "web-app"]
 
 [[channel]]
 id = "user-browser"
@@ -936,3 +943,34 @@ transport = "TCP to 127.0.0.1:6080 in the box's network namespace, from the dial
 carries = "noVNC's page and its WebSocket to the VNC server, which asks for the password."
 boundary = true
 concerns = ["desktop"]
+
+[[channel]]
+id = "archive-upload"
+from = "daemon"
+to = "hub"
+title = "Archive uploads"
+transport = "HTTPS with the machine certificate, on the uploader's own connections and never the machine link: `PUT /machine/archive/<realm>/<path>?offset=…`, and the index and prefix hashes of the machine's own archive."
+carries = "Appends to this machine's archive at the stored length: file generations with class, mode and completion, bundle parts, ref log lines."
+boundary = true
+checks = ["internal/hub.Server.apiArchivePut", "internal/archive.ParsePath", "internal/hub.archiveStore.admit", "internal/hub.archiveStore.putFile", "internal/hub.archiveStore.checkQuota"]
+concerns = ["fleet-archive"]
+
+[[channel]]
+id = "cli-hub-archive"
+from = "cli"
+to = "hub"
+title = "Restores, secrets"
+transport = "HTTPS with the machine certificate, from `devc state pull` and `devc secret push|pull`."
+carries = "Index pages, files and bundles of any machine's archive; encrypted secrets bundles in both directions."
+boundary = true
+checks = ["internal/fleet.Client.Index", "internal/archive.ParsePath", "internal/archive.DecodeSealed", "internal/hub.Server.apiSecretsPut"]
+concerns = ["state-restore", "secret-transfer"]
+
+[[channel]]
+id = "hub-archive-write"
+from = "hub"
+to = "hub-archive"
+title = "Archive files"
+transport = "Files below the hub directory: appended with `O_APPEND` and synced, created exclusively without following links, records replaced by a rename, directory entries synced."
+carries = "File generations and their records, bundle parts made final by a rename that replaces nothing, ref log lines, secrets bundles; what retention removes."
+concerns = ["fleet-archive", "secret-transfer"]

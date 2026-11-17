@@ -1,0 +1,174 @@
+id = "web-send"
+kind = "flow"
+title = "Sending a prompt from the web app"
+summary = "A prompt typed in the app gets a command ID in the browser and waits in the outbox; the hub forwards it and the machine answers with a receipt. When the answer is lost the same ID is retried, then kept as pending and asked about until a receipt settles it, so the prompt is typed at most once."
+concern = "web-app"
+trigger = "Typing a message in a session's composer and pressing Send"
+actors = ["user", "browser", "hub", "daemon"]
+
+[[step]]
+section = "Sending"
+
+[[step]]
+from = "user"
+to = "browser"
+external = true
+label = "text, Send"
+text = "Send queues the text until the agent is at rest; Steer types it at once."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/store.js~export async function sendPrompt"
+label = "sendPrompt"
+text = "The prompt gets a UUID made in the browser and waits in the session's outbox as \"sending\", shown below the timeline."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/store.js~export async function run("
+label = "run"
+text = "Every command goes through `run`, which keeps the ID for all that follows."
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:POST /api/commands"
+label = "POST /api/commands {machine, type: send, id, params}"
+ref = "file:web/app/api.js~const rec = await post('/api/commands'"
+text = "With `X-Devc-Request: 1` and a JSON body; the policy allows connections to the hub's origin only."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiCommand"
+checks = ["internal/hub.Server.checkSession", "internal/hub.Server.checkSite", "internal/hub.decodeBody", "internal/hub.commandParams", "internal/hub.Server.fillRef"]
+text = "A logged-in device, the hub's own Origin; the body decoded strictly, the parameters into the daemon method's own type with the client's ID, the session's project filled in. A machine that is not connected gets 503 at once: the hub queues nothing."
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "rpc:session.send"
+label = "session.send {id, session, ref, text, mode}"
+ref = "internal/hub.machineLink.forward"
+unchecked = "apiCommand takes the method from commandMethods, a map from command type to method, which the tool counts as a list of methods rather than a call that sends one"
+text = "On the machine link, from the request's own goroutine, for at most 90 seconds ([[flow:phone-answer]] follows a command into the box)."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.submit"
+text = "The daemon stores a receipt before anything happens; an ID it has seen gets its stored receipt back, so a repeated command is applied once."
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "reply"
+label = "receipt {outcome: accepted}"
+ref = "internal/daemon.commander.submit"
+text = "Accepted means queued until the session is at rest."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "200 receipt"
+ref = "internal/hub.Server.apiCommand"
+text = "The receipt as the machine gave it."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/api.js~typeof rec.outcome !== 'string'"
+label = "command: receipt?"
+text = "An answer that is not a receipt for this ID counts as uncertain, like no answer. A receipt that is not final (queued) is kept as pending too, and asked about until it is."
+
+[[step]]
+section = "When the answer is lost"
+
+[[step]]
+at = "hub"
+ref = "internal/hub.rpcStatus"
+text = "If the machine went away during the call (503), did not answer in 90 seconds (504), or could not be asked or sent an invalid receipt (502), the command may have arrived."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "504 {error, uncertain: true}"
+ref = "internal/hub.writeRPCError"
+text = "The body says `uncertain`; a refusal, a busy machine or invalid parameters are definite and say nothing of the kind."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/api.js~unsure = true;"
+label = "command: retry"
+text = "No answer at all, an uncertain error or an unreadable answer: the same command with the same ID is sent again after 0.8, 1.6 and 3.2 seconds. Once an attempt was uncertain, a later definite refusal (the machine went offline, say) is treated as uncertain too."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/store.js~addPending({ id, machine, type, params, wait, outcome: 'unknown'"
+label = "addPending"
+text = "After four uncertain attempts the command is kept with its ID and parameters as pending, also in local storage; the outbox shows \"unknown: the app asks the machine when it can\"."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/store.js~export async function resolvePending"
+label = "resolvePending"
+text = "Every ten seconds, when the stream says its machine is online again, and after each snapshot, the app asks for the receipts of pending commands of online machines."
+
+[[step]]
+from = "browser"
+to = "hub"
+via = "http:GET /api/commands/{machine}/{id}"
+label = "GET /api/commands/<machine>/<id>?wait=0"
+ref = "file:web/app/store.js~const rec = await api.receipt(p.machine, p.id, 0);"
+text = "Only the ID is sent; nothing is typed by asking."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiCommandGet"
+checks = ["internal/proto.ValidCommandID"]
+text = "The machine must be connected; the ID must have a command ID's form."
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "rpc:command.get"
+label = "command.get {id}"
+ref = "internal/hub.machineLink.forward"
+text = "On the machine link."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.apiCommandGet"
+text = "The stored receipt, or not found when the daemon never stored this ID."
+
+[[step]]
+from = "daemon"
+to = "hub"
+via = "reply"
+label = "receipt, or not found"
+ref = "internal/daemon.Daemon.apiCommandGet"
+text = "Receipts are kept for seven days."
+
+[[step]]
+from = "hub"
+to = "browser"
+via = "reply"
+label = "200 receipt, or 404"
+ref = "internal/hub.Server.apiCommandGet"
+text = "Not found becomes 404."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/store.js~function finish(p, rec)"
+label = "finish"
+text = "A final receipt ends the pending command and updates the outbox (delivered, refused, not submitted). A 404 for a command never confirmed marks it \"did not arrive\"."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/store.js~export async function retryPending"
+label = "retryPending"
+text = "**Send again** posts the command with its own ID; unless the machine said it never had the ID, a definite refusal of the retry leaves it pending. **Dismiss** forgets it."
+
+[[step]]
+at = "browser"
+ref = "file:web/app/store.js~function settleOutbox"
+label = "settleOutbox"
+text = "Meanwhile, a prompt event on the stream whose text begins the waiting prompt's text removes it from the outbox and ends its pending command."

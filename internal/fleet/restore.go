@@ -1,3 +1,8 @@
+// This file implements restoring a realm from a hub's archive (devc state
+// pull) or an extracted export (devc state import): which generation of
+// each file is taken, and how files, relays and the context repository
+// are added without replacing anything that exists.
+
 package fleet
 
 import (

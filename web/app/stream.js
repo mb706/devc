@@ -1,13 +1,13 @@
 // The hub's event stream (GET /api/stream): inbox changes for everyone and
 // the events of the sessions a screen has open. It resumes from the last
 // change ID it saw, reconnects by itself with backoff, is reopened when the
-// set of open sessions changes, and closes while the page is hidden (a
-// stream that names a session keeps the hub from notifying about it, and a
-// hidden page would otherwise hold notifications back) to reopen when the
-// page is visible again. A reset (the hub no longer has the changes after
-// our position) stops the stream, reads the snapshot and reopens from the
-// snapshot's position, so no change is applied twice or lost meanwhile
-// (finding C2-10).
+// set of open sessions changes, and closes 30 seconds after the page is
+// hidden (a stream that names a session keeps the hub from notifying about
+// it, and a hidden page would otherwise hold notifications back) to reopen
+// when the page is visible again. A reset (the hub no longer has the
+// changes after our position) stops the stream, reads the snapshot and
+// reopens from the snapshot's position, so no change is applied twice or
+// lost meanwhile (finding C2-10).
 
 import { state, set, applyChange, loadSnapshot, loadDetail, checkAuth, key } from './store.js';
 

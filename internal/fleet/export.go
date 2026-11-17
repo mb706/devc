@@ -1,3 +1,8 @@
+// An export (devc state export) is one tar file in the archive's layout:
+// devc-export.json, files/<path> for every durable file (the current
+// content, generation 0), and per repository one full bundle with a ref log
+// of one line. devc state import restores it like a hub's archive.
+
 package fleet
 
 import (
@@ -23,11 +28,6 @@ import (
 	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/safefs"
 )
-
-// An export (devc state export) is one tar file in the archive's layout:
-// devc-export.json, files/<path> for every durable file (the current
-// content, generation 0), and per repository one full bundle with a ref log
-// of one line. devc state import restores it like a hub's archive.
 
 // ExportManifestName is the export's first entry.
 const ExportManifestName = "devc-export.json"
