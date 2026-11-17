@@ -37,7 +37,7 @@ tests = [
   "test/integration.TestNetworkPlainStart",
   "test/integration.TestDaemon",
 ]
-related = ["box-lifecycle", "isolation", "sessions-and-events", "launching-a-harness"]
+related = ["security-model", "box-lifecycle", "isolation", "sessions-and-events", "launching-a-harness"]
 
 [[invariant]]
 text = "A box at level internet never reports ready unless the binding record names its own network namespace and start."
@@ -205,7 +205,7 @@ Every box needs a main process that is devc's, whatever the image declares. It t
 
 Problems in steps 3 and 4 go to init's standard error, which `podman logs` shows, and do not stop the box: a box with an odd home is still usable. [[flow:box-init]] goes through these steps; [[diagram:processes]] shows the processes of a running box and who starts them.
 
-**The agent.** [[internal/boxside.RunAgent]] runs a listener for the host, one for programs in the box and, at level allowlist, a proxy listener on 127.0.0.1:3128 that relays to the host's allowlist proxy. Each is set up again five seconds after a failure. The agent logs to `/run/devc/agent.log`, opened without following symlinks and started over at 1 MiB; every goroutine recovers from panics ([[internal/boxside.Agent.goSafe]]), so nothing the agent does can end box init.
+**The agent.** [[internal/boxside.RunAgent]] runs a listener for the host, one for programs in the box and, at level allowlist, a proxy listener on 127.0.0.1:3128 that relays to the host's [[concern:allowlist-proxy|allowlist proxy]]. Each is set up again five seconds after a failure. The agent logs to `/run/devc/agent.log`, opened without following symlinks and started over at 1 MiB; every goroutine recovers from panics ([[internal/boxside.Agent.goSafe]]), so nothing the agent does can end box init.
 
 *The host's side.* The agent removes whatever lies at `/run/devc/agent.sock` and listens there ([[internal/boxside.listenSocket]]). A connection counts as the host's only if the kernel reports its peer with PID 0 ([[internal/boxside.HostPeer]]): `SO_PEERCRED` gives the peer's PID as the receiver's PID namespace sees it, and a process outside that namespace, which for a box means the host, appears as 0. The connection then carries yamux, which multiplexes many streams over one connection; a newer host connection replaces an older one. The host opens a stream per request, and [[internal/boxside.Agent.serveHost]] answers with its table of handlers ([[surface:box-agent]]): [[rpc:box.hello]] (the description from `box.json`), [[rpc:box.sessions]] (the live sessions), [[rpc:box.input.clients]], [[rpc:box.input.paste]] and [[rpc:box.input.keys]] (input to panes, [[concern:launching-a-harness]]), [[rpc:box.listen]] and [[rpc:box.services]] (listeners for network exceptions and services), [[rpc:box.input.submit]] and [[rpc:box.input.extension]] (harness extensions). The daemon's side of the connection, with its own checks, is the tour [[flow:box-channel]].
 

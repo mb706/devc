@@ -2,7 +2,7 @@
 id = "github"
 title = "GitHub: reads, requests, tokens"
 summary = "The three ways a box deals with GitHub: reads through the daemon with the host's credential, pull requests and comments the user approves, and in the token modes a token of its own; where each credential lives and what the box can do with what it gets."
-order = 70
+order = 55
 packages = ["internal/github"]
 files = [
   "internal/daemon/github.go",
@@ -42,7 +42,7 @@ tests = [
   "test/integration.TestGitHub",
   "test/integration.TestGitHubTokens",
 ]
-related = ["upstream", "requests-and-approval", "secrets", "box-lifecycle", "git-ratchet", "box-channel"]
+related = ["security-model", "upstream", "requests-and-approval", "secrets", "box-lifecycle", "git-ratchet", "box-channel"]
 
 [[invariant]]
 text = "Unless a grant names its realm secret (`grants.secrets`, `token:github-token`), the host's GitHub credential is read only by the read facade and devc pr; facade answers and errors are scrubbed of it."
@@ -50,7 +50,7 @@ refs = ["internal/github.HostToken", "internal/daemon.boxWorker.serveGitHub", "i
 tests = ["internal/daemon.TestGitHubFacade", "test/integration.TestGitHub"]
 
 [[invariant]]
-text = "A facade read is a GET of the project's repository, or of one that grants.github_read lists both in the box's start record and now."
+text = "A facade read is a GET of the project's repository, or of one that grants.github_read lists both in the box's capability record and now."
 refs = ["internal/github.PlanRead", "internal/box.Capabilities.GitHubReadRepos", "internal/github.Client.Read"]
 tests = ["internal/github.TestPlanRead", "internal/daemon.TestGitHubFacade"]
 
@@ -60,12 +60,12 @@ refs = ["internal/github.ParseAPIPath", "internal/github.Client.endpoint", "inte
 tests = ["internal/github.TestParseAPIPath", "internal/github.TestRead"]
 
 [[invariant]]
-text = "A box gets a token only in a token mode, with a start record of its running container, and only while the mode, the repository and the App are those of that record."
+text = "A box gets a token only in a token mode, with a capability record of its running container, and only while the mode, the repository and the App are those of that record."
 refs = ["internal/daemon.Daemon.githubToken", "internal/daemon.Daemon.startedWith", "internal/box.Capabilities.GitHubToken"]
 tests = ["internal/daemon.TestGitHubToken", "internal/box.TestGitHubCapabilities"]
 
 [[invariant]]
-text = "A minted token is restricted to the one verified repository ID and to the permissions granted in the start record and now, never workflows; an answer listing other repositories is revoked and refused."
+text = "A minted token is restricted to the one verified repository ID and to the permissions granted in the capability record and now, never workflows; an answer listing other repositories is revoked and refused."
 refs = ["internal/github.Minter.Token", "internal/github.Minter.verify", "internal/github.Minter.mint", "internal/github.IntersectPermissions", "internal/github.CheckPermission"]
 tests = ["internal/github.TestMinter", "internal/github.TestPermissions"]
 
@@ -250,13 +250,13 @@ An agent on a GitHub project wants to read pull requests, issues and failed CI r
 |---|---|---|---|
 | Read facade (every mode) | an operation and its parameters | validates; reads with the host's credential | GitHub's status and body |
 | Requests | `devc request pr` or `comment` | after local approval, `devc pr create --yes` or `devc pr comment` | the request's outcome, with the URL |
-| Token modes (`app`, `token:<secret>`) | `host.github.token` | checks the start record; mints or reads the token | the token itself |
+| Token modes (`app`, `token:<secret>`) | `host.github.token` | checks the capability record; mints or reads the token | the token itself |
 
-**Reading** ([[flow:gh-read]]). `devc gh pr|issue|run list|view` and `devc gh api <path>` validate locally, then open a `host.github` stream through the agent. [[internal/daemon.boxWorker.serveGitHub]] works for the project of the channel: its configuration must be free of problems; repositories of `grants.github_read` count only if the container's start record lists them too ([[internal/box.Capabilities.GitHubReadRepos]]); [[internal/github.PlanRead]] accepts only the fields of a known operation and a repository that is the project's or listed. Then come the budget, the credential and [[internal/github.Client.Read]], with 150 seconds for all its requests. The answer is a JSON line announcing the body's length, then exactly that many bytes. `run view --log` keeps the last 5 MiB of the jobs' logs.
+**Reading** ([[flow:gh-read]]). `devc gh pr|issue|run list|view` and `devc gh api <path>` validate locally, then open a `host.github` stream through the agent. [[internal/daemon.boxWorker.serveGitHub]] works for the project of the channel: its configuration must be free of problems; repositories of `grants.github_read` count only if the container's capability record lists them too ([[internal/box.Capabilities.GitHubReadRepos]]); [[internal/github.PlanRead]] accepts only the fields of a known operation and a repository that is the project's or listed. Then come the budget, the credential and [[internal/github.Client.Read]], with 150 seconds for all its requests. The answer is a JSON line announcing the body's length, then exactly that many bytes. `run view --log` keeps the last 5 MiB of the jobs' logs.
 
 **Asking.** `devc request pr --title …` (the branch checked out, unless `--branch`) and `devc request comment <n> --body …` are high-risk requests ([[concern:requests-and-approval]]): only `devc requests approve` on the host decides them ([[flow:request-pr]]). The daemon then runs `devc pr create --yes …` or `devc pr comment …` as a child process; [[internal/cli.app.prCreate]] reads the host's credential first, banks and pushes the branch as `devc push` does ([[concern:upstream]]), and opens the pull request, whose URL the box can read in the outcome.
 
-**Token modes** ([[flow:app-token]]). With `grants.github = "app"` or `"token:<secret>"`, the start record holds the mode, the upstream, the App's ID and installation, and the permissions ([[internal/box.CapabilitiesOf]]). A start hook gives the box repository a remote `github` at the upstream's HTTPS URL with `devc box git-credential` as its only credential helper for the GitHub host ([[internal/gitx.Service.ConfigureGitHub]]); in relay mode it removes them. The launcher asks for the token at every harness start and exports `GH_TOKEN` ([[internal/boxside.addGitHubToken]]); the helper asks whenever git needs a credential. [[internal/daemon.Daemon.githubToken]] checks the budget, the mode, the start record of this container and [[internal/box.Capabilities.GitHubToken]]: the same mode, repository and, for `app`, App and installation as at the start, with the permissions granted then and now, each at the lower level. `token:` answers the stored secret; `app` asks [[internal/github.Minter.Token]].
+**Token modes** ([[flow:app-token]]). With `grants.github = "app"` or `"token:<secret>"`, the capability record holds the mode, the upstream, the App's ID and installation, and the permissions ([[internal/box.CapabilitiesOf]]). A start hook gives the box repository a remote `github` at the upstream's HTTPS URL with `devc box git-credential` as its only credential helper for the GitHub host ([[internal/gitx.Service.ConfigureGitHub]]); in relay mode it removes them. The launcher asks for the token at every harness start and exports `GH_TOKEN` ([[internal/boxside.addGitHubToken]]); the helper asks whenever git needs a credential. [[internal/daemon.Daemon.githubToken]] checks the budget, the mode, the capability record of this container and [[internal/box.Capabilities.GitHubToken]]: the same mode, repository and, for `app`, App and installation as at the start, with the permissions granted then and now, each at the lower level. `token:` answers the stored secret; `app` asks [[internal/github.Minter.Token]].
 
 **Minting.** The App's key is parsed before any cache lookup, and every cache key holds the project and a fingerprint of the key's public half. At most once a day per project and repository, and again after a failed mint, [[internal/github.Minter.verify]] checks with a JWT ([[internal/github.AppJWT]]) that the repository's installation belongs to its owner (and is the configured one) and learns the repository's ID through a probe token ([[flow:app-token]]). The token is minted for that ID and the permissions; an answer listing other repositories is revoked and refused. A token is reused until five minutes before its `expires_at`.
 
@@ -264,7 +264,7 @@ An agent on a GitHub project wants to read pull requests, issues and failed CI r
 
 A box controls every field of a read and of a request, when and how often it asks for a token, and everything it does with a token it holds.
 
-- **Reading other repositories.** A repository is named only as `owner/name` or in an API path, checked against GitHub's name rules, and must be the project's or listed in `grants.github_read` at the start and now. The project's own is its upstream as configured now, without a start record.
+- **Reading other repositories.** A repository is named only as `owner/name` or in an API path, checked against GitHub's name rules, and must be the project's or listed in `grants.github_read` at the start and now. The project's own is its upstream as configured now, without a capability record.
 - **Shaping the request.** Unknown parameter fields are refused when the parameters are decoded; [[internal/github.ParseAPIPath]] wants `repos/<owner>/<repo>[/…]` in printable ASCII without `%`, `\`, `#`, spaces, or empty, `.` and `..` segments. Every request is a GET built on the API base. What stays open is whatever the host's credential may GET below the allowed repositories.
 - **Getting the credential.** It is in no file, variable or argument of the box; answers, errors and the daemon's log never carry it.
 - **Spending the user's rate limit.** 120 reads and 120 token requests a minute per project, 5 MiB per answer.

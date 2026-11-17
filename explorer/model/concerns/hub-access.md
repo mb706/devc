@@ -49,7 +49,7 @@ tests = [
   "test/integration.TestHubAccess",
   "test/integration.TestHubBehindProxy",
 ]
-related = ["hub-machine-link", "hub-commands-and-terminal", "hub-inbox-and-notifications", "secrets"]
+related = ["security-model", "hub-machine-link", "hub-commands-and-terminal", "hub-inbox-and-notifications", "secrets"]
 
 [[invariant]]
 text = "No handler runs for a request without a client certificate except the two enrolment routes, and those only while an enrolment token is outstanding."

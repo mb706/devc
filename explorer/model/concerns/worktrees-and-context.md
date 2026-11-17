@@ -165,7 +165,7 @@ ref = "internal/boxside.ContextWorker.Commit"
 +++
 ## What it is for
 
-Several sessions often work in one box at once, each on its own branch, so they need separate checkouts of one repository. Work an agent has not committed must reach the relay too, without anyone touching its files. The web app shows what a session changed without the host reading the project directory. And each realm keeps notes and memory that agents write and the user wants to review and revert: the context repository versions them, although git must never look at a tree a box wrote.
+Several sessions often work in one box at once, each on its own branch, so they need separate checkouts of one repository. Work an agent has not committed must reach the relay too, without anyone touching its files. The [[concern:web-app|web app]] shows what a session changed without the host reading the project directory. And each realm keeps notes and memory that agents write and the user wants to review and revert: the context repository versions them, although git must never look at a tree a box wrote.
 
 ## How it works
 

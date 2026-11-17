@@ -1,0 +1,235 @@
+id = "trust-boundaries"
+kind = "tour"
+title = "Every trust boundary, most exposed first"
+summary = "Every place where something crosses from a less trusted side to a more trusted one, most exposed first, with the code that checks what arrives."
+concern = "security-model"
+actors = ["daemon", "cli", "hub"]
+
+[[step]]
+section = "What a box sends the host: the channel"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.connect"
+checks = ["internal/daemon.DialBoxSocket", "internal/daemon.CheckPeer", "internal/proto.HelloReply.Validate"]
+text = "The daemon connects to a socket in a directory the box controls. It reaches the socket's inode without a symlink, requires the listener to be a process of the box's container, and takes the channel only when the box's hello names this project ([[flow:channel-connect]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.muxGuard"
+text = "Every frame header the box sends is counted before yamux sees it: new streams and pings per ten seconds, streams open or half-closed. A box over a budget loses the whole channel, so it cannot grow what the daemon holds for it ([[concern:box-channel]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveStream"
+checks = ["internal/proto.ParseMessage", "internal/proto.DecodeParams"]
+text = "A stream's first line must come within 30 seconds and name a method; everything after is served for the project of this channel, whatever the box writes. Requests are JSON-RPC lines of at most 1 MiB, decoded strictly; of a handler's errors only its own JSON-RPC errors reach the box with their message."
+
+[[step]]
+section = "What a box sends the host: requests and secrets"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.requestService.create"
+checks = ["internal/requests.Validate"]
+text = "`devc request` arrives as `host.request`: only the fields of its kind, every value matched against a pattern, budgets per project. It is stored as pending, and a high-risk kind waits for your CLI ([[flow:request-approve]], [[concern:requests-and-approval]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/requests.MayDecide"
+text = "The one place that says who decides: the local socket anything, the project's auto list and a hub low-risk kinds only. The box channel has no decide method, so a box never approves its own request."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.secret"
+checks = ["internal/daemon.Daemon.startedWith", "internal/box.Capabilities.AllowsSecret"]
+text = "With daemon delivery a box asks for a secret by name. It gets it only if its project grants it now and the capability record of its running container lists it ([[flow:secret-request]], [[concern:secrets]])."
+
+[[step]]
+section = "What a box sends the host: git"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveGit"
+checks = ["internal/gitx.ServeCall", "internal/daemon.Daemon.watchPush"]
+text = "A push or fetch runs on the relay of the channel's project only. A push needs the box lock, free space and room in `git.relay_quota`, and a watchdog ends it when its pack would break either ([[flow:box-git-push]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/cli.app.relayHook"
+checks = ["internal/gitx.ParseHookInput", "internal/gitx.CheckPushSize", "internal/gitx.CheckUpdate", "internal/gitx.Service.RecordUpdate"]
+text = "git runs devc's hooks with the refs the box chose. pre-receive bounds the push, update applies the branch policy and records each new tip before git applies it, so nothing the box pushes deletes or moves a record ([[concern:git-ratchet]])."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.PlanBank"
+checks = ["internal/gitx.Service.snapshot", "internal/gitx.Relay.Update"]
+text = "A bank takes what the box offers: the snapshot report is decoded strictly, the fetch runs git's server side in the box and writes only scratch refs, every object passes fsck, and the plan skips bad names, keeps protected branches and deletes nothing ([[flow:turn-snapshot]]). A bank has no storage budget yet ([[doc:docs/dev/LEFTOVER.md#git-x7]])."
+
+[[step]]
+section = "What a box sends the host: network and brokered access"
+
+[[step]]
+at = "daemon"
+ref = "internal/netpolicy.Proxy.check"
+checks = ["internal/netpolicy.NormalizeHost", "internal/netpolicy.Proxy.CheckAddr", "internal/netpolicy.Proxy.watch"]
+text = "At level allowlist every connection is a proxy request: a bounded head, a name never an address, the allowlist of the start and of now, public IPv4 addresses checked again on the connected socket, and a watch that closes it when the permission ends ([[flow:allowlist-connect]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveDial"
+text = "A connection to a host exception reaches only the host's loopback, and only a port an exception allows at that moment ([[concern:allowlist-proxy]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveGate"
+checks = ["internal/config.ValidHostAlias", "internal/box.Capabilities.SSHGrant", "internal/gate.Exec.Run", "internal/gate.CheckReadOnly"]
+text = "An SSH connection reaches `sshd -i` that accepts only this box's key and forwards nothing; its forced command checks the grant again and runs the session over your master connection, never authenticating itself ([[flow:ssh-through-gate]], [[concern:ssh-gate]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/github.PlanRead"
+checks = ["internal/github.ParseAPIPath", "internal/box.Capabilities.GitHubReadRepos"]
+text = "A GitHub read names an operation and its fields; the daemon builds a GET of the project's repository, or one granted at the start and now, from validated parts only, and scrubs its own credential from the answer ([[flow:gh-read]], [[concern:github]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.githubToken"
+checks = ["internal/box.Capabilities.GitHubToken", "internal/github.Minter.verify"]
+text = "In a token mode a box asks for a token; it gets one only while mode, repository and App are those of its start, and a minted token covers one verified repository and never `workflows` ([[flow:app-token]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/svclogin.CheckHead"
+checks = ["internal/daemon.Daemon.serviceInForce", "internal/svclogin.NormalizeTarget", "internal/svclogin.Allowed"]
+text = "A request to a service is checked on its raw bytes before net/http parses it: the service in force for this container, one request per connection, a normalised path a rule allows. Only then is the credential added ([[flow:service-request]], [[concern:service-logins]])."
+
+[[step]]
+section = "What a box writes where the host reads"
+
+[[step]]
+at = "daemon"
+ref = "internal/session.Store.Ingest"
+checks = ["internal/safefs.Root.ReadFrom", "internal/session.Store.Claim", "internal/proto.ParseSpoolLine"]
+text = "Spool files are read beneath the box's runtime directory without following links, in bounded runs; the session must belong to this project, and each line is parsed strictly and re-encoded into the journal. A journal's total size has no bound yet ([[flow:event-ingestion]], [[doc:docs/dev/LEFTOVER.md#the-daemon-sessions-input-requests-x6]])."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.verifyRunning"
+checks = ["internal/netpolicy.CheckBinding", "internal/box.Manager.checkNetwork"]
+text = "The readiness marker and the box's hosts file are box-writable, so they prove nothing: at level internet the host checks the binding of the rules and the table itself, and tests from outside with the canary ([[concern:network-levels]])."
+
+[[step]]
+at = "cli"
+ref = "internal/session.ParseLive"
+checks = ["internal/gitx.decodeStrict", "internal/gitx.Service.WorktreeList"]
+text = "What in-box commands print through `podman exec` (live sessions, snapshot reports, worktree lists) is decoded strictly, bounded and validated; a malformed live-session report changes nothing ([[concern:sessions-and-events]], [[concern:worktrees-and-context]])."
+
+[[step]]
+at = "cli"
+ref = "internal/data.DecodeResult"
+checks = ["internal/boxside.DataWorker.Run"]
+text = "Data trees are walked only by workers in helper containers, one path component at a time without following links; the host decodes a worker's report strictly within 64 MiB and validates its paths and digests ([[concern:data-and-sealing]])."
+
+[[step]]
+at = "cli"
+ref = "internal/boxside.ScanContext"
+checks = ["internal/ctxrepo.decodeStrict"]
+text = "Notes and memory are walked in the context container through safefs, and only the accepted regular files reach git, as data; git never looks at the box-written tree ([[concern:worktrees-and-context]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/boxside.DecodeArchiveListing"
+checks = ["internal/fleet.Uploader.syncFile", "internal/archive.Excluded"]
+text = "For the archive, shared harness state is listed by the archive worker in a helper container; the host decodes the listing strictly and opens each listed file through safefs ([[concern:fleet-archive]])."
+
+[[step]]
+section = "What reaches the hub without a credential"
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.listen"
+checks = ["internal/hub.Server.identify"]
+text = "In direct TLS a client certificate must chain to the hub's CA and be in its registry before any HTTP; behind a proxy the hub listens on loopback only and verifies the certificate the proxy passes. The registry, not the certificate, says who the client is ([[concern:hub-access]])."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.gate"
+checks = ["internal/hub.isEnrolPath", "internal/hub.Store.UseEnrolment", "internal/hub.ParseCSR"]
+text = "A request without a certificate reaches only `/enroll/<token>`, and only while an enrolment token is outstanding; the token works once, within 15 minutes ([[flow:machine-join]], [[flow:device-enrol]])."
+
+[[step]]
+section = "What a machine sends the hub"
+
+[[step]]
+at = "hub"
+ref = "internal/hub.cleanEvent"
+checks = ["internal/hub.cleanView", "internal/hub.cleanRequest", "internal/hub.machineLink.applyEvent"]
+text = "Over the machine link every row is keyed by the certificate's registry name, whatever the machine says; events, views and requests are checked and re-encoded, and the hub bounds what it holds and fetches per machine ([[concern:hub-machine-link]])."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiArchivePut"
+checks = ["internal/archive.ParsePath", "internal/hub.archiveStore.admit", "internal/hub.archiveStore.checkQuota"]
+text = "Archive uploads land only below the machine's own name, append at the stored length, and are admitted and counted against quotas before a byte is written; the hub, not the machine, keeps classes and times ([[flow:archive-upload]], [[concern:fleet-archive]])."
+
+[[step]]
+section = "What a browser sends the hub"
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.guard"
+checks = ["internal/hub.Server.checkSite", "internal/hub.Server.checkSession"]
+text = "Before every handler: the route's access class (device certificate, and for the API a login session made with that certificate) and its cross-site rule (`X-Devc-Request`, the hub's Origin, a JSON body for state changes) ([[flow:hub-login]])."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.commandParams"
+checks = ["internal/hub.Server.fillRef"]
+text = "A command's parameters are decoded strictly into the daemon method's own type, with the client's command ID; nothing is queued for a machine that is offline ([[flow:phone-answer]], [[concern:hub-commands-and-terminal]])."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Store.UseAction"
+text = "A notification button needs a device certificate and a token bound to one answer of one question, valid an hour and used once ([[concern:hub-inbox-and-notifications]])."
+
+[[step]]
+section = "What the hub sends a machine"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.Daemon.hubHandlers"
+checks = ["internal/daemon.hubMethods", "internal/requests.EffectiveOrigin"]
+text = "A hub may call only the allowlisted methods; decisions carry origin `hub` and so reach low-risk requests only, and terminal input needs control switched on in your config.toml as well as in hub.toml ([[concern:hub-commands-and-terminal]])."
+
+[[step]]
+at = "cli"
+ref = "internal/fleet.Restorer.Restore"
+checks = ["internal/archive.ParsePath", "internal/gitx.Relay.RestoreRefs"]
+text = "A restore reads an archive that may be hostile: files only at accepted paths, created without following links and never replacing one; refs only in devc's namespaces, where missing, for objects that passed fsck ([[flow:state-pull]], [[concern:state-restore]])."
+
+[[step]]
+at = "cli"
+ref = "internal/archive.Sealed.Validate"
+checks = ["internal/archive.Sealed.Open", "internal/fleet.OpenSecrets"]
+text = "A secrets bundle from the hub is bounded before it is opened (its KDF's cost, its size) and opens only for its realm; the hub chooses which bundle a pull gets ([[flow:secret-push-pull]], [[concern:secret-transfer]])."
+
+[[step]]
+section = "What other outside parties send"
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.syncHeads"
+text = "An upstream fetch lands in the upstream's own refs with every object checked; a relay branch follows only by fast-forward, recorded, so a hostile upstream cannot rewrite what the relay holds ([[flow:devc-pull]], [[concern:upstream]])."
+
+[[step]]
+at = "cli"
+ref = "internal/boxside.puller.merge"
+checks = ["internal/data.ParseItems", "internal/boxside.CheckPullEntries"]
+text = "A data pull lands in a staging directory no box can reach; its preview is parsed strictly and bounded, and a worker merges it, moving what it replaces into the trash and leaving sealed entries alone ([[flow:data-pull]], [[concern:data-sync]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.crossOrigin"
+checks = ["internal/daemon.ParseLocalHost"]
+text = "A web page in your browser can send requests to local URLs: the router refuses a state-changing method or a WebSocket from another origin and a cross-site request that is not a top-level navigation ([[flow:local-url]], [[concern:forwards-and-local-urls]])."

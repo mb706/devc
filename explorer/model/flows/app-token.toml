@@ -1,7 +1,7 @@
 id = "app-token"
 kind = "flow"
 title = "git push github with an App token"
-summary = "In a project with grants.github = \"app\": devc up records the grant and gives the box repository a remote github with devc's credential helper; when git pushes, the helper asks the daemon, which checks the start record, verifies the App's installation, mints a token for the one repository and hands it over; git pushes with it directly to GitHub."
+summary = "In a project with grants.github = \"app\": devc up records the grant and gives the box repository a remote github with devc's credential helper; when git pushes, the helper asks the daemon, which checks the capability record, verifies the App's installation, mints a token for the one repository and hands it over; git pushes with it directly to GitHub."
 concern = "github"
 trigger = "devc up demo/hello (grants.github = \"app\"), then git push github fix-parser in the box"
 actors = ["github", "state-dir", "cli", "daemon", "box-git", "box-tools"]

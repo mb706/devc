@@ -2,7 +2,7 @@
 id = "desktop"
 title = "The desktop sidecar"
 summary = "How a box gets a display the user can watch in a browser: a second container that joins only the box's network and user namespaces, the X cookie and VNC password drawn for each start, limits, reuse and replacement, removal with the box, and the forwards of the viewer and of a browser's debugging port."
-order = 72
+order = 57
 packages = ["internal/gui"]
 files = ["internal/cli/guicmds.go"]
 key = [

@@ -1,0 +1,173 @@
+id = "start-here"
+kind = "tour"
+title = "Start here: one task, end to end"
+summary = "One task from beginning to end in some thirty stops, from a configured project to a box that goes down again, each pointing to the flow that tells it in full."
+actors = ["user", "cli", "daemon", "box-agent", "launcher", "harness", "hub"]
+
+[[step]]
+section = "A project is configured"
+
+[[step]]
+at = "cli"
+ref = "internal/config.Load"
+text = "Every devc command begins by loading the configuration directory in one pass: config.toml, the realms with their projects and services, envs and harness manifests. It is the only source of policy, and no box can write it ([[concern:configuration]])."
+detail = "A problem in a file does not stop the load; it is recorded with its file and key, and any command that would create, start or change an affected box refuses. The tour [[flow:config-load]] reads this in order."
+
+[[step]]
+at = "cli"
+ref = "internal/config.Config.Resolved"
+text = "`demo/hello` becomes one set of settings, the project's overriding the realm's and the realm's the machine's. Among them are the grants: what the box may use beyond itself, from secrets and SSH hosts to a GitHub mode and services ([[internal/config.Grants]])."
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.InitRelay"
+text = "`devc project init` gives the project its relay, a bare repository on the host that the box knows as `origin`, filled from the upstream with your credentials ([[concern:upstream]]). Everything the box commits will be banked there ([[concern:git-ratchet]])."
+
+[[step]]
+section = "The box comes up: devc up"
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.Up"
+text = "`devc up` takes the box's lock, syncs the toolbox and renders the box's definition: the full `podman create` argument vector, whose hash becomes a label so that any later change shows as drift ([[flow:box-up]])."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Spec.argsWithoutHash"
+text = "The definition is the confinement: a user namespace that maps the box user to you and in-box root to nobody, no capabilities, no new privileges, devc's seccomp profile, only the mounts devc lists, limits that fail the start when they cannot be applied ([[concern:isolation]])."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.publish"
+text = "Before anything runs, the host writes everything the box will see read-only: `/etc/devc`, launch descriptions, rendered baselines, delivered secrets on memory-backed storage ([[concern:secrets]]). The record of the previous start and its readiness marker are removed."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.startBox"
+text = "At level internet the container is first only initialised: the host installs and verifies the firewall rules in its network namespace and binds them to this start, and only then is it started ([[flow:network-install]], [[concern:network-levels]])."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Init"
+text = "devc's own init is the box's main process. It checks that the rules are bound to this start, prepares the home, writes the readiness marker and starts the agent, which listens for the daemon on a socket in the box's runtime directory ([[flow:box-init]])."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.afterStart"
+text = "The host fixes the box's user names as the box's root, waits for the marker, at level internet tests from outside that the box cannot reach the host (the canary), and writes the capability record: what this start was granted, which caps everything handed out later."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.connect"
+text = "The daemon sees the running box within three seconds and connects to its agent: the socket must be reached without a symlink, its listener must be a process of the box's container, and the box's hello must name the project ([[flow:channel-connect]], [[concern:box-channel]])."
+
+[[step]]
+section = "A harness is launched: devc claude"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.app.startSession"
+text = "`devc claude demo/hello` makes sure the box runs, generates a session ID and runs `devc box session start` in the box through `podman exec` ([[flow:session-launch]])."
+
+[[step]]
+at = "launcher"
+ref = "internal/boxside.PrepareLaunch"
+text = "In a tmux window tagged with the session, the launcher reads the launch description, adds the credential and devc's environment, records `session.start` in the spool and replaces itself with the harness, through the status wrapper when the harness reports its state in its terminal output ([[concern:launching-a-harness]])."
+
+[[step]]
+section = "A prompt is sent: devc send"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.submit"
+text = "`devc send` hands the daemon a command with an ID of the client's choosing. The daemon stores a receipt before anything else, so a retry with the same ID never types twice while the receipt is kept ([[flow:send-prompt]], [[concern:input-and-receipts]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.target.begin"
+text = "The command waits until the session is at rest and no terminal showing it has been active for three seconds (a minute at most); just before the first key the daemon checks the session once more and stores `delivering`."
+
+[[step]]
+at = "box-agent"
+ref = "internal/boxside.Input.Paste"
+text = "Over the box channel, the agent pastes the text into the session's pane through tmux's standard input, never as an argument, and sends the submit key. The receipt becomes `delivered` when the harness's own prompt hook reports the same text."
+
+[[step]]
+section = "The agent works and commits"
+
+[[step]]
+at = "harness"
+ref = "internal/boxside.RunHook"
+text = "The harness works unattended. Its hooks, installed by devc's baseline, report the prompt, its state, questions and its final message as events appended to the session's spool file in the box ([[flow:hook-to-spool]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/session.Store.Ingest"
+text = "The daemon ingests the spool through safefs: each line parsed strictly, the session checked to be this project's, then appended to a journal no box can reach, with the host's sequence numbers and times ([[flow:event-ingestion]], [[concern:sessions-and-events]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.boxWorker.serveGit"
+text = "The agent commits and runs `git push origin`. git's remote helper reaches the daemon through the agent, and the daemon runs receive-pack on the relay of the channel's project, within a storage budget and under a watchdog ([[flow:box-git-push]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/gitx.Service.RecordUpdate"
+text = "devc's update hook checks each ref against the branch policy and records its new tip under `refs/devc/bank/` before git applies it. Records are only ever created, so no later push or rewrite in the box can make the relay forget this commit."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.turnBanker.turnEnded"
+text = "When the turn ends, the daemon banks the box: uncommitted work is snapshotted in the box, fetched into the relay and recorded too ([[flow:turn-snapshot]], [[concern:worktrees-and-context]])."
+
+[[step]]
+section = "A question reaches the phone"
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.subscriber.send"
+text = "Claude Code asks a question while no terminal shows the session; its hook records the question and waits for an answer from the daemon. The daemon's subscription for the hub sends the new events over the machine link, a WebSocket the daemon dialled out with its certificate ([[flow:event-to-phone]], [[concern:hub-machine-link]])."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.machineLink.applyEvent"
+text = "The hub checks each event, re-encodes it from the checked fields, and folds it into its copy of the session; the session moves to the inbox's needs-you section ([[concern:hub-inbox-and-notifications]])."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.notifier.publish"
+text = "If this hub is the machine's notifier and no browser follows the session, it posts the question to ntfy, with a button per option when there are one or two, each carrying a single-use token. Your phone shows it."
+
+[[step]]
+section = "The question is answered from there"
+
+[[step]]
+at = "hub"
+ref = "internal/hub.Server.apiAct"
+text = "A button press posts the token to the hub with the phone's device certificate; the hub uses the token up and forwards `session.answer` to the machine. The web app does the same with a login and a command ID of its own ([[flow:phone-answer]], [[concern:hub-commands-and-terminal]])."
+
+[[step]]
+at = "daemon"
+ref = "internal/daemon.commander.answerByHook"
+text = "The daemon stores a receipt, checks that the question is still the pending one, and hands the answer to the waiting hook, which gives it to the harness ([[flow:question-answer]]). A hub can do this because the machine's daemon allowlists it; it could not approve a high-risk request."
+
+[[step]]
+section = "The commits are banked and pushed"
+
+[[step]]
+at = "cli"
+ref = "internal/gitx.Service.Push"
+text = "`devc push` banks the box once more, shows what the upstream lacks, asks, and pushes exactly the commit it showed with your own git credentials, which devc gives no box ([[flow:devc-push]])."
+
+[[step]]
+section = "The box goes down: devc down"
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.Down"
+text = "`devc down` ingests the box's events and banks its work while it still runs (a failed bank keeps it running), stops it, ends its open sessions and commits the realm's notes and memory ([[flow:box-down]], [[concern:box-lifecycle]])."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.cleanup"
+text = "Last, the delivered secrets, the SSH gate's key for the box and its capability record are removed. The home, the project directory, the relay and the journals stay for the next `devc up`."

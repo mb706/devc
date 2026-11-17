@@ -26,6 +26,7 @@ text = "The question, its options and the tool call's ID are taken from the inpu
 at = "hook"
 ref = "internal/boxside.askQuestion"
 text = "The hook waits for a remote answer only when the launch description's `question_wait` is above 0 and no tmux client showed the window in the last 60 seconds; otherwise it records the question and the harness shows its own dialog."
+detail = "A session without a tmux window, such as a harness started from a shell in the box, never waits: when the clients of its window cannot be listed, the hook counts someone as present ([[internal/boxside.Input.Clients]])."
 
 [[step]]
 from = "hook"

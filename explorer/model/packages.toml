@@ -135,12 +135,12 @@ role = "Builds every tmux command line devc uses (session windows and their pane
 [package."internal/ptywrap"]
 layer = "foundation"
 group = "session"
-role = "The status wrapper: runs a harness on a pseudo-terminal of its own, answers its OSC 7501 status queries (which tmux does not answer) and takes its status reports out of the output."
+role = "Runs a harness on a pseudo-terminal of its own (the status wrapper), answers its OSC 7501 status queries, which tmux does not answer, and takes its status reports out of the output."
 
 [package."internal/display"]
 layer = "foundation"
 group = "box"
-role = "The wire formats of the desktop sidecar: Xauthority files, the X11 connection setup, and the password file and challenge response of VNC authentication."
+role = "Reads and writes the wire formats of the desktop sidecar: Xauthority files, the X11 connection setup, and the password file and challenge response of VNC authentication."
 
 [package."internal/version"]
 layer = "foundation"
@@ -167,17 +167,17 @@ role = "Carries the JSON-RPC codec of internal/proto over a WebSocket, one JSON 
 [package."internal/paths"]
 layer = "shared"
 group = "config"
-role = "The only place that knows the host layout (configuration, state and runtime directories) and the fixed in-box paths."
+role = "Defines the host layout (configuration, state and runtime directories) and the fixed in-box paths, as the only place that knows them."
 
 [package."internal/archive"]
 layer = "shared"
 group = "hub"
-role = "What the machine and the hub share about the archive of durable state: archived file names, the wire types of the archive and secrets endpoints, the format of encrypted secret bundles, and the exclusion of credential files."
+role = "Defines what the machine and the hub share about the archive of durable state: archived file names, the wire types of the archive and secrets endpoints, the format of encrypted secret bundles, and the exclusion of credential files."
 
 [package."internal/requests"]
 layer = "shared"
 group = "machine"
-role = "The rules for requests a box makes: strict validation, risk classes, who may decide them, and the per-project request log."
+role = "Holds the rules for requests a box makes: strict validation, risk classes, who may decide them, and the per-project request log."
 
 # --- area
 
@@ -199,7 +199,7 @@ role = "Stores per-realm secrets on the host and writes the ones a box is given 
 [package."internal/github"]
 layer = "area"
 group = "access"
-role = "devc's side of GitHub: the repository an upstream names, the validation and requests of the read-only facade, the host's own credential, the two writes devc makes (pull requests and comments), and GitHub App installation tokens with their permission rules."
+role = "Implements devc's side of GitHub: the repository an upstream names, the validation and requests of the read-only facade, the host's own credential, the two writes devc makes (pull requests and comments), and GitHub App installation tokens with their permission rules."
 
 [package."internal/toolbox"]
 layer = "area"
@@ -209,12 +209,12 @@ role = "Manages the toolbox, the read-only tree mounted at /opt/devc in every bo
 [package."internal/boxside"]
 layer = "area"
 group = "box"
-role = "Everything the devc binary does inside a box, reached through the hidden `devc box …` commands and the harness shims (init and the box agent, the launcher, the hook receiver, session commands, the git work that must happen in the box), and the workers that run in the helper and context containers."
+role = "Implements everything the devc binary does inside a box, reached through the hidden `devc box …` commands and the harness shims (init and the box agent, the launcher, the hook receiver, session commands, the git work that must happen in the box), and the workers that run in the helper and context containers."
 
 [package."internal/session"]
 layer = "area"
 group = "session"
-role = "The host side of sessions: ingests the spool files a box writes into journals no box can reach, records which project owns each session ID, reconciles the journals with the sessions a box reports alive, and derives what `devc ps` and `devc ls` show."
+role = "Implements the host side of sessions: ingests the spool files a box writes into journals no box can reach, records which project owns each session ID, reconciles the journals with the sessions a box reports alive, and derives what `devc ps` and `devc ls` show."
 
 [package."internal/gitx"]
 layer = "area"
@@ -224,17 +224,17 @@ role = "Moves code between a project's box repository, its relay and its upstrea
 [package."internal/svclogin"]
 layer = "area"
 group = "access"
-role = "The parts of service logins that do not depend on the daemon: the strict check of a box's request, the rules, the credential-adding reverse proxy, cookie jars, login state and the request log."
+role = "Implements the parts of service logins that do not depend on the daemon: the strict check of a box's request, the rules, the credential-adding reverse proxy, cookie jars, login state and the request log."
 
 [package."internal/hubnode"]
 layer = "area"
 group = "hub"
-role = "This machine's side of joining hubs: the client certificate, key and CA stored for each hub, and the edits of config.toml's hub list by `devc join` and `devc leave`."
+role = "Keeps this machine's side of joining hubs: the client certificate, key and CA stored for each hub, and the edits of config.toml's hub list by `devc join` and `devc leave`."
 
 [package."internal/depsrc"]
 layer = "area"
 group = "data"
-role = "`devc src` in a box: fetches the source of a dependency (the version asked for, else the installed one, else the current release) into the realm's cache at /src, verified where the registry publishes a checksum, and prints the path."
+role = "Fetches, for `devc src` in a box, the source of a dependency (the version asked for, else the installed one, else the current release) into the realm's cache at /src, verified where the registry publishes a checksum, and prints the path."
 
 [package."internal/doctor"]
 layer = "area"
@@ -261,7 +261,7 @@ role = "Turns harness manifests into what a box needs: launch descriptions and s
 [package."internal/gate"]
 layer = "assembly"
 group = "access"
-role = "The host side of the SSH gate: master connections, the gate's host key and per-box keys, the configuration and forced command of the sshd started for every box stream, `devc gate-exec`, the read-only profile and the gate log."
+role = "Implements the host side of the SSH gate: master connections, the gate's host key and per-box keys, the configuration and forced command of the sshd started for every box stream, `devc gate-exec`, the read-only profile and the gate log."
 
 [package."internal/ctxrepo"]
 layer = "assembly"
@@ -281,24 +281,24 @@ role = "Publishes directories from a project's relay as shares: read-only trees 
 [package."internal/data"]
 layer = "assembly"
 group = "data"
-role = "The host side of a project's data directory: zones and ownership, sealing, the trash, savepoints and restores, the box hooks of the data layout, pull and push with rsync, and the data manifest."
+role = "Implements the host side of a project's data directory: zones and ownership, sealing, the trash, savepoints and restores, the box hooks of the data layout, pull and push with rsync, and the data manifest."
 
 [package."internal/fleet"]
 layer = "assembly"
 group = "hub"
-role = "The machine side of the archive of durable state: the client of a hub's archive and secrets endpoints, the daemon's upload pass, restore and export, and encrypted secrets between machines."
+role = "Implements the machine side of the archive of durable state: the client of a hub's archive and secrets endpoints, the daemon's upload pass, restore and export, and encrypted secrets between machines."
 
 # --- service
 
 [package."internal/daemon"]
 layer = "service"
 group = "machine"
-role = "The machine daemon, one per runtime directory: a channel to every running box, continuous ingestion and the session views it streams to subscribers, commands with receipts, requests from boxes, the boxes' git, SSH, network and service streams, links to hubs, housekeeping, and a local JSON-RPC API on <runtime>/daemon.sock."
+role = "Implements the machine daemon, one per runtime directory: a channel to every running box, continuous ingestion and the session views it streams to subscribers, commands with receipts, requests from boxes, the boxes' git, SSH, network and service streams, links to hubs, housekeeping, and a local JSON-RPC API on <runtime>/daemon.sock."
 
 [package."internal/hub"]
 layer = "service"
 group = "hub"
-role = "The hub server that machine daemons dial out to: access by client certificates from its own CA with enrolment and a password login, a SQLite projection of every session kept over the machine links, the inbox and ntfy notifications, the JSON API with server-sent events and a terminal relay, the web app's files, and the archive."
+role = "Implements the hub server that machine daemons dial out to: access by client certificates from its own CA with enrolment and a password login, a SQLite projection of every session kept over the machine links, the inbox and ntfy notifications, the JSON API with server-sent events and a terminal relay, the web app's files, and the archive."
 
 # --- entry
 
@@ -310,26 +310,26 @@ role = "Defines the devc command tree with cobra; commands parse arguments, call
 [package."cmd/devc"]
 layer = "entry"
 group = "cli"
-role = "The single devc binary: it runs the CLI, the git remote helper, a relay hook or a harness shim, depending on the name it was started under."
+role = "Builds the single devc binary, which runs the CLI, the git remote helper, a relay hook or a harness shim, depending on the name it was started under."
 
 # --- test
 
 [package."test/integration"]
 layer = "test"
 group = "test"
-role = "The integration tests (build tag integration), run on the host against real rootless Podman."
+role = "Holds the integration tests (build tag `integration`), which run on the host against real rootless Podman."
 
 [package."test/integration/itest"]
 layer = "test"
 group = "test"
-role = "The harness of the integration tests: a private devc environment built from the example configuration, and the devc binary run in it."
+role = "Provides the harness of the integration tests: a private devc environment built from the example configuration, and the devc binary run in it."
 
 [package."test/fakeharness"]
 layer = "test"
 group = "test"
-role = "fakeagent, a stand-in for a coding agent in tests."
+role = "Builds fakeagent, a stand-in for a coding agent in tests."
 
 [package."internal/depsrc/depsrctest"]
 layer = "test"
 group = "test"
-role = "A stand-in for CRAN, PyPI, the npm registry and GitHub's API, for the tests of `devc src`."
+role = "Stands in for CRAN, PyPI, the npm registry and GitHub's API in the tests of `devc src`."

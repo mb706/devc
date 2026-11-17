@@ -222,6 +222,12 @@
         if (l.ch) c.push(l.ch.has(id) ? (l.f.kind === "channel" ? "hl sel" : "hl") : "dim");
         if (flt && !flt.channels.has(id)) c.push("out");
         else if (flt && !l.ch) c.push("on");
+        // Channels the reader did not ask for are not drawn at all in
+        // the quieter modes: only those of the hovered or selected thing,
+        // those a filter keeps, and (in "bnd") those across a boundary.
+        var asked = (l.ch && l.ch.has(id)) || (flt && flt.channels.has(id));
+        var mode = X.settings.get("rtChannels") || "focus";
+        if (!asked && (mode === "focus" || (mode === "bnd" && !e.data.boundary))) c.push("quiet");
         return c.join(" ");
       };
       layer.setClass(classFn);
@@ -254,6 +260,7 @@
       el: map, layer: layer, cards: cardEls,
       select: function (ref) { state.sel = parseRef(ref); apply(); },
       setFilter: function (f) { state.filter = f; apply(); },
+      refresh: function () { apply(); },
       redraw: function () { place(); layer.redraw(); },
       destroy: function () { if (ro) ro.disconnect(); layer.destroy(); }
     };
@@ -298,10 +305,14 @@
       '<div class="rt-bar">' +
       '<label class="rt-sel">Concern <select data-f="concern">' + options(M.concerns || [], r.params.concern, "all") + "</select></label>" +
       '<label class="rt-sel">Flow <select data-f="flow">' + options(flows, r.params.flow, "all") + "</select></label>" +
+      '<label class="rt-sel">Channels <select data-f="ch">' +
+      [["focus", "of what you point at"], ["bnd", "across a trust boundary"], ["all", "all"]].map(function (o) {
+        return '<option value="' + o[0] + '"' + ((X.settings.get("rtChannels") || "focus") === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
+      }).join("") + "</select></label>" +
       '<span class="rt-filter-note muted small"></span>' +
       '<div class="pk-legend rt-legend">' + legend() + "</div></div>" +
       '<div class="rt-body"><div class="rt-wrap"></div>' +
-      '<div class="rt-hint muted small">Hover an actor to light its channels, a channel to read its name; click to inspect. Zones: hover the title for what runs there and whom it trusts.</div>' +
+      '<div class="rt-hint muted small">Hover an actor to see its channels, or pick a concern or a flow; the Channels menu shows more at rest. Click an actor or a channel to inspect it. Zones: hover the title for what runs there and whom it trusts.</div>' +
       '<section class="rt-bounds"><h2 class="sec-h">Boundaries <span class="count"></span></h2>' +
       '<p class="lead">Every channel that crosses a trust boundary: what crosses it and where what arrives is checked.</p><div class="rt-btable"></div></section>' +
       "</div></div>";
@@ -310,6 +321,7 @@
     el.querySelector(".rt-bar").addEventListener("change", function (ev) {
       var f = ev.target.getAttribute("data-f");
       if (!f) return;
+      if (f === "ch") { X.settings.set("rtChannels", ev.target.value); S.map.refresh(); return; }
       var p = {}; p[f] = ev.target.value || null;
       if (f === "flow" && ev.target.value) p.concern = null;
       if (f === "concern" && ev.target.value) p.flow = null;

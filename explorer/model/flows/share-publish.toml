@@ -120,8 +120,8 @@ from = "cli"
 to = "user"
 via = "reply"
 label = "published review version …; boxes of … see it now"
-ref = "internal/shares.Version"
-text = "What was left out, and which projects list the share."
+ref = "internal/cli.newShareCmd"
+text = "The new [[internal/shares.Version]], what was left out, and which projects list the share."
 
 [[step]]
 section = "In the boxes"

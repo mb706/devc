@@ -2,7 +2,7 @@
 id = "secrets"
 title = "Secrets"
 summary = "Where realm secrets live on the host, the two ways a box receives them (files written before a start, or the daemon's answers at launch), the rule that a box gets only what its start was given and is still granted, and how values stay out of arguments, logs and the archive."
-order = 54
+order = 53
 packages = ["internal/secrets"]
 files = [
   "internal/daemon/secrets.go",
@@ -33,10 +33,10 @@ tests = [
   "test/integration.TestHarnessLaunchAndSecrets",
   "test/integration.TestSecretsDaemon",
 ]
-related = ["ssh-gate", "launching-a-harness", "toolbox-and-harnesses", "box-lifecycle", "box-channel"]
+related = ["security-model", "ssh-gate", "launching-a-harness", "toolbox-and-harnesses", "box-lifecycle", "box-channel"]
 
 [[invariant]]
-text = "With delivery daemon, the daemon gives a box a secret only if the project grants it now and the start record of the running container lists it ([[term:capability-record]])."
+text = "With delivery daemon, the daemon gives a box a secret only if the project grants it now and the [[term:capability-record|capability record]] of the running container lists it."
 refs = ["internal/daemon.Daemon.secret", "internal/daemon.Daemon.startedWith", "internal/box.Capabilities.AllowsSecret"]
 tests = ["internal/daemon.TestSecrets", "internal/box.TestCapabilities"]
 
@@ -78,7 +78,7 @@ An agent needs some credentials to work: its model's token, an API key for a ser
 
 **The store** ([[internal/secrets.FileStore]]). Each secret is a file `durable/realms/<realm>/secrets/<name>`, mode 0600 in a 0700 directory, which no box mounts. Realm and secret names are validated before they become a path. A value is at most 64 KiB and not empty; it is written to a new temporary file and renamed into place, and read without following a symlink. `devc secret set <realm> <name>` reads the value from standard input when it is piped, else from a prompt with echo off; `devc login` stores harness tokens the same way ([[concern:toolbox-and-harnesses]]).
 
-**What a box is granted.** [[internal/box.GrantedSecrets]]: the project's `grants.secrets` ([[config:project.grants.secrets]]) and the secret of each of its harnesses that logs in with `env-token` or `api-key`. The capability record of a start keeps that list ([[term:capability-record]]). A secret named by `grants.github = "token:<name>"` reaches the box as a GitHub token instead ([[concern:github]]); nothing checks which secret that is.
+**What a box is granted.** [[internal/box.GrantedSecrets]]: the project's `grants.secrets` ([[config:project.grants.secrets]]) and the secret of each of its harnesses that logs in with `env-token` or `api-key`. The capability record of a start keeps that list ([[term:capability-record|capability record]]). A secret named by `grants.github = "token:<name>"` reaches the box as a GitHub token instead ([[concern:github]]); nothing checks which secret that is.
 
 **The two delivery modes** ([[config:config.secrets.delivery]], machine-wide, `files` by default):
 
@@ -96,7 +96,7 @@ An agent needs some credentials to work: its model's token, an API key for a ser
 
 **Cleanup.** Stop, removal and a failed start remove the secrets directory and the gate's public key ([[internal/harness.BoxHooks.Cleanup]]).
 
-**Out of the archive.** A manifest's `home.secret_files` names the files of the realm-shared harness state that hold a login; [[internal/config.Harness.SecretStatePatterns]] maps them into that state's layout, and [[internal/archive.Excluded]] keeps them out of uploads, exports and restores.
+**Out of the archive** ([[concern:fleet-archive]]). A manifest's `home.secret_files` names the files of the realm-shared harness state that hold a login; [[internal/config.Harness.SecretStatePatterns]] maps them into that state's layout, and [[internal/archive.Excluded]] keeps them out of uploads, exports and restores.
 
 ## What can go wrong, and what prevents it
 

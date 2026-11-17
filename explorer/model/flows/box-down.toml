@@ -23,6 +23,7 @@ text = "The box manager is built with its stop hooks in this order: sessions and
 at = "cli"
 ref = "internal/box.Manager.Down"
 text = "`down` takes the box lock but, unlike `up`, does not refuse while the configuration has problems: stopping only takes something away."
+detail = "`devc rm` ([[internal/box.Manager.Remove]]) goes the same way with `podman rm --force` instead of `podman stop`, and also drops the network exceptions; for a container that is already gone it skips the after-stop hooks, so open sessions stay open. With `--home` it then empties the home from a helper container ([[internal/box.Manager.clearInHelper]]: no network, only the home mounted, only the capabilities `DAC_OVERRIDE` and `FOWNER`) and removes the empty directory. `devc rebuild` is `up --recreate --build`."
 
 [[step]]
 at = "cli"

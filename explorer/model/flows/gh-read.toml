@@ -59,7 +59,7 @@ text = "The project's repository comes from its `upstream` as configured now, on
 [[step]]
 at = "daemon"
 ref = "internal/box.Capabilities.GitHubReadRepos"
-text = "Only when `grants.github_read` lists repositories: those the start record of this container lists too may be read. The project's own repository needs no record."
+text = "Only when `grants.github_read` lists repositories: those the capability record of this container lists too may be read. The project's own repository needs no record."
 
 [[step]]
 at = "daemon"

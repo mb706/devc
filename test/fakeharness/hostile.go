@@ -1,3 +1,7 @@
+// This file implements --hostile-helper: a stand-in for a misbehaving box
+// agent that answers the daemon with garbage, an oversized hello or a
+// malformed one.
+
 package main
 
 import (

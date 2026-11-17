@@ -2,7 +2,7 @@
 id = "web-app"
 title = "The web app"
 summary = "The hub's web app in plain JavaScript: how the hub embeds and serves it under a strict content security policy, how it starts, its single store fed by snapshots and one event stream, how it resynchronises after a gap, what keeps it bounded, commands whose outcome is not known, the terminal, how box-made text is rendered, and the development mode that drives it."
-order = 93
+order = 84
 packages = ["web"]
 files = [
   "internal/hub/static.go",

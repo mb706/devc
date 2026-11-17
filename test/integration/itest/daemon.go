@@ -1,5 +1,8 @@
 //go:build integration
 
+// This file starts, watches and stops `devc daemon` processes of test
+// environments, and the daemon mode of DEVC_ITEST_DAEMON.
+
 package itest
 
 import (

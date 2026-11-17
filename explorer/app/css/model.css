@@ -138,6 +138,8 @@
    something is hovered, selected or filtered (boundary ones stay heavier). */
 .rt-map:not(.focus):not(.filtered) .rt-ch { opacity: 0.55; }
 .rt-map:not(.focus):not(.filtered) .rt-ch.bnd { opacity: 0.7; }
+/* Channels nobody asked for (see the Channels menu of the Runtime view). */
+.rt-map .rt-ch.quiet { display: none; }
 .rt-map:not(.focus):not(.filtered) .rt-ch.bnd .cx-edge { stroke-width: 1.8; }
 .rt-ch.dim { opacity: 0.16; }
 .rt-ch.out { opacity: 0.12; }

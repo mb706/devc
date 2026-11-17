@@ -109,6 +109,7 @@ text = "A mount that lies inside another mount (the package cache inside the box
 at = "cli"
 ref = "internal/box.Manager.publish"
 text = "Last, the capability record, the network binding and the readiness marker of an earlier start are removed, so none of them can vouch for this one."
+detail = "On SELinux hosts in mode `labels` the project directory is relabelled first with `restorecon -R`, a system tool that follows no symlink; without the tool devc warns and goes on ([[internal/box.Manager.relabel]])."
 
 [[step]]
 section = "Create and start"
@@ -120,7 +121,7 @@ via = "exec"
 label = "podman create <arguments>"
 ref = "internal/engine.Podman.Create"
 text = "The container is created from the argument vector, with `devc.confighash` as one of its labels. If this or any later step fails, the container is removed again and the delivered secrets with it."
-detail = "A stopped container that `up` starts again skips this step ([[internal/box.Manager.startStopped]]); if a later step fails it is stopped again instead of removed."
+detail = "A stopped container that `up` starts again skips this step ([[internal/box.Manager.startStopped]]); if a later step fails it is stopped again instead of removed. Every engine call has a time limit of its own: queries 30 seconds, lifecycle verbs such as create and start two minutes, builds two hours, pulls 30 minutes ([[internal/engine.Podman]])."
 
 [[step]]
 from = "cli"

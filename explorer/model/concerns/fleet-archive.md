@@ -50,7 +50,7 @@ tests = [
   "internal/boxside.TestArchiveWorker",
   "test/integration.TestFleet",
 ]
-related = ["state-restore", "secret-transfer", "hub-access", "hub-machine-link", "git-ratchet", "secrets", "worktrees-and-context"]
+related = ["security-model", "state-restore", "secret-transfer", "hub-access", "hub-machine-link", "git-ratchet", "secrets", "worktrees-and-context"]
 
 [[invariant]]
 text = "No upload changes stored bytes: it appends at the stored length, a bundle's .part is renamed without replacing anything, and of what was stored before, an upload removes only what retention chooses and secrets bundles beyond the newest ten."

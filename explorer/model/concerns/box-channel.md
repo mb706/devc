@@ -37,7 +37,7 @@ tests = [
   "test/integration.TestDaemon",
   "test/integration.TestDaemonHostileEndpoints",
 ]
-related = ["daemon", "box-init-and-agent", "sessions-and-events", "input-and-receipts", "requests-and-approval"]
+related = ["security-model", "daemon", "box-init-and-agent", "sessions-and-events", "input-and-receipts", "requests-and-approval"]
 
 [[invariant]]
 text = "The daemon connects only to the socket inode it found beneath the box's runtime directory, never through a symlink."
@@ -166,7 +166,7 @@ label = "a later attempt passes"
 +++
 ## What it is for
 
-The daemon must reach into each running box (live sessions, typing into panes, listeners for network exceptions and services), and programs in a box must reach the host (questions, requests, secrets, git, SSH, the network). Both directions share one connection per box, the [[term:box-channel]]. The box controls the socket's directory, every process in it and every byte on the connection. The channel must make sure the daemon talks to that box and no one else, attribute everything that arrives to that box, and bound what the box can make the daemon hold.
+The daemon must reach into each running box (live sessions, typing into panes, listeners for [[concern:allowlist-proxy|network exceptions]] and [[concern:service-logins|services]]), and programs in a box must reach the host (questions, requests, secrets, git, SSH, the network). Both directions share one connection per box, the [[term:box-channel]]. The box controls the socket's directory, every process in it and every byte on the connection. The channel must make sure the daemon talks to that box and no one else, attribute everything that arrives to that box, and bound what the box can make the daemon hold.
 
 ## How it works
 
@@ -184,7 +184,7 @@ Only then is the channel `connected` ([[diagram:channel-states]]). [[flow:channe
 **Streams.** The control stream carries `box.hello` and [[rpc:box.sessions]], which reconciliation asks with 30 seconds to answer ([[internal/daemon.boxWorker.live]]). Every other request of the daemon gets a stream of its own and at most a minute ([[internal/daemon.boxWorker.call]]), so a slow answer holds up nothing else; results are decoded strictly, and a `box.input.clients` report is also range-checked. The agent opens a stream for every client in the box and relays its bytes unparsed. [[internal/daemon.boxWorker.acceptStreams]] accepts them; [[internal/daemon.boxWorker.serveStream]] reads the first line within 30 seconds and dispatches:
 
 - `host.proxy`, `host.dial`, `host.service`: raw relays of one TCP connection each, for the network levels and services;
-- `host.git`, `host.gate`, `host.github`: the stream is taken over by the relay service, the SSH gate, the GitHub facade;
+- `host.git`, `host.gate`, `host.github`: the stream is taken over by the [[concern:git-ratchet|relay service]], the [[concern:ssh-gate|SSH gate]], the [[concern:github|GitHub facade]];
 - anything else: JSON-RPC served from the table of [[surface:host-api]] ([[rpc:host.ping]], [[rpc:host.hint]], [[rpc:host.question]], [[rpc:host.request]], [[rpc:host.secret]], …), closed after 31 minutes without input, longer than the longest question wait.
 
 Every handler gets the worker's project; nothing a box sends selects one.

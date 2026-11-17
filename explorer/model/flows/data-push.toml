@@ -196,8 +196,8 @@ from = "cli"
 to = "user"
 via = "reply"
 label = "pushed 12 files to nas; the 2 files it replaced are kept there in …"
-ref = "internal/data.SyncResult"
-text = "What was sent and where the remote keeps what it replaced."
+ref = "internal/cli.newDataPushCmd"
+text = "What was sent and where the remote keeps what it replaced, from the push's [[internal/data.SyncResult]]."
 
 [[step]]
 at = "cli"

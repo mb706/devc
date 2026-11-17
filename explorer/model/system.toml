@@ -4,45 +4,51 @@
 # specific one.
 
 # ----- zones
+#
+# The map reads from left to right as trust falls: your devices and the
+# hub, the host in the middle with the auxiliary containers below it, the
+# box on the right; the outside services sit above the host and the box,
+# which reach them most.
 
 [[zone]]
 id = "device"
 title = "Your devices"
 trust = "device"
-summary = "The person using devc, at a terminal or in a browser."
+summary = "The person using devc: at a terminal on the host, in a browser, and on a phone that receives notifications."
 col = 1
 row = 1
-
-[[zone]]
-id = "hub"
-title = "Hub"
-trust = "hub"
-summary = "An always-on server that machines dial out to: it keeps a view of every session, notifies, and serves the web app. A machine trusts it only with the methods it allowlists."
-col = 1
-row = 2
 
 [[zone]]
 id = "external"
 title = "Outside services"
 trust = "external"
-summary = "Services on the internet that devc talks to on the user's behalf."
+summary = "Hosts and services outside your machines: what boxes reach, and what devc reaches on your behalf."
+col = 2
+row = 1
+colspan = 2
+
+[[zone]]
+id = "hub"
+title = "Hub"
+trust = "hub"
+summary = "An always-on server that machines dial out to: it keeps a view of every session and an archive of durable state, notifies, and serves the web app. A machine lets it call only the methods its daemon allowlists."
 col = 1
-row = 3
+row = 2
+rowspan = 2
 
 [[zone]]
 id = "host"
 title = "Host"
 trust = "host"
-summary = "The user's machine outside any box: the CLI, the daemon and the processes they start. Policy lives here (configuration directory) and so does everything a box must not change (durable state)."
+summary = "Your machine outside any box: the CLI, the daemon and the processes they start. Policy lives here (the configuration directory), and so does the state no box reaches: relays, journals, secrets, logs."
 col = 2
-row = 1
-rowspan = 2
+row = 2
 
 [[zone]]
 id = "aux"
 title = "Auxiliary containers"
 trust = "aux"
-summary = "Throwaway containers the host starts to work on box-writable trees (helper and context containers) and the desktop sidecar. They get only the mounts and capabilities their job needs."
+summary = "Containers the host starts beside the boxes, each for one job and with only the mounts and capabilities that job needs: the helper, context and restic containers work on box-writable trees, the installer and login containers run vendor and login commands, the desktop sidecar serves a box's display."
 col = 2
 row = 3
 
@@ -52,8 +58,8 @@ title = "Box"
 trust = "untrusted"
 summary = "A project's container, `devc-<realm>-<project>`. Everything in it is under the agent's control, devc's own helpers included: the host treats whatever comes out of it as hostile input."
 col = 3
-row = 1
-rowspan = 3
+row = 2
+rowspan = 2
 
 # ----- actors: devices
 
@@ -82,19 +88,19 @@ summary = "`devc hub serve`: accepts machine links and the web app's requests, b
 commands = ["devc hub serve"]
 
 [[actor]]
+id = "hub-db"
+zone = "hub"
+title = "Hub database"
+kind = "store"
+summary = "SQLite (pure Go) in the hub directory: the certificate registry, the machines, the latest view of every session with its cursor, a bounded tail of events per session, pending requests, a change log that event streams and the notifier follow, and the access state: the password hash and TOTP secret, login sessions, enrolment, action and notification records."
+
+[[actor]]
 id = "hub-cli"
 zone = "hub"
 title = "Hub CLI"
 kind = "process"
 summary = "The `devc hub` commands run on the hub's server against the hub directory: init, the CA and its certificates, enrolment tokens, the password and TOTP, login sessions, devices and machines, the doctor, the archive's listing and pruning. They write the database while the server runs; the server notices a change of the registry within a second."
 commands = ["devc hub"]
-
-[[actor]]
-id = "hub-db"
-zone = "hub"
-title = "Hub database"
-kind = "store"
-summary = "SQLite (pure Go) in the hub directory: the certificate registry, the machines, the latest view of every session with its cursor, a bounded tail of events per session, pending requests, a change log that event streams and the notifier follow, and the access state: the password hash and TOTP secret, login sessions, enrolment, action and notification records."
 
 [[actor]]
 id = "hub-archive"
@@ -104,13 +110,6 @@ kind = "store"
 summary = "The archive's files in the hub directory: `archive/<machine>/<realm>/` (file generations with their records, bundles, ref logs) and `secrets/<machine>/<realm>/` (encrypted secrets bundles). Only the hub server writes them; `devc hub archive prune` deletes from `archive/` only, never secrets bundles."
 
 # ----- actors: outside services
-
-[[actor]]
-id = "github"
-zone = "external"
-title = "GitHub"
-kind = "service"
-summary = "Upstream repositories, and the REST API behind the read-only facade and GitHub App tokens ([[pkg:internal/github]])."
 
 [[actor]]
 id = "ntfy"
@@ -148,6 +147,13 @@ kind = "service"
 summary = "The web services a realm defines in `services/<name>/service.toml` (a wiki, an internal API): the daemon's service proxy sends boxes' allowed requests there with the credential added, and a cookie service's login container logs in there."
 
 [[actor]]
+id = "github"
+zone = "external"
+title = "GitHub"
+kind = "service"
+summary = "Upstream repositories, and the REST API behind the read-only facade and GitHub App tokens ([[pkg:internal/github]])."
+
+[[actor]]
 id = "internet"
 zone = "external"
 title = "Internet hosts"
@@ -165,28 +171,26 @@ summary = "Every `devc` command the user runs on the host. Commands are thin: th
 commands = ["devc", "devc daemon status", "devc daemon stop", "devc hub status"]
 
 [[actor]]
+id = "config-dir"
+zone = "host"
+title = "Configuration directory"
+kind = "store"
+summary = "`~/.config/devc`: config.toml, realms, projects, services, envs, harness manifests, baselines, dotfiles. Policy comes only from here; no box can write it. Every devc command on the host reads it afresh (the CLI, gate-exec, the relay hooks), the daemon when it changes."
+
+[[actor]]
+id = "state-dir"
+zone = "host"
+title = "State directory"
+kind = "store"
+summary = "`~/.local/share/devc`: durable state (relays, journals, secrets, context, harness state) and local state (receipts, box files, archive bookkeeping), the toolbox and caches. Parts are mounted into boxes; the rest no box reaches."
+
+[[actor]]
 id = "daemon"
 zone = "host"
 title = "Daemon"
 kind = "process"
 summary = "`devc daemon`, one per machine (in the foreground, or as the systemd user service `devc service install` sets up): a channel to every running box, continuous ingestion of session events, commands with receipts, the relay service, the SSH gate, the allowlist proxy, the links to hubs, and the local API on `<runtime>/daemon.sock`."
 commands = ["devc daemon"]
-
-[[actor]]
-id = "relay-hooks"
-zone = "host"
-title = "Relay hooks"
-kind = "process"
-summary = "devc started by git receive-pack under the hook names pre-receive, update and post-receive while a box pushes to its relay; started so, it runs `devc relay-hook <name>` ([[cmd/devc.shim.relayHook]]), which checks and records the push."
-commands = ["devc relay-hook"]
-
-[[actor]]
-id = "gate-exec"
-zone = "host"
-title = "Gate session"
-kind = "process"
-summary = "`devc gate-exec`, the forced command of the gate's sshd: runs one SSH session of a box over the host's master connection to a granted host."
-commands = ["devc gate-exec"]
 
 [[actor]]
 id = "podman"
@@ -200,7 +204,15 @@ id = "host-git"
 zone = "host"
 title = "git (host)"
 kind = "process"
-summary = "git on the host, run only against relays and only through [[internal/gitx.Host]] (hardened environment, `/` as working directory, an empty hooks directory unless the relay hooks are wanted)."
+summary = "git on the host. On relays it runs only through [[internal/gitx.Host]] (hardened environment, `/` as working directory, an empty hooks directory unless the relay hooks are wanted); apart from that, `devc init` clones your configuration repository and `devc doctor` asks git's version."
+
+[[actor]]
+id = "relay-hooks"
+zone = "host"
+title = "Relay hooks"
+kind = "process"
+summary = "devc started by git receive-pack under the hook names pre-receive, update and post-receive while a box pushes to its relay; started so, it runs `devc relay-hook <name>` ([[cmd/devc.shim.relayHook]]), which checks and records the push."
+commands = ["devc relay-hook"]
 
 [[actor]]
 id = "rsync"
@@ -217,28 +229,36 @@ kind = "process"
 summary = "`sshd -i` started by the daemon for each gate stream of a box, with a generated configuration: one host key, the box's key, every forwarding off, a forced command."
 
 [[actor]]
-id = "config-dir"
+id = "gate-exec"
 zone = "host"
-title = "Configuration directory"
-kind = "store"
-summary = "`~/.config/devc`: config.toml, realms, projects, envs, harness manifests, dotfiles. Policy comes only from here; no box can write it."
-
-[[actor]]
-id = "state-dir"
-zone = "host"
-title = "State directory"
-kind = "store"
-summary = "`~/.local/share/devc`: durable state (relays, journals, secrets, context, harness state) and local state (receipts, box files, archive bookkeeping), the toolbox and caches. Parts are mounted into boxes; the rest no box reaches."
+title = "Gate session"
+kind = "process"
+summary = "`devc gate-exec`, the forced command of the gate's sshd: runs one SSH session of a box over the host's master connection to a granted host."
+commands = ["devc gate-exec"]
 
 [[actor]]
 id = "dialer"
 zone = "host"
-title = "Namespace dialer"
+title = "Dial process"
 kind = "process"
 summary = "`devc box dial`: the host's own devc binary, started with nsenter in a box's pinned user and network namespaces but the host's mount namespace, relaying one connection of `devc forward` or the router to a port on the box's loopback."
 commands = ["devc box dial"]
 
 # ----- actors: auxiliary containers
+
+[[actor]]
+id = "installer"
+zone = "aux"
+title = "Installer"
+kind = "process"
+summary = "A throwaway container from `localhost/devc-aux/installer` (Debian with bash, curl and git) that runs a harness's vendor installer, the check of what it installed, and vendor login and status commands. It runs no devc code."
+
+[[actor]]
+id = "service-login"
+zone = "aux"
+title = "Login container"
+kind = "process"
+summary = "`devc service login` for a cookie service: a throwaway container from `auth.image` (by default the installer image) with the network on, every capability dropped and only a scratch directory mounted, which runs the service's login command and prints the cookies. It runs no devc code."
 
 [[actor]]
 id = "helper"
@@ -249,6 +269,13 @@ summary = "`podman run --rm --network none` with the toolbox's helper root files
 commands = ["devc box rm-worker", "devc box data-worker", "devc box archive-worker", "devc box statx-worker"]
 
 [[actor]]
+id = "restic"
+zone = "aux"
+title = "restic"
+kind = "process"
+summary = "The toolbox's pinned restic in a throwaway container from the helper root filesystem, as the box user without capabilities or network: it backs up a project's data root, which it sees read-only, into the restic repository of the state directory, and restores into a staging directory. It runs no devc code."
+
+[[actor]]
 id = "context-worker"
 zone = "aux"
 title = "Context container"
@@ -257,32 +284,11 @@ summary = "A throwaway container without network that walks a realm's context di
 commands = ["devc box context-worker"]
 
 [[actor]]
-id = "restic"
-zone = "aux"
-title = "restic"
-kind = "process"
-summary = "The toolbox's pinned restic in a throwaway container from the helper root filesystem, as the box user without capabilities or network: it backs up a project's data root, which it sees read-only, into the restic repository of the state directory, and restores into a staging directory. It runs no devc code."
-
-[[actor]]
-id = "installer"
-zone = "aux"
-title = "Installer"
-kind = "process"
-summary = "A throwaway container from `localhost/devc-aux/installer` (Debian with bash, curl and git) that runs a harness's vendor installer, the check of what it installed, and vendor login and status commands. It runs no devc code."
-
-[[actor]]
 id = "desktop"
 zone = "aux"
 title = "Desktop sidecar"
 kind = "process"
 summary = "`devc gui up`: a container from the desktop image that joins the box's network and user namespaces and serves an X display with a web viewer ([[pkg:internal/gui]]). It does not run the devc binary: Xvnc, socat, websockify and a window manager, started by the image's `devc-desktop` script."
-
-[[actor]]
-id = "service-login"
-zone = "aux"
-title = "Login container"
-kind = "process"
-summary = "`devc service login` for a cookie service: a throwaway container from `auth.image` (by default the installer image) with the network on, every capability dropped and only a scratch directory mounted, which runs the service's login command and prints the cookies. It runs no devc code."
 
 # ----- actors: box
 
@@ -293,23 +299,6 @@ title = "Box agent"
 kind = "process"
 summary = "`devc box init`, the container's main process: prepares the home, then runs the agent, which listens on `/run/devc/agent.sock` for the daemon and on the abstract socket `@devc-agent` for clients in the box, relays those to the host, and carries out the daemon's input to session panes."
 commands = ["devc box init"]
-
-[[actor]]
-id = "launcher"
-zone = "box"
-title = "Launcher"
-kind = "process"
-summary = "What a harness shim runs (`/opt/devc/shims/<bin>` links to devc) and what a session's tmux window starts: fetches the credential, sets the environment, registers the session, and executes the real harness."
-commands = ["devc box launch"]
-entry = ["cmd/devc.shim.launch"]
-
-[[actor]]
-id = "status-wrapper"
-zone = "box"
-title = "Status wrapper"
-kind = "process"
-summary = "`devc box pty`: runs a harness on a pseudo-terminal of its own to answer its OSC 7501 status queries, which tmux does not answer, and to take its status reports out of the output."
-commands = ["devc box pty"]
 
 [[actor]]
 id = "hook"
@@ -329,27 +318,6 @@ commands = ["devc box", "devc gh", "devc request", "devc src"]
 entry = ["cmd/devc.shim.remoteHelper"]
 
 [[actor]]
-id = "box-git"
-zone = "box"
-title = "git (box)"
-kind = "process"
-summary = "git in the box, on the box repository `/w/<realm>/<project>/.repo`: run by the harness or the user, it reaches `origin` (`devc::<realm>/<project>`) through git-remote-devc; started by the host through `podman exec`, it is the git-upload-pack or git-receive-pack end of a bank or a pull. It runs no devc code, and the box repository's hooks and configuration apply only here."
-
-[[actor]]
-id = "harness"
-zone = "box"
-title = "Harness"
-kind = "process"
-summary = "The coding agent (Claude Code, Codex, Cursor's CLI, OpenCode, pi), described by a manifest: installed in the toolbox, run in a session's tmux window or, started through its shim from a shell, in that shell's terminal."
-
-[[actor]]
-id = "box-program"
-zone = "box"
-title = "Box program"
-kind = "process"
-summary = "Any program in the box that is not devc's: what the harness or the user runs there, such as ssh, curl, a package manager or a web server. It runs no devc code."
-
-[[actor]]
 id = "tmux"
 zone = "box"
 title = "tmux"
@@ -363,6 +331,44 @@ title = "Spool"
 kind = "store"
 summary = "`/run/devc/spool/<session>.jsonl`: the box's runtime directory, which is `<runtime>/<box-id>/` on the host. The box appends events here; the host reads them only through [[pkg:internal/safefs]]."
 
+[[actor]]
+id = "launcher"
+zone = "box"
+title = "Launcher"
+kind = "process"
+summary = "What a harness shim runs (`/opt/devc/shims/<bin>` links to devc) and what a session's tmux window starts: fetches the credential, sets the environment, registers the session, and executes the real harness."
+commands = ["devc box launch"]
+entry = ["cmd/devc.shim.launch"]
+
+[[actor]]
+id = "box-git"
+zone = "box"
+title = "git (box)"
+kind = "process"
+summary = "git in the box, on the box repository `/w/<realm>/<project>/.repo`: run by the harness or the user, it reaches `origin` (`devc::<realm>/<project>`) through git-remote-devc; started by the host through `podman exec`, it is the git-upload-pack or git-receive-pack end of a bank or a pull. It runs no devc code, and the box repository's hooks and configuration apply only here."
+
+[[actor]]
+id = "status-wrapper"
+zone = "box"
+title = "Status wrapper"
+kind = "process"
+summary = "`devc box pty`: runs a harness on a pseudo-terminal of its own to answer its OSC 7501 status queries, which tmux does not answer, and to take its status reports out of the output."
+commands = ["devc box pty"]
+
+[[actor]]
+id = "box-program"
+zone = "box"
+title = "Box program"
+kind = "process"
+summary = "Any program in the box that is not devc's: what the harness or the user runs there, such as ssh, curl, a package manager or a web server. It runs no devc code."
+
+[[actor]]
+id = "harness"
+zone = "box"
+title = "Harness"
+kind = "process"
+summary = "The coding agent (Claude Code, Codex, Cursor's CLI, OpenCode, pi), described by a manifest: installed in the toolbox, run in a session's tmux window or, started through its shim from a shell, in that shell's terminal."
+
 # ----- channels
 
 [[channel]]
@@ -372,6 +378,34 @@ to = "cli"
 title = "Terminal"
 transport = "A shell on the host."
 carries = "devc commands and their output."
+concerns = ["command-line"]
+
+[[channel]]
+id = "cli-config"
+from = "cli"
+to = "config-dir"
+title = "Policy"
+transport = "Regular files of at most 1 MiB each below `~/.config/devc`, loaded in one pass at every command ([[internal/config.Load]])."
+carries = "config.toml, realms, projects, services, envs, harness manifests, baselines and dotfiles. devc writes there only at your command: `devc init`, `realm add`, `project add` and `adopt`, `join` and `leave`, and `devc root`'s log in the env's directory."
+concerns = ["configuration"]
+
+[[channel]]
+id = "cli-state"
+from = "cli"
+to = "state-dir"
+title = "State (CLI)"
+transport = "Files below `~/.local/share/devc`, at paths from [[internal/paths.Paths]]; directories are made without following a symlink ([[internal/paths.Paths.Ensure]])."
+carries = "What CLI commands keep: a box's rendered files and capability record, the journals they ingest, secrets, the toolbox, savepoint indexes, data manifests. The State view lists every entry with its writer."
+concerns = ["host-foundations", "box-lifecycle", "sessions-and-events"]
+
+[[channel]]
+id = "cli-git"
+from = "cli"
+to = "host-git"
+title = "Host git (CLI)"
+transport = "git through [[internal/gitx.Host]]: an argument vector, `/` as working directory, the relay as `--git-dir`, no hooks; upstream commands with your own git configuration and credentials."
+carries = "Banks, pulls, pushes to the upstream, previews, logs and diffs, adoptions, share publishing and restores of relays."
+concerns = ["git-ratchet", "upstream", "shares", "state-restore"]
 
 [[channel]]
 id = "daemon-api"
@@ -382,6 +416,25 @@ transport = "The Unix socket `<runtime>/daemon.sock` (mode 0600), JSON-RPC 2.0, 
 carries = "Views of boxes and sessions, event streams, commands with receipts, decisions on requests ([[surface:daemon-api]])."
 checks = ["internal/proto.DecodeParams", "internal/daemon.Client.Serves"]
 concerns = ["daemon", "input-and-receipts", "requests-and-approval", "watching-sessions"]
+
+
+[[channel]]
+id = "daemon-config"
+from = "daemon"
+to = "config-dir"
+title = "Policy (daemon)"
+transport = "The same files, loaded again when the names, sizes or modification times of the configuration files change ([[internal/daemon.Daemon.reload]])."
+carries = "The configuration the daemon acts on: which boxes are projects, what each is granted now, the hubs, the router."
+concerns = ["configuration", "daemon"]
+
+[[channel]]
+id = "daemon-state"
+from = "daemon"
+to = "state-dir"
+title = "State (daemon)"
+transport = "Files below the state directory, at paths from [[internal/paths.Paths]]."
+carries = "What the daemon keeps: the journals it ingests, command receipts, request logs, proxy and service logs, cookie services' login state, the archive's bookkeeping; it reads capability records and secrets there."
+concerns = ["daemon", "sessions-and-events", "input-and-receipts", "requests-and-approval"]
 
 [[channel]]
 id = "box-channel"
@@ -480,7 +533,8 @@ from = "podman"
 to = "helper"
 title = "Helper run"
 transport = "`podman run --rm --network none` with the helper root filesystem as a throwaway overlay, only the target tree mounted and only the capabilities the worker needs."
-carries = "One worker request (often JSON on stdin); a report back. The data worker's request is a DataRequest of at most 1 MiB, its report a DataResult the host captures and decodes within 64 MiB."
+carries = "One worker request (often JSON on stdin); a report back. The data worker's request is a DataRequest of at most 1 MiB, its report a DataResult the host captures and decodes within 64 MiB. The trees a worker reads are box-writable, so the host treats its report as hostile input."
+boundary = true
 checks = ["internal/boxside.ReadDataRequest", "internal/boxside.DataWorker.Run", "internal/data.DecodeResult"]
 concerns = ["box-lifecycle", "data-and-sealing", "savepoints", "data-sync"]
 
@@ -511,6 +565,7 @@ title = "Data transfer"
 transport = "rsync's protocol over your own ssh (through the master of `devc ssh login` when one answers), or directly for a local directory; paths protected from the remote shell."
 carries = "Files of the targets: from the remote into a pull's staging directory, or from a push's staging directory to the remote, never deleting there."
 boundary = true
+checks = ["internal/data.ParseItems", "internal/boxside.CheckPullEntries", "internal/boxside.puller.merge"]
 concerns = ["data-sync"]
 
 [[channel]]
@@ -531,6 +586,7 @@ to = "context-worker"
 title = "Context run"
 transport = "`podman run --rm --network none` from the installer image with every capability dropped, the context directory and the toolbox mounted."
 carries = "A context repository operation (commit, diff, log, bundle, restore)."
+boundary = true
 checks = ["internal/ctxrepo.decodeStrict"]
 concerns = ["worktrees-and-context"]
 
@@ -541,6 +597,7 @@ to = "installer"
 title = "Installer run"
 transport = "`podman run --rm` from the installer image with no new privileges, the box seccomp profile and `--http-proxy=false`, empty tmpfs mounts at /home, /opt and /tmp, and only what the job needs mounted."
 carries = "A vendor installer with its version directory mounted read-write (network on), the check of the result (network none, read-only), or a vendor login or status command with the toolbox read-only and a temporary home."
+concerns = ["toolbox-and-harnesses"]
 
 [[channel]]
 id = "installer-vendors"
@@ -548,8 +605,10 @@ from = "installer"
 to = "vendors"
 title = "Vendor downloads"
 transport = "curl with `--proto =https --tlsv1.2` for the install script; the script's own downloads."
-carries = "The vendor's install script and what it fetches; a vendor login's traffic."
+carries = "The vendor's install script and what it fetches; a vendor login's traffic. devc trusts the vendor's code as far as the container lets it act, and checks only that the result runs, in a second container without network."
 boundary = true
+checks = ["internal/toolbox.Installer.Install"]
+concerns = ["toolbox-and-harnesses"]
 
 [[channel]]
 id = "agent-tmux"
@@ -583,8 +642,27 @@ id = "launcher-harness"
 from = "launcher"
 to = "harness"
 title = "exec"
-transport = "The launcher replaces itself with the real harness binary, or with the status wrapper around it when the manifest says the harness reports its status through OSC 7501 and there is a terminal."
+transport = "The launcher replaces itself with the harness binary, or with the status wrapper, which then starts the harness ([[channel:launcher-wrapper]], [[channel:wrapper-harness]])."
 carries = "The environment of the session (`DEVC_SESSION`), the credential, the settings."
+concerns = ["launching-a-harness"]
+
+
+[[channel]]
+id = "launcher-wrapper"
+from = "launcher"
+to = "status-wrapper"
+title = "Exec (wrapper)"
+transport = "The launcher replaces itself with `devc box pty --argv0 <bin> -- <exe> …` when the launch description asks for OSC 7501 status, `DEVC_NO_PTY` is not 1 and it runs on a terminal ([[internal/boxside.PrepareLaunch]])."
+carries = "The harness to run, its arguments and the session's environment."
+concerns = ["launching-a-harness"]
+
+[[channel]]
+id = "wrapper-harness"
+from = "status-wrapper"
+to = "harness"
+title = "Pseudo-terminal"
+transport = "A pseudo-terminal of the wrapper's own, on which the harness leads a new session ([[internal/ptywrap.Run]])."
+carries = "Every byte both ways unchanged, but the harness's OSC 7501 query, which the wrapper answers, and its status reports, which become state events."
 concerns = ["launching-a-harness"]
 
 [[channel]]
@@ -604,6 +682,15 @@ title = "Hooks"
 transport = "The harness runs `devc box hook <kind> <event>` with its hook input as JSON on standard input (at most 1 MiB is read)."
 carries = "What the harness reports: session start, prompts, questions, permission prompts, the final message, the end."
 concerns = ["sessions-and-events", "launching-a-harness"]
+
+[[channel]]
+id = "harness-tools"
+from = "harness"
+to = "box-tools"
+title = "devc commands"
+transport = "The harness, or a program it runs, executes devc from the toolbox: `devc request`, `devc gh`, `devc src` and `devc box` commands."
+carries = "Requests, GitHub reads, dependency sources, worktree hooks; each command reaches the host, if at all, through the agent."
+concerns = ["requests-and-approval", "github", "dependency-sources"]
 
 [[channel]]
 id = "hub-link"
@@ -663,6 +750,7 @@ to = "browser"
 title = "Web app"
 transport = "The browser's window."
 carries = "What the user reads and does in the web app."
+concerns = ["web-app"]
 
 [[channel]]
 id = "hub-ntfy"
@@ -670,8 +758,9 @@ from = "hub"
 to = "ntfy"
 title = "Notifications"
 transport = "HTTP or HTTPS requests, as `[ntfy] url` in hub.toml says, with its bearer token when one is set; over `http` the messages and the token travel without TLS."
-carries = "A short message when a session needs the user, failed or finished a turn, with action buttons that carry single-use tokens; the clearing of that message when the state ends."
+carries = "A short message when a session needs the user, failed or finished a turn, with action buttons that carry single-use tokens; the clearing of that message when the state ends. Its text comes from boxes and is made printable and cut before it leaves; what comes back is a status."
 boundary = true
+checks = ["internal/hub.buildNotification", "internal/hub.ntfyClient.do"]
 concerns = ["hub-inbox-and-notifications"]
 
 [[channel]]
@@ -730,8 +819,9 @@ from = "host-git"
 to = "github"
 title = "Upstream git"
 transport = "git over HTTPS or SSH with the host's own credentials."
-carries = "Fetches of the upstream into the relay and pushes of relay branches (devc pull, devc push, devc pr create, forwards)."
+carries = "Fetches of the upstream into the relay and pushes of relay branches (devc pull, devc push, devc pr create, forwards). Every fetched object is checked (fsck), and relay branches follow the upstream only by fast-forward."
 boundary = true
+checks = ["internal/gitx.Relay.Configure", "internal/gitx.Service.syncHeads"]
 concerns = ["upstream", "github"]
 
 [[channel]]
@@ -772,8 +862,9 @@ from = "gate-exec"
 to = "ssh-hosts"
 title = "Master connection"
 transport = "`ssh -S <master> -o ControlMaster=no -o ProxyCommand=false <host>` over the connection `devc ssh login` keeps in `<runtime>/gate`; without the master it fails instead of connecting."
-carries = "One SSH session, with every forwarding off."
+carries = "One SSH session, with every forwarding off. What the remote sends back goes to the box unchanged."
 boundary = true
+checks = ["internal/gate.Client.Check", "internal/gate.Client.ExecArgs"]
 concerns = ["ssh-gate"]
 
 [[channel]]
@@ -832,8 +923,9 @@ from = "dialer"
 to = "box-program"
 title = "Box loopback"
 transport = "TCP to `127.0.0.1:<port>` inside the box's network namespace, from the dial process."
-carries = "One forwarded or routed connection."
+carries = "One forwarded or routed connection, relayed unparsed. The dial process runs the host's binary in the box's pinned user and network namespaces and reads nothing of the box."
 boundary = true
+checks = ["internal/netpolicy.Pin", "internal/netpolicy.Forwarder.DialArgs"]
 concerns = ["forwards-and-local-urls"]
 
 [[channel]]
@@ -862,6 +954,7 @@ title = "GitHub API (CLI)"
 transport = "HTTPS to the REST API with the host's credential as a bearer token."
 carries = "`devc pr create`'s new pull request and `devc pr comment`'s comment, also when an approved request runs them."
 boundary = true
+checks = ["internal/github.Client.Call", "internal/github.Client.checkRedirect"]
 concerns = ["github"]
 
 [[channel]]
@@ -880,8 +973,9 @@ from = "box-git"
 to = "github"
 title = "git with a token"
 transport = "git over HTTPS to the remote `github`, with the box's own network (the network level must let it reach the host)."
-carries = "Pushes and fetches of the token modes, authenticated with the token the credential helper printed; GitHub, not devc, decides what the token may do."
+carries = "Pushes and fetches of the token modes, authenticated with the token the credential helper printed; GitHub, not devc, decides what the token may do. devc sees nothing of this connection; what limits it is the token: a minted one covers one repository and never `workflows`."
 boundary = true
+checks = ["internal/github.Minter.Token", "internal/github.CheckPermission"]
 concerns = ["github"]
 
 [[channel]]
@@ -902,6 +996,7 @@ to = "service-login"
 title = "Login run"
 transport = "`podman run --rm --cap-drop=ALL` with no new privileges and the toolbox's seccomp profile, the network on, a scratch directory at /login, no standard input, five minutes."
 carries = "The login command, the service directory's other files and the login secrets as files; the cookies as JSON on standard output."
+boundary = true
 checks = ["internal/svclogin.ParseLoginOutput"]
 concerns = ["service-logins"]
 
@@ -911,8 +1006,9 @@ from = "service-login"
 to = "service-upstream"
 title = "Login"
 transport = "Whatever the login command does, usually HTTPS form posts with curl."
-carries = "The login secrets, to the service's login page; its session cookies back."
+carries = "The login secrets, to the service's login page; its session cookies back, which become a jar only after a strict check of the login's output."
 boundary = true
+checks = ["internal/svclogin.ParseLoginOutput"]
 concerns = ["service-logins"]
 
 [[channel]]
@@ -932,6 +1028,7 @@ title = "Display"
 transport = "TCP on the loopback interface the box and the sidecar share: X11 on 127.0.0.1:6001, VNC on 5901, the viewer on 6080."
 carries = "X clients' drawing and the display's contents and input; the cookie in /run/devc/display.xauth admits an X client."
 boundary = true
+checks = ["internal/gui.NewSecrets"]
 concerns = ["desktop"]
 
 [[channel]]
@@ -942,6 +1039,7 @@ title = "Viewer"
 transport = "TCP to 127.0.0.1:6080 in the box's network namespace, from the dial process of the viewer's forward."
 carries = "noVNC's page and its WebSocket to the VNC server, which asks for the password."
 boundary = true
+checks = ["internal/netpolicy.Pin", "internal/gui.NewSecrets"]
 concerns = ["desktop"]
 
 [[channel]]

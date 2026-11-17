@@ -26,9 +26,15 @@ text = "The command carries an ID the client chose (a UUID); `params` hold the s
 
 [[step]]
 at = "hub"
+ref = "internal/hub.Server.guard"
+checks = ["internal/hub.Server.checkSite", "internal/hub.Server.checkSession"]
+text = "Before any handler, the front's guard applies the route's access class and cross-site rule ([[concern:hub-access]]): a device certificate, `X-Devc-Request: 1` with the hub's Origin and a JSON body, and a login session made with this certificate."
+
+[[step]]
+at = "hub"
 ref = "internal/hub.Server.apiCommand"
-checks = ["internal/hub.Server.checkSession", "internal/hub.Server.checkSite", "internal/hub.decodeBody", "internal/proto.ValidCommandID"]
-text = "Class user, rule strict. The body is decoded strictly; the type `answer` maps to `session.answer`; the ID must be a UUID or of session-ID form; `wait` at most 60 seconds."
+checks = ["internal/hub.decodeBody", "internal/proto.ValidCommandID"]
+text = "The body is decoded strictly; the type `answer` maps to `session.answer`; the ID must be a UUID or of session-ID form; `wait` at most 60 seconds."
 
 [[step]]
 at = "hub"

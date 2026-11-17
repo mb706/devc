@@ -1,5 +1,8 @@
 //go:build integration
 
+// This file installs the fake harness's manifests and the static tmux into
+// a test environment.
+
 package itest
 
 import (

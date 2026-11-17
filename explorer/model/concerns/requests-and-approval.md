@@ -2,7 +2,7 @@
 id = "requests-and-approval"
 title = "Requests and approval"
 summary = "What a box may ask the host for with `devc request`, the risk classes, who may decide which, how approved requests are carried out with the user's own commands, and the request log."
-order = 34
+order = 35
 packages = ["internal/requests"]
 files = [
   "internal/daemon/requests.go",
@@ -36,7 +36,7 @@ tests = [
   "internal/daemon.TestRequestLogs",
   "test/integration.TestRequests",
 ]
-related = ["daemon", "box-channel", "sessions-and-events"]
+related = ["security-model", "daemon", "box-channel", "sessions-and-events"]
 
 [[invariant]]
 text = "Nothing a box asks for runs before an approval, and a request that fails validation is stored nowhere."
@@ -155,7 +155,7 @@ An agent in a box sometimes needs something it cannot do from inside: seal a fin
 
 ## How it works
 
-**Kinds.** Each [[term:request]] has a kind with a fixed [[term:risk-class]] ([[internal/proto.RequestRisk]]) and is carried out by [[internal/daemon.requestCommands]]:
+**Kinds.** Each [[term:request]] has a kind with a fixed [[term:risk-class]] ([[internal/proto.RequestRisk]]) and is carried out by [[internal/daemon.requestCommands]] with the commands of [[concern:data-and-sealing]], [[concern:savepoints]], [[concern:allowlist-proxy]] and [[concern:github]]:
 
 | Kind | Risk | Carried out as |
 |---|---|---|

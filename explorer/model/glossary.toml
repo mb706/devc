@@ -3,8 +3,8 @@
 [[term]]
 id = "realm"
 title = "Realm"
-text = "A group of projects and the boundary of sharing: the boxes of a realm share harness logins and state, the context repository (notes and memory), package and source caches, and the realm's secrets. Defined by `realms/<realm>/realm.toml`; its durable state is `durable/realms/<realm>/`."
-refs = ["internal/config.Realm", "internal/paths.Paths.DurableRealmDir"]
+text = "A group of projects and the boundary of sharing: the boxes of a realm share harness logins and state and the package and source caches, and its projects that name the same `memory_group` share memory. Its secrets, notes, context repository and logs are kept per realm on the host; a secret reaches only the boxes of projects that are granted it. Defined by `realms/<realm>/realm.toml`; its durable state is `durable/realms/<realm>/`."
+refs = ["internal/config.Realm", "internal/paths.Paths.DurableRealmDir", "internal/box.GrantedSecrets"]
 see = ["project"]
 
 [[term]]
@@ -21,6 +21,14 @@ aka = ["container"]
 text = "A project's container, named `devc-<realm>-<project>`, created from the project's resolved configuration with a deterministic argument list. Everything in it is under the agent's control; the host treats what comes out of it as hostile input. Its short ID (the first 12 hex characters of the SHA-256 of `<realm>/<project>`) names its runtime directory."
 refs = ["internal/names.BoxName", "internal/names.BoxID", "internal/box.BuildSpec"]
 see = ["project", "box-agent"]
+
+[[term]]
+id = "trust-zone"
+title = "Trust zone"
+aka = ["zone (runtime map)"]
+text = "A part of the system with one level of trust, drawn as a coloured region of the Runtime map: your devices, the hub, outside services, the host, the auxiliary containers and the box. Channels marked as trust boundaries cross from one level of trust to another, and the map shows where what arrives is checked. Not to be confused with a [[term:zone|zone of a data tree]]."
+refs = ["zone:box", "zone:host"]
+see = ["box"]
 
 [[term]]
 id = "harness"
@@ -706,8 +714,8 @@ see = ["zone", "data-worker"]
 
 [[term]]
 id = "zone"
-title = "Zone"
-aka = ["input zone", "work zone", "sealed zone"]
+title = "Zone (data)"
+aka = ["data zone", "input zone", "work zone", "sealed zone"]
 text = "A directory below the data root with its own protection: an input zone is mounted read-only into the box; a work zone is the box's to change, protected only by savepoints; in a sealed zone the box creates entries that `devc seal` can hand to the vault. Zones are listed in `[data]` and may not overlap."
 refs = ["internal/boxside.DataLayout.Zones", "internal/boxside.DataWorker.layoutDirs"]
 see = ["data-root", "sealing"]

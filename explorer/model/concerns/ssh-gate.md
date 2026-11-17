@@ -2,7 +2,7 @@
 id = "ssh-gate"
 title = "The SSH gate"
 summary = "How a box uses an SSH host the user logged in to without ever holding a credential for it: the master connection on the host, a fresh key per box start, `sshd -i` per connection with a forced command, `devc gate-exec` and its checks, the read-only profile and the log."
-order = 53
+order = 54
 packages = ["internal/gate"]
 files = [
   "internal/boxside/gate.go",
@@ -44,7 +44,7 @@ tests = [
   "internal/cli.TestSSHCommands",
   "test/integration.TestSSHGate",
 ]
-related = ["secrets", "box-channel", "box-lifecycle", "daemon"]
+related = ["security-model", "secrets", "box-channel", "box-lifecycle", "daemon"]
 
 [[invariant]]
 text = "No box mounts a master connection's control socket: the sockets live in `<runtime>/gate`, which only host processes reach."
@@ -57,7 +57,7 @@ refs = ["internal/gate.ServerConfig.Render", "internal/gate.AuthorizedKeyLine", 
 tests = ["internal/gate.TestServerConfig", "internal/daemon.TestGateStreams", "test/integration.TestSSHGate"]
 
 [[invariant]]
-text = "A session starts only for a host granted to the project now and in its box's start record ([[term:capability-record]]), read-only if either grant is."
+text = "A session starts only for a host granted to the project now and in its box's [[term:capability-record|capability record]], read-only if either grant is."
 refs = ["internal/daemon.boxWorker.serveGate", "internal/gate.Exec.Run", "internal/box.Capabilities.SSHGrant"]
 tests = ["internal/gate.TestExecStartedWith", "internal/daemon.TestGateStreams", "internal/box.TestCapabilities"]
 
@@ -236,7 +236,7 @@ The box controls its ssh client and configuration, the alias it asks for and eve
 - **Forwarding into the host's network.** A control socket in reach would let a client ask the master for forwards in the host's namespaces; the socket stays on the host, and sshd, the key's `restrict` and gate-exec's ssh all switch forwarding off.
 - **Another project's host.** The project is the channel's; gate-exec finds it by the box ID the daemon wrote.
 - **A hostile alias or command.** Aliases are validated before they reach ssh; the command is one argument after `--`.
-- **A grant removed.** The daemon and gate-exec check the current configuration at every connection and session, so the next session is refused; one already running goes on until it ends or the owner closes the master (`devc ssh close`): nothing watches the configuration during a session. Adding the first grant adds a mount to the box's definition and needs `devc up --recreate` ([[internal/gate.BoxHooks.Contribute]]); another host needs a new start, which writes the box's SSH configuration and its start record.
+- **A grant removed.** The daemon and gate-exec check the current configuration at every connection and session, so the next session is refused; one already running goes on until it ends or the owner closes the master (`devc ssh close`): nothing watches the configuration during a session. Adding the first grant adds a mount to the box's definition and needs `devc up --recreate` ([[internal/gate.BoxHooks.Contribute]]); another host needs a new start, which writes the box's SSH configuration and its capability record.
 
 Limits: the read-only profile is a convenience: an allowed command that runs programs can do anything the account can ([[internal/gate.ReadOnlyNote]]). gate-exec runs through the user's login shell, so a `nologin` shell disables the gate and start-up output corrupts sftp and scp; the log is never rotated ([[doc:docs/dev/LEFTOVER.md#4]], [[doc:docs/dev/LEFTOVER.md#5]]).
 

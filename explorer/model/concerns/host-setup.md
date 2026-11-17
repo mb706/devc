@@ -2,7 +2,7 @@
 id = "host-setup"
 title = "Setting up a host"
 summary = "Getting a machine ready: `devc init` puts a configuration in place, `devc doctor` checks what devc needs from the host and prints what only root can fix as one script, and `devc service install` runs the daemon as a systemd user service."
-order = 13
+order = 95
 packages = ["internal/doctor", "internal/service"]
 files = ["internal/cli/setupcmds.go", "internal/cli/servicecmds.go", "internal/cli/commands.go"]
 key = [

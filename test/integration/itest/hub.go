@@ -1,5 +1,8 @@
 //go:build integration
 
+// This file creates hub directories and starts, restarts and stops
+// `devc hub serve` processes for tests.
+
 package itest
 
 import (

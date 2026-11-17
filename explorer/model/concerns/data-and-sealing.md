@@ -40,7 +40,7 @@ tests = [
   "test/integration.TestData",
   "test/integration.TestEscape",
 ]
-related = ["savepoints", "data-sync", "isolation", "host-foundations", "requests-and-approval", "box-lifecycle"]
+related = ["security-model", "savepoints", "data-sync", "isolation", "host-foundations", "requests-and-approval", "box-lifecycle"]
 
 [[invariant]]
 text = "Host code never opens, walks or changes the data tree (the SELinux relabel of the project before a start aside); every operation on it runs in a helper container without network, where the project is the only box-writable tree."

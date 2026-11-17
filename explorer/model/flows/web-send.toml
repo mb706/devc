@@ -48,7 +48,6 @@ to = "daemon"
 via = "rpc:session.send"
 label = "session.send {id, session, ref, text, mode}"
 ref = "internal/hub.machineLink.forward"
-unchecked = "apiCommand takes the method from commandMethods, a map from command type to method, which the tool counts as a list of methods rather than a call that sends one"
 text = "On the machine link, from the request's own goroutine, for at most 90 seconds ([[flow:phone-answer]] follows a command into the box)."
 
 [[step]]

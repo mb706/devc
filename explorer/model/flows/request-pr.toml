@@ -29,7 +29,6 @@ via = "rpc:host.request"
 label = "host.request {kind: pr, title, body, branch, base, draft}"
 ref = "internal/boxside.AgentCall"
 checks = ["internal/requests.Validate"]
-unchecked = "the run function then calls the request group's send closure, a function value held in a local variable, which validates the request and calls AgentCall"
 text = "The request is validated as the host will (a title of one line, branch and base that pass the ref name rules) and goes through the agent on a new stream of the box channel; the session comes from `DEVC_SESSION`."
 
 [[step]]

@@ -29,6 +29,7 @@ detail = "Claude Code's `PreToolUse` for `AskUserQuestion` takes the question pa
 at = "hook"
 ref = "internal/boxside.mapClaude"
 text = "The input is mapped by harness kind and event: Claude's `UserPromptSubmit` becomes a `prompt` event and a `state` event \"working\" with source `hook`. Malformed input or an unknown event becomes a note."
+detail = "The built-in mappings ([[internal/boxside.MapHook]]) for Claude Code and Codex: session start becomes `harness` and state idle, a prompt `prompt` and working, the end of a turn `message` (the final message) and done, permission prompts and questions `question` and blocked, and the session's end `session.end`."
 
 [[step]]
 at = "hook"

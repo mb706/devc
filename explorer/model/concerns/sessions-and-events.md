@@ -32,7 +32,7 @@ tests = [
   "internal/daemon.TestSubscribeEndedAndCold",
   "test/integration.TestSessions",
 ]
-related = ["launching-a-harness", "daemon", "watching-sessions", "input-and-receipts"]
+related = ["security-model", "launching-a-harness", "daemon", "watching-sessions", "input-and-receipts"]
 
 [[invariant]]
 text = "Nothing a box writes reaches a journal as it was written: every spool line is parsed strictly, its data validated field by field, and the event re-encoded."

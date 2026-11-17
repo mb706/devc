@@ -46,7 +46,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | X11 Explorer content: the hub | done | a5646c6 |
 | X12 Explorer content: fleet and the web app | done | 088791c |
 | X14 Explorer: polish from the authors' feedback | done | 48e395b |
-| Accuracy review G + X15 corrections | in progress | |
+| Accuracy review G1 to G5 + X15 corrections | done | 43f43df |
+| X13 Explorer content: synthesis | in progress | |
 
 ## Resuming
 
@@ -1401,3 +1402,20 @@ The four confirmed findings of the closing check (`docs/dev/reviews/F1-review.md
 - **Done.** All 27 findings of `reviews/G5-review.md` (the hub, fleet and the archive, the web app) were checked in the code and are right; all fixed where they stand, none rejected; answers in `reviews/G5-response.md`. The same beliefs were corrected across 9 concern pages (`secrets` among them), 10 flows, the glossary, the layout and `system.toml` (among them: what an upload can remove, credential files kept out by the machine only, re-reads unchecked for gaps, pruning by last event, notification clears, the web app's reconnects and snapshots, receipts kept seven days). Comments only in 7 Go files (`./dev explore comments-only`, `fmt`, `vet` clean).
 - **LEFTOVER part 7.** Part B verdicts recorded for X11 and X12 (two lettered parts not a defect, the rest confirmed; X12-6 sharpened). "Found by the accuracy review" gained item 8 (the web app can stop reconnecting while `/api/me` is unreachable, found while checking G5-19) and seven smaller ones; the old smaller list is now item 9.
 - **Check.** `./dev explore --check`: 0 errors, the same 17 warnings; no flow reference changed. Changed pages at or under 1,200 words (detail moved into flows where room was needed); pages and flows looked at with `explorer/check.sh --shot`.
+
+### X13 Explorer content: synthesis
+
+**Written** (`explorer/model/`):
+
+- `overview.md`: what devc is and its idea, how to read the explorer (zone colours, references, what the tool checked and what it could not), and where to start: the tour `start-here`, then `security-model` with its tour, then the concerns in a building order. Every concern's `order` was set to match (security-model 1, testing-and-tools 99; host-setup moved to 95, web-app to 84 beside the hub, secrets before ssh-gate).
+- Tours: `start-here` (28 stops in nine sections, from `config.Load` to `box.Manager.cleanup`, each pointing to its flow) and `trust-boundaries` (34 stops: the box to the host by channel, requests, git, network and brokered access, files; the hub's front; a machine and a browser to the hub; the hub to a machine; upstreams, data remotes and web pages).
+- Concerns: `security-model` (threat model; the six rules of `docs/dev/README.md` as invariants with their code; a table per zone of what it is trusted with; the accepted limits grouped with links into LEFTOVER part 5; a table of the gaps of LEFTOVER part 7 with severity and page; an index of every page's defences) and `testing-and-tools` (fakes, the fake harness, the integration suite and its isolation, a table of integration test to concern, what is untested, `./dev` and the explorer's tool). `test/fakeharness` and `test/integration/itest` belong to it; file comments added to five of their files, so `--check` reports no file without a concern.
+- `system.toml`: zones rearranged (devices and hub left, host in the middle with the auxiliary containers below, box right, outside services above host and box), actors reordered within zones; channels added for flows that had none (`cli-config`, `daemon-config`, `cli-state`, `daemon-state`, `cli-git`, `launcher-wrapper`, `wrapper-harness`, `harness-tools`); `checks` on every boundary channel (eleven had none); `podman-helper`, `podman-context` and `podman-login` marked as boundaries (their answers come from box-writable trees or a login command); zone summaries and the `host-git`, `config-dir` and `launcher-harness` texts corrected; the dial process's title unified with the pages.
+- `interfaces.toml`: the hub's routes name `through = ["internal/hub.Server.guard"]`; `phone-answer` shows the guard as a step.
+- Flows: `unchecked` removed where the check now connects (`box-init` step 11, `request-pr` step 3, `web-send` step 6; the others tried still need it); the reply steps of the eleven flows named in the work order point at their command's constructor, the printed type linked from the text.
+- The five pages over 1,200 words brought under it (box-lifecycle, isolation, launching-a-harness, toolbox-and-harnesses, service-logins): detail moved into `box-up`, `box-down`, `session-launch`, `hook-to-spool` and `question-answer`, isolation's short arguments into a table.
+- One whole: "start record" unified to "capability record"; glossary `zone` renamed "Zone (data)" beside a new term "Trust zone"; glossary `realm` corrected; `related` on every concern (security-model on the security-heavy ones); cross-links added where pages named other concerns in words; package roles in one verb-first style.
+
+**Facts changed after reading the code:** the glossary's `realm` said a realm's boxes share its secrets and the context repository; secrets reach only the projects that grant them (`box.GrantedSecrets`), notes are per project and memory per `memory_group`, which defaults to the project's name (`config` lookup). The `host-git` actor said git runs on the host only on relays through `gitx.Host`; `devc init` clones the configuration repository and `devc doctor` runs `git --version` directly. The host zone's summary called durable state everything a box must not change; parts of it are box-writable.
+
+**Check.** `./dev explore --check`: 0 errors, 0 warnings. `explorer/check.sh`: 138 screens, all assertions hold. `./dev explore comments-only`: 5 Go files differ, only in comments; `./dev fmt`, `./dev vet` clean. Overview, Runtime (1280 and 1920, both themes, with and without the inspector), the new tours and concerns looked at in screenshots. What the map would still need from the app: LEFTOVER part 5, "Explorer (X13)".

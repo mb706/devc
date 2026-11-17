@@ -368,6 +368,12 @@ After upgrading to C19r4: a desktop that runs from before is refused by `devc gu
 - `through` on an http surface is supported and tested, but the model names none yet; until it does, the hub's `guard` and its checks can still appear only as `checks`.
 - No table in today's model is wider than its column; the sideways-scroll cue was checked with injected tables. `check.sh --full` grows the window up to 16000 pixels and leaves the inspector and the code view's own panes as they are.
 
+### Explorer (X13)
+
+- The runtime map now reads from left to right as trust falls (devices and the hub, the host with the auxiliary containers below it, the box; the outside services above the host and the box), but its 40 actors and 70 channels stay dense between the host and the box. The app places actors inside a zone only by connector length: it counts no crossings and the model cannot pin an actor to a place, so at 1920 pixels the vendors and the SSH hosts land at the far right of the outside services and their connectors cross the box zone. What would help: a slot hint per actor (column and row within its zone), a placement that counts crossings, bundling of parallel connectors between two zones, and channels to stores and within a zone drawn only on hover.
+- 60 messages of today's flows have no channel of their own: most pass the box agent or Podman without naming it (a command in the box asking the daemon, a worker's report to the CLI), a few go to or from you. They light no channel when the map is filtered by such a flow, and the app marks their crossing by the zones' trust instead.
+- The overview's mini map draws no channels, by design of the app.
+
 ## 6. Deferred work
 
 | Work | What it would take |

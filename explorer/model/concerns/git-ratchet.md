@@ -44,7 +44,7 @@ tests = [
   "test/integration.TestRelayService",
   "test/integration.TestEscape",
 ]
-related = ["box-channel", "daemon", "box-lifecycle", "host-foundations"]
+related = ["security-model", "box-channel", "daemon", "box-lifecycle", "host-foundations"]
 
 [[invariant]]
 text = "Bank refs, snapshot refs and tag records are only ever created: every write of one requires that it does not exist yet, and no code deletes or moves them."

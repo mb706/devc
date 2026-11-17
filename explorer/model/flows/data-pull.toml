@@ -232,8 +232,8 @@ from = "cli"
 to = "user"
 via = "reply"
 label = "pulled 214 files …; moved 3 entries that differed into the trash entry …"
-ref = "internal/data.SyncResult"
-text = "How much arrived, how many files were identical already, and which trash entry holds what was replaced."
+ref = "internal/cli.newDataPullCmd"
+text = "How much arrived, how many files were identical already, and which trash entry holds what was replaced, from the pull's [[internal/data.SyncResult]]."
 
 [[step]]
 at = "cli"

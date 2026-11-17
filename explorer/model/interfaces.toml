@@ -57,6 +57,7 @@ title = "Hub routes"
 summary = "Every HTTP route of the hub, with the access class and cross-site rule that the front enforces before the handler runs."
 table = "internal/hub.routeTable"
 fields = { method = "method", path = "path", access = "access", xsite = "xsite", handler = "handle" }
+through = ["internal/hub.Server.guard"]
 
 [[surface]]
 id = "commands"

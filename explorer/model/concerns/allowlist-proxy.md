@@ -54,7 +54,7 @@ tests = [
   "test/integration.TestNetworkAllowlist",
   "test/integration.TestNetworkExceptions",
 ]
-related = ["network-levels", "box-channel", "requests-and-approval", "daemon"]
+related = ["security-model", "network-levels", "box-channel", "requests-and-approval", "daemon"]
 
 [[invariant]]
 text = "The proxy connects only to a public IPv4 address, checked again on the socket it actually connects, and not to one of the host's as last listed; before a first listing succeeds, it refuses none of them."
@@ -62,7 +62,7 @@ refs = ["internal/netpolicy.Proxy.CheckAddr", "internal/netpolicy.Proxy.dial", "
 tests = ["internal/netpolicy.TestProxyDialChecksAddress", "internal/netpolicy.TestProxyRefusals"]
 
 [[invariant]]
-text = "The proxy serves only a name and port that the allowlist allows both in the box's start record ([[term:capability-record]]) and now, or that an exception in force allows."
+text = "The proxy serves only a name and port that the allowlist allows both in the box's [[term:capability-record|capability record]] and now, or that an exception in force allows."
 refs = ["internal/daemon.Daemon.proxyPolicy", "internal/box.Capabilities.ProxyAllowlist", "internal/netpolicy.ProxyPolicy.Allows"]
 tests = ["internal/daemon.TestNetProxy", "internal/netpolicy.TestExpandAndIntersect"]
 

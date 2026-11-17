@@ -84,8 +84,8 @@ from = "box-tools"
 to = "cli"
 via = "reply"
 label = "JSON report {v, worktrees}"
-ref = "internal/boxside.SnapshotReport"
-text = "The report names each worktree with its commit, the files left out, or an error."
+ref = "internal/cli.newBoxGitCmds"
+text = "The report ([[internal/boxside.SnapshotReport]]) names each worktree with its commit, the files left out, or an error."
 
 [[step]]
 at = "cli"

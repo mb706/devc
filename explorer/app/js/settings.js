@@ -1,6 +1,6 @@
 // Settings kept in localStorage (through X.util.load/save, which never
-// throw): theme, whether tests are shown, the inspector's width and the
-// "open in editor" link. X.settings.on(key, fn) runs fn after a change.
+// throw): theme, whether tests are shown, the inspector's width, the
+// "open in editor" link and which channels the runtime map shows at rest. X.settings.on(key, fn) runs fn after a change.
 X.settings = (function () {
   "use strict";
   var U = X.util;
@@ -10,7 +10,8 @@ X.settings = (function () {
     tests: true,            // show test files, test symbols and test uses
     inspectorWidth: 520,
     editor: "",             // "" (none), "vscode", "cursor" or "custom"
-    editorTemplate: ""      // used when editor is "custom"
+    editorTemplate: "",     // used when editor is "custom"
+    rtChannels: "focus"     // runtime map: channels shown at rest (focus | bnd | all)
   };
   var presets = {
     vscode: { title: "VS Code", template: "vscode://file/{path}:{line}" },

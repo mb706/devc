@@ -29,7 +29,7 @@ tests = [
   "internal/extract.TestTarLimits",
   "test/integration.TestEscape",
 ]
-related = ["configuration"]
+related = ["security-model", "configuration"]
 
 [[invariant]]
 text = "Below a safefs root, host code never follows a symlink, never leaves the root through `..`, and reads only regular files."
@@ -89,7 +89,7 @@ With `KillGroup` the command runs in a process group of its own. When it exits, 
 
 **Archives.** [[pkg:internal/extract]] unpacks tar (plain, gzip, bzip2) and zip into a new, empty directory: published shares on the host, dependency sources in a box, the Node.js release of the toolbox, and exports read back by the fleet commands. Names are cleaned and checked; files and directories are created beneath the target's descriptor without following a symlink; symlinks are created last, only when relative and inside the tree, and each is then resolved by the kernel beneath the target and removed if it escapes; hard links, devices and FIFOs are left out; modes are 0644 or 0755, never set-ID. Limits on entries, file sizes, total size and decompressed input stop an extraction with `ErrLimit`.
 
-**Display.** [[pkg:internal/display]] is a leaf of wire formats for the desktop sidecar (Xauthority files, the X11 connection setup, VNC authentication), with strict, bounded parsers because the box side reads files and answers the box controls.
+**Display.** [[pkg:internal/display]] is a leaf of wire formats for the [[concern:desktop|desktop sidecar]] (Xauthority files, the X11 connection setup, VNC authentication), with strict, bounded parsers because the box side reads files and answers the box controls.
 
 ## What can go wrong, and what prevents it
 

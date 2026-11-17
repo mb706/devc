@@ -2,7 +2,7 @@
 id = "service-logins"
 title = "Service logins"
 summary = "How a box uses a web service that needs a credential without holding it: definitions in the configuration directory, a loopback port per service, the daemon's checks on each request's raw head and rules, a reverse proxy that adds the credential and filters both directions, and cookie logins in a throwaway container."
-order = 71
+order = 56
 packages = ["internal/svclogin"]
 files = [
   "internal/daemon/services.go",
@@ -46,7 +46,7 @@ tests = [
   "test/integration.TestServiceHeader",
   "test/integration.TestServiceCookie",
 ]
-related = ["secrets", "allowlist-proxy", "box-channel", "box-lifecycle", "configuration"]
+related = ["security-model", "secrets", "allowlist-proxy", "box-channel", "box-lifecycle", "configuration"]
 
 [[invariant]]
 text = "A project that would also receive a service's credential secret (value_secret, auth.secrets, _jar.<name>) through grants.secrets or a harness has a configuration problem; grants.github's token: is not checked."
@@ -204,7 +204,7 @@ ref = "internal/svclogin.rewrite"
 +++
 ## What it is for
 
-Some services an agent needs offer no token a box could hold safely: only a password login, or a token that can do much more than the task. A service login lets a box use such a service, an intranet wiki or an internal API, without ever holding its credential. The user defines the service in the realm's configuration and grants it to a project; the box sees an ordinary HTTP server on a loopback port; the daemon holds the credential, checks every request against the service's rules and adds the credential on the way out. None of this has run against a real service ([[doc:docs/dev/LEFTOVER.md#1]], "Services").
+Some services an agent needs offer no token a box could hold safely: only a password login, or a token that can do much more than the task. A service login lets a box use such a service, an intranet wiki or an internal API, without ever holding its credential. You define the service in the realm's configuration and grant it to a project; the box sees an ordinary HTTP server on a loopback port; the daemon holds the credential, checks every request against the service's rules and adds the credential on the way out. None of this has run against a real service ([[doc:docs/dev/LEFTOVER.md#1]], "Services").
 
 ## How it works
 
@@ -225,7 +225,7 @@ Some services an agent needs offer no token a box could hold safely: only a pass
 | 7 | a declared `Content-Length` fits `max_body`; a body without one is cut at `max_body` only while it streams to the upstream, after step 8 | 413 |
 | 8 | the credential is on the host and valid | 503 with what to tell the user |
 
-Only after step 6 does net/http's server parse the same bytes, with keep-alives off, so nothing after the first request is served; from then on the exchange ends at `timeout` plus five seconds. [[internal/svclogin.rewrite]] sends the normalised path to the upstream's `Host`, removes the box's credential, cookie, proxy and forwarding headers and adds the credential; the transport uses the host's trust store, no proxy and no redirects. [[internal/svclogin.modifyResponse]] drops `Set-Cookie` and its kin, maps redirects on the upstream to the local address, scrubs every header and drops trailers ([[flow:service-request]] lists them all); the upstream's 1xx responses never pass ([[internal/svclogin.noTrace]]), though net/http's server answers `Expect: 100-continue` itself; a response over `max_body` gets 502 or, streamed, is aborted. Each request is logged to `durable/realms/<realm>/service-log/<name>.jsonl`: time, box, method, normalised path, status and devc's reason.
+Only after step 6 does net/http's server parse the same bytes, with keep-alives off, so nothing after the first request is served. [[internal/svclogin.rewrite]] sends the normalised path to the upstream's `Host`, removes the box's credential, cookie, proxy and forwarding headers and adds the credential; the transport uses the host's trust store, no proxy and no redirects. [[internal/svclogin.modifyResponse]] drops `Set-Cookie` and its kin, maps redirects on the upstream to the local address, scrubs every header and drops trailers ([[flow:service-request]] lists them all); the upstream's 1xx responses never pass ([[internal/svclogin.noTrace]]), though net/http's server answers `Expect: 100-continue` itself; a response over `max_body` gets 502 or, streamed, is aborted. Each request is logged to `durable/realms/<realm>/service-log/<name>.jsonl`: time, box, method, normalised path, status and devc's reason.
 
 **Credentials.** A header service's secret is read for each request and brought into one normal form ([[internal/svclogin.HeaderCredential]]): printable ASCII, a leading scheme such as `Bearer` that counts as public, and every other word, Basic's password included, of at least eight characters. The value and each secret part are scrubbed from response headers, as written and URL-encoded. A cookie service's credential is the jar's `Cookie` header for the request's host and path ([[internal/svclogin.Jar.Credential]]); every stored cookie value is scrubbed.
 
@@ -246,7 +246,7 @@ A box controls every byte of its requests and when it opens connections, and can
 
 - **No service containers.** The daemon holds the credential and proxies; only a cookie login runs in a container ([[chunk:C18]]).
 - **One request per connection**, at the cost of clients that pipeline.
-- **Services work at every network level**, `none` included: like the SSH gate, they are an explicit grant.
+- **Services work at every network level**, `none` included: like the [[concern:ssh-gate|SSH gate]], they are an explicit grant.
 - **Ports come from the daemon**, not from the box's definition, so a removed grant closes the port within seconds.
 - **Eight characters** is the shortest credential part: a shorter value could not be scrubbed without garbling ordinary headers ([[finding:D2-07]], [[finding:E2-02]]).
 - **No private-address check** on upstreams: they are the user's configuration, and internal services are the point.

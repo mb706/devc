@@ -46,7 +46,7 @@ tests = [
   "test/integration.TestNetworkLevels",
   "test/integration.TestEscape",
 ]
-related = ["allowlist-proxy", "forwards-and-local-urls", "box-lifecycle", "isolation", "box-init-and-agent"]
+related = ["security-model", "allowlist-proxy", "forwards-and-local-urls", "box-lifecycle", "isolation", "box-init-and-agent"]
 
 [[invariant]]
 text = "No process of a box of level internet runs before devc's table is in the box's network namespace and has been verified from the host."
@@ -196,7 +196,7 @@ The owner wants an agent to download packages and call APIs without reaching the
 | `internet` (default) | the engine's network, two sysctls switching IPv6 off, rules installed by the host | public IPv4 addresses; no IPv6, LAN or host |
 | `open` | the engine's network | whatever the engine allows; devc adds nothing |
 
-At `none` and `allowlist` a box has no interface but loopback: without the host it has no network at all. The channel's services do not depend on the level ([[internal/daemon.boxWorker.serveStream]]): the relay service, host exceptions and what grants add (the SSH gate, GitHub, service logins) work at every level.
+At `none` and `allowlist` a box has no interface but loopback: without the host it has no network at all. The channel's services do not depend on the level ([[internal/daemon.boxWorker.serveStream]]): the [[concern:git-ratchet|relay service]], host exceptions and what grants add (the [[concern:ssh-gate|SSH gate]], [[concern:github|GitHub]], [[concern:service-logins|service logins]]) work at every level.
 
 **The rules.** [[internal/netpolicy.Rules]] renders one script, applied with `nft -f -` as one transaction; its structure:
 

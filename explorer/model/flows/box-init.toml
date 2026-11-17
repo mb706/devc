@@ -75,7 +75,6 @@ section = "The agent"
 [[step]]
 at = "box-agent"
 ref = "internal/boxside.RunAgent"
-unchecked = "Init starts the agent through the function value in InitOptions.Agent, which the init command fills"
 text = "Only after the marker does init start the agent in a goroutine of its own; a panic in it is logged and init keeps waiting."
 
 [[step]]

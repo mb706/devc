@@ -1,3 +1,6 @@
+// This file implements --serve: a small web server with a WebSocket echo,
+// for the tests of local URLs.
+
 package main
 
 import (

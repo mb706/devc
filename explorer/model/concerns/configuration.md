@@ -30,6 +30,7 @@ tests = [
   "internal/cli.TestLifecycleRefusesBrokenConfig",
   "test/integration.TestConfigCheckRejectsBrokenConfig",
 ]
+related = ["security-model", "host-foundations", "command-line", "box-lifecycle", "secrets", "toolbox-and-harnesses"]
 
 [[invariant]]
 text = "devc reads policy only from the configuration directory and its own binary; nothing below a project directory, a box home or the runtime directory is ever loaded as configuration."
@@ -239,7 +240,7 @@ The CLI loads the configuration afresh at every invocation; even `devc version` 
 
 **Finding the project.** [[internal/config.Config.ResolveProject]] turns a command-line argument into a reference: `realm/project`, a bare project name that is unique across realms, or, without an argument, the project whose directory `<projects root>/<realm>/<project>` contains the current directory. Only the path is compared; nothing below the project directory is opened. The tour [[flow:config-load]] follows all of this in order.
 
-**Grants.** [[internal/config.Grants]] lists what a box may use beyond itself: realm secrets delivered into the box (`secrets`; the name `gate_key` is reserved for the SSH gate), SSH hosts (`ssh`, with `host:ro` and `ssh_allow` for a read-only profile of single-word commands), GitHub access (`github`: `relay`, the default, `none`, `app` or `token:<secret>`, plus `github_read` and `github_token`), and services of the realm (`services`). The configuration only checks their form; the concerns that enforce them are elsewhere.
+**Grants.** [[internal/config.Grants]] lists what a box may use beyond itself: realm secrets delivered into the box (`secrets`; the name `gate_key` is reserved for the SSH gate), SSH hosts (`ssh`, with `host:ro` and `ssh_allow` for a read-only profile of single-word commands), GitHub access (`github`: `relay`, the default, `none`, `app` or `token:<secret>`, plus `github_read` and `github_token`), and services of the realm (`services`). The configuration only checks their form; [[concern:secrets]], [[concern:ssh-gate]], [[concern:github]] and [[concern:service-logins]] enforce them.
 
 **Names.** [[pkg:internal/names]] holds the rules. The general rule is `^[a-z0-9][a-z0-9._-]{0,62}$`. Realm names are stricter, 1 to 32 lower-case letters and digits ([[internal/names.ValidRealm]]). Secret names may also use upper-case letters and `_`, so a secret meant as an environment variable can carry the variable's name ([[internal/names.ValidSecret]]). [[internal/names.CheckRef]] applies git's rules for branch names plus devc's own, so a name that passes is safe in a ref, an argument vector and a message. Session IDs are `s` and 20 characters of base32hex, a 50-bit millisecond time followed by 50 random bits, so that sorting them sorts by creation time ([[internal/names.NewSessionID]]).
 

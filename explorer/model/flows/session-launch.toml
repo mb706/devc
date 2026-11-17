@@ -88,13 +88,14 @@ at = "launcher"
 ref = "internal/boxside.ReadLaunch"
 checks = ["internal/boxside.Launch.Validate"]
 text = "The launcher reads and validates the description again: it is the launcher's only source of what to run."
+detail = "[[internal/boxside.Launch.Validate]] checks every field: valid names, a clean absolute executable, the harness home below `/home/dev`, `PATH` entries below `/opt/devc`, credential and secret files below `/run/devc-secrets`, seed files within their directories."
 
 [[step]]
 at = "launcher"
 ref = "internal/boxside.PrepareLaunch"
 checks = ["internal/boxside.notSelf"]
 text = "The session ID from the window is kept. The environment gets the manifest's variables, `PATH` entries, `DEVC_SESSION`, `DEVC_HARNESS` and the launch depth, then the credential: from `/run/devc-secrets`, or asked from the daemon with `secrets.delivery = \"daemon\"`."
-detail = "A launch nested more than 16 deep, or an executable that resolves to devc, is refused. A harness started from inside another harness gets a session of its own."
+detail = "A launch nested more than 16 deep, or an executable that resolves to devc, is refused. A harness started from inside another harness gets a session of its own. Secret files are read up to 64 KiB each; with daemon delivery each secret is one `host.secret` call of at most ten seconds, and without a daemon the harness starts without them and the user is told once. The desktop's display and, where granted, `GH_TOKEN` from `host.github.token` are added too."
 
 [[step]]
 at = "launcher"

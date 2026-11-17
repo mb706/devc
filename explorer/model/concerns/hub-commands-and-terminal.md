@@ -35,7 +35,7 @@ tests = [
   "test/integration.TestHub",
   "test/integration.TestWebApp",
 ]
-related = ["hub-access", "hub-machine-link", "hub-inbox-and-notifications", "input-and-receipts", "requests-and-approval", "watching-sessions"]
+related = ["security-model", "hub-access", "hub-machine-link", "hub-inbox-and-notifications", "input-and-receipts", "requests-and-approval", "watching-sessions"]
 
 [[invariant]]
 text = "A browser reaches a machine only through the methods in hubMethods; any other method is unknown on a hub's connection."
@@ -118,7 +118,7 @@ Nothing a hub may call starts or stops a box, writes the configuration, stops th
 
 - **No queue for offline machines**: a command fails at once, so nothing is typed hours after the user expected.
 - **Commands bypass the worker**: a call that waits up to 90 seconds for a receipt must not hold up the projection.
-- **Device-signed commands were not built** ([[doc:docs/dev/plan.md#5]]): the hub serves the web app's code, so a key in the browser would not stop a compromised hub; the allowlist and the risk classes do the work instead.
+- **Device-signed commands were not built** ([[doc:docs/dev/plan.md#5]]): the hub serves the [[concern:web-app|web app]]'s code, so a key in the browser would not stop a compromised hub; the allowlist and the risk classes do the work instead.
 
 ## Where to start reading
 

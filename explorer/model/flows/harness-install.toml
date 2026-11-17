@@ -127,8 +127,8 @@ from = "cli"
 to = "user"
 via = "reply"
 label = "installed claude: <version> (<stamp>)"
-ref = "internal/toolbox.Installed"
-text = "The CLI prints the version the check reported and the stamp of the new directory, from the record it just published, and goes on to the boxes."
+ref = "internal/cli.newHarnessCmds"
+text = "The CLI prints the version the check reported and the stamp of the new directory, from the record it just published ([[internal/toolbox.Installed]]), and goes on to the boxes."
 
 [[step]]
 section = "Boxes that use the harness"
