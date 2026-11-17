@@ -95,7 +95,7 @@ A harness must start the same way whether you run `devc claude` on the host or t
 
 ## How it works
 
-**Launch descriptions.** For every installed harness the project lists, the host writes `/etc/devc/harness/<id>.json` ([[internal/boxside.Launch]], [[term:launch-description]]; [[concern:toolbox-and-harnesses]] says what goes in). [[internal/boxside.ReadLaunch]] reads at most 1 MiB, requires the file to name the harness asked for, and [[internal/boxside.Launch.Validate]] checks every field, so that no path in it leads out of the places it belongs ([[flow:session-launch]] lists them).
+**Launch descriptions.** For every installed harness the project lists, the host writes `/etc/devc/harness/<id>.json` ([[internal/boxside.Launch]], [[term:launch-description]]; [[concern:toolbox-and-harnesses]] says what goes in). [[internal/boxside.ReadLaunch]] reads at most 1 MiB, requires the file to name the harness asked for, and [[internal/boxside.Launch.Validate]] checks its names, its paths (clean and absolute, all but the executable below a fixed directory), variable names, the delivery mode and the seeds, though not every field ([[flow:session-launch]] lists them).
 
 **Two ways in.** From the host, `devc <harness> [project]` ([[internal/cli.app.startSession]]) prepares the box, the worktree and a session ID and runs `devc box session start` in the box through `podman exec -it` ([[flow:session-launch]]). In the box, the harness's name is a [[term:shim]] first in `PATH` ([[flow:binary-dispatch]]) that goes straight to the launcher, as `devc run <project> -- claude` does; the harness then runs in that terminal, not in a tmux window.
 

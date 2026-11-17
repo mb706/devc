@@ -2,7 +2,7 @@ id = "start-here"
 kind = "tour"
 title = "Start here: one task, end to end"
 summary = "One task from beginning to end in some thirty stops, from a configured project to a box that goes down again, each pointing to the flow that tells it in full."
-actors = ["user", "cli", "daemon", "box-agent", "launcher", "harness", "hub"]
+actors = ["user", "cli", "daemon", "relay-hooks", "box-agent", "launcher", "harness", "hook", "hub"]
 
 [[step]]
 section = "A project is configured"
@@ -21,7 +21,7 @@ text = "`demo/hello` becomes one set of settings, the project's overriding the r
 [[step]]
 at = "cli"
 ref = "internal/gitx.Service.InitRelay"
-text = "`devc project init` gives the project its relay, a bare repository on the host that the box knows as `origin`, filled from the upstream with your credentials ([[concern:upstream]]). Everything the box commits will be banked there ([[concern:git-ratchet]])."
+text = "`devc project init` gives the project its relay, a bare repository on the host that the box knows as `origin`, filled from the upstream with your credentials ([[concern:upstream]]). What a push or a bank takes from the box is recorded there for good (a bank skips invalid and protected branch names); a commit or tag the box makes and removes before either sees it never reaches the relay ([[concern:git-ratchet]])."
 
 [[step]]
 section = "The box comes up: devc up"
@@ -39,7 +39,7 @@ text = "The definition is the confinement: a user namespace that maps the box us
 [[step]]
 at = "cli"
 ref = "internal/box.Manager.publish"
-text = "Before anything runs, the host writes everything the box will see read-only: `/etc/devc`, launch descriptions, rendered baselines, delivered secrets on memory-backed storage ([[concern:secrets]]). The record of the previous start and its readiness marker are removed."
+text = "Before anything runs, the host writes everything the box will see read-only: `/etc/devc`, launch descriptions, rendered baselines, delivered secrets on memory-backed storage unless you allowed persistent copies ([[concern:secrets]]). The record of the previous start and its readiness marker are removed."
 
 [[step]]
 at = "cli"
@@ -54,7 +54,7 @@ text = "devc's own init is the box's main process. It checks that the rules are 
 [[step]]
 at = "cli"
 ref = "internal/box.Manager.afterStart"
-text = "The host fixes the box's user names as the box's root, waits for the marker, at level internet tests from outside that the box cannot reach the host (the canary), and writes the capability record: what this start was granted, which caps everything handed out later."
+text = "The host fixes the box's user names as the box's root, waits for the marker, at level internet tests from outside that the box cannot reach the host (the canary), and writes the capability record of what this start was granted: a secret, SSH host, allowlist entry, GitHub token or further repository, or service handed out later must be in it too. Reads of the project's own GitHub repository need no record."
 
 [[step]]
 at = "daemon"
@@ -85,7 +85,7 @@ text = "`devc send` hands the daemon a command with an ID of the client's choosi
 [[step]]
 at = "daemon"
 ref = "internal/daemon.target.begin"
-text = "The command waits until the session is at rest and no terminal showing it has been active for three seconds (a minute at most); just before the first key the daemon checks the session once more and stores `delivering`."
+text = "The command waits until the session is at rest, for as long as the daemon runs; then, for about a minute at most, while a terminal showing it was active in the last three seconds, after which it types anyway. Just before the first key the daemon checks the session once more and stores `delivering`."
 
 [[step]]
 at = "box-agent"
@@ -96,9 +96,9 @@ text = "Over the box channel, the agent pastes the text into the session's pane 
 section = "The agent works and commits"
 
 [[step]]
-at = "harness"
+at = "hook"
 ref = "internal/boxside.RunHook"
-text = "The harness works unattended. Its hooks, installed by devc's baseline, report the prompt, its state, questions and its final message as events appended to the session's spool file in the box ([[flow:hook-to-spool]])."
+text = "The harness works unattended. Its hooks, installed by devc's baseline, run devc's hook receiver, which reports the prompt, the harness's state, questions and its final message as events appended to the session's spool file in the box ([[flow:hook-to-spool]])."
 
 [[step]]
 at = "daemon"
@@ -111,14 +111,14 @@ ref = "internal/daemon.boxWorker.serveGit"
 text = "The agent commits and runs `git push origin`. git's remote helper reaches the daemon through the agent, and the daemon runs receive-pack on the relay of the channel's project, within a storage budget and under a watchdog ([[flow:box-git-push]])."
 
 [[step]]
-at = "daemon"
+at = "relay-hooks"
 ref = "internal/gitx.Service.RecordUpdate"
-text = "devc's update hook checks each ref against the branch policy and records its new tip under `refs/devc/bank/` before git applies it. Records are only ever created, so no later push or rewrite in the box can make the relay forget this commit."
+text = "receive-pack starts devc's update hook, a process of its own, which checks each ref against the branch policy and records its new tip under `refs/devc/bank/` before git applies it. Records are only ever created, so no later push or rewrite in the box can make the relay forget this commit."
 
 [[step]]
 at = "daemon"
 ref = "internal/daemon.turnBanker.turnEnded"
-text = "When the turn ends, the daemon banks the box: uncommitted work is snapshotted in the box, fetched into the relay and recorded too ([[flow:turn-snapshot]], [[concern:worktrees-and-context]])."
+text = "When the turn ends, the daemon starts `devc bank` as a child process: uncommitted work is snapshotted in the box, fetched into the relay and recorded too ([[flow:turn-snapshot]], [[concern:worktrees-and-context]])."
 
 [[step]]
 section = "A question reaches the phone"

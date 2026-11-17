@@ -211,7 +211,7 @@ label = "POST /api/commands"
 +++
 ## What it is for
 
-The owner follows every session of every machine from a phone or a browser: the inbox, a session's timeline, questions and requests, prompts, the terminal and the changes. The app must stay right over a flaky mobile connection (no change lost or applied twice, no prompt typed twice because an answer was lost), stay small however long a session runs, and show text that an agent wrote without letting that text act in the page. The hub serves it and holds the data ([[concern:hub-commands-and-terminal]]); this page is the browser's side.
+The owner follows recent sessions of every machine from a phone or a browser: the inbox, a session's timeline, questions and requests, prompts, the terminal and the changes. The app must stay right over a flaky mobile connection (no change lost or applied twice, no prompt typed twice because an answer was lost), stay small however long a session runs, and show text that an agent wrote without letting that text act in the page. The hub serves it and holds the data ([[concern:hub-commands-and-terminal]]); this page is the browser's side.
 
 ## How it works
 

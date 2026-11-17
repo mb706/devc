@@ -26,23 +26,23 @@ tests = [
 related = ["isolation", "host-foundations", "box-channel", "git-ratchet", "network-levels", "secrets", "hub-access", "hub-commands-and-terminal", "testing-and-tools"]
 
 [[invariant]]
-text = "Rule 1. Policy comes only from the configuration directory, which no box mounts; what a box is handed on demand is checked against its capability record and the configuration of now."
-refs = ["internal/config.Load", "internal/paths.Resolve", "internal/box.Capabilities.AllowsSecret", "internal/daemon.Daemon.reload"]
+text = "Rule 1. Policy comes only from the configuration directory, which no box mounts; a grant handed out on demand must be in the box's capability record and the configuration of now (reading its own GitHub repository needs no record)."
+refs = ["internal/config.Load", "internal/paths.Resolve", "internal/box.Capabilities.AllowsSecret", "internal/box.Capabilities.SSHGrant", "internal/daemon.boxWorker.serveGitHub", "internal/daemon.Daemon.reload"]
 tests = ["internal/box.TestCapabilities", "test/integration.TestEscape"]
 
 [[invariant]]
-text = "Rule 2. The host reads a box-writable file only beneath a directory descriptor, without following links and with a size cap, and walks such trees only in helper and context containers."
-refs = ["internal/safefs.Root.Open", "internal/safefs.Root.ReadFrom", "internal/data.Service.work", "internal/boxside.ArchiveWorker.Run", "internal/boxside.ScanContext", "internal/gitx.Host.Cmd"]
+text = "Rule 2. The host reads a box-writable file only beneath a directory descriptor, without following links and with a size cap, and walks such trees only in helper and context containers, but for `restorecon -R` on SELinux hosts."
+refs = ["internal/safefs.Root.Open", "internal/safefs.Root.ReadFrom", "internal/data.Service.work", "internal/boxside.ArchiveWorker.Run", "internal/boxside.ScanContext", "internal/gitx.Host.Cmd", "internal/box.Manager.relabel"]
 tests = ["internal/safefs.TestRefused", "test/integration.TestEscape"]
 
 [[invariant]]
-text = "Rule 2. Everything a box sends the host is decoded strictly and validated field by field before it is used or stored."
+text = "Rule 2. Every JSON message and report a box sends the host is bounded, decoded with unknown fields refused and validated field by field before it is used or stored."
 refs = ["internal/proto.ParseMessage", "internal/proto.ParseSpoolLine", "internal/requests.Validate", "internal/data.DecodeResult", "internal/gitx.decodeStrict"]
 tests = ["internal/session.TestIngestHostile", "internal/proto.TestMalformedInput", "internal/data.TestDecodeResult"]
 
 [[invariant]]
-text = "Rule 3. External commands are argument vectors run from `/`; where a shell or tmux does parse a line, every value in it is quoted and checked again."
-refs = ["internal/execx.Cmd", "internal/execx.Real.command", "internal/gate.ExecTarget.Command", "internal/boxside.SessionEnded"]
+text = "Rule 3. External commands are argument vectors, run by the host from `/`; where a shell or tmux does parse a line, every value in it is quoted and checked again."
+refs = ["internal/execx.Cmd", "internal/execx.Real.command", "internal/boxside.ExecGit", "internal/gate.ExecTarget.Command", "internal/boxside.SessionEnded"]
 tests = ["internal/execx.TestWorkDir", "internal/gate.TestExecTargetCommand", "internal/boxside.TestSessionEnded"]
 
 [[invariant]]
@@ -51,12 +51,12 @@ refs = ["internal/names.Check", "internal/names.CheckRef", "internal/paths.must"
 tests = ["internal/names.TestRealmNames", "internal/paths.TestUnvalidatedNamesPanic"]
 
 [[invariant]]
-text = "Rule 5. Secret values move on standard input, in files of mode 0400 or 0600 (memory-backed when delivered to a box) or in an answer body; the runner masks the values a caller names."
+text = "Rule 5. Secret values move on standard input, in files of mode 0400 or 0600 (memory-backed when delivered to a box, unless the user allows otherwise) or in an answer body; the runner masks the values a caller names."
 refs = ["internal/secrets.Deliver", "internal/secrets.CheckMemoryFS", "internal/execx.Cmd.Redact", "internal/daemon.Daemon.secret", "internal/gui.Secrets.Archive", "internal/cli.app.readPassphrase"]
 tests = ["internal/secrets.TestDeliver", "internal/secrets.TestFileStore"]
 
 [[invariant]]
-text = "Rule 6. A protection that cannot be applied stops the operation: an undelegated limit, an unexpected seccomp base, unverified rules, a secrets directory on disk, a configuration with problems."
+text = "Rule 6. A protection that cannot be applied stops the operation: an undelegated limit, an unexpected seccomp base, unverified rules, a secrets directory on disk (unless the user allows it), a configuration with problems."
 refs = ["internal/box.BuildSpec", "internal/toolbox.DeriveProfile", "internal/netpolicy.Installer.Verify", "internal/secrets.CheckMemoryFS", "internal/box.Manager.checkProblems"]
 tests = ["internal/box.TestSpecLimits", "internal/toolbox.TestSeccompRejectsUnexpectedBase", "internal/box.TestInternetLevel", "internal/box.TestProblemsBlockLifecycle"]
 
@@ -67,7 +67,7 @@ tests = ["test/integration.TestDaemonHostileEndpoints", "internal/daemon.TestHub
 +++
 ## What it is for
 
-devc lets an agent run unattended with its permission prompts off. The question is therefore not whether the agent behaves but what it can do when it does not: a prompt injection in an issue it reads, a malicious dependency it installs or a compromised harness all end in arbitrary code running as the box user. devc assumes that, and treats the whole box as the adversary, devc's own helpers in it included ([[zone:box]]). This page gathers what follows: the rules every part of the code follows and where each is enforced, what each zone is trusted with, the limits accepted on purpose, and the gaps the code has today. Every other concern has a section "What can go wrong, and what prevents it"; the table at the end points to each. The tour [[flow:trust-boundaries]] visits every crossing in order.
+devc lets an agent run unattended with its permission prompts off. The question is therefore not whether the agent behaves but what it can do when it does not: a prompt injection in an issue it reads, a malicious dependency it installs or a compromised harness all end in arbitrary code running as the box user. devc assumes that, and treats the whole box as the adversary, devc's own helpers in it included ([[zone:box]]). This page gathers what follows: the rules every part of the code follows and where each is enforced, what each zone is trusted with, the limits accepted on purpose, and the gaps the code has today. Every other concern has a section "What can go wrong, and what prevents it"; the table at the end points to each. The tour [[flow:trust-boundaries]] visits every crossing into a more trusted side, most exposed first.
 
 ## The threat model
 
@@ -77,7 +77,7 @@ devc lets an agent run unattended with its permission prompts off. The question 
 
 **Beyond the machine.** The hub is a server on the internet. A compromised hub can do on a machine what the machine's daemon lets a hub call (read the transcripts it mirrors, type into and start sessions, decide low-risk requests, watch terminals) and what it likes with the archive it holds; it cannot decide high-risk requests, start or stop boxes, change policy or read secret values ([[concern:hub-commands-and-terminal]]). A compromised machine writes only under its own name on a hub, but can fill its part and read every machine's archive ([[concern:hub-machine-link]], [[concern:fleet-archive]]). A web page in your browser can send requests to the hub and to local URLs; cross-site rules refuse them ([[concern:hub-access]], [[concern:forwards-and-local-urls]]). Upstreams, registries and data remotes are your choices: devc checks what it can (fetched objects through fsck, relay branches only fast-forward, published checksums) and trusts the rest.
 
-**Not defended against.** You and your configuration are trusted: `devc root`, `devc data unseal` and the grants exist to override protections, and a few grants are easy mistakes (below). devc relies on the kernel, Podman and OpenSSH. A vendor's installer runs with network in a container that sees only its version directory, and its code is trusted that far. The agent can read the credentials its box was given, which the spec accepts ([[doc:specs-v2.md#10.3]]). Processes on the host run as you: the daemon's socket is yours alone, but the router and a forward's listener answer any local connection.
+**Not defended against.** You and your configuration are trusted: `devc root`, `devc data unseal` and the grants exist to override protections, and a few grants are easy mistakes (below). `devc code` and `devc cursor` attach a desktop editor whose server in the box can act on the host through the editor, a hole the command warns about at every use ([[internal/cli.newEditorCmd]]). devc relies on the kernel, Podman and OpenSSH. A vendor's installer runs with network in a container that sees only its version directory, and its code is trusted that far. The agent can read the credentials its box was given, which the spec accepts ([[doc:specs-v2.md#10.3]]). Processes on the host run as you: the daemon's socket is yours alone, but the router and a forward's listener answer any local connection.
 
 ## The six rules
 
@@ -85,12 +85,12 @@ The development rules ([[doc:docs/dev/README.md#security-rules-for-code]]) turn 
 
 | Rule | Concentrated in | How it holds |
 |---|---|---|
-| 1. Policy comes only from the configuration directory | [[pkg:internal/config]], [[pkg:internal/paths]], [[internal/box.Capabilities]] | Loaded from one directory no box mounts; a grant is used only while the capability record of the box's start and the configuration of now both have it. |
-| 2. Box-writable data is hostile input | [[pkg:internal/safefs]], [[pkg:internal/proto]], the workers of [[pkg:internal/boxside]] in helper and context containers | Single files beneath a directory descriptor, without links, capped; trees walked only by workers; every message decoded strictly; no host git, interpreter or build tool in a box's tree. |
-| 3. No shell interpolation | [[internal/execx.Cmd]] | Argument vectors from `/`; the gate's forced command and tmux's pane-died hook quote every value and check it again. |
+| 1. Policy comes only from the configuration directory | [[pkg:internal/config]], [[pkg:internal/paths]], [[internal/box.Capabilities]] | Loaded from one directory no box mounts; a grant (a secret, an SSH host, the allowlist, a GitHub token or further repository, a service) is used only while the capability record of the box's start and the configuration of now both have it. Reads of the project's own GitHub repository need no record: they follow the upstream configured now ([[internal/daemon.boxWorker.serveGitHub]]). |
+| 2. Box-writable data is hostile input | [[pkg:internal/safefs]], [[pkg:internal/proto]], the workers of [[pkg:internal/boxside]] in helper and context containers | Single files beneath a directory descriptor, without links, capped; trees walked only by workers, but for `restorecon -R` of a project on SELinux hosts ([[internal/box.Manager.relabel]]); every JSON message decoded with unknown fields refused and validated, though not every decoder refuses what follows the value (below); no host git, interpreter or build tool in a box's tree. |
+| 3. No shell interpolation | [[internal/execx.Cmd]] | Argument vectors, from `/` on the host (in the box, git runs in the repository it works on and the harness in the directory its session started in); the gate's forced command and tmux's pane-died hook quote every value and check it again. |
 | 4. Names are validated | [[pkg:internal/names]] | `^[a-z0-9][a-z0-9._-]{0,62}$`, realms stricter, refs by git's rules too; session IDs made by devc and checked when read back. |
-| 5. Secrets stay out of arguments and logs | [[pkg:internal/secrets]], [[internal/execx.Cmd]] | Standard input, files of mode 0400 or 0600 (memory-backed when delivered to a box), answer bodies; in the box, the harness gets its granted secrets in its environment, on purpose. |
-| 6. Fail closed | where each protection is applied | Unapplied limits, an unknown seccomp base, unverified firewall rules, a disk-backed secrets directory and configuration problems all stop the operation. |
+| 5. Secrets stay out of arguments and logs | [[pkg:internal/secrets]], [[internal/execx.Cmd]] | Standard input, files of mode 0400 or 0600 (memory-backed when delivered to a box, unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`), answer bodies; in the box, the harness gets its granted secrets in its environment, on purpose. |
+| 6. Fail closed | where each protection is applied | Unapplied limits, an unknown seccomp base, unverified firewall rules, a disk-backed secrets directory (unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`) and configuration problems all stop the operation. |
 
 ## What each zone is trusted with
 
@@ -137,6 +137,7 @@ The authors of these pages read the code area by area, and a second reader check
 | The proxy refuses none of the host's public addresses until it first lists them | medium | [[concern:allowlist-proxy]] |
 | A trash restore that fails part-way strands the rest of the entry | medium | [[concern:data-and-sealing]] |
 | A regular file's seal can be recorded for a file that was swapped in and out during the seal | not graded | [[concern:data-and-sealing]] |
+| The CLI reads only the first JSON value of a live-session report, so `[]` and anything after it ends the box's open sessions; decoders that end with `Decoder.More` pass a stray `]` or `}` | not graded | [[concern:sessions-and-events]], [[concern:data-and-sealing]] |
 | `devc wt rm` removes ignored files and what snapshots leave out | not graded | [[concern:worktrees-and-context]] |
 | A full archive quota stops the upload of other realms too | medium | [[concern:fleet-archive]] |
 | `devc secret pull` takes any machine's newest bundle and shows the hub's labels | medium | [[concern:secret-transfer]] |
@@ -159,7 +160,7 @@ The authors of these pages read the code area by area, and a second reader check
 | [[concern:daemon]] | other users and configurations; floods of clients and subscribers |
 | [[concern:box-channel]] | reaching the wrong box; floods of streams and frames; host details in answers |
 | [[concern:sessions-and-events]] | rewriting the record, speaking for another project, floods |
-| [[concern:input-and-receipts]] | typing twice, into the wrong session, over a person |
+| [[concern:input-and-receipts]] | typing twice or into the wrong session; typing over a person, for about a minute (then it types anyway) |
 | [[concern:watching-sessions]] | box text on terminals; terminal input without consent |
 | [[concern:requests-and-approval]] | approving its own requests; box values as options |
 | [[concern:git-ratchet]] | rewriting recorded history; code on the host; the cost of a push |
@@ -168,12 +169,12 @@ The authors of these pages read the code area by area, and a second reader check
 | [[concern:network-levels]] | a start without rules; planted resolvers; reaching the host |
 | [[concern:allowlist-proxy]] | reaching the LAN through a name; granting itself access |
 | [[concern:forwards-and-local-urls]] | executing on the host; one box's page driving another's server |
-| [[concern:secrets]] | another project's secret; keeping a removed grant; copies on disk |
+| [[concern:secrets]] | another project's secret; a grant added while the box runs; a removed grant, from the next request in daemon mode (a delivered file stays until the box stops, and no mode takes back a value already read); copies on disk, unless you allow them |
 | [[concern:ssh-gate]] | taking a credential; forwarding into the host's network |
 | [[concern:github]] | reading other repositories; shaping requests; getting the credential |
 | [[concern:service-logins]] | another service or path; smuggled requests; the credential |
 | [[concern:desktop]] | reaching further through the sidecar; impersonating it |
-| [[concern:data-and-sealing]] | tricking a worker; a swap during a seal |
+| [[concern:data-and-sealing]] | tricking a worker; a directory swapped during a seal (a regular file can be: see the gaps above) |
 | [[concern:savepoints]] | reaching a savepoint |
 | [[concern:data-sync]] | a pull destroying data here, a push destroying data there |
 | [[concern:shares]] | hostile trees; changing a share from a box |

@@ -31,7 +31,7 @@ colspan = 2
 id = "hub"
 title = "Hub"
 trust = "hub"
-summary = "An always-on server that machines dial out to: it keeps a view of every session and an archive of durable state, notifies, and serves the web app. A machine lets it call only the methods its daemon allowlists."
+summary = "An always-on server that machines dial out to: it keeps a view of each machine's sessions that are live or had an event in the last 30 days (at most 20,000 per machine) and an archive of durable state, notifies, and serves the web app. A machine lets it call only the methods its daemon allowlists."
 col = 1
 row = 2
 rowspan = 2
@@ -77,6 +77,13 @@ title = "Browser"
 kind = "process"
 summary = "Runs the hub's web app (`web/`), with a device certificate issued by the hub's CA; on the host it also opens boxes' local URLs, which the daemon's router serves."
 
+[[actor]]
+id = "editor"
+zone = "device"
+title = "Editor"
+kind = "process"
+summary = "VS Code or Cursor on your desktop, started by `devc code` or `devc cursor` attached to a box: it runs a server of its own in the box, and its extensions, terminals and tasks act with your rights on the host. It runs no devc code."
+
 # ----- actors: hub
 
 [[actor]]
@@ -84,7 +91,7 @@ id = "hub"
 zone = "hub"
 title = "Hub server"
 kind = "process"
-summary = "`devc hub serve`: accepts machine links and the web app's requests, both only with client certificates from its CA (enrolment aside: [[internal/hub.Server.gate]]), keeps a projection of every session, sends notifications through ntfy, and forwards commands and terminals to machines."
+summary = "`devc hub serve`: accepts machine links and the web app's requests, both only with client certificates from its CA (enrolment aside: [[internal/hub.Server.gate]]), keeps a projection of the machines' recent sessions, sends notifications through ntfy, and forwards commands and terminals to machines."
 commands = ["devc hub serve"]
 
 [[actor]]
@@ -92,7 +99,7 @@ id = "hub-db"
 zone = "hub"
 title = "Hub database"
 kind = "store"
-summary = "SQLite (pure Go) in the hub directory: the certificate registry, the machines, the latest view of every session with its cursor, a bounded tail of events per session, pending requests, a change log that event streams and the notifier follow, and the access state: the password hash and TOTP secret, login sessions, enrolment, action and notification records."
+summary = "SQLite (pure Go) in the hub directory: the certificate registry, the machines, the latest view of each session it keeps (live, or with an event in the last 30 days; at most 20,000 per machine) with its cursor, a bounded tail of events per session, pending requests, a change log that event streams and the notifier follow, and the access state: the password hash and TOTP secret, login sessions, enrolment, action and notification records."
 
 [[actor]]
 id = "hub-cli"
@@ -744,6 +751,25 @@ checks = ["internal/hub.Server.identify", "internal/hub.Server.gate", "internal/
 concerns = ["hub-access", "hub-commands-and-terminal", "hub-inbox-and-notifications", "web-app"]
 
 [[channel]]
+id = "cli-editor"
+from = "cli"
+to = "editor"
+title = "Editor start"
+transport = "The editor's command-line tool, run from `/` with `--folder-uri vscode-remote://attached-container+<container name in hex><folder>` ([[internal/cli.EditorURI]]), after a warning."
+carries = "Which box and which folder to open."
+concerns = ["host-setup"]
+
+[[channel]]
+id = "editor-server"
+from = "box-program"
+to = "editor"
+title = "Attached editor"
+transport = "The editor's own connection to the server it installs and runs in the box; devc takes no part in it."
+carries = "Whatever the editor and its server exchange: files, terminals, tasks, extensions' traffic. Nothing checks it: code in the box can act on the host through the editor, a deliberate hole the command warns about at every use."
+boundary = true
+concerns = ["host-setup"]
+
+[[channel]]
 id = "user-browser"
 from = "user"
 to = "browser"
@@ -1026,9 +1052,9 @@ from = "box-program"
 to = "desktop"
 title = "Display"
 transport = "TCP on the loopback interface the box and the sidecar share: X11 on 127.0.0.1:6001, VNC on 5901, the viewer on 6080."
-carries = "X clients' drawing and the display's contents and input; the cookie in /run/devc/display.xauth admits an X client."
+carries = "X clients' drawing and the display's contents and input. Xvnc admits an X client only with the cookie in /run/devc/display.xauth, which the box can read on purpose, and a VNC client only with the password, which the box does not get; both are drawn for each start ([[internal/gui.NewSecrets]])."
 boundary = true
-checks = ["internal/gui.NewSecrets"]
+checks = ["file:assets/desktop/devc-desktop~Xvnc :1 -auth"]
 concerns = ["desktop"]
 
 [[channel]]
@@ -1037,9 +1063,9 @@ from = "dialer"
 to = "desktop"
 title = "Viewer"
 transport = "TCP to 127.0.0.1:6080 in the box's network namespace, from the dial process of the viewer's forward."
-carries = "noVNC's page and its WebSocket to the VNC server, which asks for the password."
+carries = "noVNC's page and its WebSocket to the VNC server; Xvnc admits the viewer only with the password. The pin makes the connection land in the box's namespace; it authenticates nothing."
 boundary = true
-checks = ["internal/netpolicy.Pin", "internal/gui.NewSecrets"]
+checks = ["internal/netpolicy.Pin", "file:assets/desktop/devc-desktop~Xvnc :1 -auth"]
 concerns = ["desktop"]
 
 [[channel]]

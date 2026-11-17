@@ -178,7 +178,7 @@ ref = "internal/paths.Paths.RequestsFile"
 
 [[tree.entry]]
 path = "durable/realms/<realm>/netlog/<project>.jsonl"
-text = "The allowlist proxy's log of a project: every decision, refusals and closings included (0600). Past 4 MiB it moves to `<project>.jsonl.1`, replacing the previous one."
+text = "The allowlist proxy's log of a project: every decision, refusals and closings included (0600); a stream refused before the proxy because the box's relay places are full is not in it. Past 4 MiB it moves to `<project>.jsonl.1`, replacing the previous one."
 writer = "host"
 ref = "internal/paths.Paths.NetLogFile"
 
@@ -382,7 +382,7 @@ ref = "internal/paths.Paths.RelayHooksDir"
 
 [[tree.entry]]
 path = "local/git/no-hooks"
-text = "An empty directory, every host git command's `core.hooksPath`, so no hook runs on the host."
+text = "An empty directory, the `core.hooksPath` of every git command devc runs on a relay but a box's push (which uses `relay-hooks`), so no other hook runs there."
 writer = "host"
 ref = "internal/paths.Paths.NoHooksDir"
 

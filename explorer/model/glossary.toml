@@ -93,7 +93,7 @@ see = ["box-agent"]
 id = "relay"
 title = "Relay"
 aka = ["relay repository"]
-text = "A bare git repository per project in the durable state (`durable/realms/<realm>/relay/<project>.git`), whose configuration and hooks devc controls. The box knows it as `origin` (`devc::<realm>/<project>`); host git runs only against relays."
+text = "A bare git repository per project in the durable state (`durable/realms/<realm>/relay/<project>.git`), whose configuration and hooks devc controls. The box knows it as `origin` (`devc::<realm>/<project>`). Host git works on project code only in relays; apart from them it runs only for `devc init <url>`, which clones your configuration repository with your own git settings, and for `devc doctor`'s version check."
 refs = ["internal/paths.Paths.RelayRepo", "internal/gitx.OriginURL"]
 see = ["banking"]
 
@@ -249,7 +249,7 @@ see = ["box-agent"]
 id = "capability-record"
 title = "Capability record"
 aka = ["capabilities.json", "start record"]
-text = "What a box was started with (container ID, secrets, SSH grants, network level and allowlist, GitHub grant, services), in `local/boxes/<realm>/<project>/capabilities.json`, taken from the configuration when devc finished the start, also of a running box without its readiness marker. What the daemon or the gate hands out on demand is the intersection of this record and the current configuration. devc removes it when it stops the box; a box stopped outside devc keeps it."
+text = "What a box was started with (container ID, secrets, SSH grants, network level and allowlist, GitHub grant, services), in `local/boxes/<realm>/<project>/capabilities.json`, taken from the configuration when devc finished the start, also of a running box without its readiness marker. The grants the daemon or the gate hands out on demand are the intersection of this record and the current configuration.\n\nReads of the project's own GitHub repository need no record: they follow the upstream configured now. devc removes the record when it stops the box; a box stopped outside devc keeps it."
 refs = ["internal/box.Capabilities", "internal/box.CapabilitiesOf"]
 see = ["grant"]
 
@@ -257,7 +257,7 @@ see = ["grant"]
 id = "identity-fix"
 title = "Identity fix"
 aka = ["fix-identity"]
-text = "`devc box fix-identity`, which `devc up` runs as the box's root after every start: UID and GID 1000 become `dev` with home /home/dev, 2000 becomes `vault`, and every other line of /etc/passwd and /etc/group stays as it was."
+text = "`devc box fix-identity`, which `devc up` runs as the box's root after every start: in /etc/passwd and /etc/group the entries named `dev` or with ID 1000 become one `dev` entry with home /home/dev, those named `vault` or with ID 2000 one `vault` entry, each where its first match was; every other line stays as it was."
 refs = ["internal/boxside.FixIdentity"]
 see = ["vault"]
 
@@ -444,7 +444,7 @@ see = ["request", "risk-class"]
 id = "git-ratchet"
 title = "Git ratchet"
 aka = ["ratchet"]
-text = "The guarantee that what a relay records (every tip of its branches, every snapshot, every tag created in the box) stays reachable whatever the box does: every tip a relay branch takes is recorded under `refs/devc/bank/`, records are only ever created, a box can delete no ref, and the relay never collects garbage."
+text = "The guarantee that what a relay records (every tip of its branches, every snapshot and every box tag it recorded) stays reachable whatever the box does: every tip a relay branch takes is recorded under `refs/devc/bank/`, records are only ever created, a box can delete no ref, and the relay never collects garbage.\n\nA push or a bank sees only the refs the box has at that moment, so a commit or tag the box makes and removes before either never reaches the relay."
 refs = ["internal/gitx.CheckUpdate", "internal/gitx.Service.RecordUpdate", "internal/gitx.PlanBank"]
 see = ["relay", "bank-ref", "banking"]
 
@@ -613,7 +613,7 @@ see = ["allowlist-proxy"]
 [[term]]
 id = "allowlist-proxy"
 title = "Allowlist proxy"
-text = "The HTTP proxy in the daemon for boxes of level allowlist: the box agent relays every connection to `127.0.0.1:3128` over the box channel; the daemon allows only listed names, resolves them itself, connects only to public IPv4 addresses and logs every decision."
+text = "The HTTP proxy in the daemon for boxes of level allowlist: the box agent relays every connection to `127.0.0.1:3128` over the box channel; the daemon allows only listed names, resolves them itself, connects only to public IPv4 addresses and logs its decisions (not a connection refused because the box's relay places are full)."
 refs = ["internal/netpolicy.Proxy", "internal/daemon.boxWorker.serveProxy"]
 see = ["allowlist", "proxy-log", "network-exception"]
 
@@ -629,7 +629,7 @@ see = ["network-level", "allowlist-proxy"]
 id = "proxy-log"
 title = "Proxy log"
 aka = ["netlog"]
-text = "`durable/realms/<realm>/netlog/<project>.jsonl`: every decision of the allowlist proxy for the project's box, refusals and closings included. It moves to `.1` past 4 MiB; `devc net log` shows it."
+text = "`durable/realms/<realm>/netlog/<project>.jsonl`: every decision of the allowlist proxy for the project's box, refusals and closings included; a stream refused before the proxy, because the box's relay places are full, is not in it. It moves to `.1` past 4 MiB; `devc net log` shows it."
 refs = ["internal/netpolicy.NetLog"]
 see = ["allowlist-proxy"]
 
@@ -724,7 +724,7 @@ see = ["data-root", "sealing"]
 id = "sealing"
 title = "Sealing"
 aka = ["seal", "sealed entry"]
-text = "`devc seal <path>` hands a direct child of a sealed zone to the vault and removes its write bits, recursively and without following links; from then on nothing in the box can open it for writing, move or remove it (a descriptor opened for writing before the seal still works, and a hard-linked file is sealed under every name). It protects against the box, not against you: `devc data unseal` gives it back."
+text = "`devc seal <path>` hands a direct child of a sealed zone to the vault and removes its write bits, recursively and without following links; from then on nothing in the box can open it for writing, move or remove it, except a regular file the box swapped for another during the seal and back, which stays writable although the seal is recorded. It protects against the box, not against you: `devc data unseal` gives it back.\n\nA descriptor opened for writing before the seal still works, and a hard-linked file is sealed under every name."
 refs = ["internal/boxside.DataWorker.seal", "internal/boxside.DataWorker.ownTree"]
 see = ["vault", "zone"]
 
@@ -942,7 +942,7 @@ see = ["desktop-sidecar"]
 id = "hub"
 title = "Hub"
 aka = ["hub server"]
-text = "An always-on `devc hub serve` on a server that machine daemons dial out to. It mirrors every session of every joined machine, derives the inbox, notifies through ntfy and serves the web app; it acts on a machine only through the methods that machine's daemon allows a hub."
+text = "An always-on `devc hub serve` on a server that machine daemons dial out to. It mirrors the sessions of every joined machine that are live or had an event in the last 30 days, at most 20,000 per machine, derives the inbox, notifies through ntfy and serves the web app; it acts on a machine only through the methods that machine's daemon allows a hub."
 refs = ["internal/hub.Server", "internal/daemon.hubMethods"]
 see = ["machine-link", "projection"]
 
@@ -1016,7 +1016,7 @@ see = ["access-class"]
 id = "projection"
 title = "Projection (hub)"
 aka = ["hub projection"]
-text = "The hub's copy of a machine's sessions in its database: each session's view folded to its cursor, a tail of at most 500 events and 1 MiB, the pending requests, the boxes. It can always be rebuilt from the machines' journals."
+text = "The hub's copy of a machine's sessions in its database: each session's view folded to its cursor, a tail of at most 500 events and 1 MiB, the pending requests, the boxes. The sessions can be read again from the machines' journals; the boxes and the pending requests, with their parameters, come from what the machines report now (`boxes.list`, `requests.list`)."
 refs = ["internal/hub.Tx.PutSession", "internal/hub.Tx.TrimTail", "internal/hub.machineLink.applyEvent"]
 see = ["journal", "cursor", "machine-link"]
 

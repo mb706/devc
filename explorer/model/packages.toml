@@ -194,7 +194,7 @@ role = "Decides how a box is connected to the network and enforces it from the h
 [package."internal/secrets"]
 layer = "area"
 group = "access"
-role = "Stores per-realm secrets on the host and writes the ones a box is given into its secrets directory, refusing storage that is not memory-backed."
+role = "Stores per-realm secrets on the host and writes the ones a box is given into its secrets directory, refusing storage that is not memory-backed unless the user allows it."
 
 [package."internal/github"]
 layer = "area"
@@ -298,7 +298,7 @@ role = "Implements the machine daemon, one per runtime directory: a channel to e
 [package."internal/hub"]
 layer = "service"
 group = "hub"
-role = "Implements the hub server that machine daemons dial out to: access by client certificates from its own CA with enrolment and a password login, a SQLite projection of every session kept over the machine links, the inbox and ntfy notifications, the JSON API with server-sent events and a terminal relay, the web app's files, and the archive."
+role = "Implements the hub server that machine daemons dial out to: access by client certificates from its own CA with enrolment and a password login, a SQLite projection of the machines' recent sessions kept over the machine links, the inbox and ntfy notifications, the JSON API with server-sent events and a terminal relay, the web app's files, and the archive."
 
 # --- entry
 

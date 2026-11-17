@@ -67,7 +67,7 @@ refs = ["internal/gate.Client.ExecArgs", "internal/gate.Client.Check"]
 tests = ["internal/gate.TestExecArgs", "test/integration.TestSSHGate"]
 
 [[invariant]]
-text = "Every start of a box with a grant gets a new key pair, made on memory-backed storage; afterwards the private key exists only in the box's secrets directory."
+text = "Every start of a box with a grant gets a new key pair, made on memory-backed storage unless DEVC_ALLOW_PERSISTENT_SECRETS=1; afterwards the private key exists only in the box's secrets directory."
 refs = ["internal/gate.Keys.NewBoxKey", "internal/gate.BoxHooks.BoxSecrets", "internal/secrets.CheckMemoryFS"]
 tests = ["internal/gate.TestServerPrepare", "internal/gate.TestBoxHooks"]
 

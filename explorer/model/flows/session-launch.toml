@@ -88,7 +88,7 @@ at = "launcher"
 ref = "internal/boxside.ReadLaunch"
 checks = ["internal/boxside.Launch.Validate"]
 text = "The launcher reads and validates the description again: it is the launcher's only source of what to run."
-detail = "[[internal/boxside.Launch.Validate]] checks every field: valid names, a clean absolute executable, the harness home below `/home/dev`, `PATH` entries below `/opt/devc`, credential and secret files below `/run/devc-secrets`, seed files within their directories."
+detail = "[[internal/boxside.Launch.Validate]] checks the schema, valid names for the harness and its binary, a clean absolute executable, the harness home and further home directories below `/home/dev`, `PATH` entries below `/opt/devc`, valid environment variable names, the delivery mode, credential and secret files below `/run/devc-secrets` with valid variable names, and seed files within their directories with a known `when`. It does not check every field: the realm and project, the credential's method and secret name, the home's strategy and shared lists, the input settings and the rest are taken as the host rendered them into the read-only mount."
 
 [[step]]
 at = "launcher"

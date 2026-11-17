@@ -164,7 +164,7 @@ ref = "internal/boxside.puller.displace"
 +++
 ## What it is for
 
-Results move between this machine, a cluster and a disk: inputs come in, finished runs go out. devc wraps rsync so that a pull cannot destroy what is here, a push cannot destroy what is there, the host still never walks the box-writable tree, and nothing a box wrote reaches rsync's command line. A manifest in the context repository records what each machine held.
+Results move between this machine, a cluster and a disk: inputs come in, finished runs go out. devc wraps rsync so that a pull cannot destroy what is here, a push cannot destroy what is there, the host still never walks the box-writable tree (but for the SELinux relabel of a project before a start), and nothing a box wrote reaches rsync's command line. A manifest in the context repository records what each machine held.
 
 ## How it works
 

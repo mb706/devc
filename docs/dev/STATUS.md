@@ -47,7 +47,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | X12 Explorer content: fleet and the web app | done | 088791c |
 | X14 Explorer: polish from the authors' feedback | done | 48e395b |
 | Accuracy review G1 to G5 + X15 corrections | done | 43f43df |
-| X13 Explorer content: synthesis | in progress | |
+| X13 Explorer content: synthesis | done | 68af4f6 |
+| Accuracy review G6 + corrections | in progress | |
 
 ## Resuming
 
@@ -1419,3 +1420,9 @@ The four confirmed findings of the closing check (`docs/dev/reviews/F1-review.md
 **Facts changed after reading the code:** the glossary's `realm` said a realm's boxes share its secrets and the context repository; secrets reach only the projects that grant them (`box.GrantedSecrets`), notes are per project and memory per `memory_group`, which defaults to the project's name (`config` lookup). The `host-git` actor said git runs on the host only on relays through `gitx.Host`; `devc init` clones the configuration repository and `devc doctor` runs `git --version` directly. The host zone's summary called durable state everything a box must not change; parts of it are box-writable.
 
 **Check.** `./dev explore --check`: 0 errors, 0 warnings. `explorer/check.sh`: 138 screens, all assertions hold. `./dev explore comments-only`: 5 Go files differ, only in comments; `./dev fmt`, `./dev vet` clean. Overview, Runtime (1280 and 1920, both themes, with and without the inspector), the new tours and concerns looked at in screenshots. What the map would still need from the app: LEFTOVER part 5, "Explorer (X13)".
+
+### X15d Explorer content: corrections after the accuracy review G6
+
+- **Done.** All 20 findings of `reviews/G6-review.md` (the tours `start-here` and `trust-boundaries`, `security-model`, `testing-and-tools`, the overview, the system map, package roles, the glossary) were checked in the code and are right; all fixed, none rejected; answers in `reviews/G6-response.md`. `trust-boundaries` now covers every boundary channel of the map that leads into a more trusted side, plus the attached editor (42 stops; its summary names what is not a stop); the map gained the actor `editor` and the boundary `editor-server`, which names no check. Every step of both tours was checked for its actor (five corrected). Third copies fixed on `box-lifecycle`, `ssh-gate`, `launching-a-harness`, `isolation`, `git-ratchet`, `data-sync`, `web-app`, `box-up`, `session-launch` and `layout.toml`; one comment in `internal/gitx/host.go` (`comments-only`, `fmt`, `vet` clean).
+- **LEFTOVER part 7.** Nothing new: the gaps these findings touch (G6-02, -04, -06, -16) were recorded already; the rest is deliberate behaviour the pages overstated.
+- **Check.** `./dev explore --check`: 0 errors, 0 warnings; every changed page at or under 1,200 words (`web-app` at 1,200, edited word for word). Pages, tours and the runtime map looked at with `explorer/check.sh --shot`.

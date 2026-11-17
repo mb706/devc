@@ -6,14 +6,14 @@
 //
 // Two rules shape it (README rule 2):
 //
-//   - Host git runs only against the relay, a bare repository in the state
-//     directory whose configuration and hooks the host controls. Every host
-//     git command on a relay goes through Host.Cmd, which sets --git-dir to
-//     the relay, "/" as working directory and core.hooksPath to an empty
-//     directory owned by devc (only the relay service's receive-pack gets
-//     devc's relay hooks instead). Git never runs on the host with a
-//     box-writable directory as repository, working tree or current
-//     directory.
+//   - Host git on project code runs only against the relay, a bare
+//     repository in the state directory whose configuration and hooks the
+//     host controls. Every host git command on a relay goes through
+//     Host.Cmd, which sets --git-dir to the relay, "/" as working directory
+//     and core.hooksPath to an empty directory owned by devc (only the
+//     relay service's receive-pack gets devc's relay hooks instead). Git
+//     never runs on the host with a box-writable directory as repository,
+//     working tree or current directory.
 //   - Git inside the box runs through `podman exec` as dev. When the host
 //     fetches from or pushes to the box repository, the transport is git's
 //     ext:: helper running `podman exec … git-upload-pack|git-receive-pack`

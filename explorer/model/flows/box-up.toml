@@ -166,7 +166,7 @@ text = "Podman runs the command in the box."
 [[step]]
 at = "box-tools"
 ref = "internal/boxside.FixIdentity"
-text = "UID and GID 1000 become `dev` with home /home/dev and the chosen shell, 2000 becomes `vault`; every other line of /etc/passwd and /etc/group is kept as it was."
+text = "In /etc/passwd and /etc/group, the entries named `dev` or with ID 1000 become one `dev` entry with home /home/dev and the chosen shell, those named `vault` or with ID 2000 one `vault` entry, each where its first match was; every other line is kept as it was."
 
 [[step]]
 from = "podman"

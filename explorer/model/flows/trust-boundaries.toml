@@ -1,9 +1,9 @@
 id = "trust-boundaries"
 kind = "tour"
 title = "Every trust boundary, most exposed first"
-summary = "Every place where something crosses from a less trusted side to a more trusted one, most exposed first, with the code that checks what arrives."
+summary = "Every place where something crosses from a less trusted side to a more trusted one, most exposed first, with the code that checks what arrives: each boundary of the runtime map in that direction, and the attached editor, which nothing checks; what the outside sends only a box (registries, git with a token, an SSH host's or a proxied server's answers) is not a stop."
 concern = "security-model"
-actors = ["daemon", "cli", "hub"]
+actors = ["daemon", "relay-hooks", "cli", "helper", "context-worker", "dialer", "desktop", "hub"]
 
 [[step]]
 section = "What a box sends the host: the channel"
@@ -55,25 +55,32 @@ checks = ["internal/gitx.ServeCall", "internal/daemon.Daemon.watchPush"]
 text = "A push or fetch runs on the relay of the channel's project only. A push needs the box lock, free space and room in `git.relay_quota`, and a watchdog ends it when its pack would break either ([[flow:box-git-push]])."
 
 [[step]]
-at = "daemon"
+at = "relay-hooks"
 ref = "internal/cli.app.relayHook"
 checks = ["internal/gitx.ParseHookInput", "internal/gitx.CheckPushSize", "internal/gitx.CheckUpdate", "internal/gitx.Service.RecordUpdate"]
-text = "git runs devc's hooks with the refs the box chose. pre-receive bounds the push, update applies the branch policy and records each new tip before git applies it, so nothing the box pushes deletes or moves a record ([[concern:git-ratchet]])."
+text = "receive-pack starts devc's hooks, each a process of its own (`devc relay-hook`), with the refs the box chose. pre-receive bounds the push, update applies the branch policy and records each new tip before git applies it, so nothing the box pushes deletes or moves a record ([[concern:git-ratchet]])."
 
 [[step]]
 at = "cli"
 ref = "internal/gitx.PlanBank"
 checks = ["internal/gitx.Service.snapshot", "internal/gitx.Relay.Update"]
-text = "A bank takes what the box offers: the snapshot report is decoded strictly, the fetch runs git's server side in the box and writes only scratch refs, every object passes fsck, and the plan skips bad names, keeps protected branches and deletes nothing ([[flow:turn-snapshot]]). A bank has no storage budget yet ([[doc:docs/dev/LEFTOVER.md#git-x7]])."
+text = "A bank (`devc bank`, which the daemon too starts as a child process) takes what the box offers: the snapshot report is decoded strictly, the fetch runs git's server side in the box and writes only scratch refs, every object passes fsck, and the plan skips bad names, keeps protected branches and deletes nothing ([[flow:turn-snapshot]]). A bank has no storage budget yet ([[doc:docs/dev/LEFTOVER.md#git-x7]])."
 
 [[step]]
 section = "What a box sends the host: network and brokered access"
 
 [[step]]
+at = "cli"
+ref = "internal/netpolicy.Rules"
+checks = ["internal/netpolicy.Installer.Verify", "internal/box.Manager.checkNetwork"]
+text = "At level internet the box has a network of its own, and every packet it sends passes devc's output chain in its namespace, installed and verified before the box starts: IPv6 is dropped, and of the host's addresses and the private ranges it reaches only its exceptions and its trusted resolvers' port 53. Level open has no rules ([[flow:network-install]], [[concern:network-levels]])."
+
+[[step]]
 at = "daemon"
 ref = "internal/netpolicy.Proxy.check"
 checks = ["internal/netpolicy.NormalizeHost", "internal/netpolicy.Proxy.CheckAddr", "internal/netpolicy.Proxy.watch"]
-text = "At level allowlist every connection is a proxy request: a bounded head, a name never an address, the allowlist of the start and of now, public IPv4 addresses checked again on the connected socket, and a watch that closes it when the permission ends ([[flow:allowlist-connect]])."
+text = "At level allowlist the box has only loopback, and its connections to internet hosts are proxy requests: a bounded head, a name never an address, the allowlist of the start and of now, public IPv4 addresses checked again on the connected socket, and a watch that closes it when the permission ends ([[flow:allowlist-connect]])."
+detail = "The streams of the stops around this one (host exceptions, git, SSH, GitHub, services) are not proxy requests: [[internal/daemon.boxWorker.serveStream]] hands each to a handler of its own, with its own checks, and the allowlist does not limit them."
 
 [[step]]
 at = "daemon"
@@ -123,25 +130,45 @@ text = "The readiness marker and the box's hosts file are box-writable, so they 
 at = "cli"
 ref = "internal/session.ParseLive"
 checks = ["internal/gitx.decodeStrict", "internal/gitx.Service.WorktreeList"]
-text = "What in-box commands print through `podman exec` (live sessions, snapshot reports, worktree lists) is decoded strictly, bounded and validated; a malformed live-session report changes nothing ([[concern:sessions-and-events]], [[concern:worktrees-and-context]])."
+text = "What in-box commands print through `podman exec` (live sessions, snapshot reports, worktree lists) is bounded, decoded with unknown fields refused and validated; a live-session report with one malformed entry changes nothing ([[concern:sessions-and-events]], [[concern:worktrees-and-context]])."
+detail = "What follows the value is not always refused. [[internal/session.ParseLive]] reads only the first JSON value, so on this path `[]` followed by anything counts as an empty report and ends the box's open sessions as `lost`, as `[]` alone would. The git, data, context and archive decoders end with `Decoder.More`, which passes a stray `]` or `}` after the report; what they decoded is unaffected (`docs/dev/LEFTOVER.md` part 7)."
 
 [[step]]
 at = "cli"
 ref = "internal/data.DecodeResult"
 checks = ["internal/boxside.DataWorker.Run"]
-text = "Data trees are walked only by workers in helper containers, one path component at a time without following links; the host decodes a worker's report strictly within 64 MiB and validates its paths and digests ([[concern:data-and-sealing]])."
+text = "Data trees are walked only by workers in helper containers, one path component at a time without following links (on SELinux hosts the host also relabels the project with `restorecon -R`); the host decodes a worker's report strictly within 64 MiB and validates its paths and digests ([[concern:data-and-sealing]])."
 
 [[step]]
-at = "cli"
+at = "context-worker"
 ref = "internal/boxside.ScanContext"
 checks = ["internal/ctxrepo.decodeStrict"]
-text = "Notes and memory are walked in the context container through safefs, and only the accepted regular files reach git, as data; git never looks at the box-written tree ([[concern:worktrees-and-context]])."
+text = "Notes and memory are walked in the context container through safefs, and only the accepted regular files reach git, as data; git never looks at the box-written tree. The host decodes the container's report ([[concern:worktrees-and-context]])."
 
 [[step]]
 at = "daemon"
 ref = "internal/boxside.DecodeArchiveListing"
 checks = ["internal/fleet.Uploader.syncFile", "internal/archive.Excluded"]
 text = "For the archive, shared harness state is listed by the archive worker in a helper container; the host decodes the listing strictly and opens each listed file through safefs ([[concern:fleet-archive]])."
+
+[[step]]
+section = "What a box shows you"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.newEditorCmd"
+text = "`devc code` and `devc cursor` attach a desktop editor to the box: the editor runs its server in the box, and through it extensions, terminals and tasks act with your rights on the host. Nothing checks this crossing; it is a deliberate hole, and the command warns at every use ([[concern:host-setup]])."
+
+[[step]]
+at = "desktop"
+ref = "file:assets/desktop/devc-desktop~Xvnc :1 -auth"
+text = "The desktop sidecar's X server, on the loopback it shares with the box, admits a client only with the cookie, which the box holds on purpose, so anything in the box can draw, read the screen and see what you type into the viewer. VNC asks for the password, which stays in the sidecar, on the host and in the viewer's address ([[flow:gui-up]], [[concern:desktop]])."
+
+[[step]]
+at = "dialer"
+ref = "internal/boxside.Dial"
+checks = ["internal/netpolicy.Pin"]
+text = "A forward or a local URL reaches a box's server through a dial process: the host's own devc in the user and network namespaces of the box's main process, which the host pinned and proved to be the box's, but in the host's mount namespace. It relays bytes unparsed and reads nothing of the box; a forward starts one per connection, without a bound ([[flow:local-url]], [[concern:forwards-and-local-urls]])."
 
 [[step]]
 section = "What reaches the hub without a credential"
@@ -159,7 +186,7 @@ checks = ["internal/hub.isEnrolPath", "internal/hub.Store.UseEnrolment", "intern
 text = "A request without a certificate reaches only `/enroll/<token>`, and only while an enrolment token is outstanding; the token works once, within 15 minutes ([[flow:machine-join]], [[flow:device-enrol]])."
 
 [[step]]
-section = "What a machine sends the hub"
+section = "What a machine sends the hub, and the hub your phone"
 
 [[step]]
 at = "hub"
@@ -172,6 +199,11 @@ at = "hub"
 ref = "internal/hub.Server.apiArchivePut"
 checks = ["internal/archive.ParsePath", "internal/hub.archiveStore.admit", "internal/hub.archiveStore.checkQuota"]
 text = "Archive uploads land only below the machine's own name, append at the stored length, and are admitted and counted against quotas before a byte is written; the hub, not the machine, keeps classes and times ([[flow:archive-upload]], [[concern:fleet-archive]])."
+
+[[step]]
+at = "hub"
+ref = "internal/hub.buildNotification"
+text = "Box text reaches your phone through ntfy: the hub makes the title, the message and the button labels printable and cuts them before it posts, and a button carries a single-use token, no credential. ntfy sees every message, and over `http` the messages and the token travel without TLS ([[flow:event-to-phone]], [[concern:hub-inbox-and-notifications]])."
 
 [[step]]
 section = "What a browser sends the hub"
@@ -224,9 +256,25 @@ text = "An upstream fetch lands in the upstream's own refs with every object che
 
 [[step]]
 at = "cli"
+ref = "internal/github.Client.Call"
+checks = ["internal/github.Client.checkRedirect", "internal/github.ErrorOf"]
+text = "`devc pr create` and `devc pr comment` call GitHub's API with your credential: a redirect away from HTTPS is refused, an answer is read within a size limit, and GitHub's error messages are made printable and cut before you see them ([[flow:request-pr]], [[concern:github]])."
+
+[[step]]
+at = "helper"
 ref = "internal/boxside.puller.merge"
 checks = ["internal/data.ParseItems", "internal/boxside.CheckPullEntries"]
-text = "A data pull lands in a staging directory no box can reach; its preview is parsed strictly and bounded, and a worker merges it, moving what it replaces into the trash and leaving sealed entries alone ([[flow:data-pull]], [[concern:data-sync]])."
+text = "A data pull lands in a staging directory no box can reach, and the CLI parses its preview strictly and bounded; the merge runs in the helper container, which moves what it replaces into the trash and leaves sealed entries alone ([[flow:data-pull]], [[concern:data-sync]])."
+
+[[step]]
+at = "cli"
+ref = "internal/svclogin.ParseLoginOutput"
+text = "A cookie service's login command runs with network in a container without capabilities that sees only a scratch directory; the host takes from its output only a JSON array of cookies with nothing after it, every cookie for the service's host and at least one not expired ([[flow:service-login]], [[concern:service-logins]])."
+
+[[step]]
+at = "cli"
+ref = "internal/toolbox.Installer.Install"
+text = "A harness's vendor installer runs with network in a container that sees only its new version directory and, read-only, what the harness needs; a second container without network checks that the result runs. What it installed then runs in boxes from the read-only toolbox: devc trusts the vendor's code as far as a box confines it ([[flow:harness-install]], [[concern:toolbox-and-harnesses]])."
 
 [[step]]
 at = "daemon"
