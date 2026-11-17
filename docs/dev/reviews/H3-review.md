@@ -1,0 +1,13 @@
+1. **H3-01 — (e), medium — Terminal confirmation breaks mixed-version installations.** At [internal/hub/terminal.go:218](/home/mewse/devcontainer/devc/internal/hub/terminal.go:218), every successful open now requires `terminal.confirm`; [internal/daemon/terminal.go:298](/home/mewse/devcontainer/devc/internal/daemon/terminal.go:298) requires confirmation from every opener, while the link still advertises protocol 1.
+
+   Scenario: upgrading only the hub makes terminals on an older daemon fail with “unknown method”; upgrading only the machine makes an older hub’s working terminals close after 30 seconds. Fix: negotiate confirmation support and retain the legacy terminal path for peers that do not support it.
+
+2. **H3-02 — (d), medium — A re-read tail need not reach its advertised cursor.** [internal/hub/link.go:959](/home/mewse/devcontainer/devc/internal/hub/link.go:959) checks the first event against `LastSeq`, but never checks that the tail reaches it. `finishResync` then stores that cursor alongside the shorter tail, leaving G5-08 exploitable.
+
+   Scenario: after the hub holds events 1–3, a malicious machine triggers a re-read with event 7, then returns `LastSeq: 7` and events 1–3. This passes; the subsequent event 8 produces the stored tail `1,2,3,8` without closing the link. Fix: require the returned tail to reach the advertised cursor, with any following events consecutive, before replacing stored events and cursor. The changed claim at [explorer/model/concerns/hub-machine-link.md:57](/home/mewse/devcontainer/devc/internal/../explorer/model/concerns/hub-machine-link.md:57) consequently overstates the protection.
+
+3. **H3-03 — (d), medium — Suppressing a retry forgets a potentially published notification.** The new cleanup at [internal/hub/notify.go:639](/home/mewse/devcontainer/devc/internal/hub/notify.go:639) drops records with an empty sequence ID, but the watched-session branch at [internal/hub/notify.go:704](/home/mewse/devcontainer/devc/internal/hub/notify.go:704) erases that ID even after a publish attempt.
+
+   Scenario: ntfy accepts a notification but returns an error; before its retry, the user opens that session in the browser. The retry marks it handled and clears `Seq`; when the attention state ends, cleanup drops the record without clearing the phone’s message. Fix: retain the attempted message’s sequence and retryable cleanup until its clear succeeds. This also contradicts the changed invariant at [explorer/model/concerns/hub-inbox-and-notifications.md:49](/home/mewse/devcontainer/devc/explorer/model/concerns/hub-inbox-and-notifications.md:49).
+
+3 findings must be fixed before the commit can stand.
