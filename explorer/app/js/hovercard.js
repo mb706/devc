@@ -62,8 +62,11 @@ X.hovercard = (function () {
       if (anchor || shownFor) { clearTimeout(timer); anchor = null; if (shownFor && !(card && card.contains(ev.target))) scheduleHide(); }
       return;
     }
-    if (t === shownFor) { clearTimeout(hideTimer); return; }
-    if (t === anchor) return;
+    // Any reference cancels a pending hide: leaving one reference for the
+    // next crosses a gap that schedules the hide, and the hide would
+    // otherwise take down the next card (or cancel it before it shows).
+    clearTimeout(hideTimer);
+    if (t === shownFor || t === anchor) return;
     anchor = t;
     clearTimeout(timer);
     // Moving from one reference to the next while a card is open swaps

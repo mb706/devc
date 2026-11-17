@@ -443,6 +443,22 @@ if pos:
     page.wait("document.querySelector('.hovercard.on')", "a hover card", 5)
     check(page.js("document.querySelector('.hovercard.on').textContent.length > 10"), f"hovering {pos[2]} shows its card")
     page.shot("hovercard")
+    # Leaving for another reference (across a gap, which schedules the hide)
+    # swaps the card and keeps the new one.
+    pos2 = page.js(f"""(() => {{ const a = [...document.querySelectorAll('[data-ref]:not([data-nocard])')].find(a => {{
+        if (a.dataset.ref === {json.dumps(pos[2])} || a.closest('.hovercard')) return false;
+        const r = a.getBoundingClientRect(); if (!r.width || r.top < 60 || r.bottom > innerHeight - 20) return false;
+        const e = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!e && e.closest('[data-ref]') === a; }});
+      if (!a) return null; const r = a.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2, a.dataset.ref]; }})()""")
+    if pos2:
+        page.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 5, "y": 5})
+        time.sleep(0.06)
+        page.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": pos2[0], "y": pos2[1]})
+        time.sleep(0.6)
+        check(page.js(f"(c => {{ const d = document.createElement('div'); d.innerHTML = X.refs.card({json.dumps(pos2[2])}); return !!c && c.innerHTML === d.innerHTML; }})(document.querySelector('.hovercard.on'))"),
+              f"moving from {pos[2]} to {pos2[2]} swaps the card and keeps it")
+    else:
+        check(False, "a second reference to hover")
     page.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 5, "y": 5})
 collect("hover card")
 
