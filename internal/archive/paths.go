@@ -23,7 +23,8 @@
 // state above, with names a box cannot use to escape (no "..", no
 // separators in components, a fixed character set). Credential files that
 // harness manifests list (home.secret_files) are excluded by Excluded on
-// every path into and out of the archive.
+// every path by which a machine puts files into the archive or takes them
+// out; the hub, which has no manifests, does not check for them.
 package archive
 
 import (

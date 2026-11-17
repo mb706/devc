@@ -86,7 +86,7 @@ id = "hub-cli"
 zone = "hub"
 title = "Hub CLI"
 kind = "process"
-summary = "The `devc hub` commands run on the hub's server against the hub directory: init, the CA and its certificates, enrolment tokens, the password and TOTP, login sessions, devices and machines, the doctor, the archive's listing. They write the database while the server runs; the server notices a change of the registry within a second."
+summary = "The `devc hub` commands run on the hub's server against the hub directory: init, the CA and its certificates, enrolment tokens, the password and TOTP, login sessions, devices and machines, the doctor, the archive's listing and pruning. They write the database while the server runs; the server notices a change of the registry within a second."
 commands = ["devc hub"]
 
 [[actor]]
@@ -101,7 +101,7 @@ id = "hub-archive"
 zone = "hub"
 title = "Hub archive"
 kind = "store"
-summary = "The archive's files in the hub directory: `archive/<machine>/<realm>/` (file generations with their records, bundles, ref logs) and `secrets/<machine>/<realm>/` (encrypted secrets bundles). Only the hub server writes them; `devc hub archive prune` deletes from them."
+summary = "The archive's files in the hub directory: `archive/<machine>/<realm>/` (file generations with their records, bundles, ref logs) and `secrets/<machine>/<realm>/` (encrypted secrets bundles). Only the hub server writes them; `devc hub archive prune` deletes from `archive/` only, never secrets bundles."
 
 # ----- actors: outside services
 
@@ -669,7 +669,7 @@ id = "hub-ntfy"
 from = "hub"
 to = "ntfy"
 title = "Notifications"
-transport = "HTTPS requests to the ntfy server in hub.toml, with its bearer token when one is set."
+transport = "HTTP or HTTPS requests, as `[ntfy] url` in hub.toml says, with its bearer token when one is set; over `http` the messages and the token travel without TLS."
 carries = "A short message when a session needs the user, failed or finished a turn, with action buttons that carry single-use tokens; the clearing of that message when the state ends."
 boundary = true
 concerns = ["hub-inbox-and-notifications"]

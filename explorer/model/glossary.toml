@@ -1037,7 +1037,7 @@ see = ["notification-record"]
 [[term]]
 id = "notification-record"
 title = "Notification record"
-text = "The hub's record of one attention state of a session (needs-you with its question, failed, a finished turn): pending until published or handled without a message, sent, then cleared when the state ends. Failures are retried with backoff, across restarts too."
+text = "The hub's record of one attention state of a session (needs-you with its question, failed, a finished turn): pending until published or handled without a message, sent, then cleared when the state ends (a record still pending then is dropped without a clear). Failures are retried with backoff, across restarts too."
 refs = ["internal/hub.NoteState", "internal/hub.notifier.update"]
 see = ["notifier", "action-token"]
 
@@ -1091,7 +1091,7 @@ see = ["archive-generation", "retention-window"]
 id = "retention-window"
 title = "Retention window"
 aka = ["checkpoint", "retention"]
-text = "Which generations of a mutable file a hub keeps: the newest three complete ones and, for each checkpoint (the starts of the last `keep_daily` days and `keep_weekly` weeks, UTC, by the hub's clock), the newest one completed at or before it. Other mutable generations are dropped when a newer one completes."
+text = "Which generations of a mutable file a hub keeps: the newest three complete ones; for each checkpoint (the starts of the last `keep_daily` days and `keep_weekly` weeks, UTC, by the hub's clock), the newest one completed at or before it; complete ones without a recorded time; and incomplete ones newer than the newest complete one. The others are dropped when a generation of the file first completes.\n\nWhile a time recorded for the file lies after the hub's clock (the clock stepped back), nothing is dropped."
 refs = ["internal/hub.retentionDrops", "internal/hub.checkpoints", "internal/hub.archiveStore.retain"]
 see = ["file-class", "archive-generation"]
 
@@ -1134,14 +1134,14 @@ see = ["change-log"]
 [[term]]
 id = "pending-command"
 title = "Pending command"
-text = "In the web app, a command whose final outcome is not known: its answer was lost, or the receipt so far is not final. It keeps its ID and parameters (also in local storage) and the app asks for its receipt until one settles it; one the machine never received can be sent again with the same ID."
+text = "In the web app, a command whose final outcome is not known: its answer was lost, or the receipt so far is not final. It keeps its ID and parameters (also in local storage) and the app asks for its receipt until one settles it, the user dismisses it or, for a prompt, a matching prompt event arrives; an uncertain `seen` is not kept. One the machine has no receipt for (never received, or its receipt dropped seven days after it became final) can be sent again with the same ID."
 refs = ["file:web/app/store.js~function addPending", "file:web/app/store.js~export async function resolvePending"]
 see = ["uncertain-outcome", "receipt", "outbox"]
 
 [[term]]
 id = "outbox"
 title = "Outbox"
-text = "Prompts sent from the web app that have not yet appeared in the session: shown below the timeline with their state (sending, queued, typing, unknown, did not arrive) until their prompt event arrives or their receipt says they failed."
+text = "Prompts sent from the web app that have not yet appeared in the session: shown below the timeline with their state (sending, queued, typing, unknown, did not arrive) until a prompt event arrives whose text the waiting text begins with, or their receipt says they failed."
 refs = ["file:web/app/store.js~export async function sendPrompt", "file:web/app/store.js~function settleOutbox"]
 see = ["pending-command"]
 

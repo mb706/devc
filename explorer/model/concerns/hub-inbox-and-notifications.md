@@ -46,7 +46,7 @@ refs = ["internal/hub.notifier.update", "internal/hub.NoteState", "internal/hub.
 tests = ["internal/hub.TestNotifierRetries"]
 
 [[invariant]]
-text = "When a session leaves an attention state, the buttons of its message stop working and the message is cleared, retried until ntfy confirms or the record is seven days old."
+text = "When a session leaves an attention state, the buttons of its message stop working, and a message ntfy confirmed is cleared, retried until ntfy confirms or the record is seven days old."
 refs = ["internal/hub.notifier.update", "internal/hub.notifier.clear", "internal/hub.Store.DeleteActions"]
 tests = ["internal/hub.TestNotifier", "internal/hub.TestNotifierRetries"]
 
@@ -189,7 +189,7 @@ The owner is away from the machines and wants to know when a session needs them,
 
 - A new key is `pending` and is published at once if it can be ([[internal/hub.notifier.publish]]): only while the machine is online and names this hub its notifier.
 - If a logged-in event stream names the session at that moment, the record becomes `sent` with no message. A question-less needs-you right after an answered question is not news either.
-- When the key ends, a pending record is dropped; a sent one loses its buttons, becomes `cleared`, and its message is cleared at ntfy by sequence ID (`PUT /<topic>/<seq>/clear`).
+- When the key ends, a pending record is dropped without a clear, so a publish that reached ntfy although its answer was lost leaves its message on the phone; a sent one loses its buttons, becomes `cleared`, and its message is cleared at ntfy by sequence ID (`PUT /<topic>/<seq>/clear`).
 - A key that returns while its old message is still being cleared is published again under the same sequence ID.
 
 Failed publishes and clears are retried: every 15 seconds the notifier looks at the records that are due ([[internal/hub.notifier.retryDue]]); after a failure a record waits 30 seconds, doubling up to 15 minutes, and a clear is given up once its record is seven days old. A change of a machine (online, role) also runs retryDue, so a hub that has just become the notifier sends what is still pending and still current.
@@ -198,11 +198,11 @@ Failed publishes and clears are retried: every 15 seconds the notifier looks at 
 
 **The message.** [[internal/hub.buildNotification]]: the title `<project> · <harness>`; as body the question's text, or the last message cut to 300 characters, at most 3,500 bytes, made printable; priority 4, or 3 for finished; a click URL `<public URL>/#/s/<machine>/<session>`; for a question with one or two options a button per option, and Open. It is posted as JSON to the root of the ntfy server with the topic, the bearer token from hub.toml when set, a ten-second timeout and three attempts on network errors, 408, 429 and 5xx ([[internal/hub.ntfyClient.do]]).
 
-**Buttons.** An option button posts to `/api/act` with `X-Devc-Request: 1` and a 256-bit [[term:action-token]] in `X-Devc-Action`. [[internal/hub.Server.apiAct]] needs a device certificate but no login. The token, stored as its hash, is bound to machine, session, question ID and choice, valid for an hour, used once, and its use uses up the message's other buttons ([[internal/hub.Store.UseAction]]); a machine that is offline leaves it usable (503). The answer goes as `session.answer` with a command ID stored beside the token, so a repeat is applied once, and the final receipt is awaited up to 20 seconds; the answer to the button is a short text with the outcome.
+**Buttons.** An option button posts to `/api/act` with `X-Devc-Request: 1` and a 256-bit [[term:action-token]] in `X-Devc-Action`. [[internal/hub.Server.apiAct]] needs a device certificate but no login. The token, stored as its hash, is bound to machine, session, question ID and choice, valid for an hour, used once, and its use uses up the message's other buttons ([[internal/hub.Store.UseAction]]); a machine that is offline leaves it usable (503). The token is used up before the answer goes out, as `session.answer` with a command ID stored beside it, so a press whose outcome is uncertain ("Maybe not answered") cannot be repeated from the phone; the final receipt is awaited up to 20 seconds; the answer to the button is a short text with the outcome.
 
 **Which hub notifies.** The machine decides ([[concern:hub-machine-link]]): every hub records the states, only the one the machine named notifier publishes. A hub that loses the role keeps its records; the new notifier publishes what is pending with it.
 
-**hub.toml.** [[internal/hub.LoadConfig]] decodes the file strictly: `public_url` (which must be https and name the public name, else the hub does not start), `[ntfy] url, topic, token`, `[terminal] control` and `[archive]`. The server reads it once, at start. Without `[ntfy]` the notifier does nothing at all.
+**hub.toml.** [[internal/hub.LoadConfig]] decodes the file strictly: `public_url` (which must be https and name the public name, else the hub does not start), `[ntfy] url` (http or https), `topic`, `token`, `[terminal] control` and `[archive]`. The server reads it once, at start. Without `[ntfy]` the notifier does nothing at all.
 
 ## What can go wrong, and what prevents it
 

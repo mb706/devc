@@ -28,7 +28,7 @@ text = "With the device certificate, `X-Devc-Request: 1`, the hub's Origin and a
 at = "hub"
 ref = "internal/hub.Server.apiLogin"
 checks = ["internal/hub.Server.identify", "internal/hub.Server.guard", "internal/hub.Server.checkSite"]
-text = "Class device: a registered device certificate, no session needed, but one of 64 places for requests without a login. A certificate whose failures used up its rate limit gets 429."
+text = "Class device: a registered device certificate, no session needed, but one of 64 places for requests of class device or enrolment (a login cookie makes no difference). A certificate whose failures used up its rate limit gets 429, logged in or not."
 
 [[step]]
 at = "hub"

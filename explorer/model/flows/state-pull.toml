@@ -37,7 +37,8 @@ text = "A source of another realm is refused ([[finding:D1-19]])."
 [[step]]
 at = "cli"
 ref = "internal/fleet.ExistingState"
-text = "Without `--merge` the realm must hold no durable state: no journals, relays, context repository, request, savepoint or network logs, gate log, or non-empty harness directory. Box-writable harness directories are only listed one level, through safefs."
+text = "Without `--merge` the realm must hold none of what the archive carries: no journals, relays, context repository, request, savepoint or network logs, gate log, or non-empty harness directory. Box-writable harness directories are only listed one level, through safefs."
+detail = "Not looked at: `gate-log.jsonl.1` (which the archive carries; an existing one is kept by the restore, like every existing file), and the service logs, which it does not carry."
 
 [[step]]
 section = "The index"

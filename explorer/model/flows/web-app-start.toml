@@ -105,7 +105,7 @@ text = "Three reads at once."
 [[step]]
 at = "hub"
 ref = "internal/hub.Server.apiInbox"
-text = "Each answer notes the change log's position before it reads the database, so a change made meanwhile is also in the stream after that position."
+text = "The inbox and the requests note the change log's position before they read the database, so a change made meanwhile is also in the stream after that position. The machines answer carries no position."
 
 [[step]]
 from = "hub"
@@ -113,13 +113,14 @@ to = "browser"
 via = "reply"
 label = "{sections, stream_id}"
 ref = "internal/hub.Server.apiInbox"
-text = "The inbox's sections with session summaries; the machines and requests likewise."
+text = "The inbox's sections with session summaries; the requests likewise; the machines without `stream_id`."
 
 [[step]]
 at = "browser"
 ref = "file:web/app/store.js~export async function loadSnapshot"
 label = "loadSnapshot"
-text = "The store takes the snapshot, keeps sessions a screen has open, gives each summary the snapshot's position as its version and starts from the lowest of the three positions."
+text = "The store takes the snapshot, keeps sessions a screen has open, gives each summary the higher of its old version and the inbox's position, and starts from the lower of the inbox's and the requests' positions, the inbox's standing in for the machines'."
+detail = "The three reads run at once, so the machines may be read before the positions are noted: a change of a machine made between the two is in neither, and shows only when that machine changes again or a later snapshot is read. A summary the snapshot brings replaces the one held even when a detail read had a newer one."
 
 [[step]]
 from = "browser"
@@ -181,4 +182,5 @@ text = "The app closes the stream, forgets its position, reads the snapshot agai
 at = "browser"
 ref = "file:web/app/stream.js~function onVisibility()"
 label = "onVisibility"
-text = "Thirty seconds after the page is hidden the stream closes, so notifications are not held back; it reopens when the page is visible. Errors reconnect with backoff up to a minute, after asking `/api/me` whether the login still holds."
+text = "Thirty seconds after the page is hidden the stream closes, so notifications are not held back; it reopens when the page is visible. After an error the browser's `EventSource` reconnects by itself, at its own interval, with `Last-Event-ID`; the app's backoff (one second, doubling to a minute) and its `/api/me` check run only when the stream closes for good or a snapshot cannot be read."
+detail = "A stream closes for good when the hub (or a proxy in front of it) answers with an error instead of the stream. The app then asks `/api/me`: a missing login or certificate shows the login screen; if the hub cannot be reached at that moment (a network error, or a proxy's 502 while the hub restarts), nothing schedules another try, and the app stays offline until the browser reports that it is online again or the page is reloaded."

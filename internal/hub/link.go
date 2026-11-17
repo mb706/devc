@@ -20,9 +20,11 @@
 // for at most MaxMachineSessions sessions, needs strictly advancing pages,
 // and has a byte budget and an overall deadline; sessions read again
 // (sessions.get) go through a small queue served by a few workers, and
-// capacity is reserved for stored plus outstanding sessions. A machine
-// that breaks a bound has its link closed; its daemon reconnects with
-// backoff.
+// capacity is reserved for stored plus outstanding sessions. A refresh
+// that breaks a bound has the link closed (its daemon reconnects with
+// backoff); a full re-read queue leaves the gap to the next refresh, and
+// events held back beyond their bound are dropped and the session read
+// once more.
 
 package hub
 
@@ -71,8 +73,8 @@ const (
 var (
 	// MaxMachineSessions bounds the sessions the hub keeps per machine, so a
 	// misbehaving machine cannot grow the database without end (sessions
-	// that ended before the window are pruned every hour). Sessions being
-	// read again count against it.
+	// that are not live and have had no event within the window are pruned
+	// every hour). Sessions being read again count against it.
 	MaxMachineSessions = 20000
 	// refreshBytes bounds the answers of one refresh; refreshDeadline its
 	// duration.
@@ -134,7 +136,7 @@ const (
 	itemHeartbeat
 	itemKick   // refresh the requests
 	itemResult // the result of a call
-	itemPrune  // remove sessions that ended before cutoff
+	itemPrune  // remove sessions not live with no event after cutoff
 )
 
 // linkItem is one entry of the worker's queue: a notification from the
@@ -1031,10 +1033,10 @@ func (l *machineLink) finishRefresh(t *Tx, views []proto.SessionView, boxes []pr
 	return nil
 }
 
-// requestPrune asks the worker to remove the sessions that ended before
-// cutoff, so the database and the worker's sessions (which decide the
-// capacity) agree (finding C2-15). A worker that makes no room is skipped
-// this time.
+// requestPrune asks the worker to remove the sessions that are not live
+// and whose last event is at or before cutoff, so the database and the
+// worker's sessions (which decide the capacity) agree (finding C2-15). A
+// worker that makes no room is skipped this time.
 func (l *machineLink) requestPrune(cutoff time.Time) {
 	t := time.NewTimer(5 * time.Second)
 	defer t.Stop()
@@ -1045,8 +1047,9 @@ func (l *machineLink) requestPrune(cutoff time.Time) {
 	}
 }
 
-// prune removes the sessions that ended before cutoff, with a removal for
-// the clients.
+// prune removes the sessions that are not live and whose last event is at
+// or before cutoff (a seen mark is an event too), with a removal for the
+// clients.
 func (l *machineLink) prune(t *Tx, bs *batchState, cutoff time.Time) error {
 	n := 0
 	for sid, st := range l.sessions {

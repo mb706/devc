@@ -96,8 +96,9 @@ type Server struct {
 	// bounds the logins waiting for it or hashing (finding C2-03).
 	hashSem   chan struct{}
 	hashQueue chan struct{}
-	// anonSem bounds the requests in progress that have no login session
-	// (login, buttons, the app's files, enrolment: finding C2-04).
+	// anonSem bounds the requests in progress on routes that need no login
+	// session (login, buttons, the app's files, enrolment: finding C2-04),
+	// whether or not they carry one.
 	anonSem  chan struct{}
 	notifier *notifier
 	// archive is the archive of durable state and the secrets bundles
@@ -137,9 +138,10 @@ type liveConn struct {
 	expiry      *time.Timer
 }
 
-// Limits of requests without a login session.
+// Limits of requests on routes that need no login session.
 var (
-	// maxAnonymous requests without a login session may be in progress.
+	// maxAnonymous requests on routes that need no login session may be in
+	// progress.
 	maxAnonymous = 64
 	// maxHashWaiting logins may wait for a hashing slot.
 	maxHashWaiting = 8
@@ -528,9 +530,9 @@ func (s *Server) watchRegistry(ctx context.Context) {
 }
 
 // housekeeping runs at start and then every hour: it removes the sessions
-// that ended before the window, login sessions unused for SessionIdle,
-// enrolment tokens that expired a day ago (and the bundles of expired
-// ones), and expired action tokens.
+// that are not live and have had no event within the window, login
+// sessions unused for SessionIdle, enrolment tokens that expired a day ago
+// (and the bundles of expired ones), and expired action tokens.
 func (s *Server) housekeeping(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
@@ -554,11 +556,11 @@ func (s *Server) housekeeping(ctx context.Context) {
 	}
 }
 
-// pruneSessions removes the sessions that ended before cutoff: a connected
-// machine's through its link's worker, so the worker's sessions (its
-// capacity) and the database agree; an offline machine's directly, before
-// any new link of it loads them. Clients get a removal either way
-// (finding C2-15).
+// pruneSessions removes the sessions that are not live and whose last
+// event is at or before cutoff: a connected machine's through its link's
+// worker, so the worker's sessions (its capacity) and the database agree;
+// an offline machine's directly, before any new link of it loads them.
+// Clients get a removal either way (finding C2-15).
 func (s *Server) pruneSessions(cutoff time.Time) {
 	names, err := s.st.SessionMachines()
 	if err != nil {

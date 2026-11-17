@@ -47,7 +47,7 @@ text = "30 seconds for the answer."
 at = "daemon"
 ref = "internal/daemon.termManager.open"
 checks = ["internal/proto.DecodeParams"]
-text = "At most four streams for this connection (the hub's link, so for every browser of this hub together) and sixteen in all. Control mode needs `[terminal] control = true` in config.toml; the session must be live in a running box with a tmux window."
+text = "At most four streams for this connection (the hub's link, so for every browser of this hub together) and sixteen in all, counted before the window's size is read (up to ten seconds) and not again when the stream is added, so opens at the same moment can exceed both. Control mode needs `[terminal] control = true` in config.toml; the session must be live in a running box with a tmux window."
 
 [[step]]
 from = "daemon"
@@ -72,6 +72,7 @@ via = "reply"
 label = "{stream, cols, rows}"
 ref = "internal/daemon.termManager.open"
 text = "The hub checks that the stream ID is its own and the size plausible, and sends the browser `open` with the size and mode."
+detail = "An error, no answer within 30 seconds, or an answer that fails these checks ends the browser's terminal here, before the hub arranges `terminal.close`. If the daemon did open the stream (its answer came late or was rejected), the stream stays on the machine, its output dropped by the hub, until its session ends, the link closes, the tmux client exits or twelve hours pass."
 
 [[step]]
 section = "Output"
@@ -163,7 +164,7 @@ to = "daemon"
 via = "rpc:terminal.close"
 label = "terminal.close {stream}"
 ref = "internal/hub.machineLink.forward"
-text = "Sent whatever ended the stream; a no-op when the machine ended it."
+text = "Sent whatever ended the stream, once `terminal.open` had a valid answer; a no-op when the machine ended it."
 
 [[step]]
 at = "daemon"

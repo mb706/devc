@@ -66,7 +66,7 @@ refs = ["internal/secrets.FileStore.Set", "internal/secrets.Deliver", "internal/
 tests = ["internal/secrets.TestFileStore"]
 
 [[invariant]]
-text = "Harness state files that hold a login (a manifest's home.secret_files) are kept out of the archive, exports and restores."
+text = "On the machine, harness state files that hold a login (a manifest's home.secret_files) are kept out of uploads, exports and restores; the hub does not check, and a copy under another name is not caught."
 refs = ["internal/config.Harness.SecretStatePatterns", "internal/archive.Excluded"]
 tests = ["internal/config.TestSecretStatePatterns"]
 +++

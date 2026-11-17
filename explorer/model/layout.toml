@@ -957,7 +957,7 @@ ref = "internal/hub.Layout.ArchiveDir"
 
 [[tree.entry]]
 path = "archive/<machine>/<realm>/files/<path>"
-text = "Generation 0 of an archived file; `<path>~<n>` is generation n. Only appended to; a complete mutable generation takes no more bytes. Mutable generations outside the retention window are removed by the server when a newer one completes."
+text = "Generation 0 of an archived file; `<path>~<n>` is generation n. Only appended to; a complete mutable generation takes no more bytes. The mutable generations retention does not keep are removed by the server when a generation of the file first completes."
 ref = "internal/hub.archiveStore.putFile"
 
 [[tree.entry]]

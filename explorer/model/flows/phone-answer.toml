@@ -142,7 +142,7 @@ to = "browser"
 via = "reply"
 label = "200 receipt: delivered"
 ref = "internal/hub.Server.apiCommand"
-text = "If the machine had gone away during either call, the answer would say `uncertain`: the client keeps the ID and asks again ([[term:uncertain-outcome]])."
+text = "If `session.answer` had left its arrival open (the machine went away, did not answer in time or sent an invalid receipt), the answer would say `uncertain`: the client keeps the ID and asks again ([[term:uncertain-outcome]]). If only `command.get` fails, the hub answers 200 with the receipt it has (`accepted`, not final), which the app keeps as pending and asks about."
 
 [[step]]
 section = "The inbox catches up"
@@ -166,4 +166,4 @@ text = "The question is no longer pending and the session leaves needs-you; brow
 at = "hub"
 ref = "internal/hub.notifier.update"
 unchecked = "the notifier's goroutine wakes on Store.Changed when the worker's transaction commits"
-text = "The needs-you record ends: its buttons stop working and the message on the phone is cleared at ntfy by its sequence ID."
+text = "The needs-you record ends: its buttons stop working and, if ntfy confirmed the message, it is cleared at ntfy by its sequence ID; a record still pending is dropped without a clear."

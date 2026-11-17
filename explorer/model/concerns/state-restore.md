@@ -41,7 +41,7 @@ refs = ["internal/fleet.Restorer.restoreFiles", "internal/gitx.Relay.RestoreRefs
 tests = ["internal/fleet.TestRestoreFilesAndHostileArchive", "internal/fleet.TestBundleSequence"]
 
 [[invariant]]
-text = "Without --merge a restore refuses a realm that holds durable state; an import never merges."
+text = "Without --merge a restore refuses a realm holding any kind of state ExistingState looks for (all the archive carries but gate-log.jsonl.1); an import never merges."
 refs = ["internal/fleet.Restorer.Restore", "internal/fleet.ExistingState", "internal/cli.newStateCmd"]
 tests = ["internal/fleet.TestBundleSequence", "internal/fleet.TestRestoreFilesAndHostileArchive"]
 

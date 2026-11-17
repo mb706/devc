@@ -1,12 +1,14 @@
 // The archive of durable state (work order C17 section 2): machines append
 // to their own tree below archive/<machine>/<realm>/ and read every
 // machine's. It is a ratchet: an upload names its offset, which must equal
-// the stored length; no route overwrites, truncates, renames or deletes
-// what is stored (retention, below, is the hub's own decision), and only
-// a machine's own registry name ever selects the tree it writes. Bundles are
-// stored in sequence: bundle n is accepted only after bundle n-1 is
-// complete, is written to a ".part" file and becomes visible (renamed
-// without replacing anything) when the machine says it is final.
+// the stored length; no route overwrites or truncates what is stored, and
+// none deletes it on a machine's request (what an upload may make the hub
+// remove is its own decision: retention, below, and secrets bundles beyond
+// the newest ten); and only a machine's own registry name ever selects the
+// tree it writes. Bundles are stored in sequence: bundle n is accepted
+// only after bundle n-1 is complete, is written to a ".part" file and
+// becomes visible (renamed without replacing anything) when the machine
+// says it is final.
 //
 // File generations carry a record beside them (<file>~meta, a name no
 // archive path can have): the class and permission bits given when the
@@ -14,13 +16,15 @@
 // and when it first became complete, by the hub's clock (findings D1-14,
 // D1-15, D1-18, D1-20, E1-04). The hub decides the classes: mutable only
 // in shared harness state, and a file keeps the class of its first
-// generation. A complete mutable generation takes no more bytes. The one
-// exception to "nothing is removed" is retention (retention.go): when a
-// generation of a mutable file completes, and only once its record is
-// durable, the hub drops generations of that file that are recorded as
-// mutable and are neither among the newest three complete ones nor the
-// state at a checkpoint of the retention window. Generations of
-// append-only files (transcripts, logs) are never dropped.
+// generation. A complete mutable generation takes no more bytes. In the
+// archive tree the one exception to "nothing is removed" is retention
+// (retention.go): when a generation of a mutable file completes, and only
+// once its record is durable, the hub drops generations of that file that
+// are recorded as mutable and are neither among the newest three complete
+// ones nor the state at a checkpoint of the retention window (complete
+// ones without a recorded time and incomplete ones newer than the newest
+// complete one stay too). Generations of append-only files (transcripts,
+// logs) are never dropped.
 //
 // The archive is the one place a machine legitimately sends a lot of
 // data, so it has its own budgets: a quota per machine and per realm, a
@@ -30,10 +34,11 @@
 // tree is walked and never waiting for archive work (findings D1-03,
 // D1-04, D1-08, E1-09). Every name the hub writes is checked against the
 // file system's limits, and every directory and realm is counted, before
-// anything is created; a failed upload removes what it created (E1-02).
-// Every admitted response has a write deadline (E1-10). A reached quota
-// is answered with 507 and a message saying what to do; a full admission
-// with 429.
+// anything is created; a failed upload removes what it created (E1-02),
+// except a new generation whose completion record alone cannot be
+// written, which stays incomplete. Every admitted response has a write
+// deadline (E1-10). A reached quota is answered with 507 and a message
+// saying what to do; a full admission with 429.
 //
 // Encrypted secrets bundles (section 4) are kept below
 // secrets/<machine>/<realm>/, the last ten of each; they count against the

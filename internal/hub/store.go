@@ -785,9 +785,10 @@ func (s *Store) SessionMachines() ([]string, error) {
 	return out, rows.Err()
 }
 
-// PruneMachine removes a machine's sessions that ended before cutoff, with
-// their events, and records their removal in the change log. It is for
-// machines without a link (a link prunes through its worker).
+// PruneMachine removes a machine's sessions that are not live and whose
+// last event is at or before cutoff, with their events, and records their
+// removal in the change log. It is for machines without a link (a link
+// prunes through its worker).
 func (s *Store) PruneMachine(machine string, cutoff time.Time) (int, error) {
 	rows, err := s.Sessions(SessionFilter{Machine: machine})
 	if err != nil {

@@ -147,10 +147,12 @@ func (d *DirSource) Fetch(_ context.Context, p string, length int64, w io.Writer
 
 func (d *DirSource) String() string { return "the export" }
 
-// ExistingState lists the kinds of durable state a realm holds already:
-// a restore without merge refuses when there are any. Box-writable harness
-// directories are only checked for being empty (one listing each, through
-// safefs), never walked.
+// ExistingState lists the kinds of archived durable state a realm holds
+// already: a restore without merge refuses when there are any. It does not
+// look at gate-log.jsonl.1 (a restore keeps an existing one, as it keeps
+// every existing file) or at the service logs, which are not archived.
+// Box-writable harness directories are only checked for being empty (one
+// listing each, through safefs), never walked.
 func ExistingState(c *config.Config, realm string) []string {
 	dir := c.Paths.DurableRealmDir(realm)
 	var out []string

@@ -1,6 +1,6 @@
 # C20 — Defects found while writing the explorer
 
-The authors of the explorer's content read the code area by area and recorded what looked wrong (`docs/dev/LEFTOVER.md` part 7). A second model then checked each item against the code (`docs/dev/reviews/G1-review.md` to `G5-review.md`, Part B): 50 are confirmed, five of them high. These chunks fix the confirmed defects that break the project's own rules: the threat model (a box must not be able to exhaust the host or destroy savepoints, banked commits, journals or archives; it must not obtain a credential it was not granted) and the six security rules of `docs/dev/README.md`. The remaining confirmed items stay in `LEFTOVER.md` for the owner to decide.
+The authors of the explorer's content read the code area by area and recorded what looked wrong (`docs/dev/LEFTOVER.md` part 7). A second model then checked each item against the code (`docs/dev/reviews/G1-review.md` to `G5-review.md`, Part B): 50 are confirmed, five of them high. These chunks (C20a, C20b, C20c) fix the confirmed defects that break the project's own rules: the threat model (a box must not be able to exhaust the host or destroy savepoints, banked commits, journals or archives; it must not obtain a credential it was not granted) and the six security rules of `docs/dev/README.md`. The remaining confirmed items stay in `LEFTOVER.md` for the owner to decide.
 
 Read `docs/dev/README.md` (binding), `docs/dev/LEFTOVER.md` part 7, and the Part B of the review that covers each item. The explorer's concern pages for each area (`explorer/model/concerns/`) describe how the code works today and name the functions; use them and `./dev explore query` to find your way.
 
@@ -30,7 +30,25 @@ Fix each item with a regression test that fails without the fix. A limit must fa
 | X12 1, one realm's full quota stops every later realm's archive | A realm's quota or other refusal ends that realm's pass, is reported in `sync status`, and backs that realm off; the uploader goes on with the realm's other kinds where they are independent and with the other realms. |
 | X12 6, the web app settles a waiting prompt from a box-written event | Only a receipt settles a command. A prompt event that matches a waiting prompt may be shown, but it never removes the pending command or its outbox entry. |
 
-## For both chunks
+## C20c: gaps the accuracy review found
+
+The accuracy review of the explorer's content found places where a page described the intended rule and the code does less (`docs/dev/LEFTOVER.md` part 7, "Found by the accuracy review", with the finding IDs; the reviews' Part A has the evidence).
+
+| Item | Decision |
+|---|---|
+| G4-01, a seal can be recorded for a file the box can still write | The seal's final check and its digest belong to the file that was opened and sealed: compare what is at the name afterwards with the open descriptor (device and inode), and fail the seal, leaving no record, when they differ. |
+| G4-02, G4-03, `grants.github = "token:<secret>"` can name any realm secret | One guard for reserved secret names (the realm's GitHub credential, an App's key secret, a service's credential, a cookie jar), used by `grants.secrets`, by `token:` and by the service definitions. A reserved name is refused at validation. |
+| G3-01, G3-19, `devc wt rm` deletes what nothing preserves | Without `--force`, `wt rm` refuses a worktree that holds files which no snapshot or bank preserves (ignored files, untracked files over the snapshot's size limit) and lists them, bounded. With `--force` it removes them and says how many. The help text says what is preserved and what is not. |
+| G4-17, no savepoint before sessions the daemon starts | `before_session` applies to every session start, whoever starts it (the command line, the daemon for the web app and the hub). With the driver `none` nothing is taken; the guide says so. |
+| G4-15, a service request body without a declared length passes `max_body` | The body is read through a limit before anything is forwarded past it; a body over the limit ends the request to the upstream and the box gets the refusal. |
+| G2-05, `ParseLive` ignores what follows the first JSON value | Strict decoding (no trailing data) on this path as on the channel's; apply the same to the other decoders of box-written reports that let a stray bracket through (`gitx.decodeStrict` and those listed with it). |
+| G2-01, an error shows a box the host's path to its data root | Errors that travel to a box name the path as the box sees it. Check the other request errors for the same. |
+| G5-06, a failed `terminal.open` leaves the stream open on the machine | When opening a terminal fails or its answer is lost, the hub sends `terminal.close` for that stream, and the machine closes a terminal whose opener never confirmed within a short time. |
+| G5-07, a snapshot replaces newer session summaries in the web app | A snapshot never replaces a summary that is newer than it, and the position kept for a session is the position of the summary that is kept. |
+| G5-08, the hub accepts re-read events without checking their numbers | When the hub reads a session again, the events must follow one another without gaps or repeats from the position it asked for; otherwise the read is refused like any other violation by a machine. |
+| G5-17, a pending notification is dropped without being cleared | A notification record whose state ends is cleared on the phone if it was ever published, including when it was still marked pending. |
+
+## For all chunks
 
 - The explorer's model must stay true. For every item, update the concern pages, invariants, flows and glossary terms that describe the changed behaviour (`grep` the model for the functions you change), add an invariant with its enforcing code and test where a new protection exists, and run `./dev explore --check`. In `LEFTOVER.md` part 7, mark each fixed item `Fixed in C20a` or `Fixed in C20b` with one line on how, keeping its text.
 - Document new configuration keys and commands in `docs/guide.md`.

@@ -78,7 +78,7 @@ via = "file"
 label = "durable/realms/<realm>/harness/<id>/…"
 ref = "internal/fleet.Uploader.syncFile"
 checks = ["internal/safefs.Root.Open"]
-text = "The file is opened through safefs beneath the realm's durable directory: no link followed, a regular file only. A file above `max_file_size` is skipped."
+text = "The file is opened through safefs beneath the realm's durable directory: no link followed, a regular file only. A harness file above `max_file_size` is skipped and counted; host-written files are capped at 1 TiB instead."
 
 [[step]]
 at = "daemon"
@@ -94,7 +94,7 @@ text = "The file is copied to `local/archive/<hub-id>/snap/`, at most `max_file_
 [[step]]
 at = "daemon"
 ref = "internal/fleet.Uploader.upload"
-text = "The snapshot goes up in chunks of about a second's worth at `[sync] upload_rate` (64 KiB to 4 MiB), each waiting for the hub's rate limiter."
+text = "The snapshot goes up in chunks of about a second's worth at `[sync] upload_rate` (default 4 MiB/s per hub; chunks of 64 KiB to 4 MiB), each waiting for the hub's rate limiter."
 
 [[step]]
 from = "daemon"
@@ -161,6 +161,7 @@ via = "file"
 label = "<file>~7~meta: committed, completed"
 ref = "internal/hub.writeMeta"
 text = "The record is written whole, synced, renamed into place and its directory synced. From now on the generation takes no more bytes."
+detail = "If this write fails, the upload fails and nothing is undone: the generation stays with its bytes, counted but not marked complete at this length, and a later `final=1` at its length completes it (`internal/hub.TestArchiveDurableCompletion`)."
 
 [[step]]
 at = "hub"

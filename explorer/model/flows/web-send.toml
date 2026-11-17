@@ -1,7 +1,7 @@
 id = "web-send"
 kind = "flow"
 title = "Sending a prompt from the web app"
-summary = "A prompt typed in the app gets a command ID in the browser and waits in the outbox; the hub forwards it and the machine answers with a receipt. When the answer is lost the same ID is retried, then kept as pending and asked about until a receipt settles it, so the prompt is typed at most once."
+summary = "A prompt typed in the app gets a command ID in the browser and waits in the outbox; the hub forwards it and the machine answers with a receipt. When the answer is lost the same ID is retried, then kept as pending and asked about until a receipt settles it; the daemon types a repeated ID only once while it keeps the receipt, for seven days after it is final."
 concern = "web-app"
 trigger = "Typing a message in a session's composer and pressing Send"
 actors = ["user", "browser", "hub", "daemon"]
@@ -54,7 +54,7 @@ text = "On the machine link, from the request's own goroutine, for at most 90 se
 [[step]]
 at = "daemon"
 ref = "internal/daemon.commander.submit"
-text = "The daemon stores a receipt before anything happens; an ID it has seen gets its stored receipt back, so a repeated command is applied once."
+text = "The daemon stores a receipt before anything happens; an ID it has seen gets its stored receipt back, so a repeated command is applied once while that receipt is kept."
 
 [[step]]
 from = "daemon"
@@ -76,7 +76,7 @@ text = "The receipt as the machine gave it."
 at = "browser"
 ref = "file:web/app/api.js~typeof rec.outcome !== 'string'"
 label = "command: receipt?"
-text = "An answer that is not a receipt for this ID counts as uncertain, like no answer. A receipt that is not final (queued) is kept as pending too, and asked about until it is."
+text = "An answer that is not an object with a string `outcome`, or that names another command ID, counts as uncertain, like no answer; one that names no ID at all is taken as this command's receipt. A receipt that is not final (queued) is kept as pending too, and asked about until it is."
 
 [[step]]
 section = "When the answer is lost"
@@ -145,7 +145,7 @@ to = "hub"
 via = "reply"
 label = "receipt, or not found"
 ref = "internal/daemon.Daemon.apiCommandGet"
-text = "Receipts are kept for seven days."
+text = "Receipts are kept until seven days after they became final."
 
 [[step]]
 from = "hub"
@@ -160,6 +160,7 @@ at = "browser"
 ref = "file:web/app/store.js~function finish(p, rec)"
 label = "finish"
 text = "A final receipt ends the pending command and updates the outbox (delivered, refused, not submitted). A 404 for a command never confirmed marks it \"did not arrive\"."
+detail = "A 404 also comes for a command whose final receipt the daemon has already dropped (seven days after it became final): a pending command kept in local storage on a device that was away longer is then shown as \"did not arrive\", and **Send again** would have the daemon apply it as new."
 
 [[step]]
 at = "browser"
@@ -171,4 +172,5 @@ text = "**Send again** posts the command with its own ID; unless the machine sai
 at = "browser"
 ref = "file:web/app/store.js~function settleOutbox"
 label = "settleOutbox"
-text = "Meanwhile, a prompt event on the stream whose text begins the waiting prompt's text removes it from the outbox and ends its pending command."
+text = "Meanwhile, a prompt event on the stream for an open session removes the first waiting prompt whose text begins with the event's text (without a `…[truncated]` mark, trimmed, its first 200 characters) from the outbox, and ends its pending command without a receipt."
+detail = "Prompt events come from the box's hooks, so a box can settle a waiting prompt with an event whose text is any prefix of it; an event whose text is only spaces settles the first waiting prompt, whatever its text ([[doc:docs/dev/LEFTOVER.md#7]])."

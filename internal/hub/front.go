@@ -15,8 +15,12 @@
 //
 // Failures (refused certificates, requests the gate turns away, refused
 // enrolment and button tokens, missing login sessions, failed logins)
-// drain a rate limit per address and per certificate; a request with a
-// valid login session is never limited.
+// drain a rate limit per address and per certificate. A route of class
+// user consults it only when the login check fails, so a request with a
+// valid login session is never limited there; routes of class device do
+// not look at a login session: login and buttons consult the
+// certificate's limit first, and every such request takes one of the
+// maxAnonymous places (guard).
 
 package hub
 
@@ -333,7 +337,8 @@ func (s *Server) guard(rt route) http.Handler {
 			return
 		}
 		if rt.access == accessDevice || rt.access == accessEnrol {
-			// Requests without a login session are bounded in number.
+			// Requests of the classes that need no login session are
+			// bounded in number, whether or not they carry one.
 			select {
 			case s.anonSem <- struct{}{}:
 				defer func() { <-s.anonSem }()

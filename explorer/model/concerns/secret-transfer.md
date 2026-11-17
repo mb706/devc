@@ -36,7 +36,7 @@ refs = ["internal/fleet.SealSecrets", "internal/archive.Seal", "internal/hub.Ser
 tests = ["internal/hub.TestSecretsBundles", "internal/fleet.TestSecretsRoundTrip"]
 
 [[invariant]]
-text = "The passphrase is read from a hidden prompt or one line of stdin, never from an argument; push requires at least ten characters."
+text = "The passphrase is read from a hidden prompt or one line of stdin, never from an argument; push requires at least ten bytes of it."
 refs = ["internal/cli.app.readPassphrase"]
 tests = ["internal/cli.TestFleetUsage"]
 
@@ -73,11 +73,11 @@ A new machine needs a realm's secrets (harness tokens from `devc login`, keys se
 
 ## What can go wrong, and what prevents it
 
-- **The hub reads them.** It holds ciphertext, salt, nonce, KDF parameters, sizes, the machine and realm names and times. Each guess at the passphrase costs an argon2id evaluation of 64 MiB, three passes; a weak passphrase is the weak point, and push refuses one under ten characters.
+- **The hub reads them.** It holds ciphertext, salt, nonce, KDF parameters, sizes, the machine and realm names and times. Each guess at the passphrase costs an argon2id evaluation of 64 MiB, three passes; a weak passphrase is the weak point, and push refuses one under ten bytes (its message says characters; three four-byte characters pass).
 - **The hub chooses the bundle.** It can withhold a bundle, serve an older version or another machine's; with `--overwrite` an older bundle replaces newer values. A bundle of another realm does not open. The machine, version and time that `pull` prints come from the hub's answer; the machine name and time sealed inside the set are not compared with them.
 - **Another machine.** Any enrolled machine can push a bundle under any realm name, and without `--machine` the newest wins. Without the passphrase its bundle does not open and the pull fails; with it, it chooses what a pull adds ([[doc:docs/dev/LEFTOVER.md#7]]).
 - **A hostile bundle's cost.** The KDF parameters a bundle may ask for are bounded (at most ten passes, 8 MiB to 1 GiB, at most sixteen threads), so a hostile hub cannot make a pull spend unbounded memory or time ([[internal/archive.Sealed.Validate]]).
-- **Secrets in arguments or logs.** The passphrase is never an argument; the passphrase and the decrypted bytes are cleared after use; the hub logs only machine, realm and version.
+- **Secrets in arguments or logs.** The passphrase is never an argument; the hub logs only machine, realm and version. The passphrase buffer the command uses and the plaintext JSON are cleared after use, and a pull clears each value it has handled. Other copies are left to the garbage collector: the confirmation and a refused passphrase, a passphrase read from stdin (a string first), the values a push reads and their base64 text, the base64 text inside a pulled set, the local values a pull compares, and the values left when a pull stops at an error.
 - **What is not carried.** Harness logins kept as credential files in shared harness state (a manifest's `home.secret_files`) are neither secrets in the store nor archived: log in on each machine ([[concern:secrets]]).
 
 ## Decisions that are not obvious

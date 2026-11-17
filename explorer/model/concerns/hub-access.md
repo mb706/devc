@@ -245,7 +245,7 @@ A page on another site cannot make the browser add `X-Devc-Request` without a CO
 - **A copied cookie.** It works only with the certificate it was made with; presented with another, the session is deleted.
 - **Guessing the password.** Five failures in a row lock that certificate's logins for 15 minutes, kept in the database ([[internal/hub.Store.LoginFailed]]). One attempt per certificate runs at a time ([[internal/hub.Server.loginSlot]]) and the lock is read again right before the hash ([[finding:C2-03]]). A TOTP code works once ([[internal/hub.Store.UseTOTPStep]]).
 - **Load without credentials.** At most 64 requests of class device or enrolment run at once (429); two password hashes at a time, eight waiting ([[internal/hub.Server.hashSlot]]). Failures drain a token bucket per address and per certificate (30, then one per two seconds: [[internal/hub.limiter]]); a body must arrive within ten seconds ([[finding:C2-04]]).
-- **Requests forged by another site.** The cross-site rules; no CORS headers.
+- **Requests forged by another site.** The cross-site rules (above).
 - **A browser posing as a machine, or the reverse.** The class is checked against the registry's role.
 - **Tokens in logs.** The access log shows `/enroll/-` and no query; button tokens travel in a header ([[finding:C2-06]]).
 - **Local processes behind a proxy.** The hub believes the header from any loopback peer. A certificate is not secret, so a process on the hub's server that can reach the loopback port and holds a copy of a registered certificate could pose as its owner without the key; the setup relies on the proxy being the only local client.
@@ -256,7 +256,7 @@ A page on another site cannot make the browser add `X-Devc-Request` without a CO
 - **The server reads the CA key at enrolment** so that `devc hub enroll machine` can print a token and return ([[chunk:C11b]], deviation 5).
 - **A device's key is made on the hub** and handed over in a PKCS#12 bundle; its passphrase exists only in the terminal that made it.
 - **Buttons need a device certificate but no login**: the token is bound to one answer.
-- **Rate limits count failures only**, so a logged-in user is never limited.
+- **Rate limits count failures only**, and user routes consult them only when the login check fails, so a valid login is never limited there. Device routes ignore a login: login and buttons consult the certificate's bucket first, and every device request takes one of 64 places.
 - **A new password keeps login sessions**; `devc hub sessions revoke --all` ends them.
 
 ## Where to start reading

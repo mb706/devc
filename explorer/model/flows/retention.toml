@@ -75,11 +75,11 @@ text = "A machine's secrets bundles of a realm beyond the newest ten are deleted
 
 [[step]]
 ref = "internal/hub.archiveStore.create"
-text = "A failed upload removes the files and directories it created in that request, and nothing older."
+text = "A failed upload removes the files and directories it created in that request, and nothing older; but when only the completion record of a generation it created fails to be written, the generation stays, with its bytes, incomplete."
 
 [[step]]
 ref = "internal/hub.PruneArchive"
-text = "`devc hub archive prune --machine <m> --before <date>`, run by the owner on the hub, deletes files last written before the date and repositories whose newest bundle and ref log are older, after a confirmation unless `--yes`."
+text = "`devc hub archive prune --machine <m> --before <date>`, run by the owner on the hub, deletes from that machine's `archive/` tree files last written before the date and repositories whose newest bundle and ref log are older, after a confirmation unless `--yes`. It never touches `secrets/`."
 
 [[step]]
 section = "What a restore makes of it"
