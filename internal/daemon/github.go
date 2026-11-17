@@ -173,8 +173,8 @@ func (w *boxWorker) serveGitHub(ctx context.Context, st *yamux.Stream, m *proto.
 }
 
 // githubToken serves host.github.token for the box of ref (container
-// containerID). Every request counts against the budget, refused ones
-// too: the budget is checked first.
+// containerID). Every request whose parameters decode counts against the
+// budget, refused ones too: the budget is checked before anything else.
 func (d *Daemon) githubToken(ctx context.Context, ref names.ProjectRef, containerID string, params json.RawMessage) (any, error) {
 	var p proto.GitHubTokenParams
 	if err := proto.DecodeParams(params, &p); err != nil {

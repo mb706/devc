@@ -57,8 +57,8 @@ tests = [
 related = ["network-levels", "box-channel", "requests-and-approval", "daemon"]
 
 [[invariant]]
-text = "The proxy connects only to a public IPv4 address that is not one of the host's, checked again on the socket it actually connects."
-refs = ["internal/netpolicy.Proxy.CheckAddr", "internal/netpolicy.Proxy.dial"]
+text = "The proxy connects only to a public IPv4 address, checked again on the socket it actually connects, and not to one of the host's as last listed; before a first listing succeeds, it refuses none of them."
+refs = ["internal/netpolicy.Proxy.CheckAddr", "internal/netpolicy.Proxy.dial", "internal/daemon.hostAddrCache.contains"]
 tests = ["internal/netpolicy.TestProxyDialChecksAddress", "internal/netpolicy.TestProxyRefusals"]
 
 [[invariant]]
@@ -206,7 +206,7 @@ At level allowlist a box may reach a short list of names (its package index, its
 
 ## How it works
 
-**The path of a connection** ([[flow:allowlist-connect]]). A box of level allowlist has only loopback and the proxy variables `HTTP_PROXY`/`HTTPS_PROXY` = `http://127.0.0.1:3128` (plus `NO_PROXY` for loopback and `NODE_USE_ENV_PROXY=1`). Box init has the [[term:box-agent]] listen there; [[internal/boxside.Agent.relayTCP]] relays each connection unparsed on a new `host.proxy` stream of the box channel ([[concern:box-channel]]). The agent runs at most 64 relays at once and opens at most 512 relay streams per ten seconds, closing the rest; without a connected host it closes the connection. The daemon gives the stream one of 64 relay places per box (else `503`) and serves it with a [[internal/netpolicy.Proxy]] built for that box ([[internal/daemon.boxWorker.serveProxy]]).
+**The path of a connection** ([[flow:allowlist-connect]]). A box of level allowlist has only loopback and the proxy variables `HTTP_PROXY`/`HTTPS_PROXY` = `http://127.0.0.1:3128` (plus `NO_PROXY` for loopback and `NODE_USE_ENV_PROXY=1`). Box init has the [[term:box-agent]] listen there; [[internal/boxside.Agent.relayTCP]] relays each connection unparsed on a new `host.proxy` stream of the box channel ([[concern:box-channel]]). The agent's own limits are in the flow. The daemon gives the stream one of 64 relay places per box (else `503`) and serves it with a [[internal/netpolicy.Proxy]] built for that box ([[internal/daemon.boxWorker.serveProxy]]).
 
 **What a request is checked against.** For every request [[internal/daemon.Daemon.proxyPolicy]] computes the policy anew: the project's configuration must be free of problems; the capability record must belong to the running container; both the record and the configuration must say level allowlist; the configured entries are the realm's and project's `domains` and `presets` that were also recorded at the start ([[internal/box.Capabilities.ProxyAllowlist]]); and the names of exceptions in force are added. An entry is a name or `*.suffix` (below the suffix, not the suffix itself; at least two labels after `*.`) with an optional port; without one it allows 80 and 443 ([[internal/netpolicy.ParseEntry]]). The presets are short explicit lists in [[internal/netpolicy.Presets]].
 
@@ -221,7 +221,7 @@ At level allowlist a box may reach a short list of names (its package index, its
 7. Up to eight addresses are dialled in turn, ten seconds each; the dialer's control function checks the socket's address again, so an answer that changed between check and connect does not count ([[internal/netpolicy.Proxy.dial]]).
 8. [[internal/netpolicy.Proxy.watch]] checks the policy once more, now that the connection exists, before the tunnel is acknowledged or a byte is forwarded ([[finding:E1-12]]).
 
-A tunnel is then relayed unchanged; it is closed after ten idle minutes, or one minute after one direction ended. A plain connection may carry several requests: each is checked again, an upstream connection is reused only for the same host and port, hop-by-hop headers and `Proxy-Authorization` are dropped both ways, the proxy answers `Expect: 100-continue` itself, and a response head must arrive within five minutes and 64 KiB ([[finding:D1-02]], [[finding:E1-15]]).
+A tunnel is then relayed unchanged; it is closed after ten idle minutes, and once one direction has ended, after one idle minute of the other. A plain connection may carry several requests: each is checked again, an upstream connection is reused only for the same host and port, hop-by-hop headers and `Proxy-Authorization` are dropped both ways, the proxy answers `Expect: 100-continue` itself, and a response head must arrive within five minutes and 64 KiB ([[finding:D1-02]], [[finding:E1-15]]).
 
 **Watching open connections.** Every tunnel and every upstream connection serving a request stays registered in the worker's [[internal/netpolicy.Tunnels]]. Its watch checks the policy every five seconds, when the earliest exception in force ends, and whenever [[internal/daemon.boxWorker.syncNet]] asks (every five seconds and on `net.sync`); a destination no longer allowed, or a policy that cannot be read, closes it ([[finding:D1-06]]).
 
@@ -239,7 +239,7 @@ An exception that cannot be applied is removed from the record again. Kernel ele
 
 The box controls its agent, every byte of a proxy request and the names it asks for.
 
-- **Reaching the LAN or the host through a name.** Addresses are checked after resolution and on the connected socket.
+- **Reaching the LAN or the host through a name.** Addresses are checked after resolution and on the connected socket. The host's own addresses are listed again every ten seconds, a failed listing keeping the last; while none has succeeded, the host's public addresses are not refused ([[internal/daemon.hostAddrCache.contains]]; [[doc:docs/dev/LEFTOVER.md#7]]).
 - **Granting itself access.** The box channel has no method that writes an exception; `devc request net` creates a high-risk request, which only the CLI can approve; the daemon then runs `devc net allow --request <id>` ([[concern:requests-and-approval]]).
 - **Keeping a connection beyond its permission.** The watch closes it.
 - **Flooding.** Relay places, the agent's own limits and the channel's frame inspector; the log rotates.

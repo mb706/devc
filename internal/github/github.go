@@ -22,8 +22,9 @@
 // on. Requests are built only on the API base from DEVC_GITHUB_API
 // (default https://api.github.com); a redirect is followed only to an
 // https URL (job logs live on signed storage URLs) or, for a plain-http
-// test API, to that API's own host, and Go's client drops the
-// credential when a redirect leaves the API's host. DEVC_GITHUB_URL
+// test API, to that API's own host. Go's client keeps the credential
+// on a redirect to the API's host name, on any port, or to a subdomain of
+// it, and drops it for every other host. DEVC_GITHUB_URL
 // (default https://github.com) is the web and git host: it decides which
 // upstreams are GitHub's, where the box's remote "github" points and which
 // host `gh auth token` is asked about. Tests point both at fake servers.

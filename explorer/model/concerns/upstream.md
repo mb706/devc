@@ -43,9 +43,8 @@ text = "The host pushes to the upstream only for devc push, for devc pr create, 
 refs = ["internal/gitx.Service.Push", "internal/gitx.Service.forward", "internal/gitx.Service.pushUpstream"]
 
 [[invariant]]
-text = "A forward never rewrites an upstream branch: it pushes without force or lease, so the upstream refuses a non-fast-forward."
+text = "A forward never rewrites an upstream branch: it pushes without force or lease, so git refuses a non-fast-forward."
 refs = ["internal/gitx.Service.forward", "internal/gitx.Service.pushUpstream"]
-tests = ["internal/gitx.TestRecordPush"]
 
 [[invariant]]
 text = "devc push rewrites an upstream branch only with --force, and only while the upstream still has the tip devc last fetched."
@@ -77,7 +76,7 @@ refs = ["internal/cli.app.refuseProblems", "internal/cli.app.withGit", "internal
 +++
 ## What it is for
 
-Work leaves the host only when the user lets it. Unless the project grants the box a GitHub token (`grants.github`), the box reaches the upstream only through the relay, and commits leave the relay only with the user's own credentials, by `devc push`, `devc pr create` or a forward the project configured. The other way, the upstream's changes reach the relay on `devc pull`, at project setup and, when a box fetches, by fetch-through; the box sees them as remote-tracking branches, and nothing moves its own branches.
+Work leaves through the host only when the user lets it: commits leave the relay only with the user's own git credentials, which devc gives no box, by `devc push`, `devc pr create` or a forward the project configured. Whether the box reaches the upstream itself is a matter of its network level and of what it was given ([[concern:network-levels]]): at `internet` or `open`, or at `allowlist` with the upstream's host listed, it can fetch a public upstream and push with any credential it holds, such as a GitHub token from `grants.github`; an SSH grant for the upstream's host does the same through the gate. The other way, the upstream's changes reach the relay on `devc pull`, at project setup and, when a box fetches, by fetch-through; the box sees them as remote-tracking branches, and nothing moves its own branches.
 
 ## How it works
 
@@ -89,9 +88,9 @@ Work leaves the host only when the user lets it. Unless the project grants the b
 
 **Who fetches.** `devc pull` ([[flow:devc-pull]]) fetches and syncs under the box lock, then hands everything to a running box ([[internal/gitx.Service.reflect]]): relay branches as `origin/*`, the upstream's as `github/*`, tags without force, so a box tag with another value is kept and reported. A stopped box gets the refs later. Fetch-through ([[internal/gitx.Service.FetchThrough]]) fetches and syncs before the relay service serves a box's fetch, if `git.fetch_through` is on (the default), at most once a minute per project whether it succeeds or not, waiting five seconds for the box lock and twenty for the upstream; a failure is logged and the box gets what the relay has. `devc project add` and `init` fill a new relay the same way.
 
-**Pushing** ([[flow:devc-push]], [[internal/gitx.Service.Push]]). Under the box lock a running box is banked first. Without arguments the branch checked out in `main` is pushed, or the relay's HEAD branch when the box is down. For each branch devc shows up to 200 commits the upstream lacks and, if the upstream has the branch, a diffstat; a non-fast-forward needs `--force`; then it asks, or needs `--yes` without a terminal. It pushes the commit it showed, `git push --porcelain --no-verify github <oid>:refs/heads/<b>`, with `--force-with-lease=refs/heads/<b>:<last fetched tip>` under `--force`, and sets `refs/remotes/github/<b>`. `--tag <t>` pushes the newest `refs/devc/tags/<t>` record; moving an upstream tag needs `--force`. `devc pr create` pushes this way first; an approved `pr` request runs it with `--yes` ([[concern:requests-and-approval]]).
+**Pushing** ([[flow:devc-push]], [[internal/gitx.Service.Push]]). Under the box lock a running box is banked first. Without arguments the branch checked out in `main` is pushed, or the relay's HEAD branch when the box is down or devc cannot tell (a detached HEAD, a box that does not answer). For each branch devc shows up to 200 commits the upstream lacks and, if the upstream has the branch, a diffstat; a non-fast-forward needs `--force`; then it asks, or needs `--yes` without a terminal. It pushes the commit it showed, `git push --porcelain --no-verify github <oid>:refs/heads/<b>`, with `--force-with-lease=refs/heads/<b>:<last fetched tip>` under `--force`, and sets `refs/remotes/github/<b>`. `--tag <t>` pushes the newest `refs/devc/tags/<t>` record; moving an upstream tag needs `--force`. `devc pr create` pushes this way first; an approved `pr` request runs it with `--yes` ([[concern:requests-and-approval]]).
 
-**Forwarding** ([[internal/gitx.Service.forward]]): after a bank, and in post-receive after a relay-service push, every branch matching `git.forward` whose relay tip differs from `github/<b>` is pushed, without force or lease. Failures are reported, never fatal.
+**Forwarding** ([[internal/gitx.Service.forward]]): a branch matching `git.forward` whose relay tip differs from `github/<b>` is pushed, without force or lease; after a bank every such relay branch, in post-receive after a relay-service push only the branches that push updated and recorded ([[internal/gitx.Service.ReportPush]]). Failures are reported, never fatal.
 
 **The branch policy** (`[git]` in project.toml): `forward` and `protected` are globs in which `*` does not cross `/` ([[internal/gitx.Matches]], [[internal/gitx.Protected]]); `branch_prefix` starts the branch names of task worktrees.
 

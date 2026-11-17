@@ -74,7 +74,7 @@ section = "The daemon decides"
 at = "daemon"
 ref = "internal/daemon.Daemon.githubToken"
 checks = ["internal/proto.DecodeParams", "internal/daemon.resolvedOf"]
-text = "The budget comes first: 120 token requests a minute per project, refused ones included. Then the configuration is reloaded if it changed, must be free of problems for the project, and `grants.github` must be a token mode now."
+text = "Once the parameters decode strictly, the budget comes first: 120 token requests a minute per project, refused ones included (a request whose parameters do not decode is not counted). Then the configuration is reloaded if it changed, must be free of problems for the project, and `grants.github` must be a token mode now."
 
 [[step]]
 at = "daemon"

@@ -183,7 +183,8 @@ func tail(b []byte) string {
 }
 
 // DecodeResult decodes and validates a worker's result: no unknown fields,
-// nothing after it, the expected operation, valid IDs and paths, sane
+// no second value after it (Decoder.More does not see a stray ']' or '}'),
+// the expected operation, valid IDs and paths, sane
 // counts, well-formed digests. The skipped texts are made printable; paths
 // are only checked to be data paths, which may hold any byte but NUL, so
 // whoever prints one makes it printable.

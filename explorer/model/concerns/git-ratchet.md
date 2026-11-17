@@ -76,8 +76,8 @@ refs = ["internal/gitx.Host.Cmd", "internal/gitx.EnsureEmptyDir", "internal/gitx
 tests = ["internal/gitx.TestHostCmd", "internal/gitx.TestEnsureRelayHooks", "test/integration.TestEscape"]
 
 [[invariant]]
-text = "A push that would take the relay over git.relay_quota or the state file system below 512 MiB free is ended, and its git processes are gone before the box lock is released."
-refs = ["internal/daemon.Daemon.watchPush", "internal/daemon.Daemon.runPush", "internal/daemon.Daemon.holdRelay"]
+text = "A push whose pack would take the relay over git.relay_quota, or the state file system below 512 MiB free, is refused or ended, and its git processes are gone before the box lock is released."
+refs = ["internal/daemon.Daemon.watchPush", "internal/gitx.CheckPushSize", "internal/daemon.Daemon.runPush", "internal/daemon.Daemon.holdRelay"]
 tests = ["internal/daemon.TestPushWatchdog", "internal/daemon.TestPushEndedDuringIndexPack", "internal/daemon.TestPushGroupLeft"]
 
 [[invariant]]
@@ -199,7 +199,7 @@ ref = "internal/gitx.Service.pushUpstream"
 +++
 ## What it is for
 
-An agent in a box can do anything to the box's repository: rewrite history, delete branches, wipe a worktree, plant hooks. The owner still wants to leave it alone for hours. The ratchet makes that safe: every tip a relay branch takes, every snapshot of uncommitted work and every tag created in the box that the host records stays reachable from a ref the box can neither move nor delete, and the relay never collects garbage. The box still moves branch heads in the relay, since that is how its work arrives; it cannot make the host forget a value a branch once had.
+An agent in a box can do anything to the box's repository: rewrite history, delete branches, wipe a worktree, plant hooks. The owner still wants to leave it alone for hours. The ratchet makes that safe: every tip a bank, a push, a pull or an adoption gives a relay branch, every snapshot of uncommitted work and every tag created in the box that the host records stays reachable from a ref the box can neither move nor delete, and the relay never collects garbage. The box still moves branch heads in the relay, since that is how its work arrives; it cannot make the host forget a value a branch once had.
 
 ## How it works
 
@@ -226,7 +226,7 @@ An agent in a box can do anything to the box's repository: rewrite history, dele
 | `refs/devc/boxtip/<b>` | the box's tip at the last bank or push | nothing |
 | `refs/devc/incoming/`, `refs/devc/restore/` | scratch of a bank, of a restore | nothing |
 
-In a relay, host code deletes only the two scratch namespaces, `refs/remotes/github/HEAD` after an adoption, and upstream branches the upstream deleted (fetch `--prune`).
+In a relay, host code deletes only the two scratch namespaces, `refs/remotes/github/HEAD` after an adoption, and upstream branches the upstream deleted (fetch `--prune`). A restore from the archive ([[concern:state-restore]]) creates the archived refs a relay lacks, heads and records alike, and records nothing itself ([[internal/gitx.Relay.RestoreRefs]]): a restored tip has a bank ref only if the archive holds one.
 
 ## What can go wrong, and what prevents it
 
@@ -236,7 +236,7 @@ A box controls its repository, every ref and object it offers, every byte of its
 - **Rewriting it by bank.** The fetch's refspecs write only `refs/devc/incoming/`, with `--no-tags`. [[internal/gitx.PlanBank]] skips names that fail [[internal/names.CheckRef]] or `git check-ref-format --branch`, keeps protected branches, deletes nothing, records box tags only as `refs/devc/tags/`, and applies at most 1,000 branches and 1,000 tags per run.
 - **Changing how history reads.** A `refs/replace/` ref could make a banked commit show other content; host git never interprets one, and a restore creates refs only in devc's namespaces ([[internal/gitx.ArchiveRef]], [[finding:D1-07]]).
 - **Code on the host.** `local/git/relay-hooks` is made to hold exactly three links to the daemon's devc binary before every push ([[internal/gitx.EnsureRelayHooks]]); every other host git command runs no hook.
-- **The cost of a push.** The daemon waits at most two minutes for the box lock, and refuses when the state file system has less than 1 GiB free or the relay exceeds `git.relay_quota` (default 20 GiB). git refuses a pack over `git.max_push_size` (default 2 GiB, `receive.maxInputSize`); the daemon stops feeding it 64 MiB later. Every 200 ms a watchdog measures the quarantine and ends the push when the relay would exceed its budget or less than 512 MiB stays free ([[internal/daemon.Daemon.watchPush]], [[finding:D1-05]]). receive-pack gets 30 minutes, each hook 15; a box that stops reading for two minutes loses the stream. Sizes must be positive, so no limit can be switched off.
+- **The cost of a push.** The daemon waits at most two minutes for the box lock, and refuses when the state file system has less than 1 GiB free or the relay exceeds `git.relay_quota` (default 20 GiB). git refuses a pack over `git.max_push_size` (default 2 GiB, `receive.maxInputSize`); the daemon stops feeding it 64 MiB later. Every 200 ms a watchdog measures the quarantine and ends the push when the relay would exceed its budget or less than 512 MiB stays free ([[internal/daemon.Daemon.watchPush]], [[finding:D1-05]]); `pre-receive` measures the relay with the whole pack once more ([[internal/gitx.CheckPushSize]]). What the update hooks then write (records and their reflog entries) is not counted, so an accepted push can leave the relay a little over its budget; the next push is refused. receive-pack gets 30 minutes, each hook 15; a box that stops reading for two minutes loses the stream. Sizes must be positive, so no limit can be switched off.
 - **A push that is ended.** receive-pack runs in a process group of its own; ending it kills index-pack and the hooks too and waits until none is left ([[internal/daemon.Daemon.runPush]], [[finding:E1-16]]). Only then is the quarantine removed and the lock released. A group still alive after 30 seconds leaves the relay held, refusing pushes until its last process ends ([[internal/daemon.Daemon.holdRelay]], [[finding:F1-01]]).
 
 The budget and the free-space reserve guard the relay service only: a bank's fetch has neither, nor a size limit ([[doc:docs/dev/LEFTOVER.md#7]]).

@@ -1,7 +1,10 @@
 // Data sync (work order C14): `devc data pull` and `push` wrap rsync on
 // the host, with the user's own SSH. rsync only ever reads from or writes
-// to a staging directory that no box can write; the data root itself is
-// touched only by helper-container workers. This file also holds `devc
+// to a staging directory: a pull's is in the state directory, which no box
+// reaches; a push's directories belong to the vault, so the box cannot
+// rearrange them, but its files are hard links to the box's own, which the
+// box can still change through their original names. The data root itself
+// is touched only by helper-container workers. This file also holds `devc
 // data status` and `verify`, which compare the data with the manifest.
 
 package data

@@ -94,7 +94,7 @@ to = "github"
 via = "stream"
 label = "GET /repos/<o>/<r>/pulls/12, …/issues/12/comments"
 ref = "internal/github.Client.do"
-text = "Each with `Authorization: Bearer <host credential>`, `X-GitHub-Api-Version` and devc's user agent. A redirect is followed only to https, and Go drops the credential when it leaves the API's host."
+text = "Each with `Authorization: Bearer <host credential>`, `X-GitHub-Api-Version` and devc's user agent. A redirect is followed only to https; Go keeps the credential on a redirect to the API's host name (on any port) or a subdomain of it, and drops it for any other host."
 
 [[step]]
 from = "github"

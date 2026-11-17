@@ -57,7 +57,7 @@ refs = ["internal/gate.ServerConfig.Render", "internal/gate.AuthorizedKeyLine", 
 tests = ["internal/gate.TestServerConfig", "internal/daemon.TestGateStreams", "test/integration.TestSSHGate"]
 
 [[invariant]]
-text = "A session runs only for a host granted to the project now and in its box's start record ([[term:capability-record]]), read-only if either grant is."
+text = "A session starts only for a host granted to the project now and in its box's start record ([[term:capability-record]]), read-only if either grant is."
 refs = ["internal/daemon.boxWorker.serveGate", "internal/gate.Exec.Run", "internal/box.Capabilities.SSHGrant"]
 tests = ["internal/gate.TestExecStartedWith", "internal/daemon.TestGateStreams", "internal/box.TestCapabilities"]
 
@@ -214,7 +214,7 @@ ref = "internal/gate.Client.LoginCmd"
 +++
 ## What it is for
 
-An agent often needs a remote machine: a compute server, a cluster's login node, a git server over SSH. Handing it the owner's key would let it keep and reuse the key; asking for 2FA in a box does not work. The gate lets a box run a plain OpenSSH client against a host the owner logged in to on the host, while the box holds no credential for that host, can open no forwarding into the host's or the remote's network, and loses access the moment the owner closes the connection or removes the grant. A grant is full use of the remote account ([[config:project.grants.ssh]]).
+An agent often needs a remote machine: a compute server, a cluster's login node, a git server over SSH. Handing it the owner's key would let it keep and reuse the key; asking for 2FA in a box does not work. The gate lets a box run a plain OpenSSH client against a host the owner logged in to on the host, while the box holds no credential for that host, can open no forwarding into the host's or the remote's network, and loses access the moment the owner closes the connection; removing the grant refuses every new session. A grant is full use of the remote account ([[config:project.grants.ssh]]).
 
 ## How it works
 
@@ -226,7 +226,7 @@ An agent often needs a remote machine: a compute server, a cluster's login node,
 
 **gate-exec** ([[internal/gate.Exec.Run]]) reads the box's request from `SSH_ORIGINAL_COMMAND`: empty is a shell, the sftp marker is sftp, anything else a command. It loads the configuration itself and refuses (exit 1) on problems, a host no longer granted, a missing capability record, or a host granted only after the start. Under `<host>:ro` ([[term:read-only-profile]]) it refuses a shell and sftp, and requires [[internal/gate.CheckReadOnly]]: the first word must be in `[grants.ssh_allow]` (intersected with the start's list; [[internal/box.Capabilities.SSHGrant]]), with none of `` ;|&$`<>() ``, no newline and no control character but tab. Then `ssh -O check` must find the master (else exit 255 and the advice to run `devc ssh login`). The session runs as `ssh -S <sock> -o ControlMaster=no -o ProxyCommand=false -o BatchMode=yes -o ClearAllForwardings=yes …  -e none -tt|-T <host> -- <command>`: the box's text reaches the remote shell as one argument, neither split nor quoted on the host ([[internal/gate.Client.ExecArgs]]). `ProxyCommand=false` makes a master that died meanwhile fail the session instead of being replaced by a fresh connection with the user's keys.
 
-**The log.** Every session gate-exec decides for a configured project's box becomes a line of `durable/realms/<realm>/gate-log.jsonl` (0600, appended under a lock): box, project, host, mode, terminal, the command up to 4 KiB, exit status, duration, refusal ([[internal/gate.AppendLog]]). A signal from sshd ends the remote command through a context, so the session is still logged.
+**The log.** Every session gate-exec decides for a configured project's box becomes a line of `durable/realms/<realm>/gate-log.jsonl` (0600, appended under a lock): box, project, host, mode, terminal, the command up to 4 KiB, exit status, duration, refusal ([[internal/gate.AppendLog]]). A signal from sshd ends the remote command through a context, so the session is still logged. What the daemon refuses before sshd runs (a host not granted, a missing key) is only in the daemon's log.
 
 ## What can go wrong, and what prevents it
 
@@ -236,7 +236,7 @@ The box controls its ssh client and configuration, the alias it asks for and eve
 - **Forwarding into the host's network.** A control socket in reach would let a client ask the master for forwards in the host's namespaces; the socket stays on the host, and sshd, the key's `restrict` and gate-exec's ssh all switch forwarding off.
 - **Another project's host.** The project is the channel's; gate-exec finds it by the box ID the daemon wrote.
 - **A hostile alias or command.** Aliases are validated before they reach ssh; the command is one argument after `--`.
-- **A grant removed.** The daemon and gate-exec check the current configuration; adding a grant needs `devc up --recreate`, because the mount is part of the box's definition.
+- **A grant removed.** The daemon and gate-exec check the current configuration at every connection and session, so the next session is refused; one already running goes on until it ends or the owner closes the master (`devc ssh close`): nothing watches the configuration during a session. Adding the first grant adds a mount to the box's definition and needs `devc up --recreate` ([[internal/gate.BoxHooks.Contribute]]); another host needs a new start, which writes the box's SSH configuration and its start record.
 
 Limits: the read-only profile is a convenience: an allowed command that runs programs can do anything the account can ([[internal/gate.ReadOnlyNote]]). gate-exec runs through the user's login shell, so a `nologin` shell disables the gate and start-up output corrupts sftp and scp; the log is never rotated ([[doc:docs/dev/LEFTOVER.md#4]], [[doc:docs/dev/LEFTOVER.md#5]]).
 

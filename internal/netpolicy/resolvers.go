@@ -1,6 +1,7 @@
 // This file computes, from the host's files and the engine's inspect data
-// only, which resolvers a box of level internet may reach and which
-// addresses of its network backend lead to the host.
+// only, which resolvers a box of level internet may reach on port 53 even
+// at a private or host address (public addresses are open anyway), and
+// which addresses of its network backend lead to the host.
 
 package netpolicy
 
@@ -32,8 +33,8 @@ const (
 var pastaResolver = netip.MustParseAddr("169.254.1.1")
 
 // TrustedResolvers computes on the host, from inputs no box can write, the
-// resolver addresses a box of level internet may reach on port 53 (finding
-// B13): the host's own IPv4 nameservers, those of systemd-resolved's
+// resolver addresses that the rules of level internet open on port 53 even
+// where they would reject the address (finding B13): the host's own IPv4 nameservers, those of systemd-resolved's
 // upstream file when /etc/resolv.conf names a loopback stub, and the
 // built-in resolver of the box's network backend (slirp4netns: the third
 // address of its network; pasta: Podman's DNS forward address; named

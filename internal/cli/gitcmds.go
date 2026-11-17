@@ -878,9 +878,11 @@ func (a *app) stdoutTerminal() bool {
 
 // --- worktrees ---
 
-// newWorktreeCmd is `devc wt new|ls|rm`. Only rm banks first: a worktree
-// is removed only once its uncommitted work is in the relay, unless
-// --discard says to lose it.
+// newWorktreeCmd is `devc wt new|ls|rm`. Only rm banks first: in a
+// project with a relay, a worktree is removed only once a bank has its
+// snapshot, unless --discard says to lose it. What a snapshot leaves out
+// (ignored files, untracked files over the limit, nested repositories)
+// goes with the worktree; without a relay nothing is banked.
 func newWorktreeCmd(a *app) *cobra.Command {
 	var from string
 	newCmd := &cobra.Command{

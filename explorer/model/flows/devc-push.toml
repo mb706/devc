@@ -28,7 +28,7 @@ text = "A running box is banked first, so the push includes its newest commits; 
 [[step]]
 at = "cli"
 ref = "internal/gitx.Service.MainBranch"
-text = "Without branches or tags, the branch checked out in the box's `main` is pushed (asked with `git symbolic-ref` in the box), or the relay's HEAD branch when the box is down."
+text = "Without branches or tags, the branch checked out in the box's `main` is pushed (asked with `git symbolic-ref` in the box), or the relay's HEAD branch when the box is down or devc cannot tell (a detached HEAD, a box that does not answer)."
 
 [[step]]
 section = "What would change"

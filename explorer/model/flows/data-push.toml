@@ -124,6 +124,7 @@ via = "reply"
 label = "preview; push 12 files (1.2 GB) to nas? [y/N]"
 ref = "internal/cli.printSyncPreview"
 text = "Up to 200 lines, the totals, how many files replace one on the remote and where those are kept."
+detail = "The question comes only when the preview transfers a regular file; one of directories and symlinks alone goes ahead without it. With `--yes` neither the preview nor the question is shown, and without a terminal the question is a refusal."
 
 [[step]]
 from = "user"
@@ -165,7 +166,8 @@ section = "Afterwards"
 at = "cli"
 ref = "internal/data.AppendManifest"
 checks = ["internal/data.Record.Check"]
-text = "One `push` record per entry, describing the staged tree as sent; the remote may keep further files there."
+text = "One `push` record per entry, describing the staged tree as the worker hashed it before rsync ran; the remote may keep further files there."
+detail = "The record does not prove what the remote received: rsync skips a remote file whose size and time match whatever its bytes (no `--checksum`; `--content` changes only the record's digest), and the box can rewrite a staged file through its original name until rsync has read it."
 
 [[step]]
 from = "cli"

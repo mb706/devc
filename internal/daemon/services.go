@@ -18,7 +18,9 @@
 // clear message and the live sessions of the box a note. With auth.auto
 // the daemon runs the login itself, once at a time per service and at most
 // once a minute, as a child process of the same binary (`devc service
-// login`), so the CLI's checks, lock and container apply unchanged.
+// login`), so the CLI's checks, lock and container apply unchanged; a
+// request that found the jar unusable waits for that login and is served
+// if it helped, while one the upstream refused still gets 503.
 
 package daemon
 

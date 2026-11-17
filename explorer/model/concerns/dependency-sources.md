@@ -54,7 +54,7 @@ refs = ["internal/depsrc.Spec.check", "internal/depsrc.CheckVersion", "internal/
 tests = ["internal/depsrc.TestParseSpec", "internal/depsrc.TestDiscover"]
 
 [[invariant]]
-text = "The cache never holds a partial or unverified tree: an archive is verified, unpacked into a temporary directory and only then renamed into place."
+text = "A fetch puts a tree into the cache only after its archive passed its checks and was unpacked into a temporary directory; a version directory already there is used unchecked, whoever wrote it."
 refs = ["internal/depsrc.Fetch", "internal/depsrc.Options.download"]
 tests = ["internal/depsrc.TestFetch"]
 
@@ -64,7 +64,7 @@ refs = ["internal/depsrc.cachedVersion", "internal/depsrc.concrete", "internal/d
 tests = ["internal/depsrc.TestFetchCachedOffline", "internal/depsrc.TestFetchMovingNames"]
 
 [[invariant]]
-text = "A GitHub token from the box's environment is sent only to GitHub's own API, never to another registry or a configured base."
+text = "A GitHub token from the box's environment is sent only to GitHub's own API host (or, after a redirect, another port or a subdomain of it), never to another registry or a configured base."
 refs = ["internal/depsrc.Options.headers"]
 
 [[diagram]]
@@ -233,7 +233,7 @@ An agent that wants to know how a dependency behaves should read its source at t
 - **The two exceptions.** CRAN's archive and GitHub's tarballs publish no checksum; integrity rests on https and the redirect rules, which keep a redirect to the archive that was asked for ([[finding:F2-01]]).
 - **A registry naming paths.** The version a registry or installed metadata gives is checked before it becomes a directory; npm's answer must name the package asked for.
 - **A hostile archive.** The extractor writes only below its new directory, follows no symlink and leaves out links leaving the tree, hard links and special files ([[concern:host-foundations]]).
-- **The shared cache.** Every box of the realm can write `/src`, so one box can plant a tree another reads; a realm is one trust domain ([[doc:docs/dev/LEFTOVER.md#5]]). The cache is never pruned, and two fetches of one version both download.
+- **The shared cache.** Every box of the realm can write `/src`, and a version directory that exists is answered without any check of what it holds, so one box can plant a tree another reads; a realm is one trust domain ([[doc:docs/dev/LEFTOVER.md#5]]). The cache is never pruned, and two fetches of one version both download.
 - **Running fetched code.** Nothing fetched is built, installed, imported or run.
 
 ## Decisions that are not obvious

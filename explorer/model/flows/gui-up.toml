@@ -28,7 +28,7 @@ text = "A container with the sidecar's name that devc did not create as this pro
 [[step]]
 at = "cli"
 ref = "internal/gui.LimitArgs"
-text = "`[gui]` memory, pids and cpus become engine arguments; a limit whose cgroup controller is not delegated fails `gui up` before anything changes."
+text = "`[gui]` memory, pids and cpus become engine arguments; a limit whose cgroup controller is not delegated fails `gui up` before an earlier desktop is removed; the box stays started if this `gui up` started it."
 
 [[step]]
 at = "cli"

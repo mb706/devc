@@ -113,7 +113,7 @@ to = "state-dir"
 via = "file"
 label = "durable/realms/<realm>/secrets/_jar.intranet"
 ref = "internal/secrets.FileStore.Set"
-text = "The jar, with the time of the login, as a realm secret no box mounts; no project may grant a `_jar.` secret."
+text = "The jar, with the time of the login, as a realm secret no box mounts; no project may list a `_jar.` secret in `grants.secrets`, although `grants.github = \"token:<secret>\"` could name it unchecked."
 
 [[step]]
 from = "cli"

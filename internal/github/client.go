@@ -59,7 +59,8 @@ func NewClient(api *url.URL, token string) *Client {
 // checkRedirect follows a few redirects (job logs redirect to signed
 // storage URLs), never to plain http unless the API itself is plain http
 // (a test server), and never from https to http. Go's client drops the
-// Authorization header itself on a redirect to another host.
+// Authorization header itself on a redirect to a host that is neither
+// the API's host name nor a subdomain of it; the port is not compared.
 func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
 		return errors.New("too many redirects")

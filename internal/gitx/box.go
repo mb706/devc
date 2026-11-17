@@ -128,8 +128,8 @@ func printable(s string) string { return proto.PrintableText(s) }
 // maxReport caps JSON reports read from a box.
 const maxReport = 1 << 20
 
-// decodeStrict decodes one JSON value from a box: no unknown fields,
-// nothing after it.
+// decodeStrict decodes one JSON value from a box: no unknown fields, no
+// second value after it (Decoder.More does not see a stray ']' or '}').
 func decodeStrict(b []byte, v any) error {
 	if len(b) > maxReport {
 		return fmt.Errorf("the report is larger than %d bytes", maxReport)

@@ -99,7 +99,8 @@ detail = "An entry the vault owns already is walked again (completing an interru
 [[step]]
 at = "helper"
 ref = "internal/boxside.digestEntry"
-text = "The entry's name must still refer to the inode the worker opened; if the box moved it first, the seal fails here without a record. Then the digest of what was sealed: every file and symlink with its size, and its content hash with `--content`."
+text = "A directory's name must still refer to the directory the worker opened; if the box moved it first, the seal fails here without a record. Then the digest of what was sealed: every file and symlink with its size, and its content hash with `--content`."
+detail = "For a regular file the name is compared with the `lstat` made before the file was opened, not with the file the worker re-owned: a box that swaps another file in for the open and the original back before this check passes it, with a record and a digest of a file it can still write ([[concern:data-and-sealing]])."
 
 [[step]]
 at = "helper"

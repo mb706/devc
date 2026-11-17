@@ -184,7 +184,7 @@ ref = "internal/paths.Paths.NetLogFile"
 
 [[tree.entry]]
 path = "durable/realms/<realm>/gate-log.jsonl"
-text = "One line per SSH gate session of the realm's boxes, run or refused, with the command up to 4 KiB (0600, appended under a lock). Never rotated."
+text = "One line per SSH gate session of the realm's boxes that reached `devc gate-exec`, run or refused there, with the command up to 4 KiB (0600, appended under a lock). The daemon's earlier refusals are not in it. Never rotated."
 writer = "host"
 ref = "internal/paths.Paths.GateLog"
 
@@ -842,7 +842,7 @@ ref = "internal/paths.InBoxWorktree"
 
 [[tree.entry]]
 path = "<realm>/<project>/<worktree>"
-text = "A task worktree beside main, on the branch `<branch_prefix><worktree>`; `devc wt rm` removes it after banking, and its branch stays."
+text = "A task worktree beside main, on the branch `<branch_prefix><worktree>`; `devc wt rm` removes it, in a project with a relay after a bank (what snapshots leave out is lost with it), and its branch stays."
 writer = "box"
 ref = "internal/gitx.Service.WorktreeNew"
 

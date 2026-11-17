@@ -136,7 +136,7 @@ to = "launcher"
 via = "file"
 label = "<runtime>/<box-id>-secrets/<name>"
 ref = "internal/secrets.Deliver"
-text = "The values are written as 0400 files into the box's secrets directory, which must be memory-backed (unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`) and is mounted read-only at `/run/devc-secrets`. With `secrets.delivery = \"daemon\"` nothing is written there and the launcher asks the daemon instead."
+text = "The values are written as 0400 files into the box's secrets directory, which must be memory-backed (unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`) and is mounted read-only at `/run/devc-secrets`. With `secrets.delivery = \"daemon\"` only the SSH gate's key (for a box with an SSH grant) is written there, and the launcher asks the daemon for the rest."
 
 [[step]]
 at = "launcher"

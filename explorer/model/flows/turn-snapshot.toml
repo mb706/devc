@@ -77,7 +77,7 @@ text = "Every worktree devc manages (`main` and the siblings below the project d
 at = "box-tools"
 ref = "internal/boxside.Repo.snapshotOne"
 text = "A temporary index is seeded from HEAD; tracked changes and untracked files that are not ignored (regular files up to 10 MiB, symlinks) go in; the tree becomes a commit with HEAD as parent in `refs/devc/wip/<worktree>`. A clean worktree gets none, an unchanged one keeps its commit."
-detail = "The worktree's own index and files are never touched. Left-out files (larger, special, nested repositories) are listed in the commit message and in the report, at most 100 per worktree."
+detail = "The worktree's own index and files are never touched. Left-out untracked files (larger, special, unreadable, nested repositories) are listed, all of them in the commit message of a new snapshot, at most 100 per worktree in the report with a count of the rest. Ignored files are neither taken nor listed."
 
 [[step]]
 from = "box-tools"

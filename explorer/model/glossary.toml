@@ -467,7 +467,7 @@ see = ["git-ratchet", "banking"]
 id = "snapshot"
 title = "Snapshot"
 aka = ["snapshot commit"]
-text = "A commit of a worktree's uncommitted work, made in the box with a temporary index and HEAD as parent, kept as `refs/devc/wip/<worktree>` in the box repository; a bank records it in the relay as `refs/devc/snap/<worktree>/<unix time>` when it differs from the last one."
+text = "A commit of a worktree's uncommitted work, made in the box with a temporary index and HEAD as parent, kept as `refs/devc/wip/<worktree>` in the box repository; a bank records it in the relay as `refs/devc/snap/<worktree>/<unix time>` when it differs from the last one. Ignored files, untracked files over 10 MiB, nested repositories and special files are left out."
 refs = ["internal/boxside.Repo.Snapshot", "internal/gitx.SnapPrefix"]
 see = ["banking"]
 
@@ -539,7 +539,7 @@ see = ["upstream", "relay-service"]
 id = "forward"
 title = "Forward"
 aka = ["forwarding"]
-text = "A push of a relay branch to the upstream that devc makes on its own, after a bank or a relay-service push, for branches matching `git.forward`. Never forced: the upstream refuses a non-fast-forward."
+text = "A push of a relay branch to the upstream that devc makes on its own, after a bank or a relay-service push, for branches matching `git.forward` whose tip differs from `github/<branch>`: after a bank every such branch, after a push only those it updated. Never forced, so git refuses a non-fast-forward."
 refs = ["internal/gitx.Service.forward", "internal/gitx.Matches"]
 see = ["upstream"]
 
@@ -561,7 +561,7 @@ see = ["snapshot"]
 id = "network-level"
 title = "Network level"
 aka = ["level"]
-text = "What a box's network allows, set by a project's `network.level` or the realm's `network.default`: `none` (no network), `allowlist` (listed names through the daemon's proxy), `internet` (public IPv4 only, rules installed by the host; the default) or `open` (the engine's network as it is)."
+text = "What a box's network allows, set by a project's `network.level` or the realm's `network.default`: `none` (no network), `allowlist` (listed names through the daemon's proxy), `internet` (public IPv4 only, rules installed by the host; the default) or `open` (the engine's network as it is). The channel's services (the relay service, host exceptions, the SSH gate, GitHub, service logins) do not depend on it."
 refs = ["internal/netpolicy.BoxArgs"]
 see = ["allowlist-proxy", "network-binding", "network-exception"]
 
@@ -590,7 +590,7 @@ see = ["sentinel"]
 [[term]]
 id = "trusted-resolver"
 title = "Trusted resolver"
-text = "A nameserver a box of level internet may reach on port 53: one the host computed from its own resolv.conf, systemd-resolved's upstream file or the network backend's inspect data. A nameserver only the box's resolv.conf names gets no exception."
+text = "A nameserver that the rules of level internet open on port 53 even at a private or host address: one the host computed from its own resolv.conf, systemd-resolved's upstream file or the network backend's inspect data. A nameserver only the box's resolv.conf names gets no exception; public addresses are open on every port anyway."
 refs = ["internal/netpolicy.TrustedResolvers"]
 see = ["network-level"]
 
@@ -637,7 +637,7 @@ see = ["local-url"]
 id = "local-url"
 title = "Local URL"
 aka = ["router"]
-text = "`http://<port>.<project>.<realm>.localhost:7480/`, served by the daemon's router for ports in a project's `box.ports` or forwarded at the moment, through the same dial process as a port forward. Cross-origin browser requests are refused."
+text = "`http://<port>.<project>.<realm>.localhost:7480/`, served by the daemon's router for ports in a project's `box.ports` or forwarded at the moment, through the same dial process as a port forward. From another origin the router refuses a WebSocket upgrade or a method other than GET and HEAD, and a cross-site request that is not a top-level GET navigation."
 refs = ["internal/daemon.router.ServeHTTP", "internal/daemon.crossOrigin"]
 see = ["port-forward"]
 
@@ -676,7 +676,7 @@ see = ["ssh-gate"]
 [[term]]
 id = "gate-log"
 title = "Gate log"
-text = "`durable/realms/<realm>/gate-log.jsonl`: one line per gate session of the realm's boxes, run or refused, with box, host, mode, the command up to 4 KiB, exit status and duration. Never rotated."
+text = "`durable/realms/<realm>/gate-log.jsonl`: one line per gate session that reached `devc gate-exec`, run or refused there, with box, host, mode, the command up to 4 KiB, exit status and duration. Never rotated. What the daemon refuses before sshd runs, and failed logins to the gate's sshd, are only in the daemon's log."
 refs = ["internal/gate.AppendLog", "internal/gate.Entry"]
 see = ["ssh-gate"]
 
@@ -684,7 +684,7 @@ see = ["ssh-gate"]
 id = "realm-secret"
 title = "Realm secret"
 aka = ["secret"]
-text = "A value stored on the host in `durable/realms/<realm>/secrets/<name>` (0600) with `devc secret set` or `devc login`, given to the boxes of projects whose `grants.secrets` name it (and to token harnesses). The agent can read what its box is given."
+text = "A value stored on the host in `durable/realms/<realm>/secrets/<name>` (0600) with `devc secret set` or `devc login`, given to the boxes of projects whose `grants.secrets` name it (and to token harnesses, and as a GitHub token where `grants.github = \"token:<name>\"`). The agent can read what its box is given."
 refs = ["internal/secrets.FileStore", "internal/box.GrantedSecrets"]
 see = ["secret-delivery", "grant"]
 
@@ -692,7 +692,7 @@ see = ["secret-delivery", "grant"]
 id = "secret-delivery"
 title = "Secret delivery"
 aka = ["delivery files", "delivery daemon"]
-text = "How a box receives its secrets, `secrets.delivery` in config.toml: `files` (the default) writes them before every start into the box's secrets directory (memory-backed unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`), mounted read-only at `/run/devc-secrets`; `daemon` writes nothing and the launcher asks the daemon with `host.secret` at each launch."
+text = "How a box receives its secrets, `secrets.delivery` in config.toml: `files` (the default) writes them before every start into the box's secrets directory (memory-backed unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`), mounted read-only at `/run/devc-secrets`; `daemon` writes no stored secret (only the SSH gate's generated key, for a box with an SSH grant) and the launcher asks the daemon with `host.secret` at each launch."
 refs = ["internal/harness.BoxHooks.deliverSecrets", "internal/secrets.Deliver", "internal/daemon.Daemon.secret"]
 see = ["realm-secret"]
 
@@ -716,7 +716,7 @@ see = ["data-root", "sealing"]
 id = "sealing"
 title = "Sealing"
 aka = ["seal", "sealed entry"]
-text = "`devc seal <path>` hands a direct child of a sealed zone to the vault and removes its write bits, recursively and without following links; from then on nothing in the box can change, move or remove it. It protects against the box, not against you: `devc data unseal` gives it back."
+text = "`devc seal <path>` hands a direct child of a sealed zone to the vault and removes its write bits, recursively and without following links; from then on nothing in the box can open it for writing, move or remove it (a descriptor opened for writing before the seal still works, and a hard-linked file is sealed under every name). It protects against the box, not against you: `devc data unseal` gives it back."
 refs = ["internal/boxside.DataWorker.seal", "internal/boxside.DataWorker.ownTree"]
 see = ["vault", "zone"]
 
@@ -738,7 +738,7 @@ see = ["data-root"]
 [[term]]
 id = "savepoint"
 title = "Savepoint"
-text = "A copy of the data root without its input zones and sealed entries that no box can reach, taken by `devc save`, before sessions or on a box's request: a vault-owned reflink copy in `.devc/savepoints/` or a restic snapshot in the state directory. `devc restore` brings it back as a copy or in place."
+text = "A copy of the data root without its input zones and sealed entries that no box can reach, taken by `devc save`, before sessions `devc <harness>` starts (with `before_session`) or on a box's request: a vault-owned reflink copy in `.devc/savepoints/` or a restic snapshot in the state directory. `devc restore` brings it back as a copy or in place."
 refs = ["internal/data.Savepoint", "internal/data.Service.Save"]
 see = ["reflink-copy", "data-trash"]
 
@@ -830,7 +830,7 @@ see = ["host-github-credential", "github-token-mode"]
 id = "host-github-credential"
 title = "Host GitHub credential"
 aka = ["github-token"]
-text = "The user's own GitHub token on the host: the realm secret `github-token`, else what `gh auth token` prints. Only the read facade and `devc pr` use it; no box receives it."
+text = "The user's own GitHub token on the host: the realm secret `github-token`, else what `gh auth token` prints. Only the read facade and `devc pr` use it; no box receives it unless a grant names the secret `github-token` (`grants.secrets`, `token:github-token`), which nothing refuses."
 refs = ["internal/github.HostToken"]
 see = ["read-facade"]
 
@@ -878,7 +878,7 @@ see = ["service"]
 id = "cookie-jar"
 title = "Cookie jar"
 aka = ["_jar.<service>", "jar"]
-text = "The cookies a cookie service's login command printed, checked strictly and stored with the time of the login as the realm secret `_jar.<service>`. The proxy sends the cookies that apply to each request; no project may grant the secret."
+text = "The cookies a cookie service's login command printed, checked strictly and stored with the time of the login as the realm secret `_jar.<service>`. The proxy sends the cookies that apply to each request. No project may list the secret in `grants.secrets`; `grants.github = \"token:<secret>\"` is not checked, so a GitHub project naming it there receives it."
 refs = ["internal/svclogin.Jar", "internal/svclogin.ParseLoginOutput"]
 see = ["login-container", "service"]
 

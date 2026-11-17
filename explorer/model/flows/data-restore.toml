@@ -114,7 +114,8 @@ section = "In place"
 [[step]]
 at = "helper"
 ref = "internal/boxside.DataWorker.restoreInPlace"
-text = "The savepoint is walked twice. The dry pass changes nothing and only looks for refusals, so a refusal comes before any change."
+text = "The savepoint is walked twice. The dry pass replaces nothing and only looks for refusals, so a refusal it can foresee comes before any entry is replaced."
+detail = "The layout was applied before it (missing directories made, owners and modes set). The restore is not atomic: the box keeps running, and a failure in the second pass (a full disk, something the box changed meanwhile) stops it there, with what it already displaced listed in the trash entry."
 
 [[step]]
 at = "helper"
@@ -130,7 +131,7 @@ text = "An entry that already is what the restore would make (the same symlink t
 [[step]]
 at = "helper"
 ref = "internal/boxside.inPlace.displace"
-text = "Anything else in the way moves by rename into one trash entry `<stamp>-restore-<id>`, whose `meta.json` lists it; then the saved entry is copied in. Entries that exist now but not in the savepoint stay."
+text = "Anything else in the way moves by rename into one trash entry `<stamp>-restore-<id>`, whose `meta.json` lists it; then the saved entry is copied in. Entries that exist now but not in the savepoint stay, except below a directory the savepoint has as a file or symlink: that directory moves to the trash whole."
 
 [[step]]
 from = "helper"

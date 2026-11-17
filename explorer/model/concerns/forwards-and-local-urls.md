@@ -80,7 +80,7 @@ An agent starts a web server, a notebook or a database in its box and the owner 
 nsenter --user=/proc/self/fd/3 --net=/proc/self/fd/4 --preserve-credentials <devc> box dial 127.0.0.1:<port>
 ```
 
-with the connection as standard input and output, `DEVC_BOX=1` as its only environment and `/` as working directory ([[internal/netpolicy.Forwarder.DialArgs]]). `nsenter` enters the namespaces given as open descriptors 3 and 4: the box's user namespace (so the process is the box user and holds no capability once devc runs) and its network namespace, where `127.0.0.1` is the box's loopback. It stays in the host's mount namespace, so it runs the host's binary and reads nothing of the box. [[internal/boxside.Dial]] connects within ten seconds and relays both ways, passing half-closes on. At level internet the connection passes the box's rules on the loopback interface, which they accept.
+with the connection as standard input and output, the calling process's environment with `DEVC_BOX=1` added (so it loads no host configuration) and `/` as working directory ([[internal/netpolicy.Forwarder.DialArgs]], [[internal/execx.Real]]). `nsenter` enters the namespaces given as open descriptors 3 and 4: the box's user namespace (so the process is the box user and holds no capability once devc runs) and its network namespace, where `127.0.0.1` is the box's loopback. It stays in the host's mount namespace, so it runs the host's binary and reads nothing of the box. [[internal/boxside.Dial]] connects within ten seconds and relays both ways, passing half-closes on. At level internet the connection passes the box's rules on the loopback interface, which they accept.
 
 **Pinning** ([[internal/netpolicy.Pin]]). The descriptors are opened once, from `/proc/<pid>/ns/user` and `/proc/<pid>/ns/net` of the box's main process. Between two engine reports of the same PID and start time, and two reads of that PID's start time in `/proc`, they are proven to belong to this box, not to a process that reused its PID ([[finding:B5]]). Every connection uses the pinned descriptors, so it reaches this box generation or nothing.
 
@@ -89,7 +89,7 @@ with the connection as standard input and output, `DEVC_BOX=1` as its only envir
 **The router** ([[term:local-url]], [[flow:local-url]]). The daemon listens on `router.listen` ([[config:config.router.listen]], default `127.0.0.1:7480`; validation accepts only a loopback address with a port, or `off`), read once at start. For each request [[internal/daemon.router.ServeHTTP]]:
 
 1. parses the Host as `<port>.<project>.<realm>.localhost` with an optional port ([[internal/daemon.ParseLocalHost]]); realm names have no dots, so the realm is the last label (`404` otherwise);
-2. refuses cross-origin browser requests ([[internal/daemon.crossOrigin]], `403`);
+2. refuses a WebSocket upgrade or a method other than GET and HEAD from another origin, and a cross-site request that is not a top-level GET navigation ([[internal/daemon.crossOrigin]], `403`; below);
 3. reloads the configuration if it changed and requires a configured project without problems (`404`);
 4. requires the port in the project's `box.ports` ([[config:project.box.ports]]) or a live forward of that port (`404` with both ways to allow it);
 5. requires the daemon's box table to show the box running (`502`) and one of 128 places (`503`);
@@ -99,11 +99,11 @@ with the connection as standard input and output, `DEVC_BOX=1` as its only envir
 
 - **A box executing something on the host.** The dial process is the host's binary in the box's network namespace; it reads nothing from the box and runs nothing it names.
 - **A recycled PID.** Pinning proves the namespaces belong to the box; a restart ends a forward, and the router drops its pin when the daemon sees the box stop.
-- **A page of one box driving another box's server.** Every local URL is an origin of its own, but a WebSocket is not bound by the same-origin policy and a form POST needs no CORS. So an upgrade or a state-changing method must carry no `Origin` or exactly its own, and a request Fetch Metadata marks as cross-site passes only as a top-level GET navigation ([[finding:D1-01]]). Programs that send neither header pass.
+- **A page of one box driving another box's server.** Every local URL is an origin of its own, but a WebSocket is not bound by the same-origin policy and a form POST needs no CORS. So an upgrade or a state-changing method must carry no `Origin` or exactly its own, and a request Fetch Metadata marks as cross-site passes only as a top-level GET navigation ([[finding:D1-01]]). Programs that send neither header pass, and so does a plain GET or HEAD from another origin that Fetch Metadata calls same-site: the router checks no `Origin` on those.
 - **DNS rebinding.** Routing only by a Host below `.localhost` means a page that rebinds its own name to `127.0.0.1` matches no route.
 - **A planted forward record.** Records live in the runtime directory outside every box's mount, are decoded strictly, must name the project's box, and count only while their process is the forward.
 
-Limits: the router has no authentication, so any process on the host that can connect to its loopback address reaches the routed ports, and so does anyone who can reach a forward's `--bind` address. Local URLs share the parent name `localhost`, so one box's page can set cookies for another's. A change of `router.listen` needs a daemon restart ([[doc:docs/dev/LEFTOVER.md#5]]).
+Limits: the router has no authentication, so any process on the host that can connect to its loopback address reaches the routed ports, and so does anyone who can reach a forward's `--bind` address; a forward starts a dial process for every connection it accepts, with no limit ([[doc:docs/dev/LEFTOVER.md#7]]). Local URLs share the parent name `localhost`, so one box's page can set cookies for another's. A change of `router.listen` needs a daemon restart ([[doc:docs/dev/LEFTOVER.md#5]]).
 
 ## Decisions that are not obvious
 

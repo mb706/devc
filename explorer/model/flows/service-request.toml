@@ -90,11 +90,12 @@ at = "daemon"
 ref = "internal/svclogin.Proxy.ServeHTTP"
 unchecked = "net/http's server, started by serviceManager.start on the connListener, accepts the stream and calls the handler; ConnContext attaches the decision made above"
 text = "A declared body over `max_body` gets 413; the rest of the exchange runs under `limits.timeout`."
+detail = "A body without a declared length (chunked) is cut at `max_body` only while it streams to the upstream, after the credential was added, so its first `max_body` bytes do reach the upstream before the request fails."
 
 [[step]]
 at = "daemon"
 ref = "internal/daemon.serviceManager.credential"
-text = "The credential for this request. A header service reads its secret each time; a cookie service would take its jar's `Cookie` for this path, or answer 503 when a login is needed ([[flow:service-login]])."
+text = "The credential for this request. A header service reads its secret each time; a cookie service would take its jar's `Cookie` for this path, or answer 503 when a login is needed ([[flow:service-login]]); with `auto` it first waits for the automatic login and goes on if that gave a usable jar."
 
 [[step]]
 from = "daemon"

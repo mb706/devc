@@ -37,7 +37,7 @@ text = "No version given: the installed one. For R, the first `DESCRIPTION` in t
 [[step]]
 at = "box-tools"
 ref = "internal/depsrc.cachedVersion"
-text = "A version that names one release for good (any CRAN or PyPI version, an exact npm version, a GitHub commit) already in `/src`, directly or through an alias file, is answered here, without the network."
+text = "A version that names one release for good (any CRAN or PyPI version, an exact npm version, a GitHub commit) already in `/src`, directly or through an alias file, is answered here, without the network and without a look at what the directory holds: any box of the realm may have written it."
 
 [[step]]
 section = "Asking the registry"
@@ -100,7 +100,7 @@ text = "Written into a new temporary directory below the package's directory in 
 at = "box-tools"
 ref = "internal/depsrc.Options.download"
 checks = ["internal/depsrc.Options.download"]
-text = "The archive's checksum must equal the registry's; otherwise it is refused, and the temporary directory is removed, so nothing unverified stays in the cache."
+text = "The archive's checksum must equal the registry's; otherwise it is refused, and the temporary directory is removed, so nothing of this download stays in the cache."
 
 [[step]]
 at = "box-tools"

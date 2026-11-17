@@ -16,7 +16,7 @@ via = "cmd:devc save"
 label = "devc save before-refit demo/analysis"
 external = true
 text = "You take a named savepoint; a single argument containing `/` would be the project and no name."
-detail = "The same command runs before a session with `before_session = true` (unnamed, unless one is younger than 30 minutes), and when a box's `savepoint` request is approved, by default automatically ([[concern:requests-and-approval]])."
+detail = "The same command runs before a session `devc <harness>` starts with `before_session = true` (unnamed, unless one is younger than 30 minutes or the driver is `none`; sessions the daemon starts take none), and when a box's `savepoint` request is approved, by default automatically ([[concern:requests-and-approval]])."
 
 [[step]]
 at = "cli"

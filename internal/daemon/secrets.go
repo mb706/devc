@@ -1,6 +1,7 @@
 // On-demand secrets (work order C10a section 3). With secrets.delivery =
-// "daemon" nothing is written into a box; its launcher asks host.secret
-// for the harness credential and each granted secret. The daemon answers
+// "daemon" no stored secret is written into a box (the SSH gate's
+// generated key still is, harness.BoxHooks.deliverSecrets); its launcher
+// asks host.secret for the harness credential and each granted secret. The daemon answers
 // only for names the project of the channel is granted (its
 // grants.secrets and the secrets of its token harnesses) now and was
 // granted when its box was started (box.Capabilities, finding C1-02).

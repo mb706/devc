@@ -69,8 +69,8 @@ refs = ["internal/box.Manager.checkNetwork", "internal/netpolicy.EvaluateCanary"
 tests = ["internal/netpolicy.TestCanary", "internal/box.TestInternetLevel"]
 
 [[invariant]]
-text = "Port 53 is open only towards resolvers the host computed from its own files and the engine's inspect data, never towards one only the box's resolv.conf names."
-refs = ["internal/netpolicy.TrustedResolvers", "internal/netpolicy.Gather"]
+text = "Without an exception, port 53 at a private or host address is open only at resolvers the host computed from its own files and the engine's inspect data, never at one only the box's resolv.conf names."
+refs = ["internal/netpolicy.TrustedResolvers", "internal/netpolicy.Gather", "internal/netpolicy.Rules"]
 tests = ["internal/netpolicy.TestTrustedResolvers", "internal/netpolicy.TestGather", "test/integration.TestNetworkResolvers"]
 
 [[invariant]]
@@ -191,12 +191,12 @@ The owner wants an agent to download packages and call APIs without reaching the
 
 | Level | What `podman create` gets | What the box reaches |
 |---|---|---|
-| `none` | `--network none` | nothing; only host exceptions (`host:<port>`) through the agent |
+| `none` | `--network none` | nothing directly; through the agent, host exceptions (`host:<port>`) and the channel's services |
 | `allowlist` | `--network none` and the proxy variables pointing at `127.0.0.1:3128` | listed names, through the daemon's proxy |
 | `internet` (default) | the engine's network, two sysctls switching IPv6 off, rules installed by the host | public IPv4 addresses; no IPv6, LAN or host |
 | `open` | the engine's network | whatever the engine allows; devc adds nothing |
 
-At `none` and `allowlist` a box has no interface but loopback: without the host it has no network at all.
+At `none` and `allowlist` a box has no interface but loopback: without the host it has no network at all. The channel's services do not depend on the level ([[internal/daemon.boxWorker.serveStream]]): the relay service, host exceptions and what grants add (the SSH gate, GitHub, service logins) work at every level.
 
 **The rules.** [[internal/netpolicy.Rules]] renders one script, applied with `nft -f -` as one transaction; its structure:
 
@@ -223,15 +223,15 @@ table inet devc {
 
 The first two lines make a second application replace the first. An nftables set is a kernel table that one rule matches against; its elements may carry a timeout after which the kernel drops them, which is how exceptions expire without a process. There is no rule for established connections, so every outgoing packet passes the chain. Only outgoing traffic is filtered.
 
-**The start sequence** ([[internal/box.Manager.startBox]], [[flow:network-install]]). `podman init` creates the container's namespaces and runs nothing of the box; a network namespace is the kernel's private copy of interfaces, routes and firewall tables. The host reads the namespace's path and the box's resolv.conf and hosts file, which the box could rewrite once it runs ([[internal/netpolicy.Gather]]). [[internal/netpolicy.Installer.Install]] runs `podman unshare nsenter --net=<namespace> nft -f -`: `podman unshare` enters the engine's user namespace, in which the user is root and below which the box's namespaces were made, and `nsenter` enters the box's network namespace. Verify lists the table and requires the set `allow4`, the chain `output` and the sentinel address. Then the binding is written, and only then comes `podman start`. A failure removes a new container or stops an existing one.
+**The start sequence** ([[internal/box.Manager.startBox]], [[flow:network-install]]). `podman init` creates the container's namespaces and runs nothing of the box; a network namespace is the kernel's private copy of interfaces, routes and firewall tables. The host reads the namespace's path and the box's resolv.conf and hosts file, which the box could rewrite once it runs ([[internal/netpolicy.Gather]]). [[internal/netpolicy.Installer.Install]] runs `podman unshare nsenter --net=<namespace> nft -f -`: `podman unshare` enters the engine's user namespace, in which the user is root and below which the box's namespaces were made, and `nsenter` enters the box's network namespace. Verify lists the table and requires the set `allow4`, the chain `output` and the sentinel address. Then the binding is written, and only then comes `podman start`. A failure removes a container this `up` created or stops one it started.
 
-**Trusted resolvers.** [[internal/netpolicy.TrustedResolvers]] takes the host's IPv4 nameservers, systemd-resolved's upstream servers when `/etc/resolv.conf` names a loopback stub, and the network backend's built-in resolver from the inspect data. A nameserver only the box's resolv.conf names gets no exception, with a warning. [[internal/netpolicy.BackendHostAddrs]] adds the backend's ways to the host (slirp4netns's gateway, pasta's mapped address, named networks' gateways) to the rejected host addresses.
+**Trusted resolvers.** Their rule lets DNS through to a private or host address that the rules after it would reject; public addresses are open on port 53 as on every other port. [[internal/netpolicy.TrustedResolvers]] takes the host's IPv4 nameservers, systemd-resolved's upstream servers when `/etc/resolv.conf` names a loopback stub, and the network backend's built-in resolver from the inspect data. A nameserver only the box's resolv.conf names gets no exception, with a warning. [[internal/netpolicy.BackendHostAddrs]] adds the backend's ways to the host (slirp4netns's gateway, pasta's mapped address, named networks' gateways) to the rejected host addresses.
 
 **The binding** ([[term:network-binding]]). [[internal/netpolicy.Installer.Bind]] records the namespace's inode (read with `podman unshare stat -L`), the start time of the box's main process from `/proc/<pid>/stat` and the kernel's boot ID in `etc/netns.json`, which the box sees read-only as `/etc/devc/netns.json`. Where the host can read `/proc/<pid>/ns/net`, it must be that namespace. Every start through devc removes the old record first.
 
 **Box init's check** ([[internal/boxside.NetworkCheck]], [[concern:box-init-and-agent]]). At level internet, or when `box.json` cannot be read, box init requires the record to equal its own namespace inode, PID 1's start time and the boot ID ([[internal/netpolicy.CheckBinding]]), then requires TCP to the sentinel `192.0.2.1:9` to be refused within five seconds ([[internal/netpolicy.CheckSentinel]]). Without the rules a connection to that TEST-NET-1 address times out or is unreachable, never refused. A failure ends init and the box.
 
-**The canary** ([[term:canary]]). Once the box is ready, [[internal/box.Manager.checkNetwork]] opens a listener on `0.0.0.0` and runs `devc box net-canary` in the box against each of the host's IPv4 addresses and host aliases. The start fails if the box reports a connection, if the listener accepted one, or if the report is malformed or leaves an address out ([[internal/netpolicy.EvaluateCanary]]). Then the capability record is written and the exceptions still valid are applied.
+**The canary** ([[term:canary]]). Once the box is ready, [[internal/box.Manager.checkNetwork]] opens a listener on `0.0.0.0` and runs `devc box net-canary` in the box against each of the host's IPv4 addresses and host aliases. The start fails if the box reports a connection, if the listener accepted one, or if the report is malformed or leaves an address out ([[internal/netpolicy.EvaluateCanary]]). Then the capability record is written and the exceptions still valid are applied. When `up` finishes the start of a box that runs but never reported ready ([[internal/box.Manager.up]]), the rules are verified but not installed again, so exceptions already in the sets stay during the canary; it tries the host's own addresses only, since the hosts file is box-writable by then; and a failure leaves the box running.
 
 **A running box.** `up`, `sh`, `run`, `root`, sessions and forwards first check a running box of level internet from the host: the record must equal what Bind computes now and the table must verify ([[internal/box.Manager.verifyRunning]]); otherwise the box is stopped and started again.
 
@@ -242,7 +242,7 @@ The first two lines make a second application replace the first. An nftables set
 A box controls its processes, its resolv.conf and hosts file once running, and everything in its writable mounts; it has no capability, so it cannot list or change the table ([[concern:isolation]]).
 
 - **A start without rules.** A plain `podman start` (by the user, or a tool) gets a fresh namespace and main process; box init finds the binding wrong and the box stops. Namespace inodes are reused across restarts on the development host, which is why the record holds the start time and boot ID too ([[finding:B1]]).
-- **A planted resolver.** Only resolvers the host computed itself get port 53 ([[finding:B13]]).
+- **A planted resolver.** A resolver at a private or host address gets port 53 only if the host computed it itself ([[finding:B13]]); a public one is reachable like every public address.
 - **The host behind another address.** Its own addresses, the hosts file's alias read before start and the backend's gateways are rejected before the LAN exception set, so even `lan` does not open the host ([[finding:D1-21]]).
 - **Rules that do not work.** The canary tests from outside; hiding a connection in the report does not help, since the host counts connections too.
 

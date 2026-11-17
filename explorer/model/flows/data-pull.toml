@@ -124,6 +124,7 @@ via = "reply"
 label = "preview; pull 214 files (38 GB) from cluster? [y/N]"
 ref = "internal/cli.printSyncPreview"
 text = "Up to 200 lines and the totals, then the question; with `--yes` neither, without a terminal a refusal."
+detail = "A preview that transfers no regular file is approved without the question (the confirmation in [[internal/cli.app.runSync]] counts files only), although new directories and symlinks will then arrive."
 
 [[step]]
 from = "user"

@@ -179,7 +179,7 @@ text = "post-receive gets the updates git applied; its exit status changes nothi
 [[step]]
 at = "relay-hooks"
 ref = "internal/gitx.Service.ReportPush"
-text = "The records of applied updates become the push's report; branches matching `git.forward` are pushed to the upstream, never forced, all within two minutes per branch the push updated and ten minutes at most. The forwards' results reach the pusher as `remote:` lines."
+text = "The records of applied updates become the push's report; of the branches this push updated, those matching `git.forward` are pushed to the upstream, never forced, all within two minutes per branch the push updated and ten minutes at most. The forwards' results reach the pusher as `remote:` lines."
 
 [[step]]
 section = "After git"

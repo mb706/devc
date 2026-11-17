@@ -45,7 +45,7 @@ text = "The first line must arrive within 30 seconds. A `host.proxy` stream need
 at = "daemon"
 ref = "internal/daemon.boxWorker.serveProxy"
 checks = ["internal/proto.DecodeParams"]
-text = "A proxy is built for this box: its policy is computed per request from the channel's project and container, it forbids the host's own addresses (listed again every ten seconds), and its decisions go to the project's log."
+text = "A proxy is built for this box: its policy is computed per request from the channel's project and container, it forbids the host's own addresses (listed again every ten seconds; none while no listing has succeeded), and its decisions go to the project's log."
 
 [[step]]
 at = "daemon"
@@ -106,7 +106,7 @@ to = "state-dir"
 via = "file"
 label = "durable/realms/<realm>/netlog/<project>.jsonl"
 ref = "internal/netpolicy.NetLog.Append"
-text = "The decision is logged: time, method, host, port, allowed, why, the address connected. Box-supplied text is cut to 255 printable bytes; past 4 MiB the log moves to `.1`. Every refusal above is logged the same way."
+text = "The decision is logged: time, method, host, port, allowed, why, the address connected. Box-supplied text is cut to 255 printable bytes; past 4 MiB the log moves to `.1`. Every refusal of the proxy above is logged the same way; a stream refused for want of a relay place is not, since no proxy was built for it."
 
 [[step]]
 from = "daemon"
@@ -130,4 +130,4 @@ text = "Bytes the client sent early are forwarded first. The proxy does not look
 [[step]]
 at = "daemon"
 ref = "internal/netpolicy.Proxy.connect"
-text = "Each direction may be idle ten minutes; once one has ended, the other gets one more minute. Then both sides close and the relay place is free again."
+text = "Each direction may be idle ten minutes; once one has ended, the other may be idle one minute, and goes on while bytes flow. Then both sides close and the relay place is free again."

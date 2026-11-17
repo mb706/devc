@@ -580,7 +580,10 @@ func (w *DataWorker) seal(req DataRequest, res *DataResult, seal bool) error {
 		}
 	}
 	// The box could have renamed the entry before it was sealed; then the
-	// tree is sealed wherever it went, and the record would be wrong.
+	// tree is sealed wherever it went, and the record would be wrong. For a
+	// directory ino is that of the directory sealed; for a regular file it
+	// is the Lstat before ownFile opened the name, so a file swapped in for
+	// the open and back before this check is not noticed.
 	if now, err := zd.Lstat(name); err != nil || now.Ino != ino.Ino || now.Dev != ino.Dev {
 		return fmt.Errorf("%s was moved while it was being processed; check the zone and try again", req.Path)
 	}
@@ -1769,8 +1772,10 @@ type inPlace struct {
 }
 
 // restoreInPlace walks the savepoint twice: a dry pass that only looks for
-// refusals, then the pass that changes the tree. Entries that exist now
-// and not in the savepoint are left alone; a restore never deletes.
+// refusals, then the pass that changes the tree (and can still fail half
+// way). Entries that exist now and not in the savepoint are left alone,
+// unless they lie below a directory the savepoint has as a file or
+// symlink, which is displaced whole; a restore never deletes.
 func (w *DataWorker) restoreInPlace(req DataRequest, root, devc, src *safefs.Dir, fileMode, dirMode func(string, uint32) uint32, res *DataResult) error {
 	c := &copier{w: w, uid: w.BoxUID, gid: w.BoxGID, clone: true, fileMode: fileMode, dirMode: dirMode}
 	ip := &inPlace{w: w, req: req, devc: devc, copier: c}

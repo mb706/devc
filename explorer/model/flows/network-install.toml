@@ -49,7 +49,7 @@ text = "`podman init` creates the container's namespaces, a fresh network namesp
 [[step]]
 at = "cli"
 ref = "internal/netpolicy.TrustedResolvers"
-text = "The resolvers the box may reach on port 53 are computed on the host: its own nameservers, systemd-resolved's upstream servers behind a loopback stub, and the backend's built-in resolver from the inspect data."
+text = "The resolvers that get port 53 even at a private or host address are computed on the host: its own nameservers, systemd-resolved's upstream servers behind a loopback stub, and the backend's built-in resolver from the inspect data."
 
 [[step]]
 at = "cli"
@@ -76,7 +76,7 @@ text = "nft replaces any table `inet devc` and loads the new one in one transact
 [[step]]
 at = "cli"
 ref = "internal/netpolicy.Installer.Verify"
-text = "`nft list table inet devc` in the same namespace must show the set `allow4`, the chain `output` and the sentinel address; otherwise the start fails and the container is removed again."
+text = "`nft list table inet devc` in the same namespace must show the set `allow4`, the chain `output` and the sentinel address; otherwise the start fails: a container this `up` created is removed again, one it restarted is stopped."
 
 [[step]]
 at = "cli"
@@ -182,7 +182,7 @@ text = "The report comes back as the command's output."
 at = "cli"
 ref = "internal/netpolicy.EvaluateCanary"
 checks = ["internal/netpolicy.EvaluateCanary"]
-text = "The listener's count must be zero, and the report, decoded strictly and at most 64 KiB, must name every address and show no connection. Either signal fails the start, and the container is removed again."
+text = "The listener's count must be zero, and the report, decoded strictly and at most 64 KiB, must name every address and show no connection. Either signal fails the start: a container this `up` created is removed again, one it restarted is stopped."
 
 [[step]]
 section = "Ready"
@@ -198,7 +198,8 @@ text = "The capability record names level internet; `devc net allow` and the dae
 [[step]]
 at = "cli"
 ref = "internal/box.NetExceptionHook.AfterStart"
-text = "Exceptions still valid go back into the sets, after the canary, which therefore always tested the rules alone ([[flow:net-allow]]). A failure here is a warning."
+text = "Exceptions still valid go back into the sets, after the canary, which in this flow therefore tested the rules alone ([[flow:net-allow]]). A failure here is a warning."
+detail = "The table was just replaced, so its sets were empty. When `up` finishes the start of a box that runs but never reported ready ([[internal/box.Manager.up]]), nothing is installed again: the canary runs with whatever exceptions the sets hold, tries the host's own addresses only, and a failure leaves the box running."
 
 [[step]]
 from = "cli"

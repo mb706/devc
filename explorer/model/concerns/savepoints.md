@@ -43,8 +43,8 @@ refs = ["internal/boxside.DataWorker.sealedEntries", "internal/boxside.DataWorke
 tests = ["internal/boxside.TestDataSavepointRestore", "internal/data.TestServiceRestic"]
 
 [[invariant]]
-text = "No box can read, change or remove a savepoint: reflink copies are vault-owned and read-only inside `.devc`, restic repositories are in the state directory."
-refs = ["internal/boxside.DataWorker.reflinkSave", "internal/paths.Paths.ResticRepo"]
+text = "No box can read, change or remove a savepoint's copy: reflink copies are vault-owned inside `.devc`, restic repositories in the state directory; approved save requests can make retention drop unnamed ones."
+refs = ["internal/boxside.DataWorker.reflinkSave", "internal/paths.Paths.ResticRepo", "internal/data.Retention"]
 tests = ["test/integration.TestEscape"]
 
 [[invariant]]
@@ -53,7 +53,7 @@ refs = ["internal/boxside.DataWorker.restore"]
 tests = ["internal/boxside.TestDataSavepointRestore"]
 
 [[invariant]]
-text = "An in-place restore finds its refusals before it changes anything, moves what it replaces into one trash entry and deletes nothing."
+text = "An in-place restore looks for the refusals it can foresee before it replaces any entry, moves what it replaces into one trash entry and deletes nothing; it is not atomic."
 refs = ["internal/boxside.DataWorker.restoreInPlace", "internal/boxside.inPlace.displace"]
 tests = ["internal/boxside.TestDataSavepointRestore"]
 
@@ -63,9 +63,8 @@ refs = ["internal/data.Retention", "internal/data.Service.GC"]
 tests = ["internal/data.TestIndexAndRetention", "test/integration.TestData"]
 
 [[invariant]]
-text = "With `before_session`, a session does not start when its savepoint cannot be taken."
-refs = ["internal/cli.app.saveBeforeSession", "internal/data.Service.BeforeSession"]
-tests = ["internal/data.TestServiceAutoAndBeforeSession"]
+text = "With `before_session` and a driver other than `none`, a session `devc <harness>` starts does not start when its savepoint fails; sessions the daemon starts take none."
+refs = ["internal/cli.app.saveBeforeSession", "internal/data.Service.BeforeSession", "internal/daemon.commander.runStart"]
 
 [[invariant]]
 text = "restic runs as the box user with no capability and no network, and sees the project directory only read-only."
@@ -88,11 +87,11 @@ A work zone belongs to the agent: it can delete or overwrite days of results in 
 
 **The index**, `durable/realms/<realm>/savepoints/<project>.jsonl`, holds `save` and `drop` records ([[internal/data.ReadIndex]]). IDs are `YYYYMMDDTHHMMSSZ[-name]`; a taken ID moves on by a second ([[internal/data.NewID]]).
 
-**When.** `devc save [name]`, under the box lock ([[flow:data-save]]). Before a session when `before_session = true`, unless a savepoint is younger than 30 minutes; if it fails the session does not start ([[internal/cli.app.saveBeforeSession]]). And when the box asks with `devc request savepoint [name]`, which the default `requests.auto` approves at once ([[concern:requests-and-approval]]).
+**When.** `devc save [name]`, under the box lock ([[flow:data-save]]). Before a session that `devc <harness>` starts when `before_session = true`, unless a savepoint is younger than 30 minutes or the driver is `none`; if it fails the session does not start ([[internal/cli.app.saveBeforeSession]]). A session the daemon starts (from the web app or the hub, [[internal/daemon.commander.runStart]]) takes none ([[doc:docs/dev/LEFTOVER.md#7]]). And when the box asks with `devc request savepoint [name]`, which the default `requests.auto` approves at once ([[concern:requests-and-approval]]).
 
 **Retention.** After each save, [[internal/data.Retention]] drops the oldest unnamed savepoints beyond `keep` (default 10; 0 keeps all). Named ones stay until `devc data gc --drop`. A reflink copy is deleted by the savepoint-drop worker; a restic snapshot is forgotten, and its space comes back only when `devc data gc` runs `restic prune` ([[internal/data.Service.GC]]).
 
-**Restore.** `devc restore <savepoint> [path…] [--in-place]` ([[flow:data-restore]]). The host refuses paths in input zones and paths that were sealed when the savepoint was taken ([[internal/data.Service.Restore]]). Without `--in-place` the worker copies into a new `restored-<id>[-N]/` in the first work zone, owned by the box user with the saved modes; nothing is overwritten. In place, [[internal/boxside.DataWorker.restoreInPlace]] walks twice. The dry pass only looks for refusals: an entry sealed now (a full restore skips it, an explicit path is refused), a layout conflict. The second pass leaves alone what is already identical (same type and symlink target, or a box-owned file with the restored mode and the same bytes; times do not count) and moves anything else in the way into one trash entry `<stamp>-restore-<id>` before copying. What was created since the savepoint stays. For restic, [[internal/data.Service.resticRestore]] has restic restore into a new `local/tmp/restore-*` as the box user; the worker copies from it mounted read-only at `/staging`; `devc box rm-worker` empties it in a helper container and the host removes the empty directory.
+**Restore.** `devc restore <savepoint> [path…] [--in-place]` ([[flow:data-restore]]). The host refuses paths in input zones and paths that were sealed when the savepoint was taken ([[internal/data.Service.Restore]]). Without `--in-place` the worker copies into a new `restored-<id>[-N]/` in the first work zone, owned by the box user with the saved modes; nothing is overwritten. In place, [[internal/boxside.DataWorker.restoreInPlace]] walks twice. The dry pass only looks for refusals: an entry sealed now (a full restore skips it, an explicit path is refused), a layout conflict. Missing layout directories are made before it, and the box keeps running, so the second pass can still fail half-way, leaving what it did. The second pass leaves alone what is already identical (same type and symlink target, or a box-owned file with the restored mode and the same bytes; times do not count) and moves anything else in the way into one trash entry `<stamp>-restore-<id>` before copying. What was created since the savepoint stays, except inside a directory the savepoint has as a file or symlink: that directory goes to the trash whole. For restic, [[internal/data.Service.resticRestore]] has restic restore into a new `local/tmp/restore-*` as the box user; the worker copies from it mounted read-only at `/staging`; `devc box rm-worker` empties it in a helper container and the host removes the empty directory.
 
 ## What can go wrong, and what prevents it
 

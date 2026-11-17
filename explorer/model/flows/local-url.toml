@@ -71,7 +71,7 @@ to = "dialer"
 via = "exec"
 label = "nsenter --user=fd/3 --net=fd/4 --preserve-credentials devc box dial 127.0.0.1:3000"
 ref = "internal/netpolicy.Forwarder.Dial"
-text = "One end of a new socket pair becomes the process's standard input and output; the pinned namespaces are descriptors 3 and 4; the environment is `DEVC_BOX=1` only, the working directory `/`."
+text = "One end of a new socket pair becomes the process's standard input and output; the pinned namespaces are descriptors 3 and 4; the environment is the daemon's own with `DEVC_BOX=1` added, the working directory `/`."
 
 [[step]]
 at = "dialer"
