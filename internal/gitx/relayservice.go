@@ -30,6 +30,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -234,7 +235,11 @@ var recordConfig = []string{"core.fsync=reference"}
 // refuses the update when it fails, so an accepted push always has its
 // records (finding C1-05). The caller (the daemon) holds the box lock for
 // the whole receive-pack run and settles the push when it has ended.
-func (s *Service) RecordUpdate(ctx context.Context, p *Project, u PushedRef) (PushRecord, error) {
+// heads are the box's own branches as pre-receive noted them (nil when
+// unknown): a branch record whose tip is the box's own gets an own marker,
+// so whichever settlement confirms it also records the box tip (finding
+// H2-02).
+func (s *Service) RecordUpdate(ctx context.Context, p *Project, u PushedRef, heads map[string]string) (PushRecord, error) {
 	now := s.now().Unix()
 	switch {
 	case strings.HasPrefix(u.Ref, HeadsPrefix) && !isZeroOID(u.New):
@@ -253,7 +258,8 @@ func (s *Service) RecordUpdate(ctx context.Context, p *Project, u PushedRef) (Pu
 		}
 		if last := set.LastBank[b]; last.OID != u.New {
 			ch.BankRef = BankPrefix + b + "/" + strconv.FormatInt(stamp(now, last.Time), 10)
-			if err := p.Relay.update(ctx, pendingRecord(ch.BankRef, u.New), recordConfig); err != nil {
+			own := heads != nil && heads[b] == u.New
+			if err := p.Relay.update(ctx, pendingRecord(ch.BankRef, u.New, own), recordConfig); err != nil {
 				return PushRecord{}, err
 			}
 		}
@@ -272,7 +278,7 @@ func (s *Service) RecordUpdate(ctx context.Context, p *Project, u PushedRef) (Pu
 			return PushRecord{}, nil
 		}
 		rec := Recorded{Name: t, OID: u.New, Ref: DevcTagsPrefix + t + "/" + strconv.FormatInt(stamp(now, set.NewestTag[t]), 10)}
-		if err := p.Relay.update(ctx, pendingRecord(rec.Ref, rec.OID), recordConfig); err != nil {
+		if err := p.Relay.update(ctx, pendingRecord(rec.Ref, rec.OID, false), recordConfig); err != nil {
 			return PushRecord{}, err
 		}
 		return PushRecord{Tag: &rec}, nil
@@ -281,13 +287,18 @@ func (s *Service) RecordUpdate(ctx context.Context, p *Project, u PushedRef) (Pu
 }
 
 // pendingRecord creates a record and its pending marker, both new.
-func pendingRecord(record, oid string) []RefUpdate {
-	return []RefUpdate{{Ref: record, New: oid, Old: Zero(oid)}, {Ref: pendingMarker(record), New: oid, Old: Zero(oid)}}
+func pendingRecord(record, oid string, own bool) []RefUpdate {
+	return []RefUpdate{{Ref: record, New: oid, Old: Zero(oid)}, {Ref: pendingMarker(record, own), New: oid, Old: Zero(oid)}}
 }
 
-// pendingMarker is the marker of a record below refs/devc/.
-func pendingMarker(record string) string {
-	return PendingPrefix + strings.TrimPrefix(record, "refs/devc/")
+// pendingMarker is the marker of a record below refs/devc/; own marks a
+// branch record whose tip was the box's own.
+func pendingMarker(record string, own bool) string {
+	rest := strings.TrimPrefix(record, "refs/devc/")
+	if own {
+		rest = pendingOwn + rest
+	}
+	return PendingPrefix + rest
 }
 
 // SettleResult is what SettlePush did.
@@ -304,18 +315,66 @@ type SettleResult struct {
 // maxReflogScan bounds how far back SettlePush looks in a branch's reflog.
 const maxReflogScan = 1000
 
-// SettlePush settles the records the update hook wrote (finding X7 3):
-// a record whose update git applied (the branch has, or had, that tip; the
-// tag has that object) is confirmed by removing its marker; one whose
-// update git refused is removed with its marker, so nothing keeps the
-// name, and a later record of that name can be created. Every pending
-// marker in the relay is settled, so records of a push the daemon did not
-// see end are settled by the next push or bank. pushed are the push's
-// update records and heads the box's own branches (nil when unknown):
-// a branch whose applied tip is the box's own moves its box tip, as an
-// observation of the box (finding B8). The caller holds the box lock and
-// no receive-pack runs on the relay.
+// SettlePush settles the records the update hooks of one receive-pack
+// wrote (finding X7 3), right after it: the caller has held the box lock
+// since before that receive-pack started and still holds it, so nothing
+// but git moved a ref since the hooks ran. Only there does "the branch
+// does not have, and never had, the record's tip" or "the tag does not
+// point at it" prove that git refused the update, so only there is a
+// record removed: one named in pushed (the push's records note, written
+// by its own update hooks) whose update git refused goes with its marker,
+// so nothing keeps the name (finding H2-01). Every other pending record
+// is confirmed (SettlePending). heads are the box's own branches as
+// pre-receive noted them (nil when unknown): a branch whose applied tip
+// is the box's own moves its box tip, as an observation of the box
+// (finding B8), as an own marker does.
 func (s *Service) SettlePush(ctx context.Context, p *Project, heads map[string]string, pushed []PushRecord) (SettleResult, error) {
+	wrote := map[string]bool{}
+	for _, rec := range pushed {
+		switch {
+		case rec.Branch != nil && rec.Branch.BankRef != "":
+			wrote[rec.Branch.BankRef] = true
+		case rec.Tag != nil && rec.Tag.Ref != "":
+			wrote[rec.Tag.Ref] = true
+		}
+	}
+	return s.settle(ctx, p, wrote, heads, pushed)
+}
+
+// SettlePending confirms every pending record and deletes none (finding
+// H2-01): it is the settlement after a daemon died before it settled a
+// push, and the one every operation that moves relay refs runs first
+// (settleFirst). Since then refs may have moved (an upstream fetch moves
+// tags with --force, a pull fast-forwards branches), so a ref that is
+// not at the record's object proves nothing about git's decision, and the
+// record of an accepted update must never be lost. A record git did
+// refuse then stays as a record of a tip the box offered. An own marker
+// moves the box tip when the branch still has the record's tip (finding
+// H2-02). The caller holds the box lock.
+func (s *Service) SettlePending(ctx context.Context, p *Project) (SettleResult, error) {
+	return s.settle(ctx, p, nil, nil, nil)
+}
+
+// settleFirst settles what earlier pushes left pending before an
+// operation moves refs in the relay (SettlePending), and returns the
+// problems for the operation's report. Pending records always stay
+// recorded, so the operation goes on whatever this finds.
+func (s *Service) settleFirst(ctx context.Context, p *Project) []string {
+	if !p.Relay.Exists() {
+		return nil
+	}
+	res, err := s.SettlePending(ctx, p)
+	if err != nil {
+		return []string{"settling the records of an earlier push: " + printable(err.Error())}
+	}
+	return res.Problems
+}
+
+// settle settles every pending marker in the relay. A record in removable
+// whose update git did not apply is removed with its marker; every other
+// record is confirmed, with its box tip when its marker is own and the
+// branch has its tip. pushed and heads move box tips as SettlePush says.
+func (s *Service) settle(ctx context.Context, p *Project, removable map[string]bool, heads map[string]string, pushed []PushRecord) (SettleResult, error) {
 	res := SettleResult{Problems: []string{}}
 	refs, err := p.Relay.Refs(ctx, HeadsPrefix, TagsPrefix, BoxTipPrefix, PendingPrefix)
 	if err != nil {
@@ -324,11 +383,13 @@ func (s *Service) SettlePush(ctx context.Context, p *Project, heads map[string]s
 	set := SortRefs(refs)
 	for _, record := range sortedKeys(set.Pending) {
 		oid := set.Pending[record]
-		marker := pendingMarker(record)
-		applied := false
+		own := set.PendingOwn[record]
+		marker := pendingMarker(record, own)
+		applied, branch := false, ""
 		switch {
 		case strings.HasPrefix(record, BankPrefix):
 			if b, _, ok := splitStamped(record[len(BankPrefix):]); ok {
+				branch = b
 				applied = set.Heads[b] == oid || p.Relay.inReflog(ctx, HeadsPrefix+b, oid)
 			}
 		case strings.HasPrefix(record, DevcTagsPrefix):
@@ -336,13 +397,29 @@ func (s *Service) SettlePush(ctx context.Context, p *Project, heads map[string]s
 				applied = set.UpstreamTags[t] == oid
 			}
 		}
+		remove := !applied && removable[record]
 		ups := []RefUpdate{{Ref: marker, Old: oid}}
-		if !applied {
+		if remove {
 			ups = append([]RefUpdate{{Ref: record, Old: oid}}, ups...)
+		}
+		// The observation an own marker carries goes in the same
+		// transaction as the marker; should that fail (a box tip in the
+		// way), the record is confirmed without it.
+		var tip []RefUpdate
+		if own && !remove && branch != "" && CheckName(branch) == nil && set.Heads[branch] == oid && set.BoxTips[branch] != oid {
+			tip = []RefUpdate{boxTipUpdate(set.BoxTips, branch, oid)}
+		}
+		if len(tip) > 0 {
+			if err := p.Relay.update(ctx, append(slices.Clone(ups), tip...), recordConfig); err == nil {
+				set.BoxTips[branch] = oid
+				res.Confirmed++
+				continue
+			}
+			res.Problems = append(res.Problems, fmt.Sprintf("recording the box's tip of %s: the next bank observes it", printableName(branch)))
 		}
 		if err := p.Relay.update(ctx, ups, recordConfig); err != nil {
 			// A record that is gone leaves only its marker.
-			if gone, lerr := p.Relay.Refs(ctx, record); lerr == nil && len(gone) == 0 && !applied {
+			if gone, lerr := p.Relay.Refs(ctx, record); lerr == nil && len(gone) == 0 && remove {
 				if err := p.Relay.update(ctx, []RefUpdate{{Ref: marker, Old: oid}}, recordConfig); err == nil {
 					res.Removed++
 					continue
@@ -351,10 +428,10 @@ func (s *Service) SettlePush(ctx context.Context, p *Project, heads map[string]s
 			res.Problems = append(res.Problems, fmt.Sprintf("settling %s: %s", printableName(record), printable(err.Error())))
 			continue
 		}
-		if applied {
-			res.Confirmed++
-		} else {
+		if remove {
 			res.Removed++
+		} else {
+			res.Confirmed++
 		}
 	}
 	var tips []RefUpdate
@@ -396,7 +473,7 @@ func (s *Service) RecordPush(ctx context.Context, p *Project, pushed []PushedRef
 	var recs []PushRecord
 	var problems []string
 	for _, u := range pushed {
-		rec, err := s.RecordUpdate(ctx, p, u)
+		rec, err := s.RecordUpdate(ctx, p, u, heads)
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("recording %s: %s", printableName(u.Ref), printable(err.Error())))
 			continue
@@ -746,14 +823,16 @@ func EnsureEmptyDir(dir string, mkdir func(string) error) error {
 
 // FetchThrough brings the upstream into the relay before the box fetches
 // (work order C10a section 1): a non-interactive fetch bounded by ctx, then
-// the relay's branches are fast-forwarded as devc pull does. Box tips are
-// not touched, so a later bank keeps the advanced heads. The caller holds
-// the box lock.
+// the relay's branches are fast-forwarded as devc pull does, after what an
+// earlier push left pending was settled (finding H2-01). Box tips are not
+// touched, so a later bank keeps the advanced heads. The caller holds the
+// box lock.
 func (s *Service) FetchThrough(ctx context.Context, p *Project) (*PullResult, error) {
 	res := &PullResult{Branches: []BranchChange{}, Diverged: []string{}, Notes: []string{}}
 	if !p.Relay.Exists() || p.Resolved.Upstream == "" {
 		return res, nil
 	}
+	res.Notes = append(res.Notes, s.settleFirst(ctx, p)...)
 	if err := s.fetchUpstream(ctx, p); err != nil {
 		return res, err
 	}

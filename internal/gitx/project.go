@@ -38,6 +38,11 @@ func (s *Service) InitRelay(ctx context.Context, p *Project) (string, error) {
 	if created {
 		s.printf("devc: created the relay %s\n", p.Relay.Dir)
 	}
+	// An existing relay may hold records of a push nobody settled; they
+	// are settled before the fetch moves refs (finding H2-01).
+	for _, pr := range s.settleFirst(ctx, p) {
+		s.printf("devc: %s: %s\n", p.Ref, pr)
+	}
 	def := p.Resolved.DefaultBranch
 	if p.Resolved.Upstream == "" {
 		if err := p.Relay.SetUpstream(ctx, ""); err != nil {
@@ -193,6 +198,9 @@ func (s *Service) Adopt(ctx context.Context, p *Project, clone string) (string, 
 	}
 	if _, err := p.Relay.Create(ctx); err != nil {
 		return "", err
+	}
+	for _, pr := range s.settleFirst(ctx, p) {
+		s.printf("devc: %s: %s\n", p.Ref, pr)
 	}
 	if err := p.Relay.SetUpstream(ctx, p.Resolved.Upstream); err != nil {
 		return "", err

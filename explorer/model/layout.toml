@@ -153,6 +153,12 @@ writer = "host"
 ref = "internal/paths.Paths.JournalFile"
 
 [[tree.entry]]
+path = "durable/realms/<realm>/journal/<project>/<session>.pruned"
+text = "An empty mark `devc sessions prune` leaves where it removed a session's journal: ingestion removes that session's spool file and never reads it again, and the host appends nothing more to it. The archive does not carry it."
+writer = "host"
+ref = "internal/session.prunedMark"
+
+[[tree.entry]]
 path = "durable/realms/<realm>/secrets/<name>"
 text = "A realm secret, mode 0600 in a 0700 directory: harness tokens stored by `devc login`, secrets set with `devc secret set`."
 writer = "host"
@@ -202,7 +208,7 @@ ref = "internal/paths.Paths.ServiceLogFile"
 
 [[tree.entry]]
 path = "durable/session-owners"
-text = "One file per session ID naming the project that claimed it first: the first that appended an event of that ID to a journal (or, for an ID from before these records, the project whose journal of it began first). A box cannot claim another project's session. `devc sessions prune` removes a session's file with its journal."
+text = "One file per session ID naming the project that claimed it first: the first that appended an event of that ID to a journal (or, for an ID from before these records, the project whose journal of it began first). A box cannot claim another project's session. `devc sessions prune` keeps the file, so a pruned session's ID stays claimed."
 writer = "host"
 ref = "internal/paths.Paths.SessionOwnersDir"
 

@@ -347,13 +347,34 @@ type task struct {
 }
 
 // goTask runs fn in a goroutine that recovers a panic (recoverTask). Every
-// goroutine of the daemon starts through goTask or goSafe; a test checks
-// that no other go statement is left (TestNoBareGoroutines).
+// goroutine of the daemon starts through goTask or goSafe, and every
+// callback the runtime runs in a goroutine of its own through afterFunc or
+// contextAfter; a test checks that no other go statement, time.AfterFunc
+// or context.AfterFunc is left (TestNoBareGoroutines, findings X6 2,
+// H2-04).
 func goTask(log *slog.Logger, t *task, fn func()) {
 	go func() {
 		defer func() { recoverTask(log, recover(), t) }()
 		fn()
 	}()
+}
+
+// afterFunc is time.AfterFunc with fn under recoverTask: the timer runs fn
+// in a goroutine of its own, which no goTask recovers (finding H2-04).
+func afterFunc(log *slog.Logger, t *task, d time.Duration, fn func()) *time.Timer {
+	return time.AfterFunc(d, func() {
+		defer func() { recoverTask(log, recover(), t) }()
+		fn()
+	})
+}
+
+// contextAfter is context.AfterFunc with fn under recoverTask (finding
+// H2-04).
+func contextAfter(ctx context.Context, log *slog.Logger, t *task, fn func()) (stop func() bool) {
+	return context.AfterFunc(ctx, func() {
+		defer func() { recoverTask(log, recover(), t) }()
+		fn()
+	})
 }
 
 // taskBoxKey carries, in a request's context, the box the request came

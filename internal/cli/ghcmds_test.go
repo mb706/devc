@@ -207,8 +207,11 @@ func (r *relayRunner) Interactive(ctx context.Context, c execx.Cmd) (int, error)
 // request runs) refuses, before anything is pushed or GitHub is asked, a
 // branch that is the base, the project's default branch, the upstream's
 // default as the relay records it, a protected branch, or one the relay
-// does not have (finding X10 3). Control: a branch that passes the checks
-// reaches the push (which the test refuses).
+// does not have (finding X10 3). With the box running, the first four are
+// refused before the bank, so a branch listed in git.forward is not
+// forwarded for a pull request that is refused (finding H2-03); a branch
+// that passes them is banked first. Control: a branch that passes the
+// checks reaches the push (which the test refuses).
 func TestPRCreateChecksFirst(t *testing.T) {
 	var got []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +219,7 @@ func TestPRCreateChecksFirst(t *testing.T) {
 		w.WriteHeader(500)
 	}))
 	defer srv.Close()
-	env := ghEnv(t, srv.URL, "image = \"debian\"\nupstream = \"https://github.com/acme/app.git\"\ndefault_branch = \"develop\"\n[git]\nprotected = [\"release/*\"]\n")
+	env := ghEnv(t, srv.URL, "image = \"debian\"\nupstream = \"https://github.com/acme/app.git\"\ndefault_branch = \"develop\"\n[git]\nprotected = [\"release/*\"]\nforward = [\"develop\", \"main\", \"feat/*\"]\n")
 	p, err := paths.Resolve(paths.Options{Home: env["HOME"], Getenv: func(k string) string { return env[k] }})
 	if err != nil {
 		t.Fatal(err)
@@ -258,7 +261,7 @@ func TestPRCreateChecksFirst(t *testing.T) {
 	} {
 		r := &relayRunner{fake: fake}
 		code, _, errOut := runWith(t, env, r, "", append([]string{"pr", "create", "r/p", "--yes"}, tc.args...)...)
-		if code != 1 || !strings.Contains(errOut, tc.want) || !strings.Contains(errOut, "nothing was pushed") || r.pushes != 0 {
+		if code != 1 || !strings.Contains(errOut, tc.want) || !strings.Contains(errOut, "nothing was") || !strings.Contains(errOut, "pushed") || r.pushes != 0 {
 			t.Errorf("%v: exit %d, %d pushes, %q", tc.args, code, r.pushes, errOut)
 		}
 	}
@@ -267,6 +270,33 @@ func TestPRCreateChecksFirst(t *testing.T) {
 	code, _, errOut := runWith(t, env, r, "", "pr", "create", "r/p", "--yes", "--branch", "feat/x")
 	if code != 1 || r.pushes != 1 || !strings.Contains(errOut, "the test refuses pushes") {
 		t.Errorf("control: exit %d, %d pushes, %q", code, r.pushes, errOut)
+	}
+	// The box runs: the checks that need no bank refuse before it (no
+	// exec in the box, so nothing is banked or forwarded); a branch that
+	// passes them is banked first (here the bank fails in the box).
+	running := execx.NewFake()
+	running.On("podman", "container", "inspect", "--format", "json", "devc-r-p").Stdout(`[{"Id":"c1","Name":"devc-r-p","State":{"Status":"running","Running":true,"Pid":7,"StartedAt":"2026-11-14T23:04:28Z"},` +
+		`"Config":{"Labels":{"devc.realm":"r","devc.project":"p","devc.role":"box"}}}]`)
+	running.On("podman").Exit(125).Stderr("Error: the test refuses this\n")
+	rt, err := p.BoxRuntimeDir(names.BoxID(names.ProjectRef{Realm: "r", Project: "p"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(rt, 0o700)
+	os.WriteFile(filepath.Join(rt, "ready"), nil, 0o600)
+	for _, args := range [][]string{{"--branch", "develop"}, {"--branch", "main", "--base", "develop"}, {"--branch", "release/1"}} {
+		running.Reset()
+		r := &relayRunner{fake: running}
+		code, _, errOut := runWith(t, env, r, "", append([]string{"pr", "create", "r/p", "--yes"}, args...)...)
+		if code != 1 || !strings.Contains(errOut, "nothing was banked or pushed") || r.pushes != 0 || running.Called("podman", "exec") {
+			t.Errorf("running box, %v: exit %d, %d pushes, exec in the box %v, %q", args, code, r.pushes, running.Called("podman", "exec"), errOut)
+		}
+	}
+	running.Reset()
+	r = &relayRunner{fake: running}
+	code, _, errOut = runWith(t, env, r, "", "pr", "create", "r/p", "--yes", "--branch", "feat/x")
+	if code != 1 || !running.Called("podman", "exec") || !strings.Contains(errOut, "banking before the push") || r.pushes != 0 {
+		t.Errorf("running box, control: exit %d, %d pushes, exec in the box %v, %q", code, r.pushes, running.Called("podman", "exec"), errOut)
 	}
 	if len(got) != 0 {
 		t.Errorf("GitHub was asked: %q", got)

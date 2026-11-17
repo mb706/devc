@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -49,10 +50,28 @@ func (l *lockedLog) String() string {
 const panicSecret = "ghs_PANICSECRET0123456789"
 
 // TestNoBareGoroutines: every goroutine of the daemon starts through
-// goTask or goSafe, which recover a panic (finding X6 2); no other go
-// statement is left in the package.
+// goTask or goSafe, and every callback the runtime runs in a goroutine of
+// its own through afterFunc or contextAfter, all of which recover a panic
+// (findings X6 2, H2-04): no other go statement, time.AfterFunc or
+// context.AfterFunc is left in the package. This test is what keeps the
+// statement on the explorer's daemon page true. Control: the checker finds
+// each of the three in a source made for it.
 func TestNoBareGoroutines(t *testing.T) {
 	fset := token.NewFileSet()
+	bad, err := parser.ParseFile(fset, "bad.go", `package daemon
+var later = func() { go work() }
+func f(ctx context.Context) {
+	go work()
+	time.AfterFunc(time.Second, work)
+	context.AfterFunc(ctx, work)
+	goTask(nil, nil, work)
+}`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bareGoroutines(fset, "bad.go", bad); len(got) != 4 {
+		t.Errorf("the checker found %d of 4 in the control:\n%s", len(got), strings.Join(got, "\n"))
+	}
 	files, _ := filepath.Glob("*.go")
 	checked := 0
 	for _, f := range files {
@@ -64,22 +83,44 @@ func TestNoBareGoroutines(t *testing.T) {
 			t.Fatal(err)
 		}
 		checked++
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil || ((fn.Name.Name == "goTask" || fn.Name.Name == "goSafe") && f == "daemon.go") {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				if g, ok := n.(*ast.GoStmt); ok {
-					t.Errorf("%s: a go statement outside goTask and goSafe", fset.Position(g.Pos()))
-				}
-				return true
-			})
+		for _, problem := range bareGoroutines(fset, f, file) {
+			t.Error(problem)
 		}
 	}
 	if checked < 10 {
 		t.Fatalf("only %d files checked", checked)
 	}
+}
+
+// recovering are the functions of daemon.go that start goroutines and
+// callbacks under recoverTask.
+var recovering = map[string]bool{"goTask": true, "goSafe": true, "afterFunc": true, "contextAfter": true}
+
+// bareGoroutines lists the go statements and AfterFunc calls of a file
+// outside the recovering functions, each with what to do instead.
+func bareGoroutines(fset *token.FileSet, name string, file *ast.File) []string {
+	var out []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.FuncDecl:
+			return !(name == "daemon.go" && recovering[n.Name.Name])
+		case *ast.GoStmt:
+			out = append(out, fmt.Sprintf("%s: a go statement outside goTask and goSafe: a panic there ends the daemon; "+
+				"start it with goTask(log, &task{...}, fn) (or d.goSafe for the daemon's own loops), which recovers it", fset.Position(n.Pos())))
+		case *ast.CallExpr:
+			sel, ok := n.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "AfterFunc" {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && (pkg.Name == "time" || pkg.Name == "context") {
+				helper := map[string]string{"time": "afterFunc(log, &task{...}, d, fn)", "context": "contextAfter(ctx, log, &task{...}, fn)"}[pkg.Name]
+				out = append(out, fmt.Sprintf("%s: %s.AfterFunc runs its function in a goroutine of its own, outside goTask: a panic there ends the daemon; "+
+					"use %s, which recovers it", fset.Position(n.Pos()), pkg.Name, helper))
+			}
+		}
+		return true
+	})
+	return out
 }
 
 // TestBoxStreamPanic: a panic while serving a box's raw stream ends that

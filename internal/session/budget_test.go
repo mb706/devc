@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -126,8 +128,8 @@ func TestJournalSessionBudget(t *testing.T) {
 // large one does, files count by the blocks they take, a new session
 // gets no journal and no owner record while the budget is full, and an
 // empty spool file records nothing. Prune removes only journals of
-// sessions that ended before the cutoff, with their owner records, and
-// ingestion then goes on (X6 3).
+// sessions that ended before the cutoff, keeps their owner records
+// (finding H1-01), and ingestion then goes on (X6 3).
 func TestJournalProjectBudget(t *testing.T) {
 	const quota = 96 << 10
 	e, _ := budgetEnv(t, Budgets{Session: 1 << 20, Project: quota})
@@ -208,8 +210,8 @@ func TestJournalProjectBudget(t *testing.T) {
 		if _, err := os.Stat(e.p.JournalFile(ref, id)); err == nil {
 			t.Errorf("the journal of %s is still there", id)
 		}
-		if _, found, _ := e.store.Owner(id); found {
-			t.Errorf("the owner record of %s is still there", id)
+		if owner, found, _ := e.store.Owner(id); !found || owner != ref {
+			t.Errorf("the owner record of %s is gone: %v %v", id, owner, found)
 		}
 	}
 	if _, err := os.Stat(e.p.JournalFile(ref, sid(10))); err != nil {
@@ -245,5 +247,64 @@ func TestJournalSpaceReserve(t *testing.T) {
 	e.ingest()
 	if got := len(e.messageTexts(sidA)); got != 100 {
 		t.Errorf("after space was freed: %d messages", got)
+	}
+}
+
+// TestPruneSpoolTail: a session its budget stopped ends (reconciliation
+// writes session.end) while its spool still holds events. Once pruned, the
+// next ingestion does not recreate its journal from that rest with reused
+// sequence numbers (finding H1-01): the pruned mark makes ingestion skip
+// and remove its spool file, also when the box writes it again; the host
+// appends nothing to it; its ID stays claimed, so another project's box
+// cannot take it. Control: another session's events are still ingested.
+func TestPruneSpoolTail(t *testing.T) {
+	e, _ := budgetEnv(t, Budgets{Session: 16 << 10, Project: 1 << 30})
+	e.write(sidA, event(sidA, proto.TypeSessionStart, start("fake")))
+	e.write(sidA, messages(sidA, 200, 200)...)
+	if rep := e.ingest(); len(rep.Stops) != 1 {
+		t.Fatalf("the session was not stopped: %+v", rep)
+	}
+	if err := e.store.AppendHost(ref, sidA, hostEvent{proto.TypeSessionEnd, end("lost")}); err != nil {
+		t.Fatal(err)
+	}
+	pr, err := e.store.Prune(ref, time.Now().Add(time.Hour))
+	if err != nil || !slices.Equal(pr.Removed, []string{sidA}) {
+		t.Fatalf("prune: %+v %v", pr, err)
+	}
+	if _, err := os.Stat(filepath.Join(e.spool, sidA+".jsonl")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the pruned session's spool file is still there: %v", err)
+	}
+	if owner, found, _ := e.store.Owner(sidA); !found || owner != ref {
+		t.Errorf("the pruned session's ID is no longer claimed: %v %v", owner, found)
+	}
+	// The box writes the file again; another session goes on.
+	e.write(sidA, messages(sidA, 20, 10)...)
+	e.write(sidB, event(sidB, proto.TypeSessionStart, start("fake")))
+	e.write(sidB, messages(sidB, 3, 10)...)
+	rep := e.ingest()
+	if _, err := os.Stat(e.p.JournalFile(ref, sidA)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("ingestion recreated the pruned journal (%+v): %v", rep, err)
+	}
+	if _, err := os.Stat(filepath.Join(e.spool, sidA+".jsonl")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the rewritten spool file of the pruned session is still there: %v", err)
+	}
+	if got := e.messageTexts(sidB); len(got) != 3 {
+		t.Errorf("the other session has %d of 3 messages", len(got))
+	}
+	// Raising the budget changes nothing.
+	e.store.Limits = func(names.ProjectRef) Budgets { return Budgets{Session: 1 << 20, Project: 1 << 30} }
+	e.write(sidA, messages(sidA, 2, 10)...)
+	e.ingest()
+	if _, err := os.Stat(e.p.JournalFile(ref, sidA)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("ingestion recreated the pruned journal after the budget was raised: %v", err)
+	}
+	if err := e.store.AppendHost(ref, sidA, hostEvent{proto.TypeSessionEnd, end("again")}); err == nil || !strings.Contains(err.Error(), "pruned") {
+		t.Errorf("a host event for the pruned session: %v", err)
+	}
+	if _, err := os.Stat(e.p.JournalFile(ref, sidA)); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("a host event recreated the pruned journal")
+	}
+	if _, mine, err := e.store.Claim(names.ProjectRef{Realm: "r", Project: "other"}, sidA); err != nil || mine {
+		t.Errorf("another project could claim the pruned session: %v %v", mine, err)
 	}
 }

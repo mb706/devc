@@ -105,9 +105,9 @@ func (r rawStream) abort() {
 
 // guard aborts the stream when ctx ends (the box stops, the daemon stops,
 // or the operation is over); the returned function ends the operation.
-func (r rawStream) guard(ctx context.Context) func() {
+func (r rawStream) guard(ctx context.Context, log *slog.Logger) func() {
 	ctx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(ctx, r.abort)
+	stop := contextAfter(ctx, log, &task{what: "aborting a stream"}, r.abort)
 	return func() {
 		cancel()
 		stop()
@@ -264,7 +264,7 @@ func respond(st *yamux.Stream, id json.RawMessage, result any, perr *proto.Error
 // service on the stream.
 func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Reader, m *proto.RPCMessage) {
 	raw := rawStream{st: st, stall: streamStall}
-	end := raw.guard(ctx)
+	end := raw.guard(ctx, w.d.log)
 	defer end()
 	fail := func(code int, format string, args ...any) {
 		_ = respond(st, m.ID, nil, proto.Errorf(code, format, args...))
@@ -380,7 +380,8 @@ func (w *boxWorker) serveGit(ctx context.Context, st *yamux.Stream, br *bufio.Re
 				gitx.SizeText(relayUsed), gitx.SizeText(q))
 			return
 		}
-		// Records of an earlier push that nobody settled (finding X7 3).
+		// Records of an earlier push that nobody settled are confirmed,
+		// none deleted (findings X7 3, H2-01).
 		d.settlePush(ctx, gs, proj, "")
 	}
 	call, err := gitx.ServeCall(relay, p.Service, e.cfg.Paths.RelayHooksDir(), env, nil, maxInput)
@@ -629,27 +630,35 @@ func (d *Daemon) pushed(ctx context.Context, e *env, ref names.ProjectRef, sid, 
 	}
 }
 
-// settlePush settles the records the update hooks wrote (gitx.SettlePush,
-// finding X7 3) once receive-pack has ended, with the box lock still held:
-// those of updates git applied are confirmed, the others removed, and box
-// tips move from the notes of the push's report (none when report is "").
-// What cannot be settled stays pending, ignored, until the next push or
-// bank; the push is not affected.
+// settlePush settles the records the update hooks wrote (finding X7 3).
+// With report, it runs once receive-pack has ended, with the box lock held
+// since before receive-pack started (gitx.SettlePush): records of updates
+// git applied are confirmed, those of this push's updates git refused
+// removed, and box tips move from the push's notes and own markers.
+// Without report, before receive-pack starts, it confirms whatever an
+// earlier push left pending and removes nothing (gitx.SettlePending,
+// finding H2-01). What cannot be settled stays pending, ignored, until the
+// next push or bank; the push is not affected.
 func (d *Daemon) settlePush(ctx context.Context, gs *gitx.Service, proj *gitx.Project, report string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 	defer cancel()
-	var heads map[string]string
-	var recs []gitx.PushRecord
-	if report != "" {
-		var err error
-		if heads, err = gitx.ReadHeadsNote(report); err != nil {
-			d.log.Warn("reading a push's notes", "relay", proj.Relay.Dir, "err", err)
+	var res gitx.SettleResult
+	var err error
+	if report == "" {
+		res, err = gs.SettlePending(ctx, proj)
+	} else {
+		heads, herr := gitx.ReadHeadsNote(report)
+		if herr != nil {
+			d.log.Warn("reading a push's notes", "relay", proj.Relay.Dir, "err", herr)
 		}
-		if recs, err = gitx.ReadRecordsNote(report); err != nil {
-			d.log.Warn("reading a push's notes", "relay", proj.Relay.Dir, "err", err)
+		// A records note that cannot be read whole names fewer records,
+		// so fewer can be removed: the rest are confirmed.
+		recs, rerr := gitx.ReadRecordsNote(report)
+		if rerr != nil {
+			d.log.Warn("reading a push's notes", "relay", proj.Relay.Dir, "err", rerr)
 		}
+		res, err = gs.SettlePush(ctx, proj, heads, recs)
 	}
-	res, err := gs.SettlePush(ctx, proj, heads, recs)
 	switch {
 	case err != nil:
 		d.log.Warn("settling a push's records; they stay pending until the next push or bank", "relay", proj.Relay.Dir, "err", err)

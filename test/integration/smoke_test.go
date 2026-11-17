@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -36,12 +37,18 @@ func TestSmoke(t *testing.T) {
 		t.Fatalf("doctor output is not JSON: %v\n%s", err, res.Stdout)
 	}
 	byID := map[string]string{}
+	var ids []string
 	for _, c := range checks {
 		byID[c.ID] = c.Status
+		ids = append(ids, c.ID)
 		t.Logf("doctor %-16s %-4s %s", c.ID, c.Status, c.Detail)
 	}
-	if len(checks) != 15 {
-		t.Errorf("doctor reported %d checks, want 15", len(checks))
+	// The fifteen host checks of doctor.Run in their order, then the
+	// command's own check of the journal budgets (C20a).
+	want := []string{"engine", "rootless", "subids", "linger", "runtime-dir", "tools", "netbackend", "storage", "overlay-statx",
+		"selinux", "apparmor-userns", "projects-fs", "cgroups", "kvm", "gpu", "journals"}
+	if !slices.Equal(ids, want) {
+		t.Errorf("doctor reported the checks %q, want %q", ids, want)
 	}
 	// Integration tests need a working rootless engine.
 	for _, id := range []string{"engine", "rootless", "runtime-dir"} {

@@ -75,7 +75,7 @@ text = "Only for a project with an upstream and `git.fetch_through` (the default
 [[step]]
 at = "daemon"
 ref = "internal/daemon.Daemon.fetchThrough"
-text = "The box lock is waited for five seconds at most; a busy box skips the fetch-through. The fetch and the sync get twenty seconds."
+text = "The box lock is waited for five seconds at most; a busy box skips the fetch-through. The fetch and the sync get twenty seconds; first, records a crashed daemon left pending are confirmed ([[internal/gitx.Service.SettlePending]])."
 
 [[step]]
 from = "daemon"

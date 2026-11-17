@@ -52,7 +52,7 @@ func (d *Daemon) gateServer(e *env) (*gate.Server, error) {
 // the channel's project, runs the gate's sshd on the stream.
 func (w *boxWorker) serveGate(ctx context.Context, st *yamux.Stream, br *bufio.Reader, m *proto.RPCMessage) {
 	raw := rawStream{st: st, stall: streamStall}
-	defer raw.guard(ctx)()
+	defer raw.guard(ctx, w.d.log)()
 	fail := func(code int, format string, args ...any) {
 		_ = respond(st, m.ID, nil, proto.Errorf(code, format, args...))
 	}

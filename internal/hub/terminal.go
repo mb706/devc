@@ -219,6 +219,12 @@ func (s *Server) apiTerminal(w http.ResponseWriter, r *http.Request) {
 		cctx, ccancel := context.WithTimeout(ctx, 10*time.Second)
 		_, err = l.forward(cctx, proto.MethodTerminalConfirm, proto.TerminalStreamParams{Stream: stream})
 		ccancel()
+		// A machine older than terminal.confirm does not know the method
+		// and does not wait for it (finding H3-01): its terminals go on as
+		// before.
+		if proto.IsCode(err, proto.CodeMethodNotFound) {
+			err = nil
+		}
 	}
 	if err != nil {
 		_, msg, _ := rpcStatus(err)

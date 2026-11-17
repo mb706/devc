@@ -69,7 +69,7 @@ func (b *turnBanker) scheduleLocked(ref names.ProjectRef, st *turnState) {
 	if wait < 0 {
 		wait = 0
 	}
-	st.timer = time.AfterFunc(wait, func() { b.run(ref) })
+	st.timer = afterFunc(b.d.log, &task{box: names.BoxName(ref), what: "a bank after a turn"}, wait, func() { b.run(ref) })
 }
 
 // run banks ref's box with `devc bank <ref> --quiet` when it runs and has

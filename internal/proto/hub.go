@@ -59,12 +59,21 @@ func shortText(s string, max int) bool {
 }
 
 // HubHelloReply is the hub's answer: its protocol version, its own
-// instance ID and the machine name it took from the certificate.
+// instance ID, the machine name it took from the certificate and the
+// features it announces. A machine decodes the answer leniently, so an
+// older machine ignores Features; a hub's hello decoder is strict, which
+// is why only the hub announces.
 type HubHelloReply struct {
-	Protocol int    `json:"protocol"`
-	Hub      string `json:"hub"`
-	Machine  string `json:"machine"`
+	Protocol int      `json:"protocol"`
+	Hub      string   `json:"hub"`
+	Machine  string   `json:"machine"`
+	Features []string `json:"features,omitempty"`
 }
+
+// FeatureTerminalConfirm is the feature of a hub that confirms every
+// terminal it opens (terminal.confirm, finding G5-06): a machine requires
+// the confirmation only from a hub that announces it (finding H3-01).
+const FeatureTerminalConfirm = "terminal.confirm"
 
 // HubRole tells a hub whether this machine asks it to send notifications
 // (the first connected hub in the machine's list).

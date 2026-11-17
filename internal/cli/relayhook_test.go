@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/gitx"
 	"github.com/mb706/devc/internal/names"
@@ -167,14 +168,18 @@ func TestRelayHooksRecordFirst(t *testing.T) {
 }
 
 // TestRelayHooksSettle pushes through real git receive-pack with devc's
-// relay hooks and settles as the daemon does when receive-pack has ended
-// (finding X7 3). An update git refuses after the update hook recorded it
-// (refs/heads/main/<t> while refs/heads/main exists) leaves a pending
-// record that counts for nothing and is removed at settling, so the name
-// refs/devc/bank/main/<t> stays free; an accepted update's record is
-// confirmed. Records nobody settled (the daemon ended first) are settled
-// later: an applied one by the branch's reflog, also after the branch
-// moved on.
+// relay hooks and settles as the daemon does (findings X7 3, H2-01).
+// Right after receive-pack, with the box lock held throughout, SettlePush
+// reads the push's notes: an update git refused after its update hook
+// recorded it (refs/heads/main/<t> while refs/heads/main exists) loses its
+// pending record, so the name refs/devc/bank/main/<t> stays free; an
+// accepted update's record is confirmed. Records nobody settled because
+// the daemon died between receive-pack and settling are only ever
+// confirmed (SettlePending): by the branch's reflog, by the tag, and also
+// when the ref no longer shows them. An accepted tag's record survives an
+// upstream fetch that moved the tag, whether the pull settles first or
+// the tag moved before any settling, and a later push's settling removes
+// only records of its own.
 func TestRelayHooksSettle(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
@@ -210,29 +215,38 @@ func TestRelayHooksSettle(t *testing.T) {
 	if err := gitx.EnsureRelayHooks(hooks, exe); err != nil {
 		t.Fatal(err)
 	}
+	up := filepath.Join(state, "up.git")
+	must(state, "init", "-q", "--bare", "-b", "main", up)
 	work := filepath.Join(state, "work")
 	must(state, "init", "-q", "-b", "main", work)
 	must(work, "commit", "-q", "--allow-empty", "-m", "c1")
-	push := func(args ...string) (string, error) {
+	// push runs receive-pack as the daemon does, with a fresh report file
+	// for the hooks' notes, and returns that file and git's output.
+	pushes := 0
+	push := func(args ...string) (string, string, error) {
+		pushes++
+		report := filepath.Join(state, "local", "tmp", fmt.Sprintf("report-%d.json", pushes))
+		os.MkdirAll(filepath.Dir(report), 0o700)
+		os.WriteFile(report, nil, 0o600)
 		rp := fmt.Sprintf("git -c core.hooksPath=%s receive-pack", hooks)
 		cmd := exec.Command("git", append([]string{"push", "--porcelain", "--receive-pack=" + rp, relay}, args...)...)
-		cmd.Dir, cmd.Env = work, gitEnv
+		cmd.Dir, cmd.Env = work, append(gitEnv, gitx.EnvRelayReport+"="+report)
 		out, err := cmd.CombinedOutput()
-		return string(out), err
+		return report, string(out), err
 	}
 	noHooks := filepath.Join(state, "no-hooks")
 	os.MkdirAll(noHooks, 0o700)
 	host := &gitx.Host{Runner: execx.Real{}, HooksDir: noHooks, Background: true}
 	gs := &gitx.Service{Host: host}
-	p := &gitx.Project{Ref: names.ProjectRef{Realm: "demo", Project: "hello"}, Relay: &gitx.Relay{Host: host, Dir: relay}}
+	p := &gitx.Project{Ref: names.ProjectRef{Realm: "demo", Project: "hello"}, Relay: &gitx.Relay{Host: host, Dir: relay},
+		Resolved: &config.Resolved{Realm: "demo", Project: "hello", Upstream: "file://" + up}}
 	ctx := context.Background()
 	refs := func(prefix string) string {
 		out, _ := git(state, "--git-dir="+relay, "for-each-ref", "--format=%(refname)", prefix)
 		return out
 	}
-	settle := func(confirmed, removed int) {
+	check := func(res gitx.SettleResult, err error, confirmed, removed int) {
 		t.Helper()
-		res, err := gs.SettlePush(ctx, p, nil, nil)
 		if err != nil || res.Confirmed != confirmed || res.Removed != removed || len(res.Problems) != 0 {
 			t.Fatalf("settle: %+v %v, want %d confirmed, %d removed", res, err, confirmed, removed)
 		}
@@ -240,16 +254,37 @@ func TestRelayHooksSettle(t *testing.T) {
 			t.Errorf("markers left after settling: %q", left)
 		}
 	}
-	if out, err := push("main:refs/heads/main"); err != nil {
+	// settleAfter is the daemon's settling once receive-pack has ended;
+	// recover the one after a daemon died, which a bank or pull runs.
+	settleAfter := func(report string, confirmed, removed int) {
+		t.Helper()
+		heads, err := gitx.ReadHeadsNote(report)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs, err := gitx.ReadRecordsNote(report)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := gs.SettlePush(ctx, p, heads, recs)
+		check(res, err, confirmed, removed)
+	}
+	recover := func(confirmed int) {
+		t.Helper()
+		res, err := gs.SettlePending(ctx, p)
+		check(res, err, confirmed, 0)
+	}
+	report, out, err := push("main:refs/heads/main")
+	if err != nil {
 		t.Fatalf("push: %v\n%s", err, out)
 	}
-	settle(1, 0)
+	settleAfter(report, 1, 0)
 	c1 := must(work, "rev-parse", "HEAD")
 
 	// A name in a future second below main: the update hook records it,
 	// git refuses the update when it applies it.
 	future := strconv.FormatInt(time.Now().Unix()+100000, 10)
-	out, err := push("main:refs/heads/main/" + future)
+	report, out, err = push("main:refs/heads/main/" + future)
 	if err == nil {
 		t.Fatalf("git accepted main/%s:\n%s", future, out)
 	}
@@ -264,7 +299,7 @@ func TestRelayHooksSettle(t *testing.T) {
 	if _, ok := set.LastBank["main/"+future]; ok || len(set.Pending) != 1 {
 		t.Errorf("a pending record counts: last bank %v, pending %v", set.LastBank, set.Pending)
 	}
-	settle(0, 1)
+	settleAfter(report, 0, 1)
 	if got := refs("refs/devc/bank/main/" + future + "/"); got != "" {
 		t.Errorf("the refused update's record is left: %q", got)
 	}
@@ -272,22 +307,91 @@ func TestRelayHooksSettle(t *testing.T) {
 	// second.
 	must(state, "--git-dir="+relay, "update-ref", "refs/devc/bank/main/"+future, c1, strings.Repeat("0", len(c1)))
 
-	// Records nobody settled: an accepted update whose branch then moved
-	// on is confirmed by its reflog, the newest by the branch, a refused
-	// one removed.
+	// Records nobody settled (the daemon died after receive-pack): an
+	// accepted update whose branch then moved on is confirmed by its
+	// reflog, the newest by the branch, and the refused one is confirmed
+	// too, since after a crash nothing proves that git refused it.
 	must(work, "commit", "-q", "--allow-empty", "-m", "c2")
-	if out, err := push("main:refs/heads/feature"); err != nil {
+	if _, out, err := push("main:refs/heads/feature"); err != nil {
 		t.Fatalf("push: %v\n%s", err, out)
 	}
 	must(work, "commit", "-q", "--allow-empty", "-m", "c3")
-	if out, err := push("main:refs/heads/feature"); err != nil {
+	if _, out, err := push("main:refs/heads/feature"); err != nil {
 		t.Fatalf("push: %v\n%s", err, out)
 	}
-	if _, err := push("main:refs/heads/main/" + future + "x"); err == nil {
+	if _, _, err := push("main:refs/heads/main/" + future + "x"); err == nil {
 		t.Fatal("git accepted a name below main")
 	}
-	settle(2, 1)
+	recover(3)
 	if got := strings.Count(refs("refs/devc/bank/feature/"), "\n") + 1; got != 2 {
 		t.Errorf("feature has %d records, want 2", got)
 	}
+	if refs("refs/devc/bank/main/"+future+"x/") == "" {
+		t.Error("a record nobody settled was removed")
+	}
+
+	// The crash, then an upstream fetch that moves the tag (finding
+	// H2-01): the box pushes v1 at c4, git accepts it, the daemon dies
+	// before settling; the upstream has v1 at another commit, and a pull
+	// fetches it with --force. The pull settles first: the record of c4
+	// stays, counts and is archived.
+	must(work, "commit", "-q", "--allow-empty", "-m", "c4")
+	c4 := must(work, "rev-parse", "HEAD")
+	must(work, "tag", "v1")
+	must(work, "tag", "v2")
+	must(work, "commit", "-q", "--allow-empty", "-m", "upstream's")
+	other := must(work, "rev-parse", "HEAD")
+	must(work, "push", "-q", up, "HEAD:refs/heads/main", other+":refs/tags/v1")
+	if _, out, err := push("refs/tags/v1:refs/tags/v1"); err != nil {
+		t.Fatalf("push of v1: %v\n%s", err, out)
+	}
+	if _, err := gs.Pull(ctx, p); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if got := must(state, "--git-dir="+relay, "rev-parse", "refs/tags/v1"); got != other {
+		t.Fatalf("the pull did not move v1: %s", got)
+	}
+	tagRecorded := func(tag string) {
+		t.Helper()
+		set, err := p.Relay.RefSet(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !set.DevcTags[tag][c4] || len(set.Pending) != 0 {
+			t.Errorf("the accepted %s at c4 is not recorded: devc tags %v, pending %v", tag, set.DevcTags[tag], set.Pending)
+		}
+		arch, err := p.Relay.ArchiveRefs(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		archived := false
+		for name, oid := range arch {
+			archived = archived || (strings.HasPrefix(name, gitx.DevcTagsPrefix+tag+"/") && oid == c4)
+		}
+		if !archived {
+			t.Errorf("the record of %s at c4 is not archived", tag)
+		}
+	}
+	tagRecorded("v1")
+	recover(0)
+	tagRecorded("v1")
+
+	// The same with the tag moved before anything settled: the next
+	// push's own settling removes nothing of an earlier push, and the
+	// settling a bank runs first confirms it.
+	if _, out, err := push("refs/tags/v2:refs/tags/v2"); err != nil {
+		t.Fatalf("push of v2: %v\n%s", err, out)
+	}
+	must(work, "push", "-q", up, other+":refs/tags/v2")
+	must(state, "--git-dir="+relay, "fetch", "-q", "--force", up, "+refs/tags/*:refs/tags/*")
+	if got := must(state, "--git-dir="+relay, "rev-parse", "refs/tags/v2"); got != other {
+		t.Fatalf("the fetch did not move v2: %s", got)
+	}
+	must(work, "commit", "-q", "--allow-empty", "-m", "c5")
+	report, out, err = push("HEAD:refs/heads/later")
+	if err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	settleAfter(report, 2, 0)
+	tagRecorded("v2")
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -256,8 +257,9 @@ func TestRecordPush(t *testing.T) {
 
 // TestPendingRecords: records the update hook wrote for a push that
 // nobody settled (the daemon ended before receive-pack) count for nothing:
-// neither RefSet nor the archive has them; the next bank settles them, and
-// those of updates git never applied go (finding X7 3).
+// neither RefSet nor the archive has them (finding X7 3). The next bank
+// settles them first and removes none, also of updates git never applied
+// (finding H2-01): after a crash nothing proves that git refused them.
 func TestPendingRecords(t *testing.T) {
 	w := newWorld(t)
 	ctx := context.Background()
@@ -269,11 +271,11 @@ func TestPendingRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := w.git(filepath.Join(w.box, "main"), "rev-parse", "HEAD")
-	b, err := w.svc.RecordUpdate(ctx, w.p, PushedRef{Old: Zero(head), New: head, Ref: "refs/heads/never"})
+	b, err := w.svc.RecordUpdate(ctx, w.p, PushedRef{Old: Zero(head), New: head, Ref: "refs/heads/never"}, nil)
 	if err != nil || b.Branch == nil || b.Branch.BankRef == "" {
 		t.Fatalf("branch record: %+v %v", b, err)
 	}
-	tg, err := w.svc.RecordUpdate(ctx, w.p, PushedRef{Old: Zero(head), New: head, Ref: "refs/tags/never-tag"})
+	tg, err := w.svc.RecordUpdate(ctx, w.p, PushedRef{Old: Zero(head), New: head, Ref: "refs/tags/never-tag"}, nil)
 	if err != nil || tg.Tag == nil {
 		t.Fatalf("tag record: %+v %v", tg, err)
 	}
@@ -297,9 +299,97 @@ func TestPendingRecords(t *testing.T) {
 	if _, err := w.svc.Bank(ctx, w.p); err != nil {
 		t.Fatalf("bank: %v", err)
 	}
-	for _, prefix := range []string{BankPrefix + "never/", DevcTagsPrefix + "never-tag/", PendingPrefix} {
-		if refs, _ := w.p.Relay.Refs(ctx, prefix); len(refs) != 0 {
-			t.Errorf("left after the bank: %v", refs)
+	if refs, _ := w.p.Relay.Refs(ctx, PendingPrefix); len(refs) != 0 {
+		t.Errorf("markers left after the bank: %v", refs)
+	}
+	for _, prefix := range []string{BankPrefix + "never/", DevcTagsPrefix + "never-tag/"} {
+		if refs, _ := w.p.Relay.Refs(ctx, prefix); len(refs) != 1 {
+			t.Errorf("records below %s after the bank: %v", prefix, refs)
 		}
+	}
+}
+
+// TestPendingAfterCrash: the daemon dies between receive-pack and settling
+// (findings H2-01, H2-02). The box had feature at F1 (banked, the box
+// tip), moved it to B and pushed it with tag t1; the update hooks recorded
+// both, the feature record with an own marker, and git applied them. Then
+// the upstream moved on: feature to C, a descendant of B, and t1 to
+// another commit. The pull settles first: t1's record of B stays and is
+// archived although the relay's t1 now differs, and the own marker moves
+// the box tip to B before the pull advances feature to C, so the next
+// bank keeps C instead of taking the box's unchanged B for a change. A
+// push of a branch the box does not have as its own carries no box tip.
+func TestPendingAfterCrash(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	def, err := w.svc.InitRelay(ctx, w.p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.svc.InitBox(ctx, w.p, def); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(w.box, "main")
+	w.git(main, "checkout", "-q", "-b", "feature")
+	os.WriteFile(filepath.Join(main, "f"), []byte("F1\n"), 0o644)
+	w.git(main, "commit", "-qam", "F1")
+	if _, err := w.svc.Bank(ctx, w.p); err != nil {
+		t.Fatal(err)
+	}
+	f1 := w.git(main, "rev-parse", "HEAD")
+	if set, _ := w.p.Relay.RefSet(ctx); set.BoxTips["feature"] != f1 || set.Heads["feature"] != f1 {
+		t.Fatalf("after the bank: heads %v, box tips %v", set.Heads, set.BoxTips)
+	}
+	// The push: pre-receive notes the box's heads, the update hooks
+	// record, git applies (here the objects and refs arrive first, as the
+	// update hook sees the objects); nothing settles.
+	os.WriteFile(filepath.Join(main, "f"), []byte("B\n"), 0o644)
+	w.git(main, "commit", "-qam", "B")
+	b := w.git(main, "rev-parse", "HEAD")
+	w.git(main, "tag", "t1")
+	heads := w.svc.BoxHeads(ctx, w.p)
+	if heads["feature"] != b {
+		t.Fatalf("box heads %v", heads)
+	}
+	w.git(main, "push", "-q", w.p.Relay.Dir, "feature:refs/heads/feature", "refs/tags/t1:refs/tags/t1", "feature:refs/heads/other")
+	for _, u := range []PushedRef{{Old: f1, New: b, Ref: "refs/heads/feature"}, {Old: Zero(b), New: b, Ref: "refs/tags/t1"}, {Old: Zero(b), New: b, Ref: "refs/heads/other"}} {
+		if _, err := w.svc.RecordUpdate(ctx, w.p, u, heads); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if set, _ := w.p.Relay.RefSet(ctx); len(set.PendingOwn) != 1 || len(set.Pending) != 3 {
+		t.Fatalf("pending %v, own %v", set.Pending, set.PendingOwn)
+	}
+	// The upstream: feature at C on top of B, t1 at its main.
+	w.git(main, "push", "-q", "file://"+w.up, "feature:refs/heads/feature")
+	other := filepath.Join(w.dir, "other")
+	w.git(w.dir, "clone", "-q", "-b", "feature", "file://"+w.up, other)
+	os.WriteFile(filepath.Join(other, "f"), []byte("C\n"), 0o644)
+	w.git(other, "commit", "-qam", "C")
+	c := w.git(other, "rev-parse", "HEAD")
+	w.git(other, "push", "-q", "origin", "HEAD:refs/heads/feature", "origin/main:refs/tags/t1")
+	upMain := w.git(other, "rev-parse", "origin/main")
+
+	if _, err := w.svc.Pull(ctx, w.p); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	set, _ := w.p.Relay.RefSet(ctx)
+	if set.Heads["feature"] != c || set.UpstreamTags["t1"] != upMain {
+		t.Fatalf("the pull did not move feature and t1: heads %v, tags %v", set.Heads, set.UpstreamTags)
+	}
+	if len(set.Pending) != 0 || !set.DevcTags["t1"][b] {
+		t.Errorf("t1's record of B: pending %v, devc tags %v", set.Pending, set.DevcTags)
+	}
+	if arch, _ := w.p.Relay.ArchiveRefs(ctx); arch[DevcTagsPrefix+"t1/"+strconv.FormatInt(set.DevcTagNewest["t1"].Time, 10)] != b {
+		t.Errorf("t1's record of B is not archived: %v", arch)
+	}
+	if set.BoxTips["feature"] != b || set.BoxTips["other"] != "" {
+		t.Errorf("box tips after the pull: %v", set.BoxTips)
+	}
+	if _, err := w.svc.Bank(ctx, w.p); err != nil {
+		t.Fatal(err)
+	}
+	if set, _ := w.p.Relay.RefSet(ctx); set.Heads["feature"] != c || !set.DevcTags["t1"][b] {
+		t.Errorf("after the bank: feature %s (C %s, B %s), devc tags %v", set.Heads["feature"], c, b, set.DevcTags["t1"])
 	}
 }

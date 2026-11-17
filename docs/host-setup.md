@@ -28,7 +28,9 @@ items marked *untested* have not been tried on a real host.
 | Optional: XFS or btrfs below the projects root, for instant savepoints | `projects-fs` | yes |
 | Optional: NVIDIA CDI, KVM | `gpu`, `kvm` | yes |
 
-The `tools` check also looks for `sshd`; nothing in devc uses it yet.
+The `tools` check also looks for `sshd`; nothing in devc uses it yet. One
+more check, `journals`, is no host requirement: it warns about projects whose
+session journals reached a budget (see the guide, section "Sessions").
 
 ## Root commands
 

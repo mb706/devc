@@ -15,12 +15,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/proto"
+	"github.com/mb706/devc/internal/safefs"
 )
 
 // Budgets are the journal budgets of a project, in bytes:
@@ -392,6 +394,37 @@ func BudgetText(r BudgetReport) []string {
 	return out
 }
 
+// prunedMark is the mark Prune leaves for a session whose journal it
+// removed: <journal dir>/<id>.pruned, beside where the journal was (only
+// <id>.jsonl files are journals).
+func prunedMark(p *paths.Paths, ref names.ProjectRef, id string) string {
+	return filepath.Join(p.JournalDir(ref), id+".pruned")
+}
+
+// markPruned creates a session's pruned mark durably.
+func (s *Store) markPruned(ref names.ProjectRef, id string) error {
+	file := prunedMark(s.Paths, ref, id)
+	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	d, err := os.Open(filepath.Dir(file))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
+}
+
+// pruned reports whether Prune removed the journal of ref's session id.
+func (s *Store) pruned(ref names.ProjectRef, id string) bool {
+	_, err := os.Lstat(prunedMark(s.Paths, ref, id))
+	return err == nil
+}
+
 // PruneReport says what Prune removed.
 type PruneReport struct {
 	Removed []string // sessions whose journal was removed
@@ -401,15 +434,28 @@ type PruneReport struct {
 }
 
 // Prune removes the journals of a project's sessions that ended before
-// cutoff (by the host's time of their session.end), and their owner
-// records, to make room in the project's journal budget. A session that
-// has not ended is never removed. The caller holds the ingestion lock.
-// What a hub has archived is not touched.
+// cutoff (by the host's time of their session.end), to make room in the
+// project's journal budget. A session that has not ended is never
+// removed. Each pruned session first gets a mark beside its journal
+// (prunedMark) that makes ingestion skip its spool file for good, and its
+// owner record stays, so its ID stays claimed: what the box's spool still
+// holds of it can never start a journal again with reused sequence
+// numbers, and another project cannot take the ID (finding H1-01). Its
+// spool file is removed too, beneath the box's runtime directory without
+// following a link (safefs), when it is there. The caller holds the
+// ingestion lock. What a hub has archived is not touched.
 func (s *Store) Prune(ref names.ProjectRef, cutoff time.Time) (PruneReport, error) {
 	var rep PruneReport
 	ids, err := journalSessions(s.Paths, ref)
 	if err != nil {
 		return rep, err
+	}
+	var spool *safefs.Root
+	if rt, err := s.Paths.BoxRuntimeDir(names.BoxID(ref)); err == nil {
+		if root, err := safefs.OpenRoot(rt); err == nil {
+			spool = root
+			defer root.Close()
+		}
 	}
 	for _, id := range ids {
 		file := s.Paths.JournalFile(ref, id)
@@ -425,18 +471,28 @@ func (s *Store) Prune(ref names.ProjectRef, cutoff time.Time) (PruneReport, erro
 			rep.Recent++
 			continue
 		}
+		// The ID stays claimed: a journal from before ownership was
+		// recorded is claimed now (another project's claim stays theirs).
+		if _, found, err := s.Owner(id); err != nil {
+			return rep, err
+		} else if !found {
+			if _, _, err := s.Claim(ref, id); err != nil {
+				return rep, err
+			}
+		}
+		// The mark goes first: a crash before the journal is removed
+		// leaves both, and the next prune removes the journal.
+		if err := s.markPruned(ref, id); err != nil {
+			return rep, fmt.Errorf("marking session %s as pruned: %w", id, err)
+		}
 		size := journalSize(file)
 		if err := os.Remove(file); err != nil {
 			return rep, fmt.Errorf("removing the journal of %s: %w", id, err)
 		}
 		rep.Removed = append(rep.Removed, id)
 		rep.Bytes += size
-		// The owner record goes too, when it names this project: with the
-		// journal gone it protects nothing of ref's, and leaving it would
-		// let prunes accumulate records without bound.
-		if owner, found, err := s.Owner(id); err == nil && found && owner == ref {
-			_ = os.Remove(s.Paths.SessionOwnerFile(id))
-			s.claims.Delete(ref.String() + "/" + id)
+		if spool != nil {
+			_ = spool.RemoveFile("spool/" + id + ".jsonl")
 		}
 	}
 	s.usageMu.Lock()

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 
@@ -79,7 +80,8 @@ func (a *app) relayHook(ctx context.Context, args []string) error {
 	case gitx.HookPreReceive:
 		// The whole push, before any ref changes: too many refs or too
 		// large a relay refuses all of it (findings C1-05, C1-07).
-		if _, err := gitx.ParseHookInput(a.stdinReader()); err != nil {
+		pushed, err := gitx.ParseHookInput(a.stdinReader())
+		if err != nil {
 			if errors.Is(err, gitx.ErrTooManyRefs) {
 				return refuse("%v; push in parts", err)
 			}
@@ -93,7 +95,9 @@ func (a *app) relayHook(ctx context.Context, args []string) error {
 			return exitCode(1)
 		}
 		if report != "" {
-			if heads := gs.BoxHeads(ctx, p); heads != nil {
+			// Only the pushed branches are noted: every update hook reads
+			// the note (finding H2-02), so it stays as small as the push.
+			if heads := pushedHeads(gs.BoxHeads(ctx, p), pushed); heads != nil {
 				if err := writeNote(gitx.HeadsFile(report), heads, false); err != nil {
 					return refuse("the host could not prepare the push: %s", errText(err))
 				}
@@ -114,7 +118,16 @@ func (a *app) relayHook(ctx context.Context, args []string) error {
 		// Recorded (pending) before receive-pack accepts the update, or
 		// refused; the daemon settles the push's records when receive-pack
 		// has ended (finding X7 3).
-		rec, err := gs.RecordUpdate(ctx, p, gitx.PushedRef{Ref: args[1], Old: args[2], New: args[3]})
+		// The box's own tips decide whether the record's marker carries
+		// the box tip (finding H2-02); without the note none does.
+		var heads map[string]string
+		if report != "" {
+			if heads, err = gitx.ReadHeadsNote(report); err != nil {
+				fmt.Fprintf(a.stderr, "devc: warning: reading the push's notes: %s\n", errText(err))
+				heads = nil
+			}
+		}
+		rec, err := gs.RecordUpdate(ctx, p, gitx.PushedRef{Ref: args[1], Old: args[2], New: args[3]}, heads)
 		if err != nil {
 			return refuse("recording %s in the relay failed: %s", printableArg(args[1]), errText(err))
 		}
@@ -147,6 +160,23 @@ func (a *app) relayHook(ctx context.Context, args []string) error {
 		return writeReport(report, rep)
 	}
 	return usageErrorf("unknown hook %q", printableArg(args[0]))
+}
+
+// pushedHeads keeps the box's branches that the push updates (nil when
+// heads is nil).
+func pushedHeads(heads map[string]string, pushed []gitx.PushedRef) map[string]string {
+	if heads == nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, u := range pushed {
+		if b, ok := strings.CutPrefix(u.Ref, gitx.HeadsPrefix); ok {
+			if oid, ok := heads[b]; ok {
+				out[b] = oid
+			}
+		}
+	}
+	return out
 }
 
 // writeNote writes (or, with appending, adds a line to) a note of the

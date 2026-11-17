@@ -192,7 +192,9 @@ devc sessions prune demo/hello --before 2026-10-01   # ended before that date
 ```
 
 `prune` never removes a session that has not ended and does nothing without
-`--before`; what a hub has archived stays there. Each harness also gets a generated description of the box (paths,
+`--before`; what a hub has archived stays there. A pruned session's ID stays
+the project's, and what the box's spool still holds of it is removed and
+never recorded again. Each harness also gets a generated description of the box (paths,
 network level, git and data rules) in its instructions.
 
 ### The daemon
@@ -575,7 +577,9 @@ refused, tags can be created but not moved, `refs/devc/*` and
 relay accepts it (an update whose bank ref cannot be written is refused); it
 counts once the push has ended and git applied the update, and the record of
 an update git refused (a name that clashes with an existing branch) is
-removed then, or at the next push or bank if the daemon ended first. And
+removed then. If the daemon ended first, the next push, pull, bank or `devc
+push` keeps every record the push left, so a commit that reached the host
+stays recorded even when the upstream later moves that tag. And
 branches matching `git.forward` are pushed on to the upstream (the push prints
 the result). A push may update at most 1000 refs (push in parts), its pack may
 be at most `git.max_push_size` (default `2g`), and it is refused as a whole
@@ -668,9 +672,11 @@ devc pr comment demo/app 12 --body "Looks good"
 does (it shows what the upstream lacks and asks, unless `--yes`), then opens
 the pull request and prints its URL. The title defaults to the subject of the
 branch's newest commit, the base to the project's default branch. Before
-anything is pushed it refuses a branch that is the base, the project's
-default branch or the upstream's (the relay's `HEAD`), a branch matching
-`git.protected`, and one the relay does not have. Both refuse while the
+the bank it refuses a branch that is the base, the project's default branch
+or the upstream's (the relay's `HEAD`), and a branch matching
+`git.protected`; after the bank (which, as every bank, forwards the
+branches listed in `git.forward`) one the relay does not have. Only then is
+anything pushed for the pull request. Both refuse while the
 project's configuration has problems. An agent asks for the same
 with `devc request pr` (its current branch unless `--branch`) or `devc
 request comment <n> --body …`; both are high-risk requests, approved only
@@ -1107,7 +1113,9 @@ non-loopback address makes it reachable from the network, and devc warns
 about that. Each connection runs one small process on the host, so a
 forward serves at most 64 connections at once and the router of local URLs
 at most 256 to all boxes together; a connection beyond that is closed at
-once (the forward's log, or the daemon's, says so once a minute).
+once (the forward's log, or the daemon's, says so once a minute). Once a
+client of `devc forward` has closed its side, the box has 10 seconds to
+finish its answer; then devc ends that connection, whatever the box does.
 
 **Local URLs.** While the daemon runs, it serves
 `http://<port>.<project>.<realm>.localhost:7480/` for every port listed in

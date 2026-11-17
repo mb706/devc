@@ -183,3 +183,78 @@ func TestTerminalConfirm(t *testing.T) {
 		t.Errorf("closing the confirmed stream: %v", err)
 	}
 }
+
+// TestTerminalConfirmByHello: the machine requires terminal.confirm only
+// from a hub that announced in its hello that it confirms (finding
+// H3-01). Two hubs open a terminal each and never confirm: the stream of
+// the hub that announced it is ended at the deadline, the stream of the
+// hub that did not (an older hub) stays.
+func TestTerminalConfirmByHello(t *testing.T) {
+	shortTimes(t)
+	oldC, oldW := termConfirm, termWatch
+	termConfirm, termWatch = 400*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { termConfirm, termWatch = oldC, oldW })
+	r := newRig(t)
+	cert, save := hubCreds(t, r)
+	older, newer := newFakeHub(t, cert), newFakeHub(t, cert)
+	newer.features = []string{proto.FeatureTerminalConfirm}
+	save(older.url())
+	save(newer.url())
+	listHubs(t, r, older.url(), newer.url())
+	r.boxUp(true)
+	r.start()
+	c := r.client(nil)
+	sid := names.NewSessionID()
+	r.agentWithInput(&fakeBox{r: r, sid: sid, buffers: map[string][]byte{}})
+	r.waitChannel(c, proto.ChannelConnected)
+	r.startSession(c, sid)
+	// The tmux client runs until its grouped session is killed.
+	var mu sync.Mutex
+	clients := map[string]chan struct{}{}
+	after := func(cmd []string, flag string) string {
+		if i := slices.Index(cmd, flag); i >= 0 && i+1 < len(cmd) {
+			return strings.TrimPrefix(cmd[i+1], "=")
+		}
+		return ""
+	}
+	r.eng.ExecFunc = func(o engine.ExecOptions) (execx.Result, error) {
+		switch {
+		case slices.Contains(o.Cmd, "display-message"):
+			return execx.Result{Stdout: []byte("80 24\n")}, nil
+		case slices.Contains(o.Cmd, "kill-session"):
+			mu.Lock()
+			if ch := clients[after(o.Cmd, "-t")]; ch != nil {
+				close(ch)
+				delete(clients, after(o.Cmd, "-t"))
+			}
+			mu.Unlock()
+		case o.TTY:
+			ch := make(chan struct{})
+			mu.Lock()
+			clients[after(o.Cmd, "-s")] = ch
+			mu.Unlock()
+			<-ch
+		}
+		return execx.Result{}, nil
+	}
+	ctx := context.Background()
+	oc, nc := older.conn(), newer.conn()
+	streams := map[*proto.Conn]string{oc: strings.Repeat("c", 32), nc: strings.Repeat("d", 32)}
+	for conn, stream := range streams {
+		var res proto.TerminalOpenResult
+		if err := conn.Call(ctx, proto.MethodTerminalOpen, proto.TerminalOpenParams{Stream: stream, Session: sid, Ref: hello.String(), Mode: "observe"}, &res); err != nil {
+			t.Fatalf("open through a hub: %v", err)
+		}
+	}
+	time.Sleep(termConfirm + 10*termWatch)
+	// A confirm now finds the stream only where it was kept.
+	if err := oc.Call(ctx, proto.MethodTerminalConfirm, proto.TerminalStreamParams{Stream: streams[oc]}, nil); err != nil {
+		t.Errorf("the older hub's terminal was ended: %v", err)
+	}
+	if err := nc.Call(ctx, proto.MethodTerminalConfirm, proto.TerminalStreamParams{Stream: streams[nc]}, nil); !proto.IsCode(err, proto.CodeNotFound) {
+		t.Errorf("the unconfirmed terminal of a hub that confirms was kept: %v", err)
+	}
+	for conn, stream := range streams {
+		_ = conn.Call(ctx, proto.MethodTerminalClose, proto.TerminalStreamParams{Stream: stream}, nil)
+	}
+}

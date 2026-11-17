@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -44,7 +45,16 @@ const (
 	// refusalLogEvery is the least time between two log lines about
 	// refused connections.
 	refusalLogEvery = time.Minute
+	// ClientGoneGrace is how long a dial process may go on once its
+	// client's side of the connection has ended (H1-02): long enough for
+	// the box to send the rest of an answer, short enough that a box that
+	// never closes its side cannot keep the connection's place.
+	ClientGoneGrace = 10 * time.Second
 )
+
+// clientPoll is how often relay looks at whether a connection's client
+// has gone.
+var clientPoll = 250 * time.Millisecond
 
 // Admission bounds the connections that run at once. A connection that
 // finds no place is refused at once, before any process is started, and
@@ -122,6 +132,9 @@ type Forwarder struct {
 	// one with MaxForwardConns places when it is nil; Dial uses it when it
 	// is set (the router shares one across its boxes).
 	Admission *Admission
+	// Grace is how long a connection's dial process may go on after its
+	// client's side ended (ClientGoneGrace when zero; tests shorten it).
+	Grace time.Duration
 }
 
 // Descriptors of the pinned namespaces in each dial process.
@@ -308,7 +321,11 @@ func Pin(ctx context.Context, eng engine.Engine, container string, fs ProcFS) (*
 
 // relay hands one connection to a dial process in the box. The socket
 // itself becomes the process's standard input and output, so bytes flow
-// without a copy on the host and half-closes reach the other side.
+// without a copy on the host and half-closes reach the other side. The
+// box's side is hostile and may never close, so the host ends the process
+// on what it sees itself (H1-02): once the client's side has ended, the
+// process gets f.Grace to finish and is then killed, which frees the
+// connection's place.
 func (f *Forwarder) relay(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	tc, ok := conn.(*net.TCPConn)
@@ -327,7 +344,16 @@ func (f *Forwarder) relay(ctx context.Context, conn net.Conn) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	code, err := f.Runner.Interactive(ctx, execx.Cmd{
+	pctx, kill := context.WithCancel(ctx)
+	defer kill()
+	done := make(chan struct{})
+	defer close(done)
+	var ended atomic.Bool
+	go f.endAfterClient(file, done, func() {
+		ended.Store(true)
+		kill()
+	})
+	code, err := f.Runner.Interactive(pctx, execx.Cmd{
 		Name: f.Nsenter, Args: f.DialArgs(), Dir: "/",
 		// DEVC_BOX keeps the dial process from loading the host's devc
 		// configuration; it reads nothing from the box either.
@@ -337,11 +363,61 @@ func (f *Forwarder) relay(ctx context.Context, conn net.Conn) {
 		ExtraFiles: []*os.File{f.Box.UserNS, f.Box.NetNS},
 	})
 	switch {
+	case ended.Load():
+		f.logf("connection to port %d in %s: the client went away and the box's side did not end within %s; ended", f.Port, f.Container, f.grace())
 	case err != nil && ctx.Err() == nil:
 		f.logf("connection to port %d in %s: %v", f.Port, f.Container, err)
 	case err == nil && code != 0:
 		f.logf("connection to port %d in %s ended with status %d", f.Port, f.Container, code)
 	}
+}
+
+func (f *Forwarder) grace() time.Duration {
+	if f.Grace > 0 {
+		return f.Grace
+	}
+	return ClientGoneGrace
+}
+
+// endAfterClient calls end f.grace() after the client's side of the
+// connection whose socket is file has ended (it shut down its sending
+// side, closed, or reset), unless done is closed first: the dial process
+// shares the socket, and the host only looks at its state, every
+// clientPoll, without reading from it.
+func (f *Forwarder) endAfterClient(file *os.File, done <-chan struct{}, end func()) {
+	rc, err := file.SyscallConn()
+	if err != nil {
+		return
+	}
+	t := time.NewTicker(clientPoll)
+	defer t.Stop()
+	for !clientGone(rc) {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+		}
+	}
+	g := time.NewTimer(f.grace())
+	defer g.Stop()
+	select {
+	case <-done:
+	case <-g.C:
+		end()
+	}
+}
+
+// clientGone reports whether the peer of a socket has ended its side: a
+// FIN (POLLRDHUP), or a hang-up or error. poll never consumes data.
+func clientGone(rc syscall.RawConn) bool {
+	gone := false
+	_ = rc.Control(func(fd uintptr) {
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLRDHUP}}
+		if n, err := unix.Poll(fds, 0); err == nil && n > 0 {
+			gone = fds[0].Revents&(unix.POLLRDHUP|unix.POLLHUP|unix.POLLERR) != 0
+		}
+	})
+	return gone
 }
 
 // Dial opens one connection to the forwarded port in the box, for callers

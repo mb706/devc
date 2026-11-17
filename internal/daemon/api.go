@@ -287,13 +287,16 @@ func (d *Daemon) apiSession(_ context.Context, _ *proto.Conn, params json.RawMes
 	// later ones the view has not folded yet, and a reader that applies the
 	// events above the view's LastSeq (the hub) must find them follow on
 	// from it (finding G5-08). Later events come as notifications.
+	// A view at 0 has folded no event yet: it gets none (finding H3-02).
 	v := e.view
-	evs, err := lastEvents(e.file, min(n, maxRecent), maxPageBytes, max(v.LastSeq, 1))
-	if err != nil {
-		return nil, err
-	}
-	if evs == nil {
-		evs = []proto.Event{}
+	evs := []proto.Event{}
+	if v.LastSeq > 0 {
+		if evs, err = lastEvents(e.file, min(n, maxRecent), maxPageBytes, v.LastSeq); err != nil {
+			return nil, err
+		}
+		if evs == nil {
+			evs = []proto.Event{}
+		}
 	}
 	d.decorate(&v)
 	return proto.SessionsGetResult{Session: v, Events: evs}, nil

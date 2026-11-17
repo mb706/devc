@@ -31,9 +31,16 @@ const (
 	// PendingPrefix marks a record the update hook wrote for a push
 	// update that git may still refuse (finding X7 3): the marker of
 	// refs/devc/<kind>/<name>/<time> is refs/devc/pending/<kind>/<name>/<time>
-	// at the same object. A record with a marker counts for nothing until
-	// SettlePush confirms it (removes the marker) or removes both.
+	// at the same object, or refs/devc/pending/own/<kind>/<name>/<time>
+	// when the pushed tip was the box's own branch's (PendingOwn), which
+	// settling records as the box tip (finding H2-02). A record with a
+	// marker counts for nothing until it is settled: confirmed (the marker
+	// removed) or, only by SettlePush right after the receive-pack that
+	// wrote it, removed with its marker (finding H2-01).
 	PendingPrefix = "refs/devc/pending/"
+	// pendingOwn starts the rest of an own marker after PendingPrefix; no
+	// record kind is named "own".
+	pendingOwn = "own/"
 
 	incomingHeads = IncomingPrefix + "heads/"
 	incomingWIP   = IncomingPrefix + "wip/"
@@ -300,8 +307,11 @@ type RefSet struct {
 	InWIP      map[string]string
 	InTags     map[string]string
 	Incoming   []string
-	// Pending are the records with a pending marker, by record name.
-	Pending map[string]string
+	// Pending are the records with a pending marker, by record name;
+	// PendingOwn those whose marker says the box's own branch had the
+	// pushed tip.
+	Pending    map[string]string
+	PendingOwn map[string]bool
 }
 
 // splitStamped splits "<name>/<unix-time>".
@@ -324,6 +334,7 @@ func SortRefs(refs []Ref) RefSet {
 		LastBank: map[string]Stamped{}, LastSnap: map[string]Stamped{}, NewestTag: map[string]int64{},
 		DevcTags: map[string]map[string]bool{}, DevcTagNewest: map[string]Stamped{}, BoxTips: map[string]string{},
 		InBranches: map[string]string{}, InWIP: map[string]string{}, InTags: map[string]string{}, Pending: map[string]string{},
+		PendingOwn: map[string]bool{},
 	}
 	newer := func(m map[string]Stamped, name string, st Stamped) {
 		if cur, ok := m[name]; !ok || st.Time > cur.Time {
@@ -332,7 +343,14 @@ func SortRefs(refs []Ref) RefSet {
 	}
 	for _, r := range refs {
 		if rest, ok := strings.CutPrefix(r.Name, PendingPrefix); ok {
+			own := false
+			if after, ok := strings.CutPrefix(rest, pendingOwn); ok {
+				rest, own = after, true
+			}
 			s.Pending["refs/devc/"+rest] = r.OID
+			if own {
+				s.PendingOwn["refs/devc/"+rest] = true
+			}
 		}
 	}
 	for _, r := range refs {

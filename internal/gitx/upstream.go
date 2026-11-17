@@ -127,6 +127,9 @@ func (s *Service) Pull(ctx context.Context, p *Project) (*PullResult, error) {
 	if p.Resolved.Upstream == "" {
 		return res, fmt.Errorf("%s has no upstream: set upstream in its project.toml", p.Ref)
 	}
+	// What an earlier push left pending is settled before the fetch moves
+	// tags and branches (finding H2-01).
+	res.Notes = append(res.Notes, s.settleFirst(ctx, p)...)
 	if err := s.fetchUpstream(ctx, p); err != nil {
 		return res, err
 	}
@@ -194,6 +197,11 @@ func (s *Service) Push(ctx context.Context, p *Project, o PushOptions) error {
 	}
 	if p.Resolved.Upstream == "" {
 		return fmt.Errorf("%s has no upstream: set upstream in its project.toml", p.Ref)
+	}
+	// Records an earlier push left pending count once settled (finding
+	// H2-01); a bank before has done it already when the box runs.
+	for _, pr := range s.settleFirst(ctx, p) {
+		s.printf("devc: %s\n", pr)
 	}
 	if err := p.Relay.SetUpstream(ctx, p.Resolved.Upstream); err != nil {
 		return err

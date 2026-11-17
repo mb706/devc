@@ -327,7 +327,7 @@ see = ["spool", "journal", "reconciliation"]
 id = "session-owner"
 title = "Session owner"
 aka = ["session ownership"]
-text = "The project a session ID belongs to: the first project that claimed it, which ingestion does when it first appends an event of a spool file of that ID (the host does when it first writes an event of its own); written once to `durable/session-owners/<id>`, and removed with the journal by `devc sessions prune`. A box's spool file for a session another project owns is refused before it is read, so a box cannot add events to, or receive commands for, another project's session."
+text = "The project a session ID belongs to: the first project that claimed it, which ingestion does when it first appends an event of a spool file of that ID (the host does when it first writes an event of its own); written once to `durable/session-owners/<id>`, and kept when `devc sessions prune` removes the journal. A box's spool file for a session another project owns is refused before it is read, so a box cannot add events to, or receive commands for, another project's session."
 refs = ["internal/session.Store.Claim", "internal/paths.Paths.SessionOwnersDir"]
 see = ["session", "ingestion"]
 
@@ -476,14 +476,14 @@ see = ["box-repository"]
 id = "pending-record"
 title = "Pending record"
 aka = ["pending marker", "settling a push"]
-text = "A bank ref or tag record the update hook wrote for a push update git may still refuse, marked by `refs/devc/pending/<kind>/<name>/<time>` at the same object. It counts for nothing (banks, `devc push --tag` and the archive leave it out) until it is settled: confirmed when git applied the update (the marker goes), removed with its marker when git refused it. The daemon settles a push when receive-pack has ended; what is left pending is settled by the next push or bank."
-refs = ["internal/gitx.PendingPrefix", "internal/gitx.Service.SettlePush", "internal/gitx.SortRefs"]
+text = "A bank ref or tag record the update hook wrote for a push update git may still refuse, marked by `refs/devc/pending/<kind>/<name>/<time>` at the same object (`refs/devc/pending/own/…` when the pushed tip was the box's own branch's, so settling records the box tip too). It counts for nothing (banks, `devc push --tag` and the archive leave it out) until it is settled. Right after receive-pack the daemon confirms it when git applied the update (the marker goes) and removes it with its marker when git refused it; what a daemon that died first left pending is only confirmed, by the settling every later push, pull, fetch-through, bank and `devc push` runs first."
+refs = ["internal/gitx.PendingPrefix", "internal/gitx.Service.SettlePush", "internal/gitx.Service.SettlePending", "internal/gitx.SortRefs"]
 see = ["bank-ref"]
 
 [[term]]
 id = "bank-ref"
 title = "Bank ref"
-text = "`refs/devc/bank/<branch>/<unix time>` in a relay: created for every new tip of a relay branch by a bank, a push through the relay service, a pull or an adoption. Never moved, so a rewritten branch's old commits stay reachable. A push records the tip before git applies it, with a pending marker; when the push has ended the record is confirmed if git applied the update and removed if git refused it, the only bank ref ever deleted."
+text = "`refs/devc/bank/<branch>/<unix time>` in a relay: created for every new tip of a relay branch by a bank, a push through the relay service, a pull or an adoption. Never moved, so a rewritten branch's old commits stay reachable. A push records the tip before git applies it, with a pending marker; right after the push the record is confirmed if git applied the update and removed if git refused it, the only bank ref ever deleted; one a crashed daemon left pending is confirmed later."
 refs = ["internal/gitx.BankPrefix", "internal/gitx.PlanBank", "internal/gitx.Service.RecordUpdate", "internal/gitx.Service.SettlePush"]
 see = ["git-ratchet", "banking"]
 
@@ -1076,8 +1076,8 @@ see = ["notification-record"]
 [[term]]
 id = "notification-record"
 title = "Notification record"
-text = "The hub's record of one attention state of a session (needs-you with its question, failed, a finished turn): pending until published or handled without a message, sent, then cleared when the state ends (also a record still pending whose publish was attempted; one never attempted is dropped). Failures are retried with backoff, across restarts too."
-refs = ["internal/hub.NoteState", "internal/hub.notifier.update"]
+text = "The hub's record of one attention state of a session (needs-you with its question, failed, a finished turn): pending until published or handled without a message, sent, then cleared when the state ends (also a record still pending, or handled without a message, after a publish was attempted; one never attempted is dropped). Failures are retried with backoff, across restarts too."
+refs = ["internal/hub.NoteState", "internal/hub.notifier.update", "internal/hub.notifier.retire"]
 see = ["notifier", "action-token"]
 
 [[term]]

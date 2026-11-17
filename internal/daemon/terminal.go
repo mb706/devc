@@ -13,7 +13,8 @@ package daemon
 // changes. The opener confirms the stream (terminal.confirm) once it has
 // the answer; a stream not confirmed within termConfirm is ended, so one
 // whose answer was lost, or that the opener gave up on before it existed,
-// does not stay open (finding G5-06). An observing stream cannot type
+// does not stay open (finding G5-06). A hub that did not announce in its
+// hello that it confirms (an older one) is not asked to (finding H3-01). An observing stream cannot type
 // because the daemon, the only
 // writer of its pseudo-terminal, refuses terminal.input for it (tmux's
 // read-only flag is not used: it makes tmux refuse the daemon's own
@@ -295,7 +296,9 @@ func (st *termStream) watch(ctx context.Context) {
 			return
 		case <-tick.C:
 		}
-		if !st.confirmed.Load() && time.Since(st.opened) >= termConfirm {
+		// The hub's own connection decides at the deadline, long after the
+		// hello was answered (finding H3-01).
+		if !st.confirmed.Load() && time.Since(st.opened) >= termConfirm && !st.m.d.hubs.unconfirmed(st.conn) {
 			st.end("the opener never confirmed the terminal")
 			return
 		}

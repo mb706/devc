@@ -97,7 +97,7 @@ func (d *Daemon) githubRepo(r *config.Resolved) (github.Repo, *proto.Error) {
 // it counts against the budget and before the credential is read.
 func (w *boxWorker) serveGitHub(ctx context.Context, st *yamux.Stream, m *proto.RPCMessage) {
 	raw := rawStream{st: st, stall: streamStall}
-	end := raw.guard(ctx)
+	end := raw.guard(ctx, w.d.log)
 	defer end()
 	d, ref := w.d, w.ref
 	fail := func(perr *proto.Error) { _ = respond(st, m.ID, nil, perr) }

@@ -99,7 +99,7 @@ text = "The record outlives a restart of the hub and a failure of ntfy."
 at = "hub"
 ref = "internal/hub.notifier.publish"
 checks = ["internal/hub.notifier.machineNotifies", "internal/hub.Server.watched"]
-text = "Only if the machine is online and named this hub its notifier; if a logged-in event stream names the session, the record becomes sent without a message instead."
+text = "Only if the machine is online and named this hub its notifier; if a logged-in event stream names the session, the record becomes sent without a message instead (keeping its sequence ID, so its message is cleared later, if a publish was attempted before)."
 
 [[step]]
 from = "hub"

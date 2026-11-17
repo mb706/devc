@@ -61,9 +61,9 @@ refs = ["internal/box.BuildSpec", "internal/toolbox.DeriveProfile", "internal/ne
 tests = ["internal/box.TestSpecLimits", "internal/toolbox.TestSeccompRejectsUnexpectedBase", "internal/box.TestInternetLevel", "internal/box.TestProblemsBlockLifecycle", "internal/daemon.TestHostAddrsFailClosed"]
 
 [[invariant]]
-text = "What a box sends makes the host store and run only bounded amounts: pushes and banks within `git.relay_quota`, journals within their budgets, savepoints it requests within `requested_keep`, each keeping 1 GiB free on the state file system where it writes there, and at most 64 connections per forward and 256 through the router."
-refs = ["internal/gitx.Watch", "internal/gitx.Service.fetchFromBox", "internal/session.room.fits", "internal/data.RequestedRetention", "internal/netpolicy.Admission.Acquire"]
-tests = ["internal/gitx.TestBankFetchBudget", "internal/session.TestJournalProjectBudget", "internal/data.TestRequestedSavepoints", "internal/netpolicy.TestForwarderAdmission", "test/integration.TestBankBudget", "test/integration.TestJournalBudgets", "test/integration.TestRequestedSavepoints"]
+text = "What a box sends makes the host store and run only bounded amounts: pushes and banks within `git.relay_quota`, starting only with 1 GiB free on the state file system and ended when less than 512 MiB would stay free; journals within their budgets and the same 1 GiB reserve; savepoints it requests by count, the newest `requested_keep`, with no free-space reserve of their own; and at most 64 connections per forward, each ended 10 s after its client went, and 256 through the router."
+refs = ["internal/gitx.Watch", "internal/gitx.Service.fetchFromBox", "internal/daemon.Daemon.watchPush", "internal/session.room.fits", "internal/data.RequestedRetention", "internal/netpolicy.Admission.Acquire", "internal/netpolicy.Forwarder.endAfterClient"]
+tests = ["internal/gitx.TestBankFetchBudget", "internal/daemon.TestPushWatchdog", "internal/session.TestJournalProjectBudget", "internal/data.TestRequestedSavepoints", "internal/netpolicy.TestForwarderAdmission", "internal/boxside.TestForwardClientGone", "test/integration.TestBankBudget", "test/integration.TestJournalBudgets", "test/integration.TestRequestedSavepoints"]
 
 [[invariant]]
 text = "A box's request is served for the project of the channel it arrived on, and a hub reaches a machine only through the methods its daemon allowlists, deciding low-risk requests only."

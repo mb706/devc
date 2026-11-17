@@ -261,6 +261,10 @@ type webMachine struct {
 	scope    string // answer with this scope (default: the asked one)
 	// openAnswer, when set, replaces the answer to terminal.open.
 	openAnswer func(p proto.TerminalOpenParams) (any, error)
+	// noConfirm leaves terminal.confirm out, as a machine older than it;
+	// reply is the hub's answer to the hello.
+	noConfirm bool
+	reply     proto.HubHelloReply
 }
 
 func (w *webMachine) handlers() map[string]proto.Handler {
@@ -339,6 +343,9 @@ func (w *webMachine) handlers() map[string]proto.Handler {
 		w.confirms = append(w.confirms, p.Stream)
 		w.mu.Unlock()
 		return struct{}{}, nil
+	}
+	if w.noConfirm {
+		delete(hs, proto.MethodTerminalConfirm)
 	}
 	return hs
 }
@@ -431,7 +438,47 @@ func (w *webMachine) connect(addr string, cert *Issued) {
 	if err := c.Call(ctx, proto.MethodHubHello, proto.HubHello{Protocol: proto.HubProtocol, Name: "fakehost", Version: "v", Instance: "abcd"}, &reply); err != nil {
 		w.t.Fatal(err)
 	}
+	w.mu.Lock()
+	w.reply = reply
+	w.mu.Unlock()
 	w.t.Cleanup(func() { c.Close() })
+}
+
+// TestTerminalOlderMachine: the hub announces in its hello that it
+// confirms terminals, and confirms every one it opens; a machine older
+// than terminal.confirm answers "unknown method", and its terminal opens
+// as before instead of ending (finding H3-01). The control, a machine
+// that serves the method, is TestTerminalOpenCleanup's.
+func TestTerminalOlderMachine(t *testing.T) {
+	h := newTestHub(t, "hub.test")
+	mach := h.issue(RoleMachine, "m1")
+	dev := h.issue(RoleDevice, "phone")
+	addr, _ := runHub(t, h)
+	api := newAPIClient(t, addr, dev)
+	m := &webMachine{fakeMachine: newFakeMachine(t), noConfirm: true}
+	sid := "s0000000000000000000a"
+	m.add(sid, proto.TypeSessionStart, proto.SessionStart{Harness: "fake"})
+	m.connect(addr, mach)
+	if !slices.Contains(m.reply.Features, proto.FeatureTerminalConfirm) {
+		t.Errorf("the hub's hello does not announce terminal confirmation: %+v", m.reply)
+	}
+	waitFor(t, "the machine online", func() bool {
+		code, body := api.do("GET", "/api/machines", "")
+		return code == 200 && strings.Contains(body, `"online":true`)
+	})
+	ws, _, err := api.terminal(sid, "observe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	if evs := readTerm(t, ws, 1); evs[0].text["type"] != "open" {
+		t.Errorf("a terminal on an older machine: %+v", evs)
+	}
+	m.mu.Lock()
+	if len(m.opens) != 1 || len(m.closes) != 0 {
+		t.Errorf("opens %+v closes %q", m.opens, m.closes)
+	}
+	m.mu.Unlock()
 }
 
 // terminal opens a terminal WebSocket as the web app would.

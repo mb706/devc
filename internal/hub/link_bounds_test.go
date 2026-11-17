@@ -139,10 +139,12 @@ func TestRefreshBounds(t *testing.T) {
 // capacity (stored plus outstanding), by at most resyncWorkers at a time,
 // with a bounded queue (finding C2-02).
 // TestResyncSuccession: the events of a re-read must follow one another
-// on from the machine's view without gap or repeat, be valid events of the
-// session and no more than asked for; otherwise the link is closed and the
-// hub keeps the session as it held it (finding G5-08). Control: the same
-// re-read untouched is applied.
+// without gap or repeat, end exactly at the machine's view, be valid
+// events of the session and no more than asked for; otherwise the link is
+// closed and the hub keeps the session as it held it (findings G5-08,
+// H3-02: a tail short of the view it advertises, here events 1-3 with a
+// view at 7, would have the hub store 1, 2, 3 and then 8). Control: the
+// same re-read untouched is applied.
 func TestResyncSuccession(t *testing.T) {
 	sid := testSID(1)
 	for name, change := range map[string]func(res *proto.SessionsGetResult){
@@ -154,7 +156,10 @@ func TestResyncSuccession(t *testing.T) {
 			res.Session.LastSeq = 2
 			res.Events = res.Events[3:]
 		},
-		"another session": func(res *proto.SessionsGetResult) { res.Events[4].Session = testSID(2) },
+		"short of the view": func(res *proto.SessionsGetResult) { res.Events = res.Events[:3] },
+		"beyond the view":   func(res *proto.SessionsGetResult) { res.Session.LastSeq = 5 },
+		"none, view at 7":   func(res *proto.SessionsGetResult) { res.Events = nil },
+		"another session":   func(res *proto.SessionsGetResult) { res.Events[4].Session = testSID(2) },
 		"too many": func(res *proto.SessionsGetResult) {
 			extra := make([]proto.Event, TailEvents)
 			for i := range extra {

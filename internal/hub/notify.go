@@ -595,7 +595,7 @@ func (n *notifier) update(ctx context.Context, k SessionKey, sum *SessionSummary
 	}
 	for key, r := range n.rows[k] {
 		if key != want {
-			n.ended(ctx, r)
+			n.retire(ctx, r)
 		}
 	}
 	now := n.s.now()
@@ -626,17 +626,33 @@ func (n *notifier) update(ctx context.Context, k SessionKey, sum *SessionSummary
 	}
 }
 
-// ended handles a record whose state has ended (finding G5-17): one
-// that never had a message (pending with no attempt, or sent without
-// one) is dropped; one whose message was published, or whose publish was
-// attempted and may have reached ntfy although its answer was lost, loses
-// its buttons and has its message cleared. A cleared record goes on
+// attempted reports whether a publish of r's message was ever attempted,
+// so that the message may be on the phone although ntfy's answer was lost
+// (findings G5-17, H3-03). publish stores Tries+1 before every attempt,
+// and the record keeps that knowledge in the states an attempt leads to:
+// pending with tries, sent with its sequence ID (a record handled without
+// a message keeps it too once an attempt was made), cleared.
+func attempted(r *NoteState) bool {
+	switch r.State {
+	case NoteCleared:
+		return true
+	case NoteSent:
+		return r.Seq != ""
+	}
+	return r.Seq != "" && r.Tries > 0
+}
+
+// retire ends a record whose state has ended; every record goes through
+// it (finding H3-03). One whose publish was never attempted is dropped;
+// one whose message was published, or whose publish was attempted, loses
+// its buttons and has its message cleared, and clear drops it once ntfy
+// confirms (or gives up after clearMaxAge). A cleared record goes on
 // clearing.
-func (n *notifier) ended(ctx context.Context, r *NoteState) {
+func (n *notifier) retire(ctx context.Context, r *NoteState) {
 	switch {
 	case r.State == NoteCleared:
 		return
-	case r.Seq == "", r.State == NotePending && r.Tries == 0:
+	case !attempted(r):
 		n.drop(r)
 		return
 	}
@@ -683,7 +699,7 @@ func (n *notifier) retryDue(ctx context.Context) {
 			continue
 		}
 		if len(list) != 1 || notifyKey(&list[0]) != r.Key {
-			n.ended(ctx, r)
+			n.retire(ctx, r)
 			continue
 		}
 		n.publish(ctx, r, &list[0])
@@ -701,7 +717,12 @@ func (n *notifier) publish(ctx context.Context, r *NoteState, sum *SessionSummar
 	}
 	if n.s.watched(k) {
 		n.s.log.Debug("no notification: a client follows the session", "machine", k.Machine, "session", k.Session, "section", sum.Section)
-		r.State, r.Seq = NoteSent, ""
+		// A record whose publish was attempted keeps its sequence ID, so
+		// its message is cleared when the state ends (finding H3-03).
+		if !attempted(r) {
+			r.Seq = ""
+		}
+		r.State = NoteSent
 		n.put(r)
 		return
 	}

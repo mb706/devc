@@ -110,14 +110,19 @@ text = "The repository from the upstream and the host's credential ([[internal/g
 
 [[step]]
 at = "cli"
-ref = "internal/cli.app.publishBranch"
-text = "Under the box lock, a running box is banked first ([[concern:git-ratchet]]), so the relay has the box's latest commits of the branch."
+ref = "internal/cli.checkPRBranch"
+checks = ["internal/cli.checkPRBranch", "internal/gitx.Protected"]
+text = "Under the box lock, before the bank: the branch must be neither the base (`--base`, else the project's `default_branch`, else the relay's HEAD, else `main`), nor the project's default branch, nor the upstream's as the relay's HEAD records it, nor protected by `git.protected`. Otherwise nothing is banked or published."
 
 [[step]]
 at = "cli"
-ref = "internal/cli.checkPRBranch"
-checks = ["internal/cli.checkPRBranch", "internal/gitx.Protected"]
-text = "Before anything is pushed: the relay must have the branch, and it must be neither the base (`--base`, else the project's `default_branch`, else the relay's HEAD, else `main`), nor the project's default branch, nor the upstream's as the relay's HEAD records it, nor protected by `git.protected`. Otherwise nothing is published."
+ref = "internal/cli.app.publishBranch"
+text = "A running box is banked ([[concern:git-ratchet]]), so the relay has the box's latest commits of the branch; the bank forwards the branches listed in `git.forward`, as every bank does."
+
+[[step]]
+at = "cli"
+ref = "internal/cli.checkPRBanked"
+text = "The relay must have the branch now; otherwise nothing is pushed for the pull request."
 
 [[step]]
 at = "cli"

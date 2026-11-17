@@ -265,12 +265,9 @@ func (s *Service) Bank(ctx context.Context, p *Project) (*BankResult, error) {
 		return res, fmt.Errorf("%s: %w", p.Container, ErrNotRunning)
 	}
 	// Records an update hook left for a push nobody settled (the daemon
-	// ended before receive-pack did) are settled first (finding X7 3).
-	if sr, err := s.SettlePush(ctx, p, nil, nil); err != nil {
-		res.Problems = append(res.Problems, "settling the records of an earlier push: "+printable(err.Error()))
-	} else {
-		res.Problems = append(res.Problems, sr.Problems...)
-	}
+	// ended before it settled) are confirmed first, before the bank moves
+	// a ref (findings X7 3, H2-01).
+	res.Problems = append(res.Problems, s.settleFirst(ctx, p)...)
 
 	np := &NotPreservedError{Ref: p.Ref.String(), Worktrees: map[string]string{}, Branches: map[string]string{}}
 	fail := func(cause error) (*BankResult, error) {

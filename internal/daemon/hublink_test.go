@@ -63,6 +63,8 @@ type fakeHub struct {
 	roles []bool
 	hello []proto.HubHello
 	all   []*proto.Conn
+	// features are announced in the hello's answer.
+	features []string
 }
 
 // stop closes the server and the machine links (httptest does not track
@@ -95,8 +97,9 @@ func newFakeHub(t *testing.T, cert tls.Certificate) *fakeHub {
 				}
 				f.mu.Lock()
 				f.hello = append(f.hello, h)
+				features := f.features
 				f.mu.Unlock()
-				return proto.HubHelloReply{Protocol: proto.HubProtocol, Hub: "f", Machine: "m1"}, nil
+				return proto.HubHelloReply{Protocol: proto.HubProtocol, Hub: "f", Machine: "m1", Features: features}, nil
 			},
 			proto.MethodHubRole: func(_ context.Context, _ *proto.Conn, p json.RawMessage) (any, error) {
 				var role proto.HubRole

@@ -55,10 +55,11 @@ func TestNotifierRetries(t *testing.T) {
 	if first.Message != "The session failed." {
 		t.Errorf("published %+v", first)
 	}
-	states, _ := s.Store().NoteStates()
-	if len(states) != 1 || states[0].State != NoteSent || states[0].Seq != first.SequenceID {
-		t.Errorf("records %+v", states)
-	}
+	// The hub stores the outcome just after ntfy has the message.
+	waitFor(t, "the record sent", func() bool {
+		states, _ := s.Store().NoteStates()
+		return len(states) == 1 && states[0].State == NoteSent && states[0].Seq == first.SequenceID
+	})
 
 	// The clear fails at first and is retried until it arrives.
 	ntfy.mu.Lock()
@@ -178,4 +179,81 @@ func TestNotifierLostAnswer(t *testing.T) {
 	m.notify(m.add(s1, proto.TypeState, proto.State{State: "working"}))
 	waitFor(t, "the message cleared", func() bool { return clears(seq) == 1 })
 	waitFor(t, "the record gone", func() bool { st, _ := s.Store().NoteStates(); return len(st) == 0 })
+}
+
+// TestNotifierWatchedAfterAttempt: a publish reached ntfy although its
+// answer was lost; before the retry, the user opens the session in a
+// browser, so the retry marks the record handled without a message. The
+// record keeps its sequence ID, and when the state ends the message is
+// cleared (finding H3-03). Control: a state that arrives while the session
+// is watched is never published, and its record goes without a clear.
+func TestNotifierWatchedAfterAttempt(t *testing.T) {
+	oldBackoff, oldBase, oldTick := ntfyBackoff, notifyRetryBase, notifyRetryTick
+	ntfyBackoff, notifyRetryBase, notifyRetryTick = time.Millisecond, 300*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { ntfyBackoff, notifyRetryBase, notifyRetryTick = oldBackoff, oldBase, oldTick })
+	h := newTestHub(t, "hub.test")
+	mach := h.issue(RoleMachine, "m1")
+	dev := h.issue(RoleDevice, "phone")
+	ntfy := newFakeNtfy(t)
+	writeHubConfig(t, h.dir, "[ntfy]\nurl = \""+ntfy.srv.URL+"\"\ntopic = \"devc-test\"\n")
+	addr, s, stop := startHub(t, h)
+	defer stop()
+	api := newAPIClient(t, addr, dev)
+	m := newFakeMachine(t)
+	s1, s2 := testSID(1), testSID(2)
+	for _, sid := range []string{s1, s2} {
+		m.add(sid, proto.TypeSessionStart, proto.SessionStart{Harness: "fake"})
+	}
+	conn := m.connect(addr, mach)
+	defer conn.Close()
+	waitFor(t, "the replay", func() bool { return api.detail(s2, "").Session.LastSeq == 1 })
+	if err := conn.Call(context.Background(), proto.MethodHubRole, proto.HubRole{Notifier: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	clears := func(seq string) int {
+		n := 0
+		for _, r := range ntfy.requests() {
+			if r.method == "PUT" && (seq == "" || r.path == "/devc-test/"+seq+"/clear") {
+				n++
+			}
+		}
+		return n
+	}
+	record := func(sid string) (NoteState, bool) {
+		st, _ := s.Store().NoteStates()
+		for _, r := range st {
+			if r.Session == sid {
+				return r, true
+			}
+		}
+		return NoteState{}, false
+	}
+	ntfy.mu.Lock()
+	ntfy.lose = ntfyAttempts
+	ntfy.mu.Unlock()
+	m.notify(m.add(s1, proto.TypeState, proto.State{State: "error"}))
+	var seq string
+	waitFor(t, "the publish, its answer lost", func() bool {
+		r, ok := record(s1)
+		seq = r.Seq
+		return ok && r.State == NotePending && r.Tries > 0
+	})
+	s.addWatch([]SessionKey{{Machine: "m1", Session: s1}, {Machine: "m1", Session: s2}})
+	waitFor(t, "the retry handled while watched", func() bool { r, ok := record(s1); return ok && r.State == NoteSent })
+	if r, _ := record(s1); r.Seq != seq {
+		t.Errorf("the handled record lost its sequence ID: %+v", r)
+	}
+	m.notify(m.add(s1, proto.TypeState, proto.State{State: "working"}))
+	waitFor(t, "the message cleared", func() bool { return clears(seq) == 1 })
+	waitFor(t, "the record gone", func() bool { _, ok := record(s1); return !ok })
+
+	// Control: watched from the start, never published, no clear.
+	before := len(ntfy.requests())
+	m.notify(m.add(s2, proto.TypeState, proto.State{State: "error"}))
+	waitFor(t, "a record handled without a message", func() bool { r, ok := record(s2); return ok && r.State == NoteSent })
+	m.notify(m.add(s2, proto.TypeState, proto.State{State: "working"}))
+	waitFor(t, "the record dropped", func() bool { _, ok := record(s2); return !ok })
+	if n := len(ntfy.requests()); n != before {
+		t.Errorf("%d requests to ntfy for a state that arrived while watched", n-before)
+	}
 }

@@ -24,6 +24,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -144,12 +145,15 @@ type hubLink struct {
 	stop  context.CancelFunc
 	done  chan struct{}
 
-	mu       sync.Mutex
-	state    string
-	detail   string
-	since    time.Time
-	machine  string
-	conn     *proto.Conn
+	mu      sync.Mutex
+	state   string
+	detail  string
+	since   time.Time
+	machine string
+	conn    *proto.Conn
+	// confirms is set when the hub of conn announced in its hello that
+	// it confirms the terminals it opens (finding H3-01).
+	confirms bool
 	roleWant bool
 	roleSent *bool
 	roleCh   chan struct{}
@@ -158,6 +162,28 @@ type hubLink struct {
 	// (archive.go); archiveWake starts a pass at once.
 	uploader    *fleet.Uploader
 	archiveWake chan struct{}
+}
+
+// unconfirmed reports whether c is the connection of a hub that did not
+// announce terminal confirmation in its hello: an older hub, whose
+// terminals need no terminal.confirm (finding H3-01). Every other opener,
+// a hub that announced it and a local connection, must confirm.
+func (m *hubManager) unconfirmed(c *proto.Conn) bool {
+	m.mu.Lock()
+	links := make([]*hubLink, 0, len(m.links))
+	for _, l := range m.links {
+		links = append(links, l)
+	}
+	m.mu.Unlock()
+	for _, l := range links {
+		l.mu.Lock()
+		legacy := l.conn == c && !l.confirms
+		l.mu.Unlock()
+		if legacy {
+			return true
+		}
+	}
+	return false
 }
 
 // start begins connecting (the daemon runs).
@@ -402,6 +428,7 @@ func (l *hubLink) connectOnce(ctx context.Context, creds *hubnode.Creds) (bool, 
 	}
 	l.mu.Lock()
 	l.conn, l.machine, l.roleSent = conn, reply.Machine, nil
+	l.confirms = slices.Contains(reply.Features, proto.FeatureTerminalConfirm)
 	l.mu.Unlock()
 	l.setState(proto.HubConnected, "")
 	d.log.Info("connected to hub", "hub", l.url, "machine", reply.Machine)
@@ -410,7 +437,7 @@ func (l *hubLink) connectOnce(ctx context.Context, creds *hubnode.Creds) (bool, 
 	goTask(d.log, &task{what: "the roles of the hub link " + l.url, end: func() { _ = conn.Close() }}, func() { l.roles(cctx, conn) })
 	<-conn.Done()
 	l.mu.Lock()
-	l.conn, l.roleSent = nil, nil
+	l.conn, l.roleSent, l.confirms = nil, nil, false
 	l.mu.Unlock()
 	return true, conn.Err()
 }

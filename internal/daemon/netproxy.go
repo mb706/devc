@@ -271,7 +271,7 @@ func (w *boxWorker) serveDial(ctx context.Context, st *yamux.Stream, br *bufio.R
 		return
 	}
 	defer up.Close()
-	stop := context.AfterFunc(ctx, func() { _ = up.Close(); conn.Close() })
+	stop := contextAfter(ctx, w.d.log, &task{box: names.BoxName(w.ref), what: proto.MethodHostDial}, func() { _ = up.Close(); conn.Close() })
 	defer stop()
 	w.d.log.Debug("host connection", "box", names.BoxName(w.ref), "port", p.Port)
 	done := make(chan struct{})

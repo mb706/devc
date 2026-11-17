@@ -31,6 +31,7 @@ tests = [
   "internal/netpolicy.TestForwarder",
   "internal/netpolicy.TestForwarderDial",
   "internal/netpolicy.TestForwarderAdmission",
+  "internal/boxside.TestForwardClientGone",
   "internal/netpolicy.TestListen",
   "internal/netpolicy.TestRegistry",
   "internal/netpolicy.TestProcessAlive",
@@ -55,6 +56,11 @@ tests = ["internal/netpolicy.TestForwarder", "internal/netpolicy.TestForwarderDi
 text = "A forward runs at most 64 dial processes at once and the router at most 256 across every box; a connection beyond that is closed at once, without a dial process."
 refs = ["internal/netpolicy.Admission.Acquire", "internal/netpolicy.Forwarder.Serve", "internal/netpolicy.Forwarder.Dial", "internal/daemon.router.dial"]
 tests = ["internal/netpolicy.TestForwarderAdmission"]
+
+[[invariant]]
+text = "A forwarded connection's dial process ends at most 10 s after its client's side ended, whatever the box's side does, and gives its place back; a client that stays connected keeps its connection."
+refs = ["internal/netpolicy.Forwarder.relay", "internal/netpolicy.Forwarder.endAfterClient", "internal/netpolicy.clientGone"]
+tests = ["internal/boxside.TestForwardClientGone"]
 
 [[invariant]]
 text = "The router routes only to a port listed in the project's box.ports or forwarded now, of the running box of a configured project."
@@ -87,7 +93,7 @@ An agent starts a web server, a notebook or a database in its box and the owner 
 nsenter --user=/proc/self/fd/3 --net=/proc/self/fd/4 --preserve-credentials <devc> box dial 127.0.0.1:<port>
 ```
 
-with the connection as standard input and output, the calling process's environment with `DEVC_BOX=1` added (so it loads no host configuration) and `/` as working directory ([[internal/netpolicy.Forwarder.DialArgs]], [[internal/execx.Real]]). `nsenter` enters the namespaces given as open descriptors 3 and 4: the box's user namespace (so the process is the box user and holds no capability once devc runs) and its network namespace, where `127.0.0.1` is the box's loopback. It stays in the host's mount namespace, so it runs the host's binary and reads nothing of the box. [[internal/boxside.Dial]] connects within ten seconds and relays both ways, passing half-closes on. At level internet the connection passes the box's rules on the loopback interface, which they accept.
+with the connection as standard input and output, the calling process's environment with `DEVC_BOX=1` added (so it loads no host configuration) and `/` as working directory ([[internal/netpolicy.Forwarder.DialArgs]], [[internal/execx.Real]]). `nsenter` enters the namespaces given as open descriptors 3 and 4: the box's user namespace (so the process is the box user and holds no capability once devc runs) and its network namespace, where `127.0.0.1` is the box's loopback. It stays in the host's mount namespace, so it runs the host's binary and reads nothing of the box. [[internal/boxside.Dial]] connects within ten seconds and relays both ways, passing half-closes on. The box's side may never close, so for `devc forward` the host watches the socket it handed over (without reading it): once the client's side has ended, the dial process gets 10 s ([[internal/netpolicy.ClientGoneGrace]]), then is killed and its place freed ([[internal/netpolicy.Forwarder.endAfterClient]]). At level internet the connection passes the box's rules on the loopback interface, which they accept.
 
 **Pinning** ([[internal/netpolicy.Pin]]). The descriptors are opened once, from `/proc/<pid>/ns/user` and `/proc/<pid>/ns/net` of the box's main process. Between two engine reports of the same PID and start time, and two reads of that PID's start time in `/proc`, they are proven to belong to this box, not to a process that reused its PID ([[finding:B5]]). Every connection uses the pinned descriptors, so it reaches this box generation or nothing.
 

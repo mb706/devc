@@ -495,8 +495,9 @@ func newPRCmd(a *app) *cobra.Command {
 		Long: "Bank, push the branch to the upstream as 'devc push' does (showing what would change and asking, unless " +
 			"--yes), then open the pull request with your GitHub credential (the realm secret github-token, else 'gh auth " +
 			"token') and print its URL. The title defaults to the subject of the branch's newest commit, the base to the " +
-			"project's default branch. Before anything is pushed, a branch the relay does not have, the base itself, the " +
-			"default branch and a protected branch (git.protected) are refused.",
+			"project's default branch. Before the bank, the base itself, the default branch and a protected branch " +
+			"(git.protected) are refused; after it (the bank forwards the branches listed in git.forward, as every bank " +
+			"does), a branch the relay does not have; only then is anything pushed for the pull request.",
 		Args: maxArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.prCreate(cmd, args, o)
@@ -584,9 +585,12 @@ func (a *app) prCreate(cmd *cobra.Command, args []string, o prCreateOptions) err
 	return nil
 }
 
-// publishBranch banks, checks the branch (checkPRBranch) and only then
-// pushes it as devc push does, with the box lock held, and returns the
-// branch's newest commit subject and the base.
+// publishBranch checks the branch against the base, the default branches
+// and git.protected (checkPRBranch) before anything else, banks (which
+// forwards the branches listed in git.forward, the owner's standing
+// instruction), checks that the relay has the branch (checkPRBanked) and
+// only then pushes it as devc push does, with the box lock held (finding
+// H2-03). It returns the branch's newest commit subject and the base.
 func (a *app) publishBranch(ctx context.Context, e *boxEnv, ref names.ProjectRef, o prCreateOptions) (string, string, error) {
 	unlock, err := a.lockBox(ctx, e, ref, 0)
 	if err != nil {
@@ -597,15 +601,18 @@ func (a *app) publishBranch(ctx context.Context, e *boxEnv, ref names.ProjectRef
 	if err != nil {
 		return "", "", err
 	}
-	if p.Running && p.Relay.Exists() {
+	base, err := checkPRBranch(ctx, p, o)
+	if err != nil {
+		return "", "", err
+	}
+	if p.Running {
 		res, err := e.git.Bank(ctx, p)
 		fmt.Fprint(a.stderr, gitx.FormatBank(res, true))
 		if err != nil {
 			return "", "", fmt.Errorf("banking before the push: %w", err)
 		}
 	}
-	base, err := checkPRBranch(ctx, p, o)
-	if err != nil {
+	if err := checkPRBanked(ctx, p, o.branch); err != nil {
 		return "", "", err
 	}
 	po := gitx.PushOptions{Branches: []string{o.branch}, Yes: o.yes}
@@ -628,11 +635,11 @@ func (a *app) publishBranch(ctx context.Context, e *boxEnv, ref names.ProjectRef
 }
 
 // checkPRBranch validates a pull request's branch with what the host knows
-// locally, before anything is pushed (finding X10 3): the relay has the
-// branch (it was banked), and it is neither the pull request's base, nor
-// the project's default branch, nor the upstream's default branch as the
-// relay records it (its HEAD), nor protected by git.protected. It returns
-// the base: --base, else the default branch.
+// locally, before the bank and before anything is pushed (findings X10 3,
+// H2-03): it is neither the pull request's base, nor the project's
+// default branch, nor the upstream's default branch as the relay records
+// it (its HEAD), nor protected by git.protected. It returns the base:
+// --base, else the default branch.
 func checkPRBranch(ctx context.Context, p *gitx.Project, o prCreateOptions) (string, error) {
 	if !p.Relay.Exists() {
 		return "", fmt.Errorf("%s has no relay yet: run 'devc project init %s'; nothing was pushed", p.Ref, p.Ref)
@@ -649,22 +656,30 @@ func checkPRBranch(ctx context.Context, p *gitx.Project, o prCreateOptions) (str
 	if base == "" {
 		base = def
 	}
-	set, err := p.Relay.RefSet(ctx)
-	if err != nil {
-		return "", err
-	}
 	b := o.branch
 	switch {
 	case b == base:
-		return "", fmt.Errorf("the branch %s is the pull request's base: open it from another branch; nothing was pushed", b)
+		return "", fmt.Errorf("the branch %s is the pull request's base: open it from another branch; nothing was banked or pushed", b)
 	case b == def || b == head:
-		return "", fmt.Errorf("%s is the default branch of %s's upstream: a pull request publishes work from another branch; nothing was pushed", b, p.Ref)
+		return "", fmt.Errorf("%s is the default branch of %s's upstream: a pull request publishes work from another branch; nothing was banked or pushed", b, p.Ref)
 	case gitx.Protected(p.Resolved.Git.Protected, b):
-		return "", fmt.Errorf("%s is a protected branch of %s (git.protected): a pull request publishes work from another branch; nothing was pushed", b, p.Ref)
-	case set.Heads[b] == "":
-		return "", fmt.Errorf("the relay of %s has no branch %s: commit it in the box and bank it first ('devc bank'); nothing was pushed", p.Ref, b)
+		return "", fmt.Errorf("%s is a protected branch of %s (git.protected): a pull request publishes work from another branch; nothing was banked or pushed", b, p.Ref)
 	}
 	return base, nil
+}
+
+// checkPRBanked refuses a pull request whose branch the relay does not
+// have after the bank: nothing is pushed for it (the bank itself may have
+// forwarded branches listed in git.forward).
+func checkPRBanked(ctx context.Context, p *gitx.Project, b string) error {
+	set, err := p.Relay.RefSet(ctx)
+	if err != nil {
+		return err
+	}
+	if set.Heads[b] == "" {
+		return fmt.Errorf("the relay of %s has no branch %s: commit it in the box and bank it first ('devc bank'); nothing was pushed for the pull request", p.Ref, b)
+	}
+	return nil
 }
 
 // prComment is `devc pr comment`, also what an approved comment request

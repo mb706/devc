@@ -26,6 +26,11 @@ ref = "internal/gitx.Service.Pull"
 text = "The relay must exist and the project must have an upstream."
 
 [[step]]
+at = "cli"
+ref = "internal/gitx.Service.SettlePending"
+text = "Records a push left pending because its daemon died before settling them are confirmed, none removed, before the fetch moves tags and branches: the record of an accepted tag stays although the fetch may then move the tag ([[term:pending-record]])."
+
+[[step]]
 section = "Upstream to relay"
 
 [[step]]

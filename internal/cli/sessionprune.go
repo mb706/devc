@@ -28,8 +28,9 @@ func newSessionsCmd(a *app) *cobra.Command {
 		Use:   "prune <realm>/<project> --before <date or duration>",
 		Short: "Remove the journals of sessions that ended before a date",
 		Long: "Remove from the state directory the journals of the project's sessions that ended before the date " +
-			"(YYYY-MM-DD, or an RFC 3339 time) or longer ago than the duration (for example 30d or 12h), with their " +
-			"owner records. A session that has not ended is never removed, and nothing is removed without --before. " +
+			"(YYYY-MM-DD, or an RFC 3339 time) or longer ago than the duration (for example 30d or 12h). A pruned " +
+			"session's ID stays claimed by the project, and what the box's spool still holds of it is removed and never " +
+			"recorded again. A session that has not ended is never removed, and nothing is removed without --before. " +
 			"This makes room in the project's journal budget (sessions.journal_quota); ingestion of sessions the budget " +
 			"stopped goes on by itself. What a hub has archived stays there.",
 		Args: exactArgs(1, "devc sessions prune <realm>/<project> --before <date or duration>"),

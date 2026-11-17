@@ -81,6 +81,7 @@ via = "rpc:terminal.confirm"
 label = "terminal.confirm {stream}"
 ref = "internal/hub.machineLink.forward"
 text = "The hub confirms the stream it accepted, then sends the browser `open` with the size and mode. The daemon marks the stream confirmed ([[internal/daemon.termManager.confirm]]); its watcher ends a stream not confirmed within 30 seconds."
+detail = "The daemon requires the confirmation only from a hub that announced it in its answer to `hub.hello`; a daemon older than `terminal.confirm` answers \"unknown method\", which the hub takes as a terminal that needs none."
 
 [[step]]
 section = "Output"

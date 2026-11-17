@@ -280,6 +280,17 @@ func (s *Store) ingestFile(ref names.ProjectRef, root *safefs.Root, name, sid st
 		rep.Skipped++
 		return pos, rep, false, nil
 	}
+	// A pruned session's spool is never read again (finding H1-01): its
+	// rest would start the journal over with reused sequence numbers.
+	// The file goes when it can.
+	if s.pruned(ref, sid) {
+		if err := root.RemoveFile("spool/" + name); err == nil {
+			rep.Removed++
+			return spoolPos{}, rep, true, nil
+		}
+		rep.Skipped++
+		return pos, rep, false, nil
+	}
 	// The session must be this project's (finding C1-01). It is claimed
 	// only once something is appended, so a box cannot make the host
 	// record owners for empty spool files (C20a).
@@ -563,7 +574,11 @@ func (s *Store) AppendHost(ref names.ProjectRef, sid string, ps ...hostEvent) er
 	}
 	// The host may add to a journal ref already has (also one from before
 	// ownership was recorded, so reconciliation can end it), but never
-	// start one of another project's session (finding C1-01).
+	// start one of another project's session (finding C1-01), nor start
+	// a pruned one's again (finding H1-01).
+	if !js.exists && s.pruned(ref, sid) {
+		return fmt.Errorf("the journal of session %s of %s was pruned ('devc sessions prune'): nothing more is recorded for it", sid, ref)
+	}
 	if !js.exists {
 		if owner, mine, err := s.Claim(ref, sid); err != nil {
 			return err

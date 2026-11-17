@@ -323,7 +323,7 @@ func (l *machineLink) onHello(_ context.Context, _ *proto.Conn, params json.RawM
 	l.helloed.Store(true)
 	close(l.helloCh)
 	l.s.log.Info("machine connected", "machine", l.name, "host", h.Name, "version", h.Version)
-	return proto.HubHelloReply{Protocol: proto.HubProtocol, Hub: l.s.instance, Machine: l.name}, nil
+	return proto.HubHelloReply{Protocol: proto.HubProtocol, Hub: l.s.instance, Machine: l.name, Features: []string{proto.FeatureTerminalConfirm}}, nil
 }
 
 func (l *machineLink) onRole(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
@@ -939,10 +939,10 @@ var errBound = errors.New("the machine broke a bound of the hub")
 // checkTail checks the events of a re-read (sessions.get) before anything
 // of it is applied: at most TailEvents, each a valid event of the session,
 // each the one after the event before it, without gap or repeat, and the
-// first no later than the one after the view's LastSeq, so the events
-// applied on top of the machine's view follow on from it. Anything else
-// is a broken bound: the link is closed and the hub keeps what it held
-// (finding G5-08).
+// last exactly the view's LastSeq (no events only for a view at 0), so the
+// tail the hub stores ends where the cursor it stores does and the next
+// event follows on from both. Anything else is a broken bound: the link
+// is closed and the hub keeps what it held (findings G5-08, H3-02).
 func checkTail(sid string, res proto.SessionsGetResult) error {
 	evs := res.Events
 	if len(evs) > TailEvents {
@@ -956,8 +956,11 @@ func checkTail(sid string, res proto.SessionsGetResult) error {
 			return fmt.Errorf("%w: in the re-read of %s, event %d follows %d", errBound, sid, e.Seq, evs[i-1].Seq)
 		}
 	}
-	if len(evs) > 0 && evs[0].Seq > res.Session.LastSeq+1 {
-		return fmt.Errorf("%w: the re-read of %s begins at event %d, after its view's %d", errBound, sid, evs[0].Seq, res.Session.LastSeq)
+	switch last := res.Session.LastSeq; {
+	case len(evs) == 0 && last != 0:
+		return fmt.Errorf("%w: the re-read of %s has no events, but its view is at event %d", errBound, sid, last)
+	case len(evs) > 0 && evs[len(evs)-1].Seq != last:
+		return fmt.Errorf("%w: the re-read of %s ends at event %d, not at its view's %d", errBound, sid, evs[len(evs)-1].Seq, last)
 	}
 	return nil
 }
