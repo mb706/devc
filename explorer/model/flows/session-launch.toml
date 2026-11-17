@@ -51,7 +51,7 @@ text = "The session ID, harness and worktree are checked again in the box, and s
 at = "box-tools"
 ref = "internal/boxside.ReadLaunch"
 checks = ["internal/boxside.Launch.Validate"]
-text = "The harness's launch description is read and validated, and its executable must exist and not be devc, so no window opens only to close at once."
+text = "The harness's launch description is read and validated, and its executable must be a regular file with an execute bit, so no window opens only to close at once. Whether it resolves to devc itself is left to the launcher."
 
 [[step]]
 from = "box-tools"
@@ -65,6 +65,7 @@ text = "A window named `main/claude` is added to the tmux session `devc` (which 
 at = "box-tools"
 ref = "internal/tmux.TagWindow"
 text = "The window is tagged with `@devc_session=<sid>`, and `remain-on-exit` and the pane-died hook are set on it, so a user configuration cannot hide the session's end."
+detail = "The tag comes after the launcher has started. A harness that ends before this point leaves a window without the session option: no `session.end` is written for it, and reconciliation ends the session as `lost` if its start reached the spool."
 
 [[step]]
 at = "box-tools"

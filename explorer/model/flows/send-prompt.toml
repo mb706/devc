@@ -61,7 +61,7 @@ to = "daemon"
 via = "rpc:command.get"
 label = "command.get {id, wait: 60}"
 ref = "internal/cli.app.callCommand"
-text = "The CLI asks for the receipt again, waiting up to 60 seconds at a time, until it is final."
+text = "The CLI asks for the receipt again, waiting up to 60 seconds at a time, until it is final or the command's 15 minutes are up; then it stops waiting, while the daemon's queued work goes on."
 
 [[step]]
 at = "daemon"
@@ -82,7 +82,7 @@ detail = "A session that has reported no state at all counts as at rest 60 secon
 at = "daemon"
 ref = "internal/daemon.paste.Send"
 checks = ["internal/daemon.target.gate", "internal/daemon.target.begin"]
-text = "The manifest's input adapter delivers; every built-in manifest uses paste. The input gate waits, at most 60 seconds, while a tmux client showing the session's window was active in the last three seconds (`box.input.clients`). Just before the first key the session must still be live and at rest (otherwise the send goes back to waiting), and `delivering` is stored, so a restart never types the text twice."
+text = "The manifest's input adapter delivers; every built-in manifest uses paste. The input gate waits while a tmux client showing the session's window was active in the last three seconds (`box.input.clients`); after about 60 seconds, checked between those calls, it types anyway. Just before the first key the session must still be live and at rest (otherwise the send goes back to waiting), and `delivering` is stored, so a restart never types the text twice."
 detail = "A manifest may name `mod` or `app-server`, which are not built yet and fall back to paste with a note in the receipt, or `extension` (pi, with a manifest of one's own), which hands the text to devc's extension in the harness while one is connected."
 
 [[step]]

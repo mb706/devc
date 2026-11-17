@@ -82,7 +82,7 @@ section = "Ingestion"
 at = "daemon"
 ref = "internal/daemon.boxWorker.ingestLoop"
 unchecked = "the ingester goroutine waits on the channel wake writes to"
-text = "Woken by the hint, or after two seconds (250 ms while busy), the ingester compares a snapshot of the spool's file names and sizes with the last one and skips the run when nothing changed. After a run it pauses 50 ms, so a box that floods hints still costs one run per interval."
+text = "Woken by the hint, or after two seconds (250 ms while busy), the ingester compares a snapshot of the spool's file names and sizes with the last one and skips the run when nothing changed. After a run that succeeded it pauses 50 ms, so a box that floods hints still costs one run per 50 ms; a run that failed goes straight back to waiting, and the next hint starts another at once."
 
 [[step]]
 at = "daemon"

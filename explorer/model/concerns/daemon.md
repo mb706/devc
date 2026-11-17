@@ -56,7 +56,7 @@ refs = ["internal/daemon.Client.Serves", "internal/cli.app.daemonClient"]
 tests = ["internal/daemon.TestDaemon"]
 
 [[invariant]]
-text = "The daemon acts only on a container that has a configured project's box name and carries that project's realm and project labels."
+text = "The daemon starts a box worker only for a running container that has a configured project's box name and carries that project's realm and project labels."
 refs = ["internal/daemon.Daemon.watchOnce"]
 
 [[invariant]]
@@ -69,7 +69,7 @@ refs = ["internal/daemon.hub.enqueueLocked"]
 tests = ["internal/daemon.TestSubscriberByteBudget"]
 
 [[invariant]]
-text = "A subscription sends each event of a session at most once and in seq order, and never says caught up after a replay that could not read a journal to its end."
+text = "A subscription sends each event of a session at most once and in seq order, and a session whose journal the replay could not read to its end gets `missed` before `caught_up`."
 refs = ["internal/daemon.subscriber.send", "internal/daemon.subscriber.replayOne"]
 tests = ["internal/daemon.TestSubscribeRaceWithReplay", "internal/daemon.TestReplayFailure"]
 
@@ -235,7 +235,7 @@ The CLI works without a daemon: it ingests spool files and reconciles sessions w
 
 **Start and stop.** [[internal/daemon.Daemon.Run]] makes the runtime directory 0700 and takes `daemon.lock` with a timeout of one millisecond, so a second daemon fails at once. It replaces a stale socket with `<runtime>/daemon.sock` (0600), loads the configuration, resumes the commands and requests a previous daemon left, starts the request workers, the router, the services and the hub links, and then its loops. SIGTERM, SIGINT or [[rpc:daemon.stop]] cancel its context: it closes the socket, subscriptions, terminals and box workers, and waits up to 15 seconds for its goroutines. [[flow:daemon-start]] goes through this.
 
-**What runs where.** The loops, box workers, command lines and request workers run in goroutines started by [[internal/daemon.Daemon.goSafe]], which logs a panic instead of ending the process. [[diagram:inside]] shows how they hand work on.
+**What runs where.** The loops, box workers, command lines and request workers run in goroutines started by [[internal/daemon.Daemon.goSafe]], which logs a panic instead of ending the process. The handlers of a box's raw streams and the workers of `projects.list` run under a plain `go`, so a panic there ends the daemon (`docs/dev/LEFTOVER.md` part 7). [[diagram:inside]] shows how they hand work on.
 
 | Goroutine | Does | When |
 |---|---|---|
@@ -277,9 +277,9 @@ Box-written text survives validation; [[internal/proto.Printable]] is applied be
 ## What can go wrong, and what prevents it
 
 - **A second daemon, another user, another configuration.** The lock; the socket's mode; [[internal/daemon.Client.Serves]].
-- **A container that only looks like a box.** Without the project's labels it is never acted on.
+- **A container that only looks like a box.** Without the project's labels it gets no worker and counts as absent. The channel checks the container ID again at every connection, but session starts and stops through the engine and the terminal's exec address the box by name, relying on the last observation (normally at most three seconds old): a container replaced under that name in between, which only the host's user can do, would receive them (`docs/dev/LEFTOVER.md` part 7).
 - **A flood of clients.** At most 64 API connections, lines of 1 MiB, pages of 1,000 sessions or events and 512 KiB, `command.get` waits of at most 600 seconds, one subscription per connection, cursors of at most 100,000 sessions.
-- **A slow subscriber.** Disconnected at its queue budgets; it resumes from its cursor ([[finding:C1-08]]). A replay that fails sends `missed` ([[finding:C1-17]]); a window longer than 30 days loads the ended sessions it reaches ([[finding:C1-16]]); host events after a session's end still reach live views ([[finding:C1-15]]).
+- **A slow subscriber.** Disconnected at its queue budgets; it resumes from its cursor ([[finding:C1-08]]). A replay that fails sends `missed`, and `caught_up` still follows, so a client must read such a session again ([[finding:C1-17]]); a window longer than 30 days loads the ended sessions it reaches ([[finding:C1-16]]); host events after a session's end still reach live views ([[finding:C1-15]]).
 - **A crash or a restart.** Views, commands and requests come back from their files. What lives only in memory ends: subscriptions and terminals (clients connect again) and hooks waiting for an answer (the harness shows its own dialog).
 - **A hub.** It may call only the allowlisted methods in [[internal/daemon.hubMethods]], decides with origin `hub`, and sees no host paths.
 

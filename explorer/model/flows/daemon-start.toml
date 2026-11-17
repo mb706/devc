@@ -49,7 +49,7 @@ section = "What a previous daemon left"
 [[step]]
 at = "daemon"
 ref = "internal/daemon.commander.resume"
-text = "Stored receipts are read in acceptance order. A command that had begun to type (`delivering`) ends as `unknown` and is never typed again; one still `accepted` is queued again; one waiting longer than seven days is refused; final receipts older than seven days are removed."
+text = "Stored receipts are read in acceptance order. An unfinished command accepted more than seven days ago is refused as expired, even one that had begun to type; of the others, one that had begun to type (`delivering`) ends as `unknown` and is never typed again, and one still `accepted` is queued again. Final receipts older than seven days are removed."
 
 [[step]]
 at = "daemon"

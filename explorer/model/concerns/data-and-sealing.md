@@ -43,7 +43,7 @@ tests = [
 related = ["savepoints", "data-sync", "isolation", "host-foundations", "requests-and-approval", "box-lifecycle"]
 
 [[invariant]]
-text = "Host code never opens, walks or changes the data tree; every operation on it runs in a container from the helper root filesystem, without network, where the project directory is the only box-writable tree."
+text = "Host code never opens, walks or changes the data tree (the SELinux relabel of the project before a start aside); every operation on it runs in a helper container without network, where the project is the only box-writable tree."
 refs = ["internal/data.Service.work", "internal/data.Service.helperBase", "internal/data.Service.restic"]
 tests = ["internal/data.TestServiceWorkers"]
 

@@ -13,9 +13,12 @@ package box
 // the box was started with, next to its other generated state (beside the
 // home, out of every box's reach), and the daemon and gate-exec authorise
 // against the intersection of that record and the current configuration:
-// removing a grant takes effect at once, adding one needs the box to be
-// brought up again. A box without a record (started before this record
-// existed, or a start that failed) gets nothing on demand.
+// removing a grant takes effect at once, adding one needs the record to be
+// written again. That happens when the box is brought up again, and also
+// when up finishes the start of a running box without its readiness
+// marker, which records the configuration of that moment. A box without
+// a record (started before this record existed, or a start that failed)
+// gets nothing on demand.
 //
 // Network exceptions (netpolicy, `devc net allow`) are different on
 // purpose: they are granted while the box runs, by the user on the host or

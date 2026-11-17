@@ -98,7 +98,7 @@ A box controls the content and the shape of its trees: it can plant symlinks, FI
 - **A symlink redirects a read or a write.** No safefs operation follows one below the root, and `..` is refused before the kernel sees it ([[internal/safefs.checkRel]]). The root itself must be reached by a host-controlled path, and its last component must not be a link ([[internal/safefs.OpenRoot]]).
 - **A FIFO stalls the host.** Files are opened with `O_NONBLOCK`, so opening a FIFO returns at once, and the type check then refuses it.
 - **A huge file or directory exhausts memory.** Every read takes a limit; a file that grows past it during the read is refused too.
-- **A file is truncated or replaced while being tailed.** [[internal/safefs.Root.ReadFrom]] reports `ErrShrunk` instead of reading from the wrong place.
+- **A file is truncated or replaced while being tailed.** [[internal/safefs.Root.ReadFrom]] reports `ErrShrunk` only when the file is now shorter than the offset; one replaced and grown back past it is not noticed.
 - **An old kernel.** Without `openat2` (Linux before 5.6) every safefs operation fails with `ErrUnsupported`; there is no path-based fallback.
 - **A command runs inside a project.** Host tools would then read configuration and hooks from a box-writable directory. execx never inherits the caller's working directory.
 - **A secret appears in an error or log.** Values listed in `Cmd.Redact` are replaced in `Cmd.String`, in error messages and in the debug log; the package's rule is that secrets go on standard input, never into arguments or the environment.

@@ -50,7 +50,7 @@ refs = ["internal/github.HostToken", "internal/daemon.boxWorker.serveGitHub", "i
 tests = ["internal/daemon.TestGitHubFacade", "test/integration.TestGitHub"]
 
 [[invariant]]
-text = "A facade read is a GET of the project's repository, or of one that grants.github_read lists both at the box's start and now."
+text = "A facade read is a GET of the project's repository, or of one that grants.github_read lists both in the box's start record and now."
 refs = ["internal/github.PlanRead", "internal/box.Capabilities.GitHubReadRepos", "internal/github.Client.Read"]
 tests = ["internal/github.TestPlanRead", "internal/daemon.TestGitHubFacade"]
 
@@ -60,12 +60,12 @@ refs = ["internal/github.ParseAPIPath", "internal/github.Client.endpoint", "inte
 tests = ["internal/github.TestParseAPIPath", "internal/github.TestRead"]
 
 [[invariant]]
-text = "A box gets a token only in a token mode, with a start record of its running container, and only while the mode, the repository and the App are those of its start."
+text = "A box gets a token only in a token mode, with a start record of its running container, and only while the mode, the repository and the App are those of that record."
 refs = ["internal/daemon.Daemon.githubToken", "internal/daemon.Daemon.startedWith", "internal/box.Capabilities.GitHubToken"]
 tests = ["internal/daemon.TestGitHubToken", "internal/box.TestGitHubCapabilities"]
 
 [[invariant]]
-text = "A minted token is restricted to the one verified repository ID and to the permissions granted at the start and now, never workflows; an answer listing other repositories is revoked and refused."
+text = "A minted token is restricted to the one verified repository ID and to the permissions granted in the start record and now, never workflows; an answer listing other repositories is revoked and refused."
 refs = ["internal/github.Minter.Token", "internal/github.Minter.verify", "internal/github.Minter.mint", "internal/github.IntersectPermissions", "internal/github.CheckPermission"]
 tests = ["internal/github.TestMinter", "internal/github.TestPermissions"]
 

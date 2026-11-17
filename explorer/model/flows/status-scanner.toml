@@ -60,7 +60,8 @@ text = "Only the harness's own record counts (no `id`), never `clear`, and only 
 [[step]]
 at = "hook"
 ref = "internal/boxside.OSCActive"
-text = "From then on the hook receiver drops its own state events for the session: `DEVC_STATUS=osc` alone is not enough, so a harness that never reports keeps its hook states."
+text = "From then on the hook receiver drops the state events it maps from the session's hooks: `DEVC_STATUS=osc` alone is not enough, so a harness that never reports keeps its hook states."
+detail = "The question hook is the exception: it writes `blocked` with its question, and `working` after a remote answer, whatever the wrapper reports ([[internal/boxside.questionPayloads]])."
 
 [[step]]
 ref = "internal/boxside.ExitWith"

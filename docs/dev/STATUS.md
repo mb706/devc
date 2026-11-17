@@ -45,7 +45,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | X10 Explorer content: GitHub, service logins, desktop | done | f2a9d3e |
 | X11 Explorer content: the hub | done | a5646c6 |
 | X12 Explorer content: fleet and the web app | done | 088791c |
-| X14 Explorer: polish from the authors' feedback | in progress | |
+| X14 Explorer: polish from the authors' feedback | done | 48e395b |
+| Accuracy review G + X15 corrections | in progress | |
 
 ## Resuming
 
@@ -1382,3 +1383,9 @@ The four confirmed findings of the closing check (`docs/dev/reviews/F1-review.md
 **For the next chunk** (the model was not changed): `unchecked` no longer needed on request-pr step 3 (the fourth `[[step]]`: the `send` closure) and web-send step 6 (the seventh `[[step]]`: `commandMethods`). Final replies pointed at a printed type could name the constructor instead (all eleven connect when tried): data-pull, data-push, data-restore, data-save, data-seal, harness-install, secret-push-pull, share-publish, src-fetch, state-pull, turn-snapshot (`newBoxGitCmds`); the X9 flows may start at the constructor after their `cmd:` step. The hub-routes surface could name `through = ["internal/hub.Server.guard"]`. Five concern pages pass 1,200 words of prose (isolation, launching-a-harness, box-lifecycle, toolbox-and-harnesses, service-logins).
 
 **How to check.** `./dev test ./explorer/tool/` passes; `./dev go vet ./explorer/tool/` clean; `./dev explore --check`: 0 errors, 17 warnings (the 12 test files of before and the five long pages). `explorer/check.sh` passes: 138 screenshots, the earlier assertions and 15 new ones (flows filter, glossary index, "On this page", wide-table cue, four loop labels, a flow opened at its last step, tour names, an unchecked reason, a weaker path, one mark per kind, labels of a filtered runtime map).
+
+### X15a Explorer content: corrections after the accuracy reviews G1 and G2
+
+- **Done.** All 44 findings of `reviews/G1-review.md` and `G2-review.md` were checked in the code and fixed (none rejected); answers in `reviews/G1-response.md` and `G2-response.md`. The same beliefs were corrected wherever they stood: 11 concern pages of the two areas, invariants of `secrets`, `allowlist-proxy`, `ssh-gate`, `github`, `network-levels` and `data-and-sealing` (the capability record is now "the start record", written whenever devc finishes a start), 15 flows (`box-up` gained the `--recreate` branch; diagrams `box-states` and `channel-states` corrected), glossary, layout, system. Comments only in 11 Go files (`./dev explore comments-only`, `fmt`, `vet` clean).
+- **LEFTOVER part 7.** Part B verdicts recorded for X4, X5 and X6; new heading "Found by the accuracy review": a box that removes its readiness marker gets grants added since its start without a restart (G1-01), `ParseLive` ignores trailing output on the engine path (G2-05), a seal error shows the host's data root (G2-01), the daemon's execs by box name (G2-06), and smaller items.
+- **Check.** `./dev explore --check`: 0 errors, the same 17 warnings as before (the four long pages grew: box-lifecycle 1,456, isolation 1,468, launching-a-harness 1,443, toolbox-and-harnesses 1,268 words); every flow connects. Changed pages and flows looked at with `explorer/check.sh --shot`.

@@ -70,7 +70,8 @@ text = "The list is box output: up to 1 MiB, parsed strictly."
 at = "cli"
 ref = "internal/session.ParseLive"
 checks = ["internal/session.ParseLive"]
-text = "Every entry must have a valid session ID, a known source and valid window, pane and PID; anything unexpected rejects the whole report and reconciliation changes nothing. Open sessions the box no longer runs end as `lost`."
+text = "Every entry must have a valid session ID, a known source and valid window, pane and PID; an entry or field that is not as expected rejects the whole report and reconciliation changes nothing. Open sessions the box no longer runs end as `lost`."
+detail = "Only the first JSON value of the output is read: anything after it is ignored, so `[]` followed by other text counts as an empty report and ends every open session as `lost` (`docs/dev/LEFTOVER.md` part 7). A box can print `[]` alone to the same effect."
 
 [[step]]
 section = "The window"
@@ -108,7 +109,7 @@ to = "harness"
 via = "stream"
 label = "the session's pane"
 external = true
-text = "The user now types into the harness's pane directly, as at any tmux session. Commands the daemon delivers meanwhile wait while this client is active ([[concern:input-and-receipts]])."
+text = "The user now types into the harness's pane directly, as at any tmux session. Commands the daemon delivers meanwhile wait while this client was active in the last three seconds, for about a minute at most; then they are typed even if the user is still typing ([[concern:input-and-receipts]])."
 
 [[step]]
 from = "tmux"

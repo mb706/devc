@@ -89,7 +89,7 @@ text = "The hint's only effect is to wake the box's ingester; its content is che
 at = "daemon"
 ref = "internal/daemon.boxWorker.ingestLoop"
 unchecked = "the ingester goroutine waits on the channel wake writes to"
-text = "The ingester runs at once on a hint, every 250 ms while events arrive and every 2 s otherwise, skips a run when no spool file changed, and makes at most one run per 50 ms."
+text = "The ingester runs at once on a hint, every 250 ms while events arrive and every 2 s otherwise, skips a run when no spool file changed, and after a run that succeeded pauses 50 ms before the next."
 
 [[step]]
 from = "spool"

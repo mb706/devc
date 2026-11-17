@@ -117,8 +117,9 @@ func (m *termManager) count(c *proto.Conn) (mine, all int) {
 }
 
 // open serves terminal.open: a live session's window in a running box,
-// observed or (when config.toml allows) controlled, within the stream
-// limits.
+// observed or (when config.toml allows) controlled. The stream limits are
+// checked before the window's size is read and not again when the stream
+// is added, so opens running at the same time can all pass them.
 func (m *termManager) open(ctx context.Context, c *proto.Conn, params json.RawMessage) (any, error) {
 	d := m.d
 	var p proto.TerminalOpenParams

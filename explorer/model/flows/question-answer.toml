@@ -33,7 +33,7 @@ to = "daemon"
 via = "rpc:host.question"
 label = "host.question {session, question, timeout}"
 ref = "internal/boxside.askQuestion"
-text = "The request goes through the agent on a stream of the box channel, started before the question is recorded."
+text = "The request goes through the agent on a stream of the box channel. The hook starts it in a goroutine just before it records the question and does not wait for it, so the daemon may ingest the question before the request arrives."
 
 [[step]]
 at = "daemon"
@@ -101,14 +101,14 @@ text = "The line's goroutine takes the command, waits until the session is known
 [[step]]
 at = "daemon"
 ref = "internal/daemon.commander.answerByHook"
-text = "A hook waits for this session (the daemon waits up to two seconds for one while a question is pending). The answer's question must still be the pending one and the one the hook waits for; otherwise it is refused as stale and never typed. `delivering` is stored before the answer is handed over."
+text = "A hook waits for this session (the daemon waits up to two seconds for one while a question is pending, which covers a question ingested before its request). The answer's question must still be the pending one and the one the hook waits for; otherwise it is refused as stale and never typed. `delivering` is stored before the answer is handed over."
 detail = "Without a waiting hook the answer is typed into the dialog by the input adapter: the manifest's `answer_keys` with `{n}` for an option, or the text pasted and submitted, confirmed by a state change ([[concern:input-and-receipts]])."
 
 [[step]]
 at = "daemon"
 ref = "internal/daemon.commander.questionWait"
 unchecked = "answerByHook sends the reply on the waiter's channel; the host.question handler, blocked on that channel, returns it"
-text = "The waiting `host.question` handler receives the answer."
+text = "The waiting `host.question` handler, in the goroutine of its stream, receives the answer. The line's goroutine does not wait for it or for the hook: the waiter's channel holds the reply, and the daemon goes straight on to record the answer (below), while the hook does its part."
 
 [[step]]
 from = "daemon"
@@ -139,7 +139,7 @@ text = "Claude Code runs the tool with the answer instead of showing its dialog.
 [[step]]
 at = "daemon"
 ref = "internal/daemon.commander.recordAnswer"
-text = "The daemon appends a host-only `answer` event (`via: hook`) to the session's journal, under the ingestion lock and after ingesting the spool, which clears the pending question in every view."
+text = "Right after the handoff, without waiting for the hook, the daemon appends a host-only `answer` event (`via: hook`) to the session's journal, under the ingestion lock and after one ingestion pass of the spool, which clears the pending question in every view."
 
 [[step]]
 at = "daemon"

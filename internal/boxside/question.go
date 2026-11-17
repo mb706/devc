@@ -212,8 +212,10 @@ func askQuestion(session string, spec questionSpec, e HookEnv) *proto.QuestionRe
 		err error
 	}
 	done := make(chan result, 1)
-	// The request goes out before the question is recorded, so the daemon
-	// knows about the waiting hook by the time a client sees the question.
+	// The request is started before the question is recorded, but nothing
+	// waits for it, so the daemon may ingest the question first; an answer
+	// then waits a moment for the hook (commander.answerByHook in the
+	// daemon) before it is typed on screen.
 	go func() {
 		var r proto.QuestionReply
 		err := e.Agent(ctx, proto.MethodHostQuestion, proto.QuestionParams{Session: session, Question: spec.id, Timeout: wait}, &r)

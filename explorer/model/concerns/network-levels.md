@@ -251,7 +251,7 @@ What the level does not cover: DNS to the trusted resolvers is a channel out (qu
 ## Decisions that are not obvious
 
 - **Rules from outside, before start.** Nothing in the box holds a capability that could change them, and no box process exists yet.
-- **Readiness bound to the start, not to a file the box writes.** The readiness marker proves only that box init ran; for level internet the host verifies the binding and the table itself.
+- **Readiness bound to the start, not to a file the box writes.** Any process in the box can write the readiness marker, so it proves nothing by itself; for level internet the host verifies the binding and the table itself.
 - **IPv6 off twice, and reject rather than drop.** The sysctls leave no IPv6 address and the rule drops IPv6 anyway; forbidden IPv4 connections fail at once instead of hanging.
 
 ## Where to start reading

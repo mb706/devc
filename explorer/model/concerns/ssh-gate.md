@@ -57,7 +57,7 @@ refs = ["internal/gate.ServerConfig.Render", "internal/gate.AuthorizedKeyLine", 
 tests = ["internal/gate.TestServerConfig", "internal/daemon.TestGateStreams", "test/integration.TestSSHGate"]
 
 [[invariant]]
-text = "A session runs only for a host granted to the project now and when its box started, read-only if either grant is."
+text = "A session runs only for a host granted to the project now and in its box's start record ([[term:capability-record]]), read-only if either grant is."
 refs = ["internal/daemon.boxWorker.serveGate", "internal/gate.Exec.Run", "internal/box.Capabilities.SSHGrant"]
 tests = ["internal/gate.TestExecStartedWith", "internal/daemon.TestGateStreams", "internal/box.TestCapabilities"]
 

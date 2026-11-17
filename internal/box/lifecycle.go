@@ -1,5 +1,6 @@
 // This file implements the Manager: up with its start sequence and
-// rollback, down, rm, rebuild and ls, and the box lock they all hold.
+// rollback, down, rm, rebuild and ls, and the box lock that all but ls
+// hold.
 
 package box
 
@@ -623,8 +624,9 @@ func (m *Manager) selinuxHost() bool {
 	return err == nil
 }
 
-// clearReady removes the readiness marker before a start, so only the box
-// init of this start can make the box count as ready.
+// clearReady removes the readiness marker before a start, so a marker left
+// from an earlier start cannot make this one count as ready. It does not
+// authenticate the next marker: any process in the box can write it.
 func (m *Manager) clearReady(runtime string) error {
 	err := os.Remove(filepath.Join(runtime, "ready"))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -633,8 +635,9 @@ func (m *Manager) clearReady(runtime string) error {
 	return nil
 }
 
-// isReady reports whether box init has written its readiness marker since
-// the last start through devc (which removes it first).
+// isReady reports whether a readiness marker has been written since the
+// last start through devc (which removes it first). Box init writes it,
+// but so can any other process in the box.
 func (m *Manager) isReady(ref names.ProjectRef) bool {
 	rt, err := m.Config.Paths.BoxRuntimeDir(names.BoxID(ref))
 	if err != nil {
@@ -805,9 +808,9 @@ func (m *Manager) afterStop(ctx context.Context, ref names.ProjectRef, stopped b
 	}
 }
 
-// State reports whether a project's box runs and whether box init has
-// reported ready since its last start through devc. ci is nil when the box
-// does not exist.
+// State reports whether a project's box runs and whether a readiness
+// marker has been written since its last start through devc (isReady). ci
+// is nil when the box does not exist.
 func (m *Manager) State(ctx context.Context, ref names.ProjectRef) (ci *engine.ContainerInfo, running, ready bool, err error) {
 	ci, err = m.Find(ctx, ref)
 	if err != nil || ci == nil {

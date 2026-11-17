@@ -37,6 +37,18 @@ Your material is the model as it stands. Read every concern page and every flow 
 - **Coverage.** `./dev explore --check` reports no file without a concern. Add the file comments that are still missing where a file's name does not say enough.
 - **The package roles** read as one list: same style, no two packages claiming the same thing.
 
+### 6. Follow-ups from the polish chunk
+
+The tool's connection check improved after the areas were written (X14). Bring the model up to it:
+
+- `unchecked` is no longer needed on `request-pr` step 3 and `web-send` step 6; remove it there and wherever else the check now connects (try each `unchecked` whose reason is a function value, a local closure or a method held in a map).
+- A final reply step that had to point at a printed type can now name the command's constructor: `data-pull`, `data-push`, `data-restore`, `data-save`, `data-seal`, `harness-install`, `secret-push-pull`, `share-publish`, `src-fetch`, `state-pull`, `turn-snapshot`.
+- The hub's route surface can say `through = ["internal/hub.Server.guard"]` (see `explorer/README.md`), so that flows crossing the hub's front show its checks as part of the connection.
+- Five concern pages are over the word limit that `--check` now counts. Bring each within it by moving detail into a flow's `detail`, not by cutting what a reader needs.
+- The unfiltered runtime map is a tangle with all actors and channels the areas added. Arranging it is part of item 1 above; if arrangement alone cannot make it read, say what the app would need.
+
+The accuracy review's corrections (X15) are applied before you start; `docs/dev/reviews/G1-response.md` to `G5-response.md` say what changed.
+
 ## Before you finish
 
 As in the guide. In addition: read the Overview, the Runtime view, `start-here` and `security-model` in the built site as the owner would on their first visit, and fix whatever makes them stop.

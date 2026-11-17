@@ -451,8 +451,9 @@ func (c *Conn) worker() {
 
 // serve answers one request from the method table. A panic, a result that
 // cannot be encoded or is too large, and an error that is not an *Error
-// (unless ExposeErrors) become generic errors, so nothing of the host's
-// internals reaches the peer.
+// (unless ExposeErrors) become generic errors, so no unplanned detail of
+// the host reaches the peer. An *Error passes unchanged: what its message
+// says is the handler's choice.
 func (c *Conn) serve(m *RPCMessage) (resp *RPCMessage) {
 	resp = &RPCMessage{JSONRPC: "2.0", ID: m.ID}
 	defer func() {

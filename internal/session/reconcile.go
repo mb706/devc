@@ -32,8 +32,10 @@ type Live struct {
 const maxLiveOutput = 1 << 20
 
 // ParseLive validates the report of `devc box session ps --json`. The box
-// controls this output, so anything unexpected rejects the whole report:
-// reconciliation then does nothing rather than act on a guess.
+// controls this output, so an entry or field that is not as expected
+// rejects the whole report: reconciliation then does nothing rather than
+// act on a guess. Only the first JSON value is decoded; what follows it is
+// not looked at.
 func ParseLive(out []byte) ([]Live, error) {
 	if len(out) > maxLiveOutput {
 		return nil, errors.New("the live-session report is too large")

@@ -45,7 +45,7 @@ refs = ["internal/proto.HostOnly", "internal/proto.ParseSpoolLine"]
 tests = ["internal/proto.TestC09Events"]
 
 [[invariant]]
-text = "A box cannot add events to a session of another project: the first project to record a session ID owns it, and that record is never replaced."
+text = "A box cannot add events to a session of another project: the first project to claim a session ID owns it, and that record is never replaced."
 refs = ["internal/session.Store.Claim", "internal/session.Store.writeOwner", "internal/session.Store.AppendHost"]
 tests = ["internal/session.TestSessionOwnership"]
 
@@ -69,7 +69,7 @@ refs = ["internal/session.Store.refresh"]
 tests = ["internal/session.TestRefreshObservesUnderLock"]
 
 [[invariant]]
-text = "After `session.end`, nothing changes a session's view but the turn a user marked seen."
+text = "After `session.end`, a session's view changes only in the turn a user marked seen and in its event count, last seq and last-event time."
 refs = ["internal/proto.SessionView.Apply"]
 tests = ["internal/proto.TestTurnsAndSeen"]
 
@@ -285,9 +285,9 @@ An event is one JSON object per line: version, session ID, timestamp, type and d
 
 [[internal/session.Store.Ingest]] opens the box's runtime directory as a [[pkg:internal/safefs]] root and lists `spool` beneath it. For each regular file named `<session ID>.jsonl` it claims the session (below), reads complete lines from the offset in `spool-offsets.json`, parses each with [[internal/proto.ParseSpoolLine]], and gives each valid event the session's next `seq`, the host's time `at` and its spool offset. The batch is appended to `durable/realms/<realm>/journal/<project>/<session>.jsonl` ([[term:journal]]) in one synced write, and only then is the offset saved. [[flow:event-ingestion]] follows one line to a subscriber.
 
-**Ownership.** Session IDs are chosen in the box, so a box could reuse another project's ID. [[internal/session.Store.Claim]] records the owner of every ID in `durable/session-owners/<id>` when it first appears, created whole and exclusively by a hard link. An ID without a record whose journals predate the records goes to the project whose journal's first event was ingested earliest. A spool file of another project's session is refused whole, remembered in the offending project's offsets and reported once ([[finding:C1-01]]).
+**Ownership.** Session IDs are chosen in the box, so a box could reuse another project's ID. [[internal/session.Store.Claim]] records the owner of every ID in `durable/session-owners/<id>` when it first appears, created whole and exclusively by a hard link. Ingestion claims an ID before reading its spool file, so even an empty file claims an unowned ID. An ID without a record whose journals predate the records goes to the project whose journal's first event was ingested earliest. A spool file of another project's session is refused whole, remembered in the offending project's offsets and reported once ([[finding:C1-01]]).
 
-**Host events.** `seen`, `answer` and `request` are written only by the host ([[internal/proto.HostOnly]]). [[internal/session.Store.AppendHostEvent]] appends one under the ingestion lock after ingesting the spool, so it follows everything the box reported before it.
+**Host events.** `seen`, `answer` and `request` are written only by the host ([[internal/proto.HostOnly]]). [[internal/session.Store.AppendHostEvent]] appends one under the ingestion lock after one ingestion pass ([[internal/daemon.Daemon.recordHost]]). That pass is bounded and may fail without stopping the event, so earlier box events can still follow it in the journal.
 
 **Reconciliation.** A harness that dies without a word leaves its session open. [[term:reconciliation]] ([[internal/session.Store.Refresh]]) ingests, then observes the box under the same lock. A running box that is not ready is left alone. In a ready box, the sessions open at that moment are noted, the box is asked which sessions are alive (over the channel, or `devc box session ps --json` through the engine), the spool is ingested again, and the noted sessions the box did not report end with reason `lost`. A box that does not run ends every open session as `lost`; `devc down` ends them as `box-down` ([[internal/session.Store.RefreshStopped]]). The daemon reconciles every 30 seconds.
 
@@ -303,9 +303,9 @@ The box controls its spool completely: content, size, whether the entries are fi
 - **Malformed lines.** Unknown fields, trailing data, missing fields, another version, another session's ID, unknown and host-only types, bad timestamps and data that fails [[internal/proto.ValidateData]] are counted and reported, never stored. A line over 64 KiB is skipped whole, also across runs.
 - **Raw bytes.** Journals hold re-encoded events. Text may still hold control characters; [[internal/proto.Printable]] is applied before any of it reaches a terminal.
 - **Another project's session.** Ownership, above; and [[internal/session.Store.AppendHost]] never starts a journal for another project's session.
-- **Floods.** One run takes at most 8 MiB and 20,000 events per file and comes back for the rest; at most 10,000 spool entries are looked at; a box that floods hints still gets at most one run per 50 ms. Nothing bounds a journal's total size: journals are never rotated (an accepted limit).
+- **Floods.** One run takes at most 8 MiB and 20,000 events per file and comes back for the rest; at most 10,000 spool entries are looked at; after a run that succeeded, a box that floods hints gets at most one run per 50 ms. Nothing bounds a journal's total size, so a box that keeps writing valid events grows `durable/` without limit (`docs/dev/LEFTOVER.md` part 7); part 5 accepts only that journals are never rotated.
 - **Truncation and crashes.** A file that shrinks below the offset gets a note in the journal and is read on from its end. A torn journal line is skipped by readers. If the offset was not saved, ingestion resumes after the last spool offset the journal holds ([[finding:B6]]).
-- **A lying live-session report.** [[internal/session.ParseLive]] rejects the whole report on anything unexpected; reconciliation then changes nothing.
+- **A lying live-session report.** [[internal/session.ParseLive]] rejects the whole report when an entry is malformed, and reconciliation then changes nothing; through the engine, text after the first JSON value is ignored (`docs/dev/LEFTOVER.md` part 7). Any box can report `[]` and so end its own open sessions as `lost`.
 - **Late events.** After `session.end` further events are dropped; a fully ingested file of an ended session is removed.
 
 ## Decisions that are not obvious
@@ -313,7 +313,7 @@ The box controls its spool completely: content, size, whether the entries are fi
 - **Files, with a hint on the side.** The spool works without a daemon and keeps what a box wrote while none ran; the hint only shortens the wait, and a lost hint costs at most two seconds.
 - **Two clocks.** `ts` is the box's claim; `at` and `seq` are the host's, and comparisons that matter use them ([[internal/session.Store.firstRecorder]]).
 - **Observe under the lock, after ingesting.** A session whose start is in the journal by then started before the observation; one started later is still in the spool and untouched ([[finding:B7]]).
-- **Views from journals.** The CLI and the daemon derive the same view from the same file, so `devc ps` answers alike with and without a daemon.
+- **Views from journals.** The CLI and the daemon derive the same view from the same file, so `devc ps` answers alike with and without a daemon. Only a last event cut off before its newline (a crash) is read by the CLI, but by the daemon not until the next append.
 
 ## Where to start reading
 

@@ -42,8 +42,8 @@ refs = ["internal/paths.Paths.ToolboxDir", "internal/paths.InBoxTools"]
 tests = ["test/integration.TestEscape"]
 
 [[invariant]]
-text = "A vendor installer sees no part of the host but the new version directory it fills, and `current` switches only after a check without network succeeds."
-refs = ["internal/toolbox.Installer.Install"]
+text = "Of the host, a vendor installer sees only the new version directory it fills (read-write) and the toolbox components its manifest needs (read-only); `current` switches only after a check without network succeeds."
+refs = ["internal/toolbox.Installer.Install", "internal/toolbox.Toolbox.NeedsFor"]
 tests = ["internal/toolbox.TestInstallScript", "internal/toolbox.TestInstallFailureKeepsCurrent"]
 
 [[invariant]]
@@ -67,7 +67,7 @@ refs = ["internal/harness.BoxHooks.renderBaseline", "internal/harness.Merge"]
 tests = ["internal/harness.TestClaudeSettingsMerge", "test/integration.TestHarnessSeedsAndBaseline"]
 
 [[invariant]]
-text = "A harness credential is written only into the box's memory-backed secrets directory, as a 0400 file, never into podman's arguments or environment."
+text = "A token or key credential reaches a box only as a 0400 file in its secrets directory (memory-backed unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`) or from the daemon, never through podman's arguments or environment."
 refs = ["internal/harness.BoxHooks.deliverSecrets", "internal/secrets.Deliver"]
 tests = ["internal/harness.TestPrepareAndCleanup", "test/integration.TestHarnessLaunchAndSecrets"]
 
@@ -263,7 +263,7 @@ A box runs the project's own image, which knows nothing of devc. Yet every box n
 
 **Manifests.** A [[term:harness]] is described by a [[internal/config.Harness]] ([[surface:config-harness]]): how it is installed (`install`), where its state lives and whether a realm shares it (`home`), how it logs in (`auth`), what settings and instructions it must get (`baseline`), how it is started (`launch`, `env`), which hooks report its events, how input reaches it. Five manifests are built in ([[pkg:assets]]); the configuration chapter explains how a user file replaces one ([[concern:configuration]]).
 
-**Installing.** [[flow:harness-install]] shows it step by step. Each installation is a new directory `harness/<id>/v/<stamp>/`. The vendor's installer runs in a container from the installer image that sees only that directory; a second container without network checks that `install.exe` runs. Only then does [[internal/toolbox.Toolbox.publish]] write `installed.json` and switch `current`, and the switch is appended to `history.jsonl`. A failure before the switch deletes the new directory and leaves `current` as it was. [[diagram:harness-version|The life of a version]] is drawn below.
+**Installing.** [[flow:harness-install]] shows it step by step. Each installation is a new directory `harness/<id>/v/<stamp>/`. The vendor's installer runs in a container from the installer image that sees that directory, read-write, and the toolbox components the manifest needs (`install.needs`), read-only; a second container without network checks that `install.exe` runs. Only then does [[internal/toolbox.Toolbox.publish]] write `installed.json` and switch `current`, and the switch is appended to `history.jsonl`. A failure before the switch deletes the new directory and leaves `current` as it was. [[diagram:harness-version|The life of a version]] is drawn below.
 
 **What a box gets.** [[internal/harness.BoxHooks]] plugs into the box's life cycle. When the box's arguments are built, [[internal/harness.BoxHooks.Contribute]] adds the mounts: the rendered baseline, read-only, at the directory of the manifest's baseline paths; the harness state of the home strategy (with `private`, the listed subdirectories come from realm state; with `shared`, the whole harness home does, and `per_box` subdirectories stay per box); and the secrets directory at `/run/devc-secrets`, always, even when empty. When the box is started, [[internal/harness.BoxHooks.Prepare]] renders the baselines, writes a launch description and seed files for every installed harness, delivers the credentials, makes sure the shims exist and removes what belongs to harnesses the project no longer lists.
 
@@ -271,16 +271,16 @@ A box runs the project's own image, which knows nothing of devc. Yet every box n
 
 **Launch descriptions.** [[internal/harness.Describe]] writes what the in-box launcher needs into `/etc/devc/harness/<id>.json`: the executable in the concrete version directory, arguments, environment, where the credential file is and which variable receives it, the home strategy, seeds, granted secrets, hooks and input settings. The description is validated before it is written. A shim is a link `/opt/devc/shims/<bin>` to devc; started under that name, devc looks the name up among the descriptions and runs the launcher ([[flow:binary-dispatch]]).
 
-**Logins.** [[flow:harness-login]] shows `devc login <realm> <harness>`. The method comes from the manifest or the realm's override ([[internal/harness.EffectiveAuth]]): `env-token` runs the vendor's login in a throwaway container with a temporary home and stores the token the user pastes as a realm secret; `api-key` only asks for the key; `shared-home` mounts the realm's shared harness home into the login container, so the vendor writes its own credential file there. At `devc up` token and key reach the box as files in `/run/devc-secrets` (with `secrets.delivery = "daemon"` the launcher asks the daemon instead), and the launcher exports them under the manifest's `auth.env`.
+**Logins.** [[flow:harness-login]] shows `devc login <realm> <harness>`. The method comes from the manifest or the realm's override ([[internal/harness.EffectiveAuth]]): `env-token` runs the vendor's login in a throwaway container with a temporary home and stores the token the user pastes as a realm secret; `api-key` only asks for the key; `shared-home` mounts the realm's shared harness home into the login container, so the vendor writes its own credential file there. When the box is next started (not by `up` of a box already running and ready), token and key reach it as files in `/run/devc-secrets` (with `secrets.delivery = "daemon"` the launcher asks the daemon instead), and the launcher exports them under the manifest's `auth.env`.
 
 **Versions.** `devc harness install` and `devc update` rewrite the launch description of every box that has one, under the box's lock ([[internal/harness.BoxHooks.RefreshLaunches]]), so the next start in a running box gets the new version while running sessions keep theirs. [[internal/toolbox.Toolbox.GC]] removes versions nothing may use any more; `devc harness gc` refuses to remove anything when it cannot list the running boxes.
 
 ## What can go wrong, and what prevents it
 
 - **A box changes its tools or settings.** The toolbox, `/etc/devc` (descriptions, seeds) and the baseline directory are read-only mounts of host directories. Validation refuses baseline directories devc or the system needs, such as `/etc/devc`, `/opt/devc`, `/home` or `/usr` ([[internal/config.reservedBaselineDir]]).
-- **A vendor installer misbehaves.** It runs with no new privileges, the box seccomp profile, `--http-proxy=false` and only its version directory mounted; its result is checked in a container without network. It does run with network and as the container's root, which rootless Podman maps to the host user: the user trusts the vendor's script as far as the container lets it act.
+- **A vendor installer misbehaves.** It runs with no new privileges, the box seccomp profile, `--http-proxy=false` and only its version directory (read-write) and the components it needs (read-only) mounted; its result is checked in a container without network. It does run with network and as the container's root, which rootless Podman maps to the host user: the user trusts the vendor's script as far as the container lets it act.
 - **Shared harness state.** With strategy `shared`, every box of a realm mounts the same home, so one box can change what the others read, the vendor's credential file included; the realm is the sharing boundary (spec rule R5). Homes that nest are refused ([[internal/harness.BoxHooks.Contribute]]), because a writable mount's source inside another box-writable tree could be redirected by a planted symlink.
-- **Credentials leak.** They are written only to the box's secrets directory, which must be memory-backed unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`, as 0400 files by rename, and removed at `down` and `rm` ([[internal/harness.BoxHooks.Cleanup]]). The agent can read its own model credential; the spec accepts that.
+- **Credentials leak.** Token and key credentials are written only to the box's secrets directory, which must be memory-backed unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`, as 0400 files by rename, and removed at `down` and `rm` ([[internal/harness.BoxHooks.Cleanup]]). A `shared-home` credential is the vendor's file in the shared harness home, durable state the realm's boxes can write (above). The agent can read its own model credential; the spec accepts that.
 - **gc removes a version a session runs.** See the invariants; the keep rules use the descriptions and the switch history.
 
 ## Decisions that are not obvious

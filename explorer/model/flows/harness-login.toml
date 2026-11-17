@@ -57,6 +57,7 @@ via = "exec"
 label = "podman run -i -t installer: claude setup-token"
 ref = "internal/engine.Podman.RunStream"
 text = "The container is attached to the user's terminal (`-i`, `-t` when there is one, no detach keys), with network, from the installer image and with the options every auxiliary container gets."
+detail = "The login uses the installer image as it is: it does not build it when it is missing or out of date (`docs/dev/LEFTOVER.md` part 7)."
 
 [[step]]
 from = "podman"
@@ -108,7 +109,7 @@ to = "state-dir"
 via = "file"
 label = "durable/realms/<realm>/secrets/<name>"
 ref = "internal/secrets.writeFile"
-text = "The value is written to a new temporary file in the realm's 0700 secrets directory and renamed into place with mode 0600. The CLI says that `devc up` delivers it."
+text = "The value is written to a new temporary file in the realm's 0700 secrets directory and renamed into place with mode 0600. The CLI says that `devc up` delivers it, which is true only of an `up` that starts the box."
 
 [[step]]
 section = "shared-home (Codex, pi, Cursor)"
@@ -120,13 +121,14 @@ text = "With `shared-home`, the realm's shared harness home (`durable/realms/<re
 detail = "Those directories are also mounted into every box of the realm that lists the harness (strategy `shared`), so the boxes find the credential where the vendor's program expects it, and can change it."
 
 [[step]]
-section = "At the next devc up"
+section = "At the box's next start"
 
 [[step]]
 at = "cli"
 ref = "internal/harness.BoxHooks.deliverSecrets"
 unchecked = "a later `devc up`, another CLI process, reads the stored secret"
-text = "`devc up` reads the credential of every installed token harness of the project, together with the granted secrets. A missing credential is a warning naming `devc login`, not an error."
+text = "When devc next creates or starts the box (`devc up` of a stopped or missing box, a recreation, `down` then `up`), it reads the credential of every installed token harness of the project, together with the granted secrets. A missing credential is a warning naming `devc login`, not an error."
+detail = "`devc up` of a box that is already running and ready returns before this: the new credential does not reach a running box. With `secrets.delivery = \"daemon\"` the launcher asks the daemon at every harness start, which reads the current value."
 
 [[step]]
 from = "cli"
@@ -134,7 +136,7 @@ to = "launcher"
 via = "file"
 label = "<runtime>/<box-id>-secrets/<name>"
 ref = "internal/secrets.Deliver"
-text = "The values are written as 0400 files into the box's secrets directory, which must be memory-backed and is mounted read-only at `/run/devc-secrets`. With `secrets.delivery = \"daemon\"` nothing is written there and the launcher asks the daemon instead."
+text = "The values are written as 0400 files into the box's secrets directory, which must be memory-backed (unless `DEVC_ALLOW_PERSISTENT_SECRETS=1`) and is mounted read-only at `/run/devc-secrets`. With `secrets.delivery = \"daemon\"` nothing is written there and the launcher asks the daemon instead."
 
 [[step]]
 at = "launcher"

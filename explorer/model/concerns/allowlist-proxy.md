@@ -62,7 +62,7 @@ refs = ["internal/netpolicy.Proxy.CheckAddr", "internal/netpolicy.Proxy.dial"]
 tests = ["internal/netpolicy.TestProxyDialChecksAddress", "internal/netpolicy.TestProxyRefusals"]
 
 [[invariant]]
-text = "The proxy serves only a name and port that the allowlist allows both as the box was started and now, or that an exception in force allows."
+text = "The proxy serves only a name and port that the allowlist allows both in the box's start record ([[term:capability-record]]) and now, or that an exception in force allows."
 refs = ["internal/daemon.Daemon.proxyPolicy", "internal/box.Capabilities.ProxyAllowlist", "internal/netpolicy.ProxyPolicy.Allows"]
 tests = ["internal/daemon.TestNetProxy", "internal/netpolicy.TestExpandAndIntersect"]
 
@@ -248,7 +248,7 @@ Limits: the allowlist limits names, not content; CONNECT relays TLS unchanged, s
 
 ## Decisions that are not obvious
 
-- **The allowlist is a start capability, exceptions are not.** Growing the configured list needs the box to be brought up again; removing an entry applies at once ([[finding:C1-02]]).
+- **The allowlist is a start capability, exceptions are not.** Growing the configured list waits until the capability record is written again (the box's next start, or devc finishing the start of a box that removed its readiness marker); removing an entry applies at once ([[finding:C1-02]]).
 - **Names only at allowlist.** The proxy never connects to a private address, so a LAN host is reached at internet with an address exception, or through `host:<port>`.
 
 ## Where to start reading

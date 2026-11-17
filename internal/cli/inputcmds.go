@@ -113,7 +113,9 @@ func (a *app) runCommand(cmd *cobra.Command, f *commandFlags, method string, par
 }
 
 // callCommand sends a command on an open connection and, with --wait,
-// asks command.get (60 seconds at a time) until the receipt is final.
+// asks command.get (60 seconds at a time) until the receipt is final or
+// ctx ends (runCommand gives it 15 minutes); the daemon's work goes on
+// either way.
 func (a *app) callCommand(ctx context.Context, cl *daemon.Client, f *commandFlags, method string, params any) error {
 	var r proto.Receipt
 	if err := cl.Call(ctx, method, params, &r); err != nil {

@@ -210,7 +210,8 @@ func (s *SessionView) NeedsYou() bool {
 
 // Apply folds one journal event into the view. Times are the host's
 // ingestion times (at), which a box cannot choose. Nothing after the end
-// changes the session, except what a user has seen.
+// changes the session, except what a user has seen and the counters
+// (Events, LastEvent, LastSeq), which every event advances.
 func (s *SessionView) Apply(e *Event) {
 	at := e.AtTime()
 	if s.Events == 0 {

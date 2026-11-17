@@ -36,7 +36,7 @@ tests = [
 related = ["ssh-gate", "launching-a-harness", "toolbox-and-harnesses", "box-lifecycle", "box-channel"]
 
 [[invariant]]
-text = "With delivery daemon, the daemon gives a box a secret only if the project grants it now and granted it when the running container started."
+text = "With delivery daemon, the daemon gives a box a secret only if the project grants it now and the start record of the running container lists it ([[term:capability-record]])."
 refs = ["internal/daemon.Daemon.secret", "internal/daemon.Daemon.startedWith", "internal/box.Capabilities.AllowsSecret"]
 tests = ["internal/daemon.TestSecrets", "internal/box.TestCapabilities"]
 
@@ -104,8 +104,8 @@ A box controls the processes that receive secrets, its agent, and every request 
 
 - **Asking for another project's secret.** The daemon answers for the channel's project only, and only for granted names.
 - **Keeping a grant the owner removed.** In daemon mode the daemon checks the current configuration, reloaded within three seconds; in files mode the file remains until the box stops.
-- **A grant added while the box runs.** Refused until the box is brought up again, in both modes ([[finding:C1-02]]).
-- **A copy on disk.** Delivery and the gate's key generation refuse storage that is not memory-backed.
+- **A grant added while the box runs.** Refused until the capability record is written again, in both modes ([[finding:C1-02]]): at the box's next start, but also when a command finishes the start of the running box after the box removed its own readiness marker ([[concern:box-lifecycle]], `docs/dev/LEFTOVER.md` part 7).
+- **A copy on disk.** Delivery and the gate's key generation refuse storage that is not memory-backed, unless the user set `DEVC_ALLOW_PERSISTENT_SECRETS=1`.
 - **A value in a log or command line.** The store and delivery use files; the daemon's answer carries the value in the response body only; the command runner hides the values a caller lists in errors and logs ([[concern:host-foundations]]).
 
 What the mechanism does not cover: in either mode, once a secret is in the harness's environment, every program the harness runs can read it; in daemon mode any process of the box can ask for a granted secret at any time while the daemon is connected (that is what `devc box secret` does).

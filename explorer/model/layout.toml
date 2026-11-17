@@ -202,7 +202,7 @@ ref = "internal/paths.Paths.ServiceLogFile"
 
 [[tree.entry]]
 path = "durable/session-owners"
-text = "One file per session ID naming the project whose journal first recorded it, so a box cannot claim another project's session."
+text = "One file per session ID naming the project that claimed it first: the first whose spool file of that ID was ingested, whatever the file held (or, for an ID from before these records, the project whose journal of it began first). A box cannot claim another project's session."
 writer = "host"
 ref = "internal/paths.Paths.SessionOwnersDir"
 
@@ -292,7 +292,7 @@ ref = "internal/paths.Paths.BoxLockFile"
 
 [[tree.entry]]
 path = "local/boxes/<realm>/<project>/capabilities.json"
-text = "What the box's last successful start was given: its container ID, secrets, SSH grants, network level and allowlist, GitHub grant and services. Written at the end of a successful start, removed at the beginning of the next and whenever the box stops; grants on demand are checked against it."
+text = "What the box was started with: its container ID and the secrets, SSH grants, network level and allowlist, GitHub grant and services the configuration granted when devc finished the start (also when it finished the start of a running box without its readiness marker). Removed before every start and whenever devc stops or removes the box; a box stopped outside devc keeps it. Grants on demand are checked against it."
 writer = "host"
 ref = "internal/paths.Paths.BoxCapabilitiesFile"
 
@@ -304,7 +304,7 @@ ref = "internal/paths.Paths.BoxNetExceptionsFile"
 
 [[tree.entry]]
 path = "local/receipts"
-text = "The daemon's command receipts (directory 0700): one file per command ID, created exclusively before the command acts, kept seven days after it is final."
+text = "The daemon's command receipts (directory 0700): one file per command ID, created exclusively before the command acts (`session.seen` acts first and stores its final receipt after), removed seven days after it is final."
 writer = "host"
 ref = "internal/paths.Paths.ReceiptsDir"
 
@@ -604,7 +604,7 @@ ref = "internal/paths.Paths.SpoolDir"
 
 [[tree.entry]]
 path = "<box-id>/ready"
-text = "The readiness marker, written by box init by rename once the home is prepared (and, at level internet, the network check passed); devc removes it before every start. Box-writable, so it proves only that init got that far."
+text = "The readiness marker, written by box init by rename once the home is prepared (and, at level internet, the network check passed); devc removes it before every start, so a marker of an earlier start never counts. The host checks only that it is a regular file, and any process in the box can write or remove it, so it proves nothing about who wrote it."
 writer = "box"
 ref = "internal/boxside.writeReady"
 
@@ -622,7 +622,7 @@ ref = "internal/boxside.OpenAgentLog"
 
 [[tree.entry]]
 path = "<box-id>/status/<session>"
-text = "Exists while the status wrapper reports the session's state through OSC 7501; the hook receiver then drops its own state events."
+text = "Exists while the status wrapper reports the session's state through OSC 7501; the hook receiver then drops the state events it maps from hooks, but not the blocked and working states of the question hook."
 writer = "box"
 ref = "internal/boxside.StatusDir"
 
@@ -687,7 +687,7 @@ ref = "internal/netpolicy.Registry.LogFile"
 source = "<projects root>/<realm>/<project>"
 target = "/w/<realm>/<project>"
 mode = "rw"
-text = "The project directory: the box repository (`.repo`), the worktrees `main/` and its siblings, and the data directory. Box-writable; host code never runs tools in it or walks it."
+text = "The project directory: the box repository (`.repo`), the worktrees `main/` and its siblings, and the data directory. Box-writable; host code never runs tools in it or walks it, except `restorecon -R`, which relabels it before a start on SELinux hosts."
 ref = "internal/paths.Paths.HostProjectDir"
 
 [[mount]]
@@ -820,7 +820,7 @@ ref = "internal/data.BoxHooks.Contribute"
 id = "projects"
 title = "Projects root"
 root = "~/devc"
-summary = "The project directories, one per project, each mounted read-write into its box at `/w/<realm>/<project>`. `projects_root` in config.toml moves it. Everything here is box-writable: host code never runs git or another tool in it and never walks it."
+summary = "The project directories, one per project, each mounted read-write into its box at `/w/<realm>/<project>`. `projects_root` in config.toml moves it. Everything here is box-writable: host code never runs git or another tool in it and never walks it, except `restorecon -R` on a project directory before a start on SELinux hosts."
 
 [[tree.entry]]
 path = "<realm>/<project>"

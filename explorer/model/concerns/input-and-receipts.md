@@ -1,7 +1,7 @@
 +++
 id = "input-and-receipts"
 title = "Input and receipts"
-summary = "Typing into live sessions from outside: commands (send, answer, interrupt, keys, start, stop, seen) with a receipt stored before anything happens, a line of commands per session, the wait for a session at rest and for quiet at its terminal, the input adapters and the verified paste."
+summary = "Typing into live sessions from outside: commands (send, answer, interrupt, keys, start, stop, seen) with a receipt stored before anything is typed, a line of commands per session, the wait for a session at rest and for quiet at its terminal, the input adapters and the verified paste."
 order = 33
 files = [
   "internal/daemon/commands.go",
@@ -40,7 +40,7 @@ tests = [
 related = ["daemon", "launching-a-harness", "sessions-and-events", "box-channel"]
 
 [[invariant]]
-text = "A command ID acts at most once: a repeated ID returns the stored receipt and does nothing else."
+text = "A command ID acts at most once while its receipt is kept (until seven days after it became final): a repeated ID returns the stored receipt and does nothing else."
 refs = ["internal/daemon.commander.submit", "internal/daemon.receiptStore.create"]
 tests = ["internal/daemon.TestReceiptStore", "internal/daemon.TestCommands"]
 
@@ -167,7 +167,7 @@ ref = "internal/daemon.commander.runStart"
 +++
 ## What it is for
 
-From the host, or a phone through a hub, the user wants to type into a session: a prompt, an answer, an interrupt, a key, or start a new session with a first prompt. The text must arrive once, in the right session, when the harness is ready for it, never while someone types in the same terminal, and the user wants to know whether it arrived. Each of these is a [[term:command]] whose [[term:receipt]] the daemon stores before it acts. This page is the daemon's half; the box's half (pasting into the pane) is in [[concern:launching-a-harness]].
+From the host, or a phone through a hub, the user wants to type into a session: a prompt, an answer, an interrupt, a key, or start a new session with a first prompt. The text must arrive once, in the right session, when the harness is ready for it, if possible not while someone types in the same terminal, and the user wants to know whether it arrived. Each of these is a [[term:command]] whose [[term:receipt]] the daemon stores before it acts (`seen` stores it after). This page is the daemon's half; the box's half (pasting into the pane) is in [[concern:launching-a-harness]].
 
 ## How it works
 
@@ -179,7 +179,7 @@ From the host, or a phone through a hub, the user wants to type into a session: 
 
 **Executing.** [[internal/daemon.commander.execute]] waits up to 60 seconds for the session to be known, refuses an ended one, and finds the harness's manifest. A queued command then waits until the session is [[term:at-rest]] ([[internal/daemon.atRest]]): idle, done or error with a state reported after the last prompt and no question pending; a session that never reported a state counts as at rest 60 seconds after it started. That wait has no limit while the daemon runs; a session that ends refuses the command. Then the box's channel (up to 60 seconds), the inject lock and the adapter. A stop goes through the engine instead (`devc box session stop`), followed by a reconciliation.
 
-**The gate and the last check.** Before its first key every adapter passes the [[term:input-gate]] ([[internal/daemon.target.gate]]): it asks the agent for the clients showing the session's window (`box.input.clients`) and waits, polling every half second for at most 60 seconds, while one was active in the last three seconds ([[internal/daemon.gateDecision]]). Then [[internal/daemon.target.begin]] checks once more that the session is live, that a queued send still finds it at rest (otherwise the command goes back to waiting, [[finding:C1-14]]) and that an answer's question is still the pending one ([[finding:C1-13]]), and stores `delivering`; if that cannot be stored, nothing is typed and the command is tried again ten seconds later ([[finding:C1-06]]).
+**The gate and the last check.** Before its first key every adapter passes the [[term:input-gate]] ([[internal/daemon.target.gate]]): it asks the agent for the clients showing the session's window (`box.input.clients`) and waits, polling every half second, while one was active in the last three seconds ([[internal/daemon.gateDecision]]). After 60 seconds, checked between calls, it types anyway. Then [[internal/daemon.target.begin]] checks once more that the session is live, that a queued send still finds it at rest (otherwise the command goes back to waiting, [[finding:C1-14]]) and that an answer's question is still the pending one ([[finding:C1-13]]), and stores `delivering`; if that cannot be stored, nothing is typed and the command is tried again ten seconds later ([[finding:C1-06]]).
 
 **Adapters.** [[internal/daemon.adapterFor]] uses the manifest's `input.adapter`. Every built-in manifest names `paste`. `mod` and `app-server` are not built: the daemon uses paste and says so in the receipt. `extension` (pi) hands a message to devc's extension in the harness through `box.input.submit` while one is connected, and otherwise types it; interrupts and dialog answers are always typed.
 
@@ -188,15 +188,15 @@ From the host, or a phone through a hub, the user wants to type into a session: 
 - *Answer*: first to a hook that waits for this question ([[internal/daemon.commander.answerByHook]], waiting two seconds for one while a question is pending); a hook waiting for another question refuses it as stale. Otherwise the manifest's answer keys with `{n}`, or the text pasted, confirmed by a state change. A delivered answer is recorded as a host `answer` event, saying which way it went. [[flow:question-answer]] goes through it.
 - *Keys*: one to 32 names from a fixed list.
 - *Start* ([[internal/daemon.commander.runStart]]): the project must list the harness, have no configuration problems, a running box (it waits up to ten seconds for the watch to see one just started) and a launch description. After `delivering` it creates the worktree if asked (under the box lock) and runs `devc box session start --detach` with a new session ID through the engine; the first prompt is queued like a send.
-- *Seen*: answered at once; it records a `seen` event, and stores a receipt only when given an ID.
+- *Seen*: answered at once; it records a `seen` event first and only then, when given an ID, stores a final receipt ([[internal/daemon.Daemon.apiSeen]]).
 
-**After a restart.** [[internal/daemon.commander.resume]] turns `delivering` into `unknown`, queues `accepted` commands again in their order, refuses those waiting longer than seven days and removes final receipts older than that.
+**After a restart.** [[internal/daemon.commander.resume]] refuses unfinished commands accepted more than seven days ago, even a `delivering` one that may have typed; otherwise it turns `delivering` into `unknown` and queues `accepted` commands again in their order. Final receipts older than seven days are removed, also by housekeeping ([[internal/daemon.commander.prune]]); their IDs then count as new.
 
 ## What can go wrong, and what prevents it
 
-- **Typed twice.** The durable `delivering` state and the receipt per ID.
+- **Typed twice.** The durable `delivering` state and the receipt per ID, for as long as the receipt is kept.
 - **The wrong session.** Binding at acceptance by project and ID; the box's channel is the session's project's; in the box the pane is found by its window's session tag.
-- **Typed over a person.** The input gate, bounded at a minute.
+- **Typed over a person.** The input gate: a wait of about a minute at most.
 - **Typed into a busy harness, or into the next question.** At rest, and the last check before the first key.
 - **Text that becomes commands.** [[internal/proto.CheckInputText]]; in the box the text reaches tmux on standard input and key names match a strict pattern ([[internal/boxside.Input.Paste]]).
 - **A box that lies.** `delivered` means the box's hook reported a prompt with the text's hash; a compromised box can report one without typing anything. Box answers are decoded strictly and their text made printable in receipts.

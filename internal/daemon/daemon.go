@@ -557,7 +557,9 @@ func (d *Daemon) watchOnce(ctx context.Context) error {
 		}
 		c, ok := byName[names.BoxName(ref)]
 		// A container with the box's name that devc did not create for
-		// this project is never acted on (box.Manager.Find).
+		// this project gets no worker and counts as absent
+		// (box.Manager.Find). Execs that later address the box by name
+		// (session start and stop, terminals) rely on this observation.
 		if ok && (c.Labels[box.LabelRealm] != ref.Realm || c.Labels[box.LabelProject] != ref.Project) {
 			ok = false
 		}
@@ -674,7 +676,8 @@ func (w *boxWorker) ingestLoop(ctx context.Context) {
 		if rep.Events > 0 {
 			busyUntil = time.Now().Add(busyFor)
 		}
-		// A box that floods hints still costs one run per interval.
+		// A box that floods hints still costs one run per 50 ms after a run
+		// that succeeded; a failed run goes back to waiting at once.
 		select {
 		case <-ctx.Done():
 			return
@@ -715,8 +718,10 @@ func (d *Daemon) ingest(ctx context.Context, e *env, ref names.ProjectRef) (sess
 }
 
 // recordHost appends an event the host writes itself (seen, answer) to a
-// session's journal: under the ingestion lock, after ingesting what the box
-// spooled, so it follows what the box reported before it.
+// session's journal: under the ingestion lock, after one ingestion pass of
+// what the box spooled, so it follows what that pass took in. The pass is
+// bounded per file and its error does not stop the event, so older box
+// events can still reach the journal after it.
 func (d *Daemon) recordHost(ctx context.Context, ref names.ProjectRef, sid, typ string, data any) error {
 	e := d.current()
 	unlock, err := e.store.Lock(ctx, ref)

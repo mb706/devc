@@ -45,8 +45,8 @@ tests = [
 related = ["box-lifecycle", "toolbox-and-harnesses", "host-foundations", "configuration"]
 
 [[invariant]]
-text = "No process in a box holds a capability, and none can gain one or another user's rights by executing a program."
-refs = ["internal/box.Spec.argsWithoutHash", "internal/box.BuildSpec"]
+text = "No process in a box holds a capability, and none can gain one or another user's rights by executing a program; the one exception is the command of `devc root`, which the user runs from the host."
+refs = ["internal/box.Spec.argsWithoutHash", "internal/box.BuildSpec", "internal/box.Manager.Root"]
 tests = ["internal/box.TestSpecProperties", "test/integration.TestEscape"]
 
 [[invariant]]
@@ -65,8 +65,8 @@ refs = ["internal/box.BuildSpec", "internal/harness.BoxHooks.Contribute", "inter
 tests = ["test/integration.TestEscape"]
 
 [[invariant]]
-text = "No mount source or nested mount point is reached through a symlink."
-refs = ["internal/box.prepareDirs", "internal/box.prepareMountPoints", "internal/box.checkRealDir"]
+text = "Just before a start, devc refuses a symlink at any component of a mount source below its own directories, at the last component of any other source, and at any component of a nested mount point."
+refs = ["internal/box.prepareDirs", "internal/box.prepareMountPoints", "internal/box.checkRealDir", "internal/paths.EnsureBeneath"]
 tests = ["internal/box.TestNestedMountPointSymlinkRefused"]
 
 [[invariant]]
@@ -146,7 +146,7 @@ The harness in a box runs without asking: the baseline sets Claude Code's permis
 
 **The seccomp profile.** `--security-opt seccomp=<state>/toolbox/seccomp.json`. Seccomp is a kernel filter on system calls and their register arguments. The profile is Podman's default (containers/common, embedded in devc) with two changes by [[internal/toolbox.DeriveProfile]]. First, `clone` and `unshare` are allowed only with `CLONE_NEWUSER` clear, and `clone3`, whose flags lie in memory where seccomp cannot see them, fails with ENOSYS: no process can make a user namespace, in which it would be root and reach kernel code meant for privileged users. Second, `socket` with domain 38 (AF_ALG, the kernel's crypto interface) fails with EAFNOSUPPORT, and `socketcall`, the 32-bit multiplexer that hides its arguments, with EPERM. Every socket allow rule also requires the domain's upper 32 bits to be zero, because the kernel truncates the domain while seccomp compares 64 bits. The derivation checks that the base has the shape it relies on and otherwise fails, which stops `up` before anything exists. The toolbox sync at every `up` keeps the file equal to the derived profile, and the profile's digest is part of the box's hash, so a changed profile shows as drift. `capabilities.nested = true` is refused rather than opening this.
 
-**The mounts.** Only bind mounts devc lists exist; the state view shows them all with their sources. Writable: the project directory, the home, the realm's package cache (`/home/dev/.cache`) and sources (`/src`), `/ctx/notes`, `/ctx/memory`, the runtime directory `/run/devc`, harness state, and other projects of the realm where `[[mounts]]` says `mode = "rw"` (read-only otherwise). Read-only: the toolbox at `/opt/devc`, the rendered `/etc/devc`, harness baselines, the secrets directory, the gate's SSH configuration, shares and data input zones. The configuration directory is never mounted. [[internal/box.Spec.AddMount]] accepts only clean absolute paths without commas, quotes or control characters, one mount per target; sources below devc's roots are created without following symlinks and must be real directories ([[internal/box.prepareDirs]]); a mount inside another needs a real directory at its place ([[internal/box.prepareMountPoints]]).
+**The mounts.** Only bind mounts devc lists exist; the state view shows them all with their sources. Writable: the project directory, the home, the realm's package cache (`/home/dev/.cache`) and sources (`/src`), `/ctx/notes`, `/ctx/memory`, the runtime directory `/run/devc`, harness state, and other projects of the realm where `[[mounts]]` says `mode = "rw"` (read-only otherwise). Read-only: the toolbox at `/opt/devc`, the rendered `/etc/devc`, harness baselines, the secrets directory, the gate's SSH configuration, shares and data input zones. The configuration directory is never mounted. [[internal/box.Spec.AddMount]] accepts only clean absolute paths without commas, quotes or control characters, one mount per target; sources below devc's roots (which may themselves be symlinks) are created without following symlinks and must be real directories ([[internal/box.prepareDirs]]); a mount inside another needs a real directory at its place ([[internal/box.prepareMountPoints]]).
 
 **Environment and entrypoint.** The box gets `HOME`, `USER`, `LOGNAME`, `DEVC_BOX=1`, `DEVC_REALM`, `DEVC_PROJECT`, `PATH` (devc's shims and tools first, then `~/.local/bin`, then the image's) and `TERMINFO_DIRS`, plus proxy variables at level allowlist; `--http-proxy=false` keeps the host's proxy variables, which may carry credentials, out. `--entrypoint /opt/devc/bin/devc` with `box init` makes devc's init the main process whatever the image declares; `--init` puts Podman's minimal init in front of it.
 
@@ -164,7 +164,7 @@ The box controls everything inside it: any program, as `dev`, with any file in i
 
 - **Becoming root on the host.** In-box root is a subordinate ID without capabilities, and set-ID programs gain nothing; `TestEscape` tries `su`, `mount`, `unshare` and `nsenter`.
 - **Kernel attack surface.** No user namespaces, no AF_ALG; a base profile the derivation does not understand stops every `up`.
-- **Redirecting a mount.** Symlinks at mount sources and nested mount points are refused, not followed; for the same reason the secrets are mounted at `/run/devc-secrets`, outside the box-writable `/run/devc`.
+- **Redirecting a mount.** Symlinks at mount sources and nested mount points are refused when devc checks them, just before the start; for the same reason the secrets are mounted at `/run/devc-secrets`, outside the box-writable `/run/devc`. Another running box of the realm can still swap a component in a realm-shared parent between this check and Podman's mount (an accepted limit).
 - **Changing tools, descriptions, baselines or secrets.** They are read-only mounts; `TestEscape` tries to write, remount and unmount them.
 - **A planted program run as root.** Root execs never search a box-writable directory.
 - **Exhausting the host, or reaching another realm.** The limits apply or the box does not start; nothing of another realm is mounted, which `TestEscape` checks in the box's mount table.

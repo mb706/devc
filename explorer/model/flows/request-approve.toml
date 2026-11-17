@@ -134,7 +134,7 @@ text = "The command runs in the box as root with every capability (`podman exec 
 at = "daemon"
 ref = "internal/daemon.requestService.transitionLocked"
 text = "The outcome (done or failed, with the last 2,000 characters of the output) replaces the request's state only while that state is still the approval this run carried out ([[finding:C1-18]])."
-detail = "With `--wait`, the CLI that approved polls `requests.list` every 300 ms until the request is final, prints the outcome and exits with status 1 when it failed."
+detail = "With `--wait`, the CLI that approved polls `requests.list` every 300 ms until the request is final, prints the outcome and exits with status 1 when it failed. After the command's 15 minutes it stops waiting and says the request is still approved; the worker carries on."
 
 [[step]]
 section = "The box learns the outcome"
@@ -150,7 +150,8 @@ text = "`devc request status <id> --wait` asks again until the request is final.
 [[step]]
 at = "daemon"
 ref = "internal/daemon.requestService.status"
-text = "Only requests of the channel's own project are visible. The answer waits up to the given time for a change; a pending request past its seven days is expired first, under the lock."
+text = "Only requests of the channel's own project are visible. The answer waits up to the given time for the request to become final, looking again at every change (an approval alone does not end the wait); a pending request past its seven days is expired first, under the lock."
+detail = "If the expiry cannot be stored, the handler tries again at once, without a pause and without looking at its deadline or the connection, until storing succeeds (`docs/dev/LEFTOVER.md` part 7)."
 
 [[step]]
 from = "daemon"

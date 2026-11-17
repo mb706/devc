@@ -53,7 +53,29 @@ at = "cli"
 ref = "internal/box.Manager.Find"
 checks = ["internal/box.Manager.Find"]
 text = "The container named `devc-<realm>-<project>` is looked up. One that lacks devc's labels for this project is never touched. With no container `up` creates one; a container with another hash has drifted, and `up` stops with exit status 1 unless `--recreate` was given."
-detail = "A running container with the same hash is left alone when box init has written its readiness marker since the last start; at level internet the host also checks that the rules devc installed are still bound to it, and otherwise stops it and starts it again. A running box that never reported ready gets the rest of its start (fix-identity and the wait) without being restarted."
+detail = "A running container with the same hash is left alone when its readiness marker is there; at level internet the host also checks that the rules devc installed are still bound to it, and otherwise stops it and starts it again. A running box without the marker gets the rest of its start (from the identity fix on, below) without being restarted and without anything written before it; a failure then leaves it running. A stopped container with the same hash is started again: it goes through the steps below except `podman create`."
+
+[[step]]
+section = "Only with --recreate"
+
+[[step]]
+at = "cli"
+ref = "internal/cli.bankHook.BeforeStop"
+text = "A running box goes through the stop hooks first, as for `rm`: its events are ingested and its work banked into the relay. A bank that fails ends `up` here and leaves the box running, unless `--no-bank` was given."
+detail = "Errors of the session hook are warnings; only a bank that could not preserve the work stops `up` ([[internal/box.ErrKeepRunning]], [[finding:B4]]). A configuration with problems never gets here: `up` refused it at the start."
+
+[[step]]
+from = "cli"
+to = "podman"
+via = "exec"
+label = "podman rm --force"
+ref = "internal/engine.Podman.Remove"
+text = "The desktop sidecar is removed, then the container. Home, project directory and state stay."
+
+[[step]]
+at = "cli"
+ref = "internal/box.Manager.cleanup"
+text = "If the box was running, the after-stop hooks end its open sessions and commit the realm's context; then the capability record, the delivered secrets and the gate key are removed, as at `down`. From here on `up` goes on as for a missing container."
 
 [[step]]
 section = "What the box will see"
@@ -98,6 +120,7 @@ via = "exec"
 label = "podman create <arguments>"
 ref = "internal/engine.Podman.Create"
 text = "The container is created from the argument vector, with `devc.confighash` as one of its labels. If this or any later step fails, the container is removed again and the delivered secrets with it."
+detail = "A stopped container that `up` starts again skips this step ([[internal/box.Manager.startStopped]]); if a later step fails it is stopped again instead of removed."
 
 [[step]]
 from = "cli"
@@ -150,7 +173,7 @@ to = "cli"
 via = "reply"
 label = "exit status"
 external = true
-text = "A failure ends the start: the container is removed again."
+text = "A failure ends the start: a container this `up` created is removed again, one it started is stopped again."
 
 [[step]]
 from = "box-agent"
@@ -177,7 +200,7 @@ to = "state-dir"
 via = "file"
 label = "local/boxes/<realm>/<project>/capabilities.json"
 ref = "internal/box.WriteCapabilities"
-text = "Only now is the capability record written: the container ID and the secrets, SSH hosts, network level, GitHub grant and services this start was given. Grants handed out later are checked against it."
+text = "Only now is the capability record written: the container ID and the secrets, SSH hosts, network level and allowlist, GitHub grant and services the configuration grants at this moment. Grants handed out later are checked against it."
 
 [[step]]
 at = "cli"

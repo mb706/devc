@@ -1,7 +1,7 @@
 id = "harness-install"
 kind = "flow"
 title = "devc harness install"
-summary = "A harness's vendor installer runs in a throwaway container that sees only a new version directory of the toolbox; a second container without network checks the result, and only then does `current` switch and running boxes learn of the new version."
+summary = "A harness's vendor installer runs in a throwaway container that sees only a new version directory of the toolbox and, read-only, the components it needs; a second container without network checks the result, and only then does `current` switch and running boxes learn of the new version."
 concern = "toolbox-and-harnesses"
 trigger = "devc harness install claude"
 actors = ["user", "cli", "state-dir", "podman", "installer", "vendors", "launcher"]
@@ -120,6 +120,7 @@ text = "The switch is recorded with its time; `devc harness gc` uses the history
 at = "cli"
 ref = "internal/toolbox.Toolbox.EnsureShim"
 text = "`shims/<bin>` becomes a link to `../bin/devc`. The name is checked again, so a shim can never take one of devc's own names (`devc`, `devc-*`, `git-remote-devc`)."
+detail = "`current` has already switched: if this fails, `harness install` reports an error although the new version is in use (`docs/dev/LEFTOVER.md` part 7)."
 
 [[step]]
 from = "cli"

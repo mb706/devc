@@ -29,7 +29,7 @@ const (
 	worktreesFresh  = 20 * time.Second
 	worktreeTimeout = 30 * time.Second
 	changesTimeout  = time.Minute
-	// projectWorkers bounds the boxes asked at once.
+	// projectWorkers bounds the boxes one projects.list call asks at once.
 	projectWorkers = 4
 )
 
@@ -109,8 +109,10 @@ func (d *Daemon) readWorktrees(ctx context.Context, e *env, ref names.ProjectRef
 }
 
 // apiProjects serves projects.list: every matching configured project with
-// its box state, harnesses, session counts and worktrees; at most
-// projectWorkers boxes are asked for their worktrees at once.
+// its box state, harnesses, session counts and worktrees. One call asks at
+// most projectWorkers boxes for their worktrees at once; concurrent calls
+// each have their own limit, and worktrees keeps them from asking one box
+// at the same time.
 func (d *Daemon) apiProjects(ctx context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	var p proto.ProjectsListParams
 	if err := proto.DecodeParams(params, &p); err != nil {

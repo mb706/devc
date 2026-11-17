@@ -54,12 +54,12 @@ text = "Every request a box makes is served for the project of the channel it ar
 refs = ["internal/daemon.boxWorker.acceptStreams", "internal/daemon.boxWorker.serveStream"]
 
 [[invariant]]
-text = "A box that exceeds the stream or control-frame budgets loses its channel instead of growing what the daemon holds."
-refs = ["internal/daemon.muxGuard.frame", "internal/daemon.boxWorker.serveStream"]
+text = "A box that exceeds the frame inspector's budgets loses its channel instead of growing what the daemon holds; a stream beyond the application's own limits is closed or refused alone."
+refs = ["internal/daemon.muxGuard.frame", "internal/daemon.boxWorker.acceptStreams", "internal/daemon.boxWorker.serveStream"]
 tests = ["internal/daemon.TestMuxGuard", "internal/daemon.TestHostileTransport"]
 
 [[invariant]]
-text = "No error text of host code reaches a box: a handler error that is not a JSON-RPC error becomes \"internal error\"."
+text = "A handler error that is not a JSON-RPC error reaches a box only as \"internal error\"; a JSON-RPC error reaches it with the message its handler chose."
 refs = ["internal/proto.Conn.serve"]
 tests = ["internal/proto.TestExposeErrors"]
 
@@ -141,7 +141,8 @@ ref = "internal/daemon.ErrNoSocket"
 [[diagram.edge]]
 from = "connecting"
 to = "refused"
-label = "a check fails"
+label = "a check or budget failed"
+ref = "internal/daemon.boxWorker.channelLoop"
 
 [[diagram.edge]]
 from = "connecting"
@@ -162,16 +163,10 @@ label = "a later attempt passes"
 from = "error"
 to = "connected"
 label = "a later attempt passes"
-
-[[diagram.edge]]
-from = "connected"
-to = "refused"
-label = "a budget exceeded"
-ref = "internal/daemon.muxGuard.violation"
 +++
 ## What it is for
 
-The daemon must reach into each running box (live sessions, typing into panes, listeners for network exceptions and services), and programs in a box must reach the host (questions, requests, secrets, git, SSH, the network). Both directions share one connection per box, the [[term:box-channel]]. The box controls the socket's directory, every process in it and every byte on the connection. The channel must make sure the daemon talks to that box's agent and no one else, attribute everything that arrives to that box, and bound what the box can make the daemon hold.
+The daemon must reach into each running box (live sessions, typing into panes, listeners for network exceptions and services), and programs in a box must reach the host (questions, requests, secrets, git, SSH, the network). Both directions share one connection per box, the [[term:box-channel]]. The box controls the socket's directory, every process in it and every byte on the connection. The channel must make sure the daemon talks to that box and no one else, attribute everything that arrives to that box, and bound what the box can make the daemon hold.
 
 ## How it works
 
@@ -196,19 +191,19 @@ Every handler gets the worker's project; nothing a box sends selects one.
 
 **The frame inspector.** yamux keeps a stream it closed until the peer closes it too (or a minute passes) and answers every ping in a goroutine of its own; handler and message limits reach neither. [[internal/daemon.muxGuard]] sits between the socket and yamux, reads every frame header in both directions, counts the streams the box opens and the pings and go-aways it sends per ten seconds, tracks every stream that is open or half-closed, and closes the whole connection when a budget is exceeded ([[finding:C1-03]], [[finding:C1-04]]). Data is not budgeted: a push or a terminal moves a lot of it over few streams.
 
-**The codec.** [[internal/proto.Conn]] is the JSON-RPC 2.0 of every devc connection: one object per line, at most 1 MiB, decoded strictly ([[internal/proto.ParseMessage]]); unknown methods get an error and responses that match no call are dropped. A handler error that is not a JSON-RPC error becomes "internal error" unless the connection exposes errors, which only the daemon's own socket does; a handler panic is answered the same way. A connection serves requests one at a time unless it is given more workers, and runs notification handlers on its reader in arrival order.
+**The codec.** [[internal/proto.Conn]] is the JSON-RPC 2.0 of every devc connection: one object per line, at most 1 MiB, decoded strictly ([[internal/proto.ParseMessage]]); unknown methods get an error and responses that match no call are dropped. A handler error that is not a JSON-RPC error becomes "internal error" unless the connection exposes errors, which only the daemon's own socket does; a handler panic is answered the same way. A JSON-RPC error passes unchanged, with the message its handler wrote. A connection serves requests one at a time unless it is given more workers, and runs notification handlers on its reader in arrival order.
 
-**Reconnection.** After a failed attempt the loop records the state with a printable reason and waits, from one second doubling to 30, at most four seconds while there is no socket (a box still starting). A channel that ended normally is tried again after one second; one the inspector closed counts as refused. A failure state stays until the next attempt ends.
+**Reconnection.** After a failed attempt the loop records the state with a printable reason and waits, from one second doubling to 30, at most four seconds while there is no socket (a box still starting). A channel that ended normally is tried again after one second; one the inspector closed goes back to `connecting` as it ends and is then recorded as refused. A failure state stays until the next attempt ends.
 
 ## What can go wrong, and what prevents it
 
 - **A planted symlink, file or FIFO at `agent.sock`.** Refused: only a socket reached without following a symlink is connected.
-- **A box process posing as the agent, or another box's agent.** The cgroup and PID namespace checks, and a hello that must name this project.
+- **Another box's agent, or something else at the socket.** The cgroup and PID namespace checks establish that the listener is a process of this box's container, and the hello must name this project. They do not tell devc's agent from another program in the same box that listens in its place and answers the hello: the daemon then talks to that program, which is still this box, and trusts it no more than the box.
 - **A box process posing as the host towards the agent.** The PID 0 rule; it assumes a box never shares the host's PID namespace (`docs/dev/LEFTOVER.md` part 5).
 - **A recreated box.** The engine must report the worker's own container ID.
-- **Floods.** At most 96 streams waiting for their first line, then 32 for requests and the taken-over streams and 64 relays; a stream beyond is closed or refused at once. The inspector allows 1,024 new streams and 32 pings or go-aways per ten seconds and 192 streams open or half-closed, each holding at most a 256 KiB window (48 MiB in all).
+- **Floods.** At most 96 streams waiting for their first line, then 32 for requests and the taken-over streams and 64 relays; a stream beyond is closed or refused at once, and the channel stays. The inspector allows 1,024 new streams and 32 pings or go-aways per ten seconds and 192 streams open or half-closed, each holding at most a 256 KiB window (48 MiB in all).
 - **Malformed or endless messages.** The 1 MiB line limit, strict decoding, the first-line and idle timeouts.
-- **Host details in answers.** Errors are hidden from the box.
+- **Host details in answers.** Ordinary errors are hidden from the box, but a JSON-RPC error's message passes, and some carry host details: a seal request for a path outside the data root is told the data root's path on the host ([[internal/data.Normalize]], `docs/dev/LEFTOVER.md` part 7).
 - **A box that removes its socket.** No new channel can be made until the box restarts (an accepted limit); removing the file does not close a channel already open.
 
 ## Decisions that are not obvious

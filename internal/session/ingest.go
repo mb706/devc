@@ -453,8 +453,8 @@ type hostEvent struct {
 }
 
 // AppendHostEvent appends one event the host writes itself (seen, answer)
-// to a session's journal. The caller holds the lock and has ingested the
-// box's spool first, so the event follows what the box reported before it.
+// to a session's journal. The caller holds the lock and has run an
+// ingestion pass first, so the event follows what that pass took in.
 func (s *Store) AppendHostEvent(ref names.ProjectRef, sid, typ string, data any) error {
 	if _, err := proto.ValidateData(typ, mustJSON(data)); err != nil {
 		return err

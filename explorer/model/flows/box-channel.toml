@@ -81,4 +81,4 @@ text = "The first line must arrive within 30 seconds. `host.proxy`, `host.dial` 
 [[step]]
 at = "daemon"
 ref = "internal/proto.Conn.serve"
-text = "Each request is answered from the method table; an unknown method gets an error, and a handler's error becomes \"internal error\" unless it chose a JSON-RPC error itself, so no host detail reaches the box."
+text = "Each request is answered from the method table; an unknown method gets an error, and a handler's error becomes \"internal error\" unless it chose a JSON-RPC error itself, which passes with its message. Ordinary errors thus never reach the box; what a JSON-RPC error says is up to its handler, and a few carry host details (a seal path outside the data root is told the host's data root)."

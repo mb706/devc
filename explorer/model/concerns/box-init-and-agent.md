@@ -45,9 +45,9 @@ refs = ["internal/boxside.Init", "internal/boxside.NetworkCheck", "internal/netp
 tests = ["internal/boxside.TestInitNetworkCheck", "internal/boxside.TestNetworkCheckSelection", "test/integration.TestNetworkPlainStart"]
 
 [[invariant]]
-text = "The readiness marker a start through devc waits for was written by the box init of that start."
-refs = ["internal/box.Manager.clearReady", "internal/boxside.Init", "internal/boxside.writeReady"]
-tests = ["internal/boxside.TestInitWritesReadyAndWaits"]
+text = "A readiness marker left from an earlier start never makes a new start through devc count as ready: devc removes it before the box runs."
+refs = ["internal/box.Manager.clearReady", "internal/box.Manager.publish"]
+tests = ["internal/box.TestUpRollsBack"]
 
 [[invariant]]
 text = "No process inside a box is accepted as the host on the agent's socket."
@@ -218,7 +218,7 @@ Problems in steps 3 and 4 go to init's standard error, which `podman logs` shows
 The box controls its runtime directory and every process in it, devc's own included.
 
 - **A box process posing as the host.** A process in the box always has a PID in the box's namespace, so the PID-0 rule refuses it. The rule assumes that a box never shares the host's PID namespace (`docs/dev/LEFTOVER.md` part 5).
-- **A box process posing as the agent.** The daemon checks the listener from its side: the socket is opened beneath the runtime directory without following symlinks, the listening process must belong to the box's container, and `box.hello` must name this project ([[internal/daemon.CheckPeer]]).
+- **Something else at the agent's socket.** The daemon checks from its side that the socket lies beneath the runtime directory, reached without symlinks, that the listener belongs to the box's container and that `box.hello` names this project ([[internal/daemon.CheckPeer]]). That rules out another box's agent, not another program of this box listening in its place.
 - **Something planted at `agent.sock`.** It is removed before the agent listens. A box that deletes the socket later only cuts itself off until it restarts.
 - **A plain `podman start` at level internet.** Its binding record names another start, so init ends with an error and the box stops.
 - **A dotfiles repository with symlinks.** The host copies only regular files and directories into `/etc/devc/dotfiles` ([[internal/box.copyDotfiles]]), so no link can bring a host file into a box. In the box, a real file the user made wins over a dotfile link.
@@ -227,7 +227,7 @@ The box controls its runtime directory and every process in it, devc's own inclu
 ## Decisions that are not obvious
 
 - **The box listens, the host connects.** The spec expects this direction also to work under SELinux without a policy module (spec section 12.5).
-- **Ready only after the network check.** At level internet the marker then means that the host's rules are bound to this start, which is what `up` waits for.
+- **Ready only after the network check.** At level internet box init writes the marker only once the binding and sentinel checks pass. The host does not take the marker as proof, since any box process can write it, and checks from outside after it ([[internal/box.Manager.checkNetwork]]).
 - **Hints over the channel, events in files.** The spool is the source of truth and works without a daemon; a hint only shortens the host's wait ([[concern:sessions-and-events]]).
 - **The agent inside init, not beside it.** One process to start and supervise; its failures are logged and retried, never fatal.
 

@@ -57,7 +57,7 @@ text = "Whole files are read with a cap the caller chooses; a file that grows pa
 [[step]]
 at = "cli"
 ref = "internal/safefs.Root.ReadFrom"
-text = "Append-only files are tailed: at most `max` bytes from an offset. A file now shorter than the offset was truncated or replaced, and says so (`ErrShrunk`)."
+text = "Append-only files are tailed: at most `max` bytes from an offset. A file now shorter than the offset gives `ErrShrunk`; one truncated or replaced and grown back past the offset is read from the old offset unnoticed, since no identity of the file is kept."
 
 [[step]]
 at = "cli"
