@@ -252,12 +252,15 @@ func TestWebRoutes(t *testing.T) {
 // webMachine is a fake machine with the web app's methods.
 type webMachine struct {
 	*fakeMachine
-	mu      sync.Mutex
-	changes []proto.ChangesParams
-	opens   []proto.TerminalOpenParams
-	inputs  []string
-	closes  []string
-	scope   string // answer with this scope (default: the asked one)
+	mu       sync.Mutex
+	changes  []proto.ChangesParams
+	opens    []proto.TerminalOpenParams
+	inputs   []string
+	closes   []string
+	confirms []string
+	scope    string // answer with this scope (default: the asked one)
+	// openAnswer, when set, replaces the answer to terminal.open.
+	openAnswer func(p proto.TerminalOpenParams) (any, error)
 }
 
 func (w *webMachine) handlers() map[string]proto.Handler {
@@ -294,7 +297,11 @@ func (w *webMachine) handlers() map[string]proto.Handler {
 		}
 		w.mu.Lock()
 		w.opens = append(w.opens, p)
+		answer := w.openAnswer
 		w.mu.Unlock()
+		if answer != nil {
+			return answer(p)
+		}
 		go func() {
 			time.Sleep(20 * time.Millisecond)
 			c.Notify(proto.NotifyTerminalData, proto.TerminalData{Stream: p.Stream, Data: []byte("hello \x1b[1mpane\x1b[0m")})
@@ -323,7 +330,90 @@ func (w *webMachine) handlers() map[string]proto.Handler {
 		w.mu.Unlock()
 		return struct{}{}, nil
 	}
+	hs[proto.MethodTerminalConfirm] = func(_ context.Context, c *proto.Conn, params json.RawMessage) (any, error) {
+		var p proto.TerminalStreamParams
+		if err := proto.DecodeParams(params, &p); err != nil {
+			return nil, err
+		}
+		w.mu.Lock()
+		w.confirms = append(w.confirms, p.Stream)
+		w.mu.Unlock()
+		return struct{}{}, nil
+	}
 	return hs
+}
+
+// TestTerminalOpenCleanup: the hub confirms a stream whose open it
+// accepted, and sends terminal.close for one whose open failed, whose
+// answer it rejected or whose answer did not come in time (finding
+// G5-06). Control: a valid open is confirmed and closed once the page goes.
+func TestTerminalOpenCleanup(t *testing.T) {
+	oldWait := termOpenWait
+	termOpenWait = 300 * time.Millisecond
+	t.Cleanup(func() { termOpenWait = oldWait })
+	h := newTestHub(t, "hub.test")
+	mach := h.issue(RoleMachine, "m1")
+	dev := h.issue(RoleDevice, "phone")
+	addr, _ := runHub(t, h)
+	api := newAPIClient(t, addr, dev)
+	m := &webMachine{fakeMachine: newFakeMachine(t)}
+	sid := "s0000000000000000000a"
+	m.add(sid, proto.TypeSessionStart, proto.SessionStart{Harness: "fake"})
+	m.connect(addr, mach)
+	waitFor(t, "the machine online", func() bool {
+		code, body := api.do("GET", "/api/machines", "")
+		return code == 200 && strings.Contains(body, `"online":true`)
+	})
+	release := make(chan struct{})
+	defer close(release)
+	for name, answer := range map[string]func(proto.TerminalOpenParams) (any, error){
+		"refused": func(proto.TerminalOpenParams) (any, error) {
+			return nil, proto.Errorf(proto.CodeBusy, "too many terminals are open")
+		},
+		"invalid answer": func(p proto.TerminalOpenParams) (any, error) {
+			return proto.TerminalOpenResult{Stream: strings.Repeat("e", 32), Mode: p.Mode, Cols: 80, Rows: 24}, nil
+		},
+		"late answer": func(p proto.TerminalOpenParams) (any, error) {
+			<-release
+			return proto.TerminalOpenResult{Stream: p.Stream, Mode: p.Mode, Cols: 80, Rows: 24}, nil
+		},
+	} {
+		m.mu.Lock()
+		m.openAnswer, m.opens, m.closes, m.confirms = answer, nil, nil, nil
+		m.mu.Unlock()
+		ws, _, err := api.terminal(sid, "observe")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if evs := readTerm(t, ws, 1); evs[0].text["type"] != "end" {
+			t.Errorf("%s: %+v", name, evs)
+		}
+		ws.CloseNow()
+		waitFor(t, name+": the machine's stream closed", func() bool { m.mu.Lock(); defer m.mu.Unlock(); return len(m.closes) == 1 })
+		m.mu.Lock()
+		if len(m.opens) != 1 || m.closes[0] != m.opens[0].Stream || len(m.confirms) != 0 {
+			t.Errorf("%s: opens %+v closes %q confirms %q", name, m.opens, m.closes, m.confirms)
+		}
+		m.mu.Unlock()
+	}
+	// Control: a valid open is confirmed, and closed when the page goes.
+	m.mu.Lock()
+	m.openAnswer, m.opens, m.closes, m.confirms = nil, nil, nil, nil
+	m.mu.Unlock()
+	ws, _, err := api.terminal(sid, "observe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evs := readTerm(t, ws, 1); evs[0].text["type"] != "open" {
+		t.Errorf("valid open: %+v", evs)
+	}
+	m.mu.Lock()
+	if len(m.confirms) != 1 || m.confirms[0] != m.opens[0].Stream || len(m.closes) != 0 {
+		t.Errorf("valid open: confirms %q closes %q", m.confirms, m.closes)
+	}
+	m.mu.Unlock()
+	ws.CloseNow()
+	waitFor(t, "the valid stream closed", func() bool { m.mu.Lock(); defer m.mu.Unlock(); return len(m.closes) == 1 })
 }
 
 func (w *webMachine) connect(addr string, cert *Issued) {

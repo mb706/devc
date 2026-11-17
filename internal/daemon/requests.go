@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/mb706/devc/internal/data"
 	"github.com/mb706/devc/internal/execx"
 	"github.com/mb706/devc/internal/names"
+	"github.com/mb706/devc/internal/paths"
 	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/requests"
 	"github.com/mb706/devc/internal/session"
@@ -193,6 +195,40 @@ func (rs *requestService) expireAll(ctx context.Context) {
 	}
 }
 
+// boxView rewrites text for the box of ref so that it names paths as the
+// box sees them (finding G2-01): the project's directory on the host
+// becomes /w/<realm>/<project>; the other directories of devc and the
+// user's home, which no box sees, become "<host>".
+func boxView(e *env, ref names.ProjectRef, text string) string {
+	p := e.cfg.Paths
+	type pair struct{ host, box string }
+	var pairs []pair
+	add := func(host, box string) {
+		if host != "" && host != "/" && host != "." {
+			pairs = append(pairs, pair{host, box})
+		}
+	}
+	add(p.HostProjectDir(ref), paths.InBoxProjectDir(ref))
+	if real, err := filepath.EvalSymlinks(p.ProjectsRoot()); err == nil {
+		add(filepath.Join(real, ref.Realm, ref.Project), paths.InBoxProjectDir(ref))
+		add(real, "<host>")
+	}
+	add(p.ProjectsRoot(), "<host>")
+	add(p.StateDir(), "<host>")
+	add(p.ConfigDir(), "<host>")
+	if rt, err := p.RuntimeDir(); err == nil {
+		add(rt, "<host>")
+	}
+	add(p.Home(), "<host>")
+	// Longer paths first: the project's directory lies below the others.
+	slices.SortStableFunc(pairs, func(a, b pair) int { return len(b.host) - len(a.host) })
+	var args []string
+	for _, x := range pairs {
+		args = append(args, x.host, x.box)
+	}
+	return strings.NewReplacer(args...).Replace(text)
+}
+
 func invalidParams(err error) *proto.Error {
 	return proto.Errorf(proto.CodeInvalidParams, "%s", proto.Printable(proto.Truncate(err.Error(), 300)))
 }
@@ -217,7 +253,7 @@ func (rs *requestService) create(ctx context.Context, ref names.ProjectRef, para
 		if err != nil {
 			return nil, proto.Errorf(proto.CodeInvalidParams, "%s defines no data zones; nothing can be sealed", ref)
 		}
-		rel, err := data.Normalize(dp, e.cfg.Paths.ProjectsRoot(), p.Path)
+		rel, err := data.NormalizeInBox(dp, p.Path)
 		if err != nil {
 			return nil, invalidParams(err)
 		}
@@ -317,7 +353,8 @@ func (rs *requestService) status(ctx context.Context, ref names.ProjectRef, para
 		}
 		left := time.Until(deadline)
 		if proto.FinalRequest(found.Status) || left <= 0 {
-			return proto.RequestStatus{ID: found.ID, Kind: found.Kind, Risk: found.Risk, Status: found.Status, Result: found.Result, Reason: found.Reason}, nil
+			// The result is what devc printed on the host.
+			return proto.RequestStatus{ID: found.ID, Kind: found.Kind, Risk: found.Risk, Status: found.Status, Result: boxView(rs.d.current(), ref, found.Result), Reason: found.Reason}, nil
 		}
 		select {
 		case <-ctx.Done():

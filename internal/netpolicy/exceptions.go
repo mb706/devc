@@ -21,7 +21,6 @@
 package netpolicy
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -39,6 +38,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/mb706/devc/internal/proto"
 )
 
 // Kinds of exceptions.
@@ -285,9 +286,7 @@ func ReadExceptions(path string) ([]Exception, error) {
 		return nil, fmt.Errorf("%s is too large", path)
 	}
 	var ef ExceptionFile
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&ef); err != nil || dec.More() || ef.V != 1 {
+	if err := proto.StrictJSON(b, &ef); err != nil || ef.V != 1 {
 		return nil, fmt.Errorf("%s is corrupt", path)
 	}
 	if len(ef.Exceptions) > MaxExceptions {

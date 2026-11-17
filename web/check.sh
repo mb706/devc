@@ -471,9 +471,35 @@ checks = page.js("""(async () => {
     if (store.state.pending[id4] || !entry4() || entry4().outcome !== 'delivered') out.push('the final receipt did not settle the prompt: ' + JSON.stringify({ pending: !!store.state.pending[id4], entry: entry4() }));
     store.dropDetail(m4, s4);
     store.applyChange('session.removed', { machine: m4, session: s4 });
+
+    // A snapshot never replaces a summary newer than it, and a session
+    // keeps the position of the summary it keeps (G5-07): s5 was read at
+    // 1000 (after the snapshot's 500) and stays; s6 was held at 400 and
+    // takes the snapshot's summary and position.
+    const m5 = 'nomachine', s5 = 's0000000000000000000w', s6 = 's0000000000000000000v';
+    const k5 = m5 + '/' + s5, k6 = m5 + '/' + s6;
+    store.applyChange('session', { machine: m5, session: s5, question: { id: 'q2' }, last_seq: 9 }, 1000);
+    store.applyChange('session', { machine: m5, session: s6, question: { id: 'old' }, last_seq: 1 }, 400);
+    const snapAt = (url) => {
+      const body = url.includes('/api/inbox') ? { sections: [{ sessions: [{ machine: m5, session: s5, question: { id: 'q1' }, last_seq: 8 }, { machine: m5, session: s6, question: { id: 'new' }, last_seq: 2 }] }], stream_id: 500 }
+        : url.includes('/api/machines') ? { machines: [], stream_id: 500 } : { requests: [], stream_id: 500 };
+      return new Response(JSON.stringify(body), { status: 200 });
+    };
+    window.fetch = async (url) => snapAt(String(url));
+    await store.loadSnapshot();
+    const v5 = store.state.sessions[k5], v6 = store.state.sessions[k6];
+    if (!v5 || v5.question.id !== 'q2' || store.state.sessionVer[k5] !== 1000) out.push('a snapshot replaced a newer summary: ' + JSON.stringify({ v5, ver: store.state.sessionVer[k5] }));
+    if (!v6 || v6.question.id !== 'new' || store.state.sessionVer[k6] !== 500) out.push('a snapshot did not replace an older summary: ' + JSON.stringify({ v6, ver: store.state.sessionVer[k6] }));
+    // A stream change of s6 after the snapshot applies.
+    store.applyChange('session', { machine: m5, session: s6, question: { id: 'newer' }, last_seq: 3 }, 600);
+    if (store.state.sessions[k6].question.id !== 'newer') out.push('a change after the snapshot was refused: ' + JSON.stringify(store.state.sessions[k6]));
+    store.applyChange('session.removed', { machine: m5, session: s5 });
+    store.applyChange('session.removed', { machine: m5, session: s6 });
   } finally {
     window.fetch = realFetch;
   }
+  // The mocked snapshot replaced machines and requests: read the real one.
+  await store.loadSnapshot();
   return out;
 })()""")
 if checks:

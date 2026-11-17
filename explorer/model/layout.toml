@@ -842,7 +842,7 @@ ref = "internal/paths.InBoxWorktree"
 
 [[tree.entry]]
 path = "<realm>/<project>/<worktree>"
-text = "A task worktree beside main, on the branch `<branch_prefix><worktree>`; `devc wt rm` removes it, in a project with a relay after a bank (what snapshots leave out is lost with it), and its branch stays."
+text = "A task worktree beside main, on the branch `<branch_prefix><worktree>`; `devc wt rm` removes it, in a project with a relay after a bank, and without `--force` only when it holds nothing a snapshot leaves out; its branch stays."
 writer = "box"
 ref = "internal/gitx.Service.WorktreeNew"
 

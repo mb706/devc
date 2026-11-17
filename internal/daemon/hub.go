@@ -456,8 +456,9 @@ func readEvents(file string, from int64, limit int, maxBytes int) ([]proto.Event
 	}
 }
 
-// lastEvents returns the last n events of a journal (about maxBytes).
-func lastEvents(file string, n int, maxBytes int) ([]proto.Event, error) {
+// lastEvents returns the last n events of a journal (about maxBytes) up
+// to the event upTo (0: to the end).
+func lastEvents(file string, n int, maxBytes int, upTo int64) ([]proto.Event, error) {
 	var ring []proto.Event
 	off := int64(0)
 	for {
@@ -467,6 +468,9 @@ func lastEvents(file string, n int, maxBytes int) ([]proto.Event, error) {
 		}
 		for i := range evs {
 			ev := evs[i]
+			if upTo > 0 && ev.Seq > upTo {
+				continue
+			}
 			ev.Spool = nil
 			ring = append(ring, ev)
 			if len(ring) > n {

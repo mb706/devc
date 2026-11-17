@@ -35,6 +35,7 @@ tests = [
   "internal/daemon.TestRequestExecutor",
   "internal/daemon.TestRequestLogs",
   "internal/daemon.TestSavepointRequestWindow",
+  "internal/daemon.TestRequestHostPaths",
   "test/integration.TestRequests",
   "test/integration.TestRequestedSavepoints",
 ]
@@ -69,6 +70,11 @@ tests = ["internal/daemon.TestRequestsInterrupted"]
 text = "An outcome or an expiry replaces only the state it was computed from."
 refs = ["internal/daemon.requestService.transitionLocked", "internal/daemon.requestService.status"]
 tests = ["internal/daemon.TestRequestLogs"]
+
+[[invariant]]
+text = "What host.request tells a box names paths as the box sees them: a seal path's refusal names the in-box data root, and a request's result has the project's host directory as /w/<realm>/<project> and devc's other host directories and the home as <host>."
+refs = ["internal/data.NormalizeInBox", "internal/daemon.boxView", "internal/daemon.requestService.status"]
+tests = ["internal/daemon.TestRequestHostPaths"]
 
 [[diagram]]
 id = "request-states"
@@ -178,7 +184,7 @@ Under the service's lock, the project's log must be below 16 MiB, fewer than 100
 
 **Carrying out.** A worker runs the commands one after another as child processes of the same binary with the daemon's directories, from `/`, 30 minutes each ([[internal/daemon.Daemon.runChild]]), so the box lock, the configuration checks and the root log apply as for the user. The outcome keeps the last 2,000 characters of the output and replaces the request's state only while it is still `approved` ([[finding:C1-18]]). [[flow:request-approve]] goes through a package request.
 
-**The box learns.** [[rpc:host.request.status]] returns a request of the channel's own project, waiting up to 600 seconds for a final status; `devc request status --wait` asks until it is final.
+**The box learns.** [[rpc:host.request.status]] returns a request of the channel's own project, waiting up to 600 seconds for a final status, with its result in the box's view of paths ([[internal/daemon.boxView]]); `devc request status --wait` asks until it is final.
 
 **Expiry and restart.** Pending requests expire after seven days: checked at start, at every housekeeping pass, whenever a log is read to create, list or decide requests, and when a box asks about an expired one. A request found `approved` at start was interrupted and fails without running again ([[internal/daemon.requestService.recoverInterrupted]]).
 
@@ -190,7 +196,8 @@ Under the service's lock, the project's log must be below 16 MiB, fewer than 100
 - **A compromised hub approving a package install.** High-risk kinds are refused for origin `hub` (plan section 5).
 - **Forged or extra fields.** Strict decoding and the per-kind field list.
 - **Box-chosen values as options.** They come after `--` or as `--flag=value`, in argument vectors.
-- **A seal outside the data.** The path is resolved against the project's data root before the request is stored ([[internal/data.Normalize]]).
+- **A seal outside the data.** The path is resolved against the project's data root as the box sees it before the request is stored; the refusal names only that root ([[internal/data.NormalizeInBox]]).
+- **Host paths in answers.** A request's result is what devc printed on the host; the box gets it with the project's host directory written as it sees it and devc's other directories and the home as `<host>` ([[internal/daemon.boxView]]). The user's listing keeps the text as printed.
 - **Floods.** The per-project limits, the log cap and the executor's places; for savepoints also the interval and the separate retention of requested ones, so requests cannot push out the owner's savepoints.
 - **Another project's requests.** The channel names the project; a log line naming another project is skipped.
 - **A decision racing an expiry.** Expiry reads the log again under the lock and changes only a request still pending.

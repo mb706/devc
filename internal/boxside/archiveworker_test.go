@@ -167,4 +167,14 @@ func TestArchiveWorker(t *testing.T) {
 	if _, err := DecodeArchiveListing([]byte(`{"v":1,"files":[{"path":"claude/../../secrets/x","size":1,"mtime":0}],"skipped":[],"skipped_count":0,"excluded":0}`)); err == nil {
 		t.Error("a listing with a traversing path was accepted")
 	}
+	// Nothing may follow a listing (finding G4-24).
+	empty := `{"v":1,"files":[],"skipped":[],"skipped_count":0,"excluded":0}`
+	if _, err := DecodeArchiveListing([]byte(empty + "\n")); err != nil {
+		t.Errorf("an empty listing: %v", err)
+	}
+	for _, after := range []string{"]", "}", " x"} {
+		if _, err := DecodeArchiveListing([]byte(empty + after)); err == nil {
+			t.Errorf("a listing followed by %q was accepted", after)
+		}
+	}
 }

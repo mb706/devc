@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -741,6 +743,75 @@ func TestStartAndStop(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no stop command: %+v", r.eng.Execs)
+	}
+}
+
+// TestStartSavepointFirst: a session the daemon starts takes the
+// before-session savepoint first (data.savepoints.before_session), through
+// `devc save --before-session`; a failed or timed-out savepoint refuses the
+// start with the reason and nothing runs in the box (finding G4-17).
+// Control: without before_session no savepoint is asked for.
+func TestStartSavepointFirst(t *testing.T) {
+	shortTimes(t)
+	r := newRig(t)
+	f := filepath.Join(r.p.ConfigDir(), "realms", "demo", "projects", "hello", "project.toml")
+	plain, _ := os.ReadFile(f)
+	os.WriteFile(f, append(slices.Clone(plain), []byte("\n[data]\nwork = [\"scratch\"]\n[data.savepoints]\nbefore_session = true\n")...), 0o644)
+	r.boxUp(true)
+	r.recordStart()
+	os.MkdirAll(filepath.Join(r.p.BoxEtcDir(hello), "harness"), 0o755)
+	os.WriteFile(filepath.Join(r.p.BoxEtcDir(hello), "harness", "claude.json"), []byte("{}"), 0o644)
+	r.start()
+	c := r.client(nil)
+	starts := func() int {
+		n := 0
+		for _, x := range r.eng.Execs {
+			if len(x.Cmd) > 3 && x.Cmd[3] == "start" {
+				n++
+			}
+		}
+		return n
+	}
+	saves := func() int {
+		n := 0
+		for _, x := range r.runner.Calls() {
+			if strings.Join(x.Args, " ") == "save --before-session -- demo/hello" {
+				n++
+			}
+		}
+		return n
+	}
+	start := func() proto.Receipt {
+		t.Helper()
+		return waitFinal(t, c, call(t, c, proto.MethodSessionStart, proto.StartParams{ID: newID(), Ref: "demo/hello", Harness: "claude"}).Command)
+	}
+
+	// The savepoint fails: refused with its reason, nothing started.
+	r.runner.On("/fake/devc", "save", "--before-session").Stderr("devc: saved nothing\ndevc: taking the savepoint before the session (data.savepoints.before_session): restic: repository is locked\n").Exit(1).Times(1)
+	if rec := start(); rec.Outcome != proto.OutcomeRefused || !strings.Contains(rec.Detail, "the session was not started") || !strings.Contains(rec.Detail, "repository is locked") || rec.Session != "" {
+		t.Errorf("failed savepoint: %+v", rec)
+	}
+	if saves() != 1 || starts() != 0 {
+		t.Fatalf("after a failed savepoint: %d saves, %d starts", saves(), starts())
+	}
+	// It takes too long.
+	r.runner.On("/fake/devc", "save", "--before-session").Err(fmt.Errorf("devc save: timed out after 30m0s: %w", context.DeadlineExceeded)).Times(1)
+	if rec := start(); rec.Outcome != proto.OutcomeRefused || !strings.Contains(rec.Detail, "took longer than") || !strings.Contains(rec.Detail, "'devc save demo/hello'") {
+		t.Errorf("savepoint timed out: %+v", rec)
+	}
+	if starts() != 0 {
+		t.Fatalf("a session started after the savepoint timed out")
+	}
+	// It is taken (or a recent one suffices): the session starts.
+	r.runner.On("/fake/devc", "save", "--before-session").Stderr("devc: saved 20261117T000000Z before the session (restic)\n")
+	if rec := start(); rec.Outcome != proto.OutcomeDelivered || saves() != 3 || starts() != 1 {
+		t.Errorf("savepoint taken: %+v, %d saves, %d starts", rec, saves(), starts())
+	}
+	// Control: without before_session nothing is asked for.
+	os.WriteFile(f, plain, 0o644)
+	r.d.fresh()
+	if rec := start(); rec.Outcome != proto.OutcomeDelivered || saves() != 3 || starts() != 2 {
+		t.Errorf("without before_session: %+v, %d saves, %d starts", rec, saves(), starts())
 	}
 }
 

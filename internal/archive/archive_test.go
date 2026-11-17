@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -123,11 +124,16 @@ func TestSealed(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, err := DecodeSealed(append(b[:len(b)-1], []byte(`,"extra":1}`)...)); err == nil {
+	if _, err := DecodeSealed(append(slices.Clone(b[:len(b)-1]), []byte(`,"extra":1}`)...)); err == nil {
 		t.Error("an unknown field was accepted")
 	}
-	if _, err := DecodeSealed(append(b, []byte(`{}`)...)); err == nil {
-		t.Error("trailing data was accepted")
+	for _, after := range []string{`{}`, `]`, `}`, ` x`} {
+		if _, err := DecodeSealed(append(slices.Clone(b), after...)); err == nil {
+			t.Errorf("trailing %q was accepted", after)
+		}
+	}
+	if _, err := DecodeSealed(append(slices.Clone(b), "\n"...)); err != nil {
+		t.Errorf("a trailing newline was refused: %v", err)
 	}
 }
 

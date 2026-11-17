@@ -895,6 +895,13 @@ func (c *commander) runStart(r *cmdRecord) {
 		c.finish(r, proto.OutcomeRefused, reason)
 		return
 	}
+	if reason := c.saveBeforeSession(ctx, env, ref); reason != "" {
+		if ctx.Err() != nil {
+			return // the daemon stops: the start stays accepted and runs again at the next start
+		}
+		c.finish(r, proto.OutcomeRefused, reason)
+		return
+	}
 	for {
 		err := c.setDelivering(r)
 		if err == nil {
@@ -936,6 +943,53 @@ func (c *commander) runStart(r *cmdRecord) {
 	// and ends it as unknown; the prompt is still sent now.
 	_ = c.save(r)
 	c.dispatch(r)
+}
+
+// beforeSessionTimeout bounds the savepoint a session start takes first,
+// as requestTimeout bounds a requested one.
+var beforeSessionTimeout = requestTimeout
+
+// saveBeforeSession takes the savepoint that data.savepoints.before_session
+// asks for before every session, whoever starts it (finding G4-17): it
+// runs `devc save --before-session`, the code of `devc <harness>`, which
+// takes the box lock, does nothing while one of the owner's savepoints is
+// from the last 30 minutes or with the driver none, and fails when the
+// savepoint fails. Nothing is typed meanwhile: the command stays accepted.
+// It returns why the session must not start, or "": a failed savepoint,
+// or one that took longer than beforeSessionTimeout (its child is ended as
+// any timed-out child of the daemon, and the session is not started).
+func (c *commander) saveBeforeSession(ctx context.Context, env *env, ref names.ProjectRef) string {
+	rv, err := env.cfg.Resolved(ref)
+	if err != nil {
+		return err.Error()
+	}
+	if !rv.Data.Enabled || !rv.Data.Savepoints.BeforeSession {
+		return ""
+	}
+	res, err := c.d.runChild(ctx, []string{"save", "--before-session", "--", ref.String()}, beforeSessionTimeout)
+	if out := strings.TrimSpace(string(res.Stderr)); err == nil {
+		if out != "" {
+			c.d.log.Info("savepoint before a session", "ref", ref.String(), "output", proto.Printable(proto.Truncate(out, 300)))
+		}
+		return ""
+	}
+	var ee *execx.ExitError
+	if !errors.As(err, &ee) {
+		c.d.log.Warn("the savepoint before a session did not finish", "ref", ref.String(), "err", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Sprintf("the savepoint before the session (data.savepoints.before_session) took longer than %s, so the session was not started: take one with 'devc save %s', then start it again", beforeSessionTimeout, ref)
+		}
+		return "the savepoint before the session (data.savepoints.before_session) did not finish, so the session was not started: " + proto.Printable(proto.Truncate(err.Error(), 200))
+	}
+	// The reason is at the end of the child's output.
+	out := []rune(strings.TrimSpace(string(res.Stderr)))
+	if len(out) > 300 {
+		out = append([]rune("…"), out[len(out)-300:]...)
+	}
+	if len(out) == 0 {
+		out = []rune(err.Error())
+	}
+	return "the session was not started: " + proto.Printable(string(out))
 }
 
 // newWorktree creates a task worktree for a new session (an existing one

@@ -71,8 +71,16 @@ to = "hub"
 via = "reply"
 label = "{stream, cols, rows}"
 ref = "internal/daemon.termManager.open"
-text = "The hub checks that the stream ID is its own and the size plausible, and sends the browser `open` with the size and mode."
-detail = "An error, no answer within 30 seconds, or an answer that fails these checks ends the browser's terminal here, before the hub arranges `terminal.close`. If the daemon did open the stream (its answer came late or was rejected), the stream stays on the machine, its output dropped by the hub, until its session ends, the link closes, the tmux client exits or twelve hours pass."
+text = "The hub checks that the stream ID is its own and the size plausible."
+detail = "An error, no answer within 30 seconds, or an answer that fails these checks ends the browser's terminal here; `terminal.close` still goes to the machine as the handler returns. A stream the daemon opened after that close, or whose answer was lost, is never confirmed and the daemon ends it."
+
+[[step]]
+from = "hub"
+to = "daemon"
+via = "rpc:terminal.confirm"
+label = "terminal.confirm {stream}"
+ref = "internal/hub.machineLink.forward"
+text = "The hub confirms the stream it accepted, then sends the browser `open` with the size and mode. The daemon marks the stream confirmed ([[internal/daemon.termManager.confirm]]); its watcher ends a stream not confirmed within 30 seconds."
 
 [[step]]
 section = "Output"
@@ -164,7 +172,7 @@ to = "daemon"
 via = "rpc:terminal.close"
 label = "terminal.close {stream}"
 ref = "internal/hub.machineLink.forward"
-text = "Sent whatever ended the stream, once `terminal.open` had a valid answer; a no-op when the machine ended it."
+text = "Sent whatever ended the stream, a failed or unanswered open included; a no-op when the machine never opened it or ended it."
 
 [[step]]
 at = "daemon"

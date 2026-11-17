@@ -175,7 +175,7 @@ func TestBrokenServices(t *testing.T) {
 		}, hello, "grants.services[0]", "no service \"wiki\" in realm \"demo\""},
 		{"service granted twice", grant("[grants]\nservices = [\"wiki\", \"wiki\"]"), hello, "grants.services[1]", "listed twice"},
 		{"service name", grant("[grants]\nservices = [\"../wiki\"]"), hello, "grants.services[0]", "invalid service name"},
-		{"credential granted too", grant("[grants]\nservices = [\"wiki\"]\nsecrets = [\"WIKI_TOKEN\"]"), hello, "grants.services[0]", "would enter the box"},
+		{"credential granted too", grant("[grants]\nservices = [\"wiki\"]\nsecrets = [\"WIKI_TOKEN\"]"), hello, "grants.secrets[0]", "would enter the box"},
 		{"jar granted", grant("[grants]\nsecrets = [\"_jar.wiki\"]"), hello, "grants.secrets[0]", "cookie jar"},
 		{"port clash", grant("[grants]\nservices = [\"wiki\"]\n[box]\nports = [8601]"), hello, "grants.services[0]", "box.ports"},
 		{"broken granted service", func(t *testing.T, dir string) {

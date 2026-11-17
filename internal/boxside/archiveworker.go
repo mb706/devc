@@ -323,14 +323,9 @@ func DecodeArchiveListing(b []byte) (*ArchiveListing, error) {
 	if len(b) > MaxArchiveListing {
 		return nil, errors.New("the archive listing is too large")
 	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
 	var l ArchiveListing
-	if err := dec.Decode(&l); err != nil {
+	if err := proto.StrictJSON(b, &l); err != nil {
 		return nil, fmt.Errorf("invalid archive listing: %w", err)
-	}
-	if dec.More() {
-		return nil, errors.New("invalid archive listing: data after the report")
 	}
 	if l.V != ArchiveProtoVersion || len(l.Files) > archiveMaxFiles || len(l.Skipped) > archiveMaxSkips || l.SkippedCount < 0 || l.Excluded < 0 {
 		return nil, errors.New("invalid archive listing: version or counts")

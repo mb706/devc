@@ -884,6 +884,8 @@ func (a *app) prepareSession(ctx context.Context, e *boxEnv, ref names.ProjectRe
 // saveBeforeSession takes a savepoint before a session when the project
 // asks for one (data.savepoints.before_session) and none is recent. A
 // failure stops the session from starting: the protection was asked for.
+// The daemon's session starts take the same savepoint through
+// `devc save --before-session` (beforeSession, finding G4-17).
 func (a *app) saveBeforeSession(ctx context.Context, e *boxEnv, r *config.Resolved) error {
 	if !r.Data.Enabled || !r.Data.Savepoints.BeforeSession {
 		return nil
@@ -897,6 +899,12 @@ func (a *app) saveBeforeSession(ctx context.Context, e *boxEnv, r *config.Resolv
 		return err
 	}
 	defer unlock()
+	return a.beforeSession(ctx, e, p)
+}
+
+// beforeSession takes the before-session savepoint of p, if one is due,
+// with the box lock held by the caller.
+func (a *app) beforeSession(ctx context.Context, e *boxEnv, p *data.Project) error {
 	sp, err := e.data.BeforeSession(ctx, p)
 	if err != nil {
 		return fmt.Errorf("taking the savepoint before the session (data.savepoints.before_session): %w", err)

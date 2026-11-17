@@ -326,9 +326,13 @@ func TestReadEvents(t *testing.T) {
 	if !more || len(evs) < 1 || len(evs) > 3 {
 		t.Errorf("byte bound: %d %v", len(evs), more)
 	}
-	last, _ := lastEvents(file, 3, 1<<20)
+	last, _ := lastEvents(file, 3, 1<<20, 0)
 	if len(last) != 3 || last[0].Seq != 8 || last[2].Seq != 10 {
 		t.Errorf("lastEvents: %+v", last)
+	}
+	// Up to a view's LastSeq (sessions.get, finding G5-08).
+	if last, _ := lastEvents(file, 3, 1<<20, 9); len(last) != 3 || last[0].Seq != 7 || last[2].Seq != 9 {
+		t.Errorf("lastEvents up to 9: %+v", last)
 	}
 	if evs, more, err := readEvents(filepath.Join(t.TempDir(), "none.jsonl"), 0, 10, 1<<20); err != nil || more || len(evs) != 0 {
 		t.Errorf("missing journal: %v %v %v", evs, more, err)

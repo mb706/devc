@@ -556,7 +556,14 @@ and say why; `--no-bank` stops it without banking (its files stay in the
 project directory). `devc wt rm` removes a worktree only after its
 uncommitted work is banked, also with `--force` (which allows a dirty worktree
 or live sessions); `--discard` removes it without banking, and its uncommitted
-work is lost.
+work is lost. A bank keeps what a snapshot takes: tracked changes and
+untracked files up to 10 MiB. It keeps no ignored files (build output, a
+`.env`, data a `.gitignore` names), no larger untracked files, no nested
+repositories and no special files, and git would delete them with the
+worktree. So `wt rm` refuses a worktree that holds any of them and lists them
+(the first 20, with the count); move what you need, or remove them with the
+worktree with `--force`, which then says how many went. Without a relay
+nothing is banked, so `--force` also loses uncommitted changes.
 
 **In the box**, with the daemon running, `git push origin <branch>` and `git
 fetch origin` go to the relay through the daemon (the relay service): the
@@ -691,11 +698,14 @@ and installation: changing any of them (the project's `upstream`, `app_id`,
 `installation_id`) stops tokens until `devc down` and `devc up`, and
 removing the mode stops them at once. Token delivery needs the daemon.
 
-Neither `github-token` nor the App's key secret can be granted to a project
-as an ordinary secret (`grants.secrets`, or a harness's credential): the
-configuration check refuses it, as it refuses a service's credential, since
-in the box the key would mint tokens for every repository of the
-installation.
+Some realm secrets are **reserved**: `github-token`, the App's key secret
+(`key_secret`), a credential of any of the realm's services (`value_secret`,
+a cookie login's `secrets`) and every cookie jar (`_jar.<service>`). No
+project may name one for its box, whether in `grants.secrets`, as a
+harness's credential or in `grants.github = "token:<secret>"`; the
+configuration check refuses it (in the box the App's key would mint tokens
+for every repository of the installation). For the token mode, store a token
+made for the box under a name of its own.
 
 The App mode needs, in `realm.toml`:
 
@@ -806,8 +816,13 @@ inside the project when its filesystem can clone files (XFS, btrfs); `restic`
 keeps an incremental repository on the host (install it with `devc toolbox
 install restic`); `auto` picks `reflink` when a probe succeeds, else `restic`.
 `keep` limits the number of your unnamed savepoints; `before_session = true` takes
-one before a session starts (at most one per 30 minutes; a savepoint the box
-requested does not count). Savepoints a box requests are kept apart, with
+one before every session starts, whether you start it with `devc <harness>`,
+from the web app or through a hub (at most one per 30 minutes; a savepoint
+the box requested does not count). If the savepoint fails the session does
+not start; a start from the web app or a hub also gives up after 30 minutes
+of saving, with the reason in its receipt (the daemon runs `devc save
+--before-session` for it). With `driver = "none"` nothing is taken, and
+sessions start without one. Savepoints a box requests are kept apart, with
 their own limits (`requested_keep`, `requested_interval`; see [Requests from
 a box](#requests-from-a-box)); savepoints taken before devc had these
 classes count as yours. All data
@@ -1456,7 +1471,10 @@ the daemon, which decides everything:
   is scrubbed of the credential (the value and its parts: every word except
   a leading scheme such as `Bearer`, `Basic`, `Token` or `Bot`, and the
   user:password and password of `Basic`). Bodies pass through within
-  `max_body`. A stored credential is used in one normal form: spaces and
+  `max_body`: a request body with a declared length over it is refused at
+  once, and one without (chunked) is read whole first, in memory up to 1 MiB
+  and beyond that in a temporary file, so the upstream receives nothing of
+  a body over the limit. A stored credential is used in one normal form: spaces and
   tabs around it are removed (HTTP drops them on the wire anyway), and a
   value with control characters or bytes outside printable ASCII is
   refused. Every secret word of it must have at least 8 characters, so that
@@ -1497,8 +1515,10 @@ language or a consent flag, out of the output). Errors about the output
 name cookies by their position and never repeat what was printed, and every
 error of a login is cleaned of the login's secret values before it is
 shown, logged or stored. The jar is stored as the realm secret
-`_jar.<service>` with the time of the login (it cannot be granted to a box,
-nor can the login secrets of a service the project uses).
+`_jar.<service>` with the time of the login. The jar, the login secrets and a
+header service's `value_secret` are reserved: no project of the realm may
+name them for its box (see [GitHub](#github)), and a service's definition
+may not use `github-token`, the App's key or a jar as its credential.
 `examples/services/` has a worked example (a form login with curl) and notes
 on what a browser-driven login would need.
 

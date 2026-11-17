@@ -2,12 +2,18 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/mb706/devc/internal/engine"
+	"github.com/mb706/devc/internal/execx"
+	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/proto"
 )
 
@@ -19,7 +25,7 @@ func TestWebMethods(t *testing.T) {
 	r.start()
 	c := r.client(nil)
 	ctx := context.Background()
-	for _, m := range []string{proto.MethodProjectsList, proto.MethodChangesGet, proto.MethodTerminalOpen, proto.MethodTerminalInput, proto.MethodTerminalClose} {
+	for _, m := range []string{proto.MethodProjectsList, proto.MethodChangesGet, proto.MethodTerminalOpen, proto.MethodTerminalConfirm, proto.MethodTerminalInput, proto.MethodTerminalClose} {
 		if !slices.Contains(hubMethods, m) {
 			t.Errorf("%s is not on the hub's allowlist", m)
 		}
@@ -65,6 +71,7 @@ func TestWebMethods(t *testing.T) {
 		{proto.MethodTerminalOpen, proto.TerminalOpenParams{Stream: strings.Repeat("a", 32), Session: sid, Mode: "observe"}, proto.CodeNotFound},
 		{proto.MethodTerminalInput, proto.TerminalInputParams{Stream: strings.Repeat("a", 32), Data: "x"}, proto.CodeNotFound},
 		{proto.MethodTerminalClose, proto.TerminalStreamParams{Stream: strings.Repeat("a", 32)}, proto.CodeNotFound},
+		{proto.MethodTerminalConfirm, proto.TerminalStreamParams{Stream: strings.Repeat("a", 32)}, proto.CodeNotFound},
 		{proto.MethodTerminalClose, map[string]any{"stream": strings.Repeat("a", 32), "extra": 1}, proto.CodeInvalidParams},
 	} {
 		if err := c.Call(ctx, tc.method, tc.params, nil); !proto.IsCode(err, tc.code) {
@@ -85,3 +92,94 @@ func TestWebMethods(t *testing.T) {
 }
 
 func newTestID() string { return "123e4567-e89b-12d3-a456-4266141740aa" }
+
+// TestTerminalConfirm: a terminal stream its opener does not confirm
+// within termConfirm is ended with the reason, so an open whose answer was
+// lost does not hold a place (finding G5-06). Control: a confirmed stream
+// stays open past that time until it is closed.
+func TestTerminalConfirm(t *testing.T) {
+	shortTimes(t)
+	oldC, oldW := termConfirm, termWatch
+	termConfirm, termWatch = 400*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { termConfirm, termWatch = oldC, oldW })
+	r := newRig(t)
+	r.boxUp(true)
+	r.start()
+	var mu sync.Mutex
+	ends := map[string]string{}
+	c := r.client(map[string]proto.NotifyHandler{proto.NotifyTerminalEnd: func(_ context.Context, _ *proto.Conn, params json.RawMessage) {
+		var e proto.TerminalEnd
+		if json.Unmarshal(params, &e) == nil {
+			mu.Lock()
+			ends[e.Stream] = e.Reason
+			mu.Unlock()
+		}
+	}})
+	sid := names.NewSessionID()
+	r.agentWithInput(&fakeBox{r: r, sid: sid, buffers: map[string][]byte{}})
+	r.waitChannel(c, proto.ChannelConnected)
+	r.startSession(c, sid)
+	// The tmux client runs until its grouped session is killed.
+	clients := map[string]chan struct{}{}
+	after := func(cmd []string, flag string) string {
+		if i := slices.Index(cmd, flag); i >= 0 && i+1 < len(cmd) {
+			return strings.TrimPrefix(cmd[i+1], "=")
+		}
+		return ""
+	}
+	r.eng.ExecFunc = func(o engine.ExecOptions) (execx.Result, error) {
+		switch {
+		case slices.Contains(o.Cmd, "display-message"):
+			return execx.Result{Stdout: []byte("80 24\n")}, nil
+		case slices.Contains(o.Cmd, "kill-session"):
+			mu.Lock()
+			if ch := clients[after(o.Cmd, "-t")]; ch != nil {
+				close(ch)
+				delete(clients, after(o.Cmd, "-t"))
+			}
+			mu.Unlock()
+		case o.TTY:
+			ch := make(chan struct{})
+			mu.Lock()
+			clients[after(o.Cmd, "-s")] = ch
+			mu.Unlock()
+			<-ch
+		}
+		return execx.Result{}, nil
+	}
+	ctx := context.Background()
+	open := func(stream string) {
+		t.Helper()
+		var res proto.TerminalOpenResult
+		if err := c.Call(ctx, proto.MethodTerminalOpen, proto.TerminalOpenParams{Stream: stream, Session: sid, Ref: hello.String(), Mode: "observe"}, &res); err != nil || res.Cols != 80 {
+			t.Fatalf("open %s: %+v %v", stream, res, err)
+		}
+	}
+	ended := func(stream string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		return ends[stream]
+	}
+	lost, kept := strings.Repeat("a", 32), strings.Repeat("b", 32)
+	open(lost)
+	open(kept)
+	if err := c.Call(ctx, proto.MethodTerminalConfirm, proto.TerminalStreamParams{Stream: kept}, nil); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for ended(lost) == "" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(ended(lost), "never confirmed") {
+		t.Errorf("the unconfirmed stream: %q", ended(lost))
+	}
+	if _, all := r.d.term.count(nil); all != 1 || ended(kept) != "" {
+		t.Errorf("the confirmed stream: %d open, ended %q", all, ended(kept))
+	}
+	if err := c.Call(ctx, proto.MethodTerminalConfirm, proto.TerminalStreamParams{Stream: lost}, nil); !proto.IsCode(err, proto.CodeNotFound) {
+		t.Errorf("confirming an ended stream: %v", err)
+	}
+	if err := c.Call(ctx, proto.MethodTerminalClose, proto.TerminalStreamParams{Stream: kept}, nil); err != nil {
+		t.Errorf("closing the confirmed stream: %v", err)
+	}
+}

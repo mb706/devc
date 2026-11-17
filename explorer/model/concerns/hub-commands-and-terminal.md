@@ -30,6 +30,8 @@ tests = [
   "internal/hub.TestStreamRetention",
   "internal/hub.TestStreamEndsWithSession",
   "internal/hub.TestWebEndpoints",
+  "internal/hub.TestTerminalOpenCleanup",
+  "internal/daemon.TestTerminalConfirm",
   "internal/daemon.TestHubAllowlist",
   "internal/daemon.TestHubOrigin",
   "test/integration.TestHub",
@@ -68,6 +70,11 @@ refs = ["internal/hub.Server.apiTerminal", "internal/daemon.termManager.open", "
 tests = ["internal/hub.TestWebEndpoints"]
 
 [[invariant]]
+text = "No terminal stream stays open on a machine after the hub gave up on it: the hub sends terminal.close whatever ends its relay, an open that failed, was answered invalidly or not in time included, and the machine ends a stream its opener did not confirm (terminal.confirm) within 30 seconds."
+refs = ["internal/hub.Server.apiTerminal", "internal/daemon.termManager.confirm", "internal/daemon.termStream.watch"]
+tests = ["internal/hub.TestTerminalOpenCleanup", "internal/daemon.TestTerminalConfirm"]
+
+[[invariant]]
 text = "An event stream delivers every change after its position once and in order, or says reset."
 refs = ["internal/hub.Server.apiStream", "internal/hub.Store.changesAfter"]
 tests = ["internal/hub.TestStreamRetention", "internal/hub.TestMachineLink"]
@@ -87,7 +94,7 @@ From a phone or a browser the owner wants to answer, prompt, interrupt or start 
 | type `stop`, `seen` | `session.stop`, `session.seen` | the session ended in the box, as `devc stop` does; a turn marked seen |
 | `GET /api/commands/{machine}/{id}` | `command.get` | none: a stored receipt, after waiting up to 60 seconds |
 | `POST /api/requests/{machine}/{id}/decide` | `requests.decide` | a request of low risk (seal, savepoint, note) approved and carried out, or denied |
-| `GET /api/terminal/{machine}/{session}` | `terminal.open`, `terminal.input`, `terminal.close` | the session's tmux window watched; typed into only in control mode |
+| `GET /api/terminal/{machine}/{session}` | `terminal.open`, `terminal.confirm`, `terminal.input`, `terminal.close` | the session's tmux window watched; typed into only in control mode |
 | `GET /api/sessions/{machine}/{session}?before=` | `events.read` | none: older events |
 | `GET /api/projects`, `GET /api/changes/{machine}/{session}` | `projects.list`, `changes.get` | none: worktrees asked in running boxes, a session's changes computed on the relay |
 
@@ -103,7 +110,7 @@ Nothing a hub may call starts or stops a box, writes the configuration, stops th
 
 **The event stream.** `GET /api/stream` ([[internal/hub.Server.apiStream]]) sends the [[term:change-log]] as server-sent events with the change's ID. `session` (a summary with its inbox section), `session.removed`, `machine`, `request` and `request.removed` go to every stream; `event` and `session.reset` only for the sessions the stream names (up to 32). A client resumes with `Last-Event-ID`; with none it gets `ready` at the present; an ID the log no longer reaches, or one beyond its newest (another hub's, a new database), gets `reset`, and the client reads its snapshot again. IDs are bare numbers: another hub's ID within this hub's range passes as this hub's. IDs are consecutive, so a page that skips one shows that pruning overtook the stream: `reset` again ([[internal/hub.Store.changesAfter]], [[finding:C2-09]]). A comment goes out every 15 seconds, when the stream also checks its login session; revocation of the certificate ends it within a second, its expiry at once. A stream that names a session suppresses its notifications ([[concern:hub-inbox-and-notifications]]).
 
-**The terminal.** [[internal/hub.Server.apiTerminal]] ([[flow:hub-terminal]]) refuses control mode unless hub.toml has `[terminal] control = true`; the machine refuses it unless its config.toml has the same ([[internal/daemon.termManager.open]]). The hub picks a random stream ID and registers a sink of 512 messages before it calls `terminal.open`, so the `terminal.data` notifications, which the link's reader handles, find it ([[internal/hub.termSink.put]]); a browser that falls that far behind loses the stream instead of stalling the reader. Output goes to the browser as binary WebSocket frames. The browser sends JSON frames: `input`, accepted only in control mode (in observe mode it ends the stream), and `visible`. A stream ends with its session, the page, the machine's link, 30 minutes hidden, the login session or the certificate; once the machine has confirmed the open, `terminal.close` goes to it however the stream ends. An open that fails, gets no answer within 30 seconds or an invalid one sends no close: a stream the daemon did open then stays there until its session ends, the link closes, the client exits or 12 hours pass. All browsers' terminals to one machine share its link, and the daemon admits four streams per connection, four terminals per machine through one hub (counted without a reservation, so opens at the same moment can pass together).
+**The terminal.** [[internal/hub.Server.apiTerminal]] ([[flow:hub-terminal]]) refuses control mode unless hub.toml has `[terminal] control = true`; the machine refuses it unless its config.toml has the same ([[internal/daemon.termManager.open]]). The hub picks a random stream ID and registers a sink of 512 messages before it calls `terminal.open`, so the `terminal.data` notifications, which the link's reader handles, find it ([[internal/hub.termSink.put]]); a browser that falls that far behind loses the stream instead of stalling the reader. Output goes to the browser as binary WebSocket frames. The browser sends JSON frames: `input`, accepted only in control mode (in observe mode it ends the stream), and `visible`. A stream ends with its session, the page, the machine's link, 30 minutes hidden, the login session or the certificate; `terminal.close` goes to the machine however it ends, also after an open that failed, got no answer within 30 seconds or an invalid one. A valid answer the hub confirms with `terminal.confirm`; the machine ends a stream not confirmed within 30 seconds ([[internal/daemon.termStream.watch]]), so one whose answer was lost, or whose close came before it existed, does not stay. All browsers' terminals to one machine share its link, and the daemon admits four streams per connection, four terminals per machine through one hub (counted without a reservation, so opens at the same moment can pass together).
 
 ## What can go wrong, and what prevents it
 

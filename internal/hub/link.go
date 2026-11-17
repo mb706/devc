@@ -35,7 +35,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -808,6 +807,9 @@ func (l *machineLink) pumpResync() {
 			var res proto.SessionsGetResult
 			err := l.call(proto.MethodSessionsGet, proto.SessionsGetParams{Session: sid, Ref: ref, Events: TailEvents}, &res)
 			gone := proto.IsCode(err, proto.CodeNotFound)
+			if err == nil {
+				err = checkTail(sid, res)
+			}
 			if err != nil && !gone {
 				return l.fail("reading a session again", err)
 			}
@@ -841,15 +843,13 @@ func (l *machineLink) finishResync(t *Tx, sid string, res proto.SessionsGetResul
 		l.full()
 		return nil
 	}
+	// checkTail has seen that the events are valid, of this session and
+	// follow one another.
 	var evs []proto.Event
 	for _, e := range res.Events {
 		if ev, err := cleanEventOnly(e); err == nil && ev.Session == sid {
 			evs = append(evs, ev)
 		}
-	}
-	sort.Slice(evs, func(i, j int) bool { return evs[i].Seq < evs[j].Seq })
-	if len(evs) > TailEvents {
-		evs = evs[len(evs)-TailEvents:]
 	}
 	last := v.LastSeq
 	for i := range evs {
@@ -935,6 +935,32 @@ func (l *machineLink) startRefresh() {
 
 // errBound is a machine breaking a bound of the link.
 var errBound = errors.New("the machine broke a bound of the hub")
+
+// checkTail checks the events of a re-read (sessions.get) before anything
+// of it is applied: at most TailEvents, each a valid event of the session,
+// each the one after the event before it, without gap or repeat, and the
+// first no later than the one after the view's LastSeq, so the events
+// applied on top of the machine's view follow on from it. Anything else
+// is a broken bound: the link is closed and the hub keeps what it held
+// (finding G5-08).
+func checkTail(sid string, res proto.SessionsGetResult) error {
+	evs := res.Events
+	if len(evs) > TailEvents {
+		return fmt.Errorf("%w: %d events of %s where %d were asked for", errBound, len(evs), sid, TailEvents)
+	}
+	for i, e := range evs {
+		if ev, err := cleanEventOnly(e); err != nil || ev.Session != sid {
+			return fmt.Errorf("%w: an invalid event in the re-read of %s", errBound, sid)
+		}
+		if i > 0 && e.Seq != evs[i-1].Seq+1 {
+			return fmt.Errorf("%w: in the re-read of %s, event %d follows %d", errBound, sid, e.Seq, evs[i-1].Seq)
+		}
+	}
+	if len(evs) > 0 && evs[0].Seq > res.Session.LastSeq+1 {
+		return fmt.Errorf("%w: the re-read of %s begins at event %d, after its view's %d", errBound, sid, evs[0].Seq, res.Session.LastSeq)
+	}
+	return nil
+}
 
 // listSessions pages through sessions.list within ctx. The hub asks for at
 // most MaxMachineSessions sessions in all; a page with more than asked, a

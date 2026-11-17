@@ -164,6 +164,17 @@ func (p *Project) HostRoot() string { return filepath.Join(p.HostDir, p.Layout.R
 // <root>/…) or on the host. ".." is refused anywhere in the argument, even
 // where it would stay inside.
 func Normalize(p *Project, projectsRoot, arg string) (string, error) {
+	return normalize(p, projectsRoot, arg, false)
+}
+
+// NormalizeInBox is Normalize for a path a box sent: an absolute path must
+// lie inside the data root as the box sees it, and no error names a host
+// path (finding G2-01).
+func NormalizeInBox(p *Project, arg string) (string, error) {
+	return normalize(p, "", arg, true)
+}
+
+func normalize(p *Project, projectsRoot, arg string, inBox bool) (string, error) {
 	if arg == "" {
 		return "", errors.New("empty path")
 	}
@@ -177,11 +188,14 @@ func Normalize(p *Project, projectsRoot, arg string) (string, error) {
 	}
 	rel := arg
 	if strings.HasPrefix(arg, "/") {
-		roots := []string{p.InBoxRoot(), p.HostRoot()}
-		if real, err := filepath.EvalSymlinks(projectsRoot); err == nil {
-			// The projects root is the user's own directory; resolving it
-			// (and only it) is safe.
-			roots = append(roots, filepath.Join(real, p.Ref.Realm, p.Ref.Project, p.Layout.Root))
+		roots := []string{p.InBoxRoot()}
+		if !inBox {
+			roots = append(roots, p.HostRoot())
+			if real, err := filepath.EvalSymlinks(projectsRoot); err == nil {
+				// The projects root is the user's own directory; resolving
+				// it (and only it) is safe.
+				roots = append(roots, filepath.Join(real, p.Ref.Realm, p.Ref.Project, p.Layout.Root))
+			}
 		}
 		clean := path.Clean(arg)
 		rel = ""
@@ -194,7 +208,10 @@ func Normalize(p *Project, projectsRoot, arg string) (string, error) {
 				break
 			}
 		}
-		if rel == "" {
+		switch {
+		case rel == "" && inBox:
+			return "", fmt.Errorf("%s is not inside the data root of %s (%s)", arg, p.Ref, p.InBoxRoot())
+		case rel == "":
 			return "", fmt.Errorf("%s is not inside the data root of %s (%s in the box, %s on the host)", arg, p.Ref, p.InBoxRoot(), p.HostRoot())
 		}
 	}

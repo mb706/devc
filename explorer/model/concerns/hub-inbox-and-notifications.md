@@ -46,9 +46,9 @@ refs = ["internal/hub.notifier.update", "internal/hub.NoteState", "internal/hub.
 tests = ["internal/hub.TestNotifierRetries"]
 
 [[invariant]]
-text = "When a session leaves an attention state, the buttons of its message stop working, and a message ntfy confirmed is cleared, retried until ntfy confirms or the record is seven days old."
-refs = ["internal/hub.notifier.update", "internal/hub.notifier.clear", "internal/hub.Store.DeleteActions"]
-tests = ["internal/hub.TestNotifier", "internal/hub.TestNotifierRetries"]
+text = "When a session leaves an attention state, the buttons of its message stop working, and a message that was published, or whose publish was attempted (it may have reached ntfy although the answer was lost), is cleared, retried until ntfy confirms or the record is seven days old; only a record never attempted goes without a clear."
+refs = ["internal/hub.notifier.update", "internal/hub.notifier.ended", "internal/hub.notifier.publish", "internal/hub.notifier.clear", "internal/hub.Store.DeleteActions"]
+tests = ["internal/hub.TestNotifier", "internal/hub.TestNotifierRetries", "internal/hub.TestNotifierLostAnswer"]
 
 [[invariant]]
 text = "An action token answers one question of one session with one choice, once, within an hour; using it uses up the other buttons of its message."
@@ -144,8 +144,14 @@ ref = "internal/hub.backoff"
 [[diagram.edge]]
 from = "pending"
 to = "gone"
-label = "state ended first"
-ref = "internal/hub.notifier.update"
+label = "state ended before any attempt"
+ref = "internal/hub.notifier.ended"
+
+[[diagram.edge]]
+from = "pending"
+to = "cleared"
+label = "state ended after an attempt"
+ref = "internal/hub.notifier.ended"
 
 [[diagram.edge]]
 from = "quiet"
@@ -189,7 +195,7 @@ The owner is away from the machines and wants to know when a session needs them,
 
 - A new key is `pending` and is published at once if it can be ([[internal/hub.notifier.publish]]): only while the machine is online and names this hub its notifier.
 - If a logged-in event stream names the session at that moment, the record becomes `sent` with no message. A question-less needs-you right after an answered question is not news either.
-- When the key ends, a pending record is dropped without a clear, so a publish that reached ntfy although its answer was lost leaves its message on the phone; a sent one loses its buttons, becomes `cleared`, and its message is cleared at ntfy by sequence ID (`PUT /<topic>/<seq>/clear`).
+- When the key ends ([[internal/hub.notifier.ended]]), a record that never had a message, a pending one never attempted or one handled without a message, is dropped. A sent one, and a pending one with an attempt, loses its buttons, becomes `cleared`, and its message is cleared at ntfy by sequence ID (`PUT /<topic>/<seq>/clear`). A pending record counts its attempts in `Tries`, stored before each publish goes out, since ntfy may take a message whose answer is lost.
 - A key that returns while its old message is still being cleared is published again under the same sequence ID.
 
 Failed publishes and clears are retried: every 15 seconds the notifier looks at the records that are due ([[internal/hub.notifier.retryDue]]); after a failure a record waits 30 seconds, doubling up to 15 minutes, and a clear is given up once its record is seven days old. A change of a machine (online, role) also runs retryDue, so a hub that has just become the notifier sends what is still pending and still current.

@@ -3,6 +3,7 @@ package boxside
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -228,11 +229,11 @@ func TestWorktrees(t *testing.T) {
 	}
 
 	os.WriteFile(filepath.Join(dir, "new"), []byte("x\n"), 0o644)
-	if err := r.RemoveWorktree("t1", false); err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
-		t.Errorf("dirty removal: %v", err)
+	if rep, err := r.RemoveWorktree("t1", false); err != nil || rep.Removed || !rep.Dirty || rep.LostTotal != 0 || !strings.Contains(rep.RefusalText("t1"), "uncommitted changes") {
+		t.Errorf("dirty removal: %+v %v", rep, err)
 	}
-	if err := r.RemoveWorktree("t1", true); err != nil {
-		t.Fatalf("forced removal: %v", err)
+	if rep, err := r.RemoveWorktree("t1", true); err != nil || !rep.Removed {
+		t.Fatalf("forced removal: %+v %v", rep, err)
 	}
 	if _, err := os.Stat(dir); err == nil {
 		t.Error("t1 still exists")
@@ -242,10 +243,10 @@ func TestWorktrees(t *testing.T) {
 	if _, created, err := r.AddWorktree(AddWorktreeOptions{Name: "t1", Prefix: "agent/"}); err != nil || !created {
 		t.Errorf("re-create: %v %v", created, err)
 	}
-	if err := r.RemoveWorktree("nosuch", false); err == nil {
+	if _, err := r.RemoveWorktree("nosuch", false); err == nil {
 		t.Error("removing a missing worktree succeeded")
 	}
-	if err := r.RemoveWorktree("main", true); err == nil {
+	if _, err := r.RemoveWorktree("main", true); err == nil {
 		t.Error("removing main succeeded")
 	}
 	if st := r.State(); st.Repo != RepoValid || st.MainGit != true {
@@ -253,6 +254,78 @@ func TestWorktrees(t *testing.T) {
 	}
 	if st := (&Repo{ProjectDir: t.TempDir(), Git: ExecGit}).State(); st.Repo != RepoAbsent {
 		t.Errorf("empty state: %+v", st)
+	}
+}
+
+// TestRemoveWorktreeUnpreserved: a worktree git calls clean but that
+// holds ignored files, a file over the snapshot's limit or a nested
+// repository is refused without force, with what would go listed (sorted,
+// at most MaxLostReported names, all counted); force removes it and counts
+// them; the data link is not counted (findings G3-01, G3-19). Control: a
+// worktree with only its data link is removed without force.
+func TestRemoveWorktreeUnpreserved(t *testing.T) {
+	r, git := testRepo(t)
+	os.MkdirAll(filepath.Join(r.ProjectDir, "data"), 0o755)
+	dir, _, err := r.AddWorktree(AddWorktreeOptions{Name: "t1", Prefix: "agent/", DataRoot: "data", DataLink: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.ign\nbuild/\n"), 0o644)
+	git(dir, "add", ".gitignore")
+	git(dir, "commit", "-qm", "ignore")
+	os.MkdirAll(filepath.Join(dir, "build", "deep"), 0o755)
+	os.WriteFile(filepath.Join(dir, "build", "deep", "out"), []byte("x"), 0o644)
+	for i := range 25 {
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%02d.ign", i)), nil, 0o644)
+	}
+	if dirty, err := r.Dirty(Worktree{Path: dir}); err != nil || dirty {
+		t.Fatalf("t1 is not clean for git: %v %v", dirty, err)
+	}
+	// Clean for git status, yet 26 entries no snapshot keeps.
+	rep, err := r.RemoveWorktree("t1", false)
+	if err != nil || rep.Removed || rep.Dirty || rep.LostTotal != 26 || len(rep.Lost) != MaxLostReported || rep.Lost[0] != "build/" || rep.Lost[1] != "f00.ign" {
+		t.Fatalf("ignored files: %+v %v", rep, err)
+	}
+	text := rep.RefusalText("t1")
+	if !strings.Contains(text, "t1 holds 26 files or directories") || !strings.Contains(text, "… and 6 more") || !strings.Contains(text, "--force") {
+		t.Errorf("refusal: %s", text)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "build", "deep", "out")); err != nil {
+		t.Errorf("the ignored file went: %v", err)
+	}
+	// A file over the snapshot's limit and a nested repository count too.
+	for i := range 25 {
+		os.Remove(filepath.Join(dir, fmt.Sprintf("f%02d.ign", i)))
+	}
+	os.RemoveAll(filepath.Join(dir, "build"))
+	f, _ := os.Create(filepath.Join(dir, "huge.bin"))
+	f.Truncate(SnapshotLimit + 1)
+	f.Close()
+	git(dir, "init", "-q", "nested")
+	os.WriteFile(filepath.Join(dir, "nested", "x"), []byte("x"), 0o644)
+	git(filepath.Join(dir, "nested"), "add", "x")
+	git(filepath.Join(dir, "nested"), "commit", "-qm", "n")
+	rep, err = r.RemoveWorktree("t1", false)
+	if err != nil || rep.Removed || !rep.Dirty || strings.Join(rep.Lost, ",") != "huge.bin (10 MiB),nested/ (nested repository)" {
+		t.Fatalf("large and nested: %+v %v", rep, err)
+	}
+	rep, err = r.RemoveWorktree("t1", true)
+	if err != nil || !rep.Removed || rep.LostTotal != 2 {
+		t.Fatalf("forced: %+v %v", rep, err)
+	}
+	if _, err := os.Stat(dir); err == nil {
+		t.Error("t1 still exists")
+	}
+	// Control: only the data link.
+	dir, _, err = r.AddWorktree(AddWorktreeOptions{Name: "t2", Prefix: "agent/", DataRoot: "data", DataLink: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(filepath.Join(dir, DataLinkName)); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("no data link: %v", err)
+	}
+	if rep, err := r.RemoveWorktree("t2", false); err != nil || !rep.Removed || rep.LostTotal != 0 {
+		t.Errorf("plain worktree: %+v %v", rep, err)
 	}
 }
 

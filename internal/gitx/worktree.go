@@ -79,16 +79,31 @@ func (s *Service) WorktreeNew(ctx context.Context, p *Project, name, start strin
 
 // WorktreeRemove removes a task worktree in the box (its branch stays); a
 // dirty one only with force. The caller has banked and holds the box lock.
-func (s *Service) WorktreeRemove(ctx context.Context, p *Project, name string, force bool) error {
+func (s *Service) WorktreeRemove(ctx context.Context, p *Project, name string, force bool) (boxside.WorktreeRemoval, error) {
+	var rep boxside.WorktreeRemoval
 	if err := boxside.CheckWorktreeName(name, ""); err != nil {
-		return err
+		return rep, err
 	}
-	args := []string{"worktree", "rm", name}
+	args := []string{"worktree", "rm", name, "--json"}
 	if force {
 		args = append(args, "--force")
 	}
-	_, err := s.boxHelper(ctx, p, nil, args...)
-	return err
+	out, err := s.boxHelper(ctx, p, nil, args...)
+	if err != nil {
+		return rep, err
+	}
+	// The names are the box's: bounded in number and length, and made
+	// printable before anyone shows them.
+	if err := decodeStrict(out, &rep); err != nil {
+		return rep, fmt.Errorf("the worktree removal report of %s is invalid: %w", p.Container, err)
+	}
+	if len(rep.Lost) > boxside.MaxLostReported || rep.LostTotal < len(rep.Lost) || (rep.Removed && rep.Dirty && !force) {
+		return rep, fmt.Errorf("the worktree removal report of %s is invalid (%d of %d names)", p.Container, len(rep.Lost), rep.LostTotal)
+	}
+	for i, l := range rep.Lost {
+		rep.Lost[i] = proto.Printable(proto.Truncate(l, 300))
+	}
+	return rep, nil
 }
 
 // WorktreeList describes the box's worktrees, validated.

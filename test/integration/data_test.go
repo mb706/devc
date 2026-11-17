@@ -199,6 +199,11 @@ func TestData(t *testing.T) {
 	if sps := dataLs(t, e, ref).Savepoints; len(sps) != 1 || sps[0].Name != "" || sps[0].Driver != "restic" {
 		t.Errorf("savepoints after two sessions: %+v", sps)
 	}
+	// What the daemon runs before it starts a session (finding G4-17):
+	// nothing new while the owner's savepoint is recent.
+	if res := e.MustRun("save", "--before-session", "--", ref); strings.Contains(res.Stderr, "saved") || len(dataLs(t, e, ref).Savepoints) != 1 {
+		t.Errorf("save --before-session with a recent savepoint: %s", res.Stderr)
+	}
 
 	// 3. Seal.
 	boxSh(t, e, ref, "cd "+bdir+"/data/results && mkdir -p run1/sub && echo hello > run1/a.txt && echo b > run1/sub/b.txt")

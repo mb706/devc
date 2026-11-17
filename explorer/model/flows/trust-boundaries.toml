@@ -130,8 +130,8 @@ text = "The readiness marker and the box's hosts file are box-writable, so they 
 at = "cli"
 ref = "internal/session.ParseLive"
 checks = ["internal/gitx.decodeStrict", "internal/gitx.Service.WorktreeList"]
-text = "What in-box commands print through `podman exec` (live sessions, snapshot reports, worktree lists) is bounded, decoded with unknown fields refused and validated; a live-session report with one malformed entry changes nothing ([[concern:sessions-and-events]], [[concern:worktrees-and-context]])."
-detail = "What follows the value is not always refused. [[internal/session.ParseLive]] reads only the first JSON value, so on this path `[]` followed by anything counts as an empty report and ends the box's open sessions as `lost`, as `[]` alone would. The git, data, context and archive decoders end with `Decoder.More`, which passes a stray `]` or `}` after the report; what they decoded is unaffected (`docs/dev/LEFTOVER.md` part 7)."
+text = "What in-box commands print through `podman exec` (live sessions, snapshot reports, worktree lists, removals) is bounded, decoded with unknown fields and anything after the value refused, and validated; a live-session report with one malformed entry changes nothing ([[concern:sessions-and-events]], [[concern:worktrees-and-context]])."
+detail = "The live-session, git, data, context, archive, canary and data-links decoders go through [[internal/proto.StrictJSON]]: after the value only white space may follow, so a stray `]` or `}` refuses the report."
 
 [[step]]
 at = "cli"

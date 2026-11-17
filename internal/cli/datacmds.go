@@ -181,6 +181,7 @@ func newDataCmds(a *app) []*cobra.Command {
 	seal.Flags().BoolVar(&sealContent, "content", false, "also record a content hash in the data manifest")
 
 	var saveRequest string
+	var saveBefore bool
 	save := &cobra.Command{
 		Use:   "save [name] [<realm>/<project>]",
 		Short: "Take a savepoint of the project's data (input zones and sealed entries left out)",
@@ -190,7 +191,10 @@ func newDataCmds(a *app) []*cobra.Command {
 			"With --request (set by the daemon for an approved savepoint request) the savepoint is of the class requested: " +
 			"at most one per data.savepoints.requested_interval (default 10m), and only the newest " +
 			"data.savepoints.requested_keep (default 10) requested savepoints are kept, named or not. Requested savepoints " +
-			"never count toward data.savepoints.keep, and retention of the owner's savepoints never drops them.",
+			"never count toward data.savepoints.keep, and retention of the owner's savepoints never drops them.\n\n" +
+			"With --before-session (set by the daemon before it starts a session) a savepoint is taken as before every session " +
+			"(data.savepoints.before_session): only when the project asks for one, its driver is not none, and none of the " +
+			"owner's savepoints is from the last 30 minutes.",
 		Args: rangeArgs(0, 2, "devc save [name] [<realm>/<project>]"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, refArgs := "", args
@@ -208,7 +212,13 @@ func newDataCmds(a *app) []*cobra.Command {
 			if saveRequest != "" && !proto.ValidRequestID(saveRequest) {
 				return usageErrorf("--request %q is not a request ID", proto.Printable(saveRequest))
 			}
+			if saveBefore && (name != "" || saveRequest != "") {
+				return usageErrorf("--before-session takes neither a name nor --request")
+			}
 			return a.withData(cmd, refArgs, "", true, func(ctx context.Context, e *boxEnv, p *data.Project) error {
+				if saveBefore {
+					return a.beforeSession(ctx, e, p)
+				}
 				save := e.data.Save
 				if saveRequest != "" {
 					save = func(ctx context.Context, p *data.Project, name string) (*data.Savepoint, error) {
@@ -225,6 +235,7 @@ func newDataCmds(a *app) []*cobra.Command {
 	}
 
 	save.Flags().StringVar(&saveRequest, "request", "", "the approved savepoint request this carries out (set by the daemon)")
+	save.Flags().BoolVar(&saveBefore, "before-session", false, "take the savepoint that data.savepoints.before_session asks for before a session, if one is due (set by the daemon)")
 
 	var inPlace bool
 	var restoreRef string

@@ -615,13 +615,5 @@ func DecodeResult(raw json.RawMessage, v any) error {
 	if t := bytes.TrimSpace(raw); len(t) == 0 || string(t) == "null" {
 		return errors.New("no result")
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return errors.New("data after the JSON value")
-	}
-	return nil
+	return StrictJSON(raw, v)
 }

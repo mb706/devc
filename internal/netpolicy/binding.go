@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/mb706/devc/internal/execx"
+	"github.com/mb706/devc/internal/proto"
 )
 
 // BindingFile is the name of the binding record in the box's generated
@@ -92,13 +93,8 @@ func ParseBinding(data []byte) (Binding, error) {
 	if len(data) > maxBinding {
 		return b, errors.New("the network binding record is too large")
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&b); err != nil {
+	if err := proto.StrictJSON(data, &b); err != nil {
 		return b, fmt.Errorf("the network binding record cannot be parsed: %w", err)
-	}
-	if dec.More() {
-		return b, errors.New("the network binding record has data after it")
 	}
 	return b, b.valid()
 }

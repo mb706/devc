@@ -376,7 +376,8 @@ func TestBinding(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{`{"v":1,"netns":5,"pid1_start":7,"boot_id":"` + testBoot + `","x":1}`, `{"v":2,"netns":5,"pid1_start":7,"boot_id":"` + testBoot + `"}`,
-		`{"v":1,"netns":0,"pid1_start":7,"boot_id":"` + testBoot + `"}`, `{"v":1,"netns":5,"pid1_start":7,"boot_id":"x"}`, "{} {}"} {
+		`{"v":1,"netns":0,"pid1_start":7,"boot_id":"` + testBoot + `"}`, `{"v":1,"netns":5,"pid1_start":7,"boot_id":"x"}`, "{} {}",
+		`{"v":1,"netns":5,"pid1_start":7,"boot_id":"` + testBoot + `"}]`, `{"v":1,"netns":5,"pid1_start":7,"boot_id":"` + testBoot + `"}}`} {
 		if _, err := ParseBinding([]byte(bad)); err == nil {
 			t.Errorf("record %s accepted", bad)
 		}
@@ -502,7 +503,7 @@ func TestCanary(t *testing.T) {
 		t.Errorf("probes: %+v", probes)
 	}
 	ok := []byte(`[{"addr":"192.168.1.5:4000","result":"unreachable"},{"addr":"169.254.1.2:4000","result":"timeout"}]`)
-	if err := EvaluateCanary(ok, want, 4000, 0); err != nil {
+	if err := EvaluateCanary(append(slices.Clone(ok), '\n'), want, 4000, 0); err != nil {
 		t.Errorf("clean report: %v", err)
 	}
 	for name, c := range map[string]struct {
@@ -515,6 +516,7 @@ func TestCanary(t *testing.T) {
 		"missing":   {`[{"addr":"192.168.1.5:4000","result":"refused"}]`, 0, "leaves out 169.254.1.2:4000"},
 		"garbage":   {`not json`, 0, "cannot be parsed"},
 		"unknown":   {`[{"addr":"x","result":"refused","extra":1}]`, 0, "cannot be parsed"},
+		"trailing":  {string(ok) + "]", 0, "cannot be parsed"}, // nothing after the report (finding G4-24)
 	} {
 		if err := EvaluateCanary([]byte(c.report), want, 4000, c.accepted); err == nil || !strings.Contains(err.Error(), c.msg) {
 			t.Errorf("%s: %v", name, err)

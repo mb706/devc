@@ -397,7 +397,7 @@ func TestDecodeResult(t *testing.T) {
 		t.Errorf("array: %v %v", list, err)
 	}
 	var obj struct{ A int }
-	for _, bad := range []string{`null`, ``, `{"A":1,"B":2}`, `{"A":1} {}`, `[1]`} {
+	for _, bad := range []string{`null`, ``, `{"A":1,"B":2}`, `{"A":1} {}`, `[1]`, `{"A":1}]`, `{"A":1}}`, `{"A":1} x`} {
 		if err := DecodeResult(json.RawMessage(bad), &obj); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

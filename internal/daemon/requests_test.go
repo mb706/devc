@@ -697,6 +697,34 @@ func TestRequestsInterrupted(t *testing.T) {
 	}
 }
 
+// TestRequestHostPaths: what host.request tells a box names paths as the
+// box sees them (finding G2-01): the refusal of a seal path outside the
+// data root names the in-box data root and not the host's, and the
+// result of a carried-out request has the host's directories rewritten.
+func TestRequestHostPaths(t *testing.T) {
+	r := boxRig(t, "[requests]\nauto = [\"seal\"]\n[data]\nwork = [\"w\"]\nsealed = [\"s\"]\n", "")
+	cp := r.d.current().cfg.Paths
+	host := cp.HostProjectDir(hello)
+	_, err := r.request(t, proto.RequestParams{Kind: "seal", Path: "/etc/x"})
+	if !proto.IsCode(err, proto.CodeInvalidParams) || !strings.Contains(err.Error(), "/w/demo/hello/data") || strings.Contains(err.Error(), cp.ProjectsRoot()) {
+		t.Errorf("seal outside the data root: %v", err)
+	}
+	r.runner.On("/fake/devc", "seal").Stderr("devc: sealing failed: open " + host + "/data/s/x: permission denied; see " + cp.StateDir() + "/local/x\n").Exit(1)
+	rep, err := r.request(t, proto.RequestParams{Kind: "seal", Path: "/w/demo/hello/data/s/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := r.waitRequest(t, rep.ID)
+	if st.Status != proto.RequestFailed || !strings.Contains(st.Result, "open /w/demo/hello/data/s/x: permission denied; see <host>/local/x") ||
+		strings.Contains(st.Result, cp.ProjectsRoot()) || strings.Contains(st.Result, cp.StateDir()) {
+		t.Errorf("result for the box: %+v", st)
+	}
+	// The user's own listing keeps what devc printed.
+	if list, err := r.d.requests.store.Load(hello); err != nil || len(list) == 0 || !strings.Contains(list[len(list)-1].Result, host) {
+		t.Errorf("the stored result: %+v %v", list, err)
+	}
+}
+
 // TestRequestExecutor: approved requests run on a bounded executor and
 // count against the per-project limit until they finish (finding C1-11).
 func TestRequestExecutor(t *testing.T) {

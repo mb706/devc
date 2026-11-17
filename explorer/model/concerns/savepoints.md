@@ -36,6 +36,7 @@ tests = [
   "internal/data.TestServiceAutoAndBeforeSession",
   "internal/data.TestRequestedSavepoints",
   "internal/daemon.TestSavepointRequestWindow",
+  "internal/daemon.TestStartSavepointFirst",
   "internal/toolbox.TestInstallRestic",
   "test/integration.TestData",
   "test/integration.TestRequestedSavepoints",
@@ -73,8 +74,9 @@ refs = ["internal/data.Service.SaveRequested", "internal/data.RequestedRetention
 tests = ["internal/data.TestRequestedSavepoints", "internal/daemon.TestSavepointRequestWindow", "test/integration.TestRequestedSavepoints"]
 
 [[invariant]]
-text = "With `before_session` and a driver other than `none`, a session `devc <harness>` starts does not start when its savepoint fails; sessions the daemon starts take none."
-refs = ["internal/cli.app.saveBeforeSession", "internal/data.Service.BeforeSession", "internal/daemon.commander.runStart"]
+text = "With `before_session` and a driver other than `none`, no session starts, whoever starts it, while its savepoint fails: `devc <harness>` takes it itself, the daemon (for the web app and the hub) through `devc save --before-session`, and a savepoint that fails or takes longer than 30 minutes refuses the daemon's start."
+refs = ["internal/cli.app.saveBeforeSession", "internal/cli.app.beforeSession", "internal/data.Service.BeforeSession", "internal/daemon.commander.saveBeforeSession", "internal/daemon.commander.runStart"]
+tests = ["internal/daemon.TestStartSavepointFirst", "test/integration.TestData"]
 
 [[invariant]]
 text = "restic runs as the box user with no capability and no network, and sees the project directory only read-only."
@@ -87,17 +89,17 @@ A work zone belongs to the agent: it can delete or overwrite days of results in 
 
 ## How it works
 
-**What a savepoint holds.** The data root without its input zones (read-only for the box anyway) and without the entries sealed at that moment ([[concern:data-and-sealing]]): directories, regular files with their bytes, modes and times, and symlinks as links. FIFOs, sockets and devices are skipped and reported. Owners are not kept: restored files belong to the box user. The box may be writing while the copy is made, so each file is as it was when it was copied, not the whole tree at one instant. The index entry also records the relay's default-branch tip, and the manifest gets a record with path `.` ([[concern:data-sync]]).
+**What a savepoint holds.** The data root without its input zones (read-only for the box anyway) and without the entries sealed at that moment ([[concern:data-and-sealing]]): directories, regular files with their bytes, modes and times, and symlinks as links. FIFOs, sockets and devices are skipped and reported. Restored files belong to the box user. The box may be writing while the copy is made, so each file is as it was when it was copied, not the whole tree at one instant. The index entry also records the relay's default-branch tip, and the manifest gets a record with path `.` ([[concern:data-sync]]).
 
 **Drivers** (`data.savepoints.driver`, default `auto`; [[internal/data.Service.Save]]):
 
 - `reflink`. The worker first clones a one-byte file in `.devc/savepoints` ([[internal/boxside.DataWorker.probeClone]]); `FICLONE` makes a copy that shares the original's blocks until either changes, so a savepoint costs space only as files diverge. [[internal/boxside.DataWorker.reflinkSave]] copies the tree into `<id>.partial/`, owned by the vault, directories `0555`, files without write bits, keeps the original modes in `.devc/savepoints/.modes/<id>` ([[internal/boxside.SavedModes]]) and renames the copy to `<id>`. It lives on the project's filesystem, inside the project directory.
-- `restic`. The setup worker checks the layout and reports what to leave out and the digest; then [[internal/data.Service.restic]] runs `restic backup --json --quiet --host devc --tag <id> --exclude=… /project/<root>` in a container from the helper root filesystem as the box user, without capabilities or network, the project directory read-only at `/project`, the repository `local/savepoints/<realm>/<project>/restic` at `/repo`, a cache, the toolbox read-only and a tmpfs `/tmp`. The repository has no password; it is in the state directory. restic is the pinned 0.19.1 that `devc toolbox install restic` puts into the toolbox after checking its SHA-256 ([[internal/toolbox.Toolbox.InstallRestic]]).
+- `restic`. The setup worker checks the layout and reports what to leave out and the digest; then [[internal/data.Service.restic]] runs `restic backup --json --quiet --host devc --tag <id> --exclude=… /project/<root>` in a container from the helper root filesystem as the box user, without capabilities or network, the project directory read-only at `/project`, the repository `local/savepoints/<realm>/<project>/restic` at `/repo`, a cache, the toolbox read-only and a tmpfs `/tmp`. The repository, in the state directory, has no password. restic is the pinned 0.19.1 that `devc toolbox install restic` puts into the toolbox after checking its SHA-256 ([[internal/toolbox.Toolbox.InstallRestic]]).
 - `auto` uses reflink when the probe succeeds, else restic if installed, else fails and says what to do. `none` and `borg` refuse.
 
 **The index**, `durable/realms/<realm>/savepoints/<project>.jsonl`, holds `save` and `drop` records ([[internal/data.ReadIndex]]). IDs are `YYYYMMDDTHHMMSSZ[-name]`; a taken ID moves on by a second ([[internal/data.NewID]]). A save record of a savepoint a box requested carries the class `requested` and the request's ID ([[term:requested-savepoint]]); records without a class, also all from before classes existed, are the owner's.
 
-**When.** `devc save [name]`, under the box lock ([[flow:data-save]]). Before a session that `devc <harness>` starts when `before_session = true`, unless a savepoint is younger than 30 minutes or the driver is `none`; if it fails the session does not start ([[internal/cli.app.saveBeforeSession]]). A session the daemon starts (from the [[concern:web-app|web app]] or the hub, [[internal/daemon.commander.runStart]]) takes none ([[doc:docs/dev/LEFTOVER.md#7]]). And when the box asks with `devc request savepoint [name]`, which the default `requests.auto` approves at once ([[concern:requests-and-approval]]): the daemon runs `devc save --request <id>`, which [[internal/data.Service.SaveRequested]] refuses, under the box lock, within `requested_interval` (10 minutes) of the last requested savepoint; `before_session` counts only the owner's.
+**When.** `devc save [name]`, under the box lock ([[flow:data-save]]). Before every session when `before_session = true`, unless one of the owner's savepoints is younger than 30 minutes or the driver is `none`; if it fails the session does not start. `devc <harness>` takes it itself ([[internal/cli.app.saveBeforeSession]]); a start by the daemon runs `devc save --before-session` first and is refused if that fails or takes over 30 minutes ([[internal/daemon.commander.saveBeforeSession]]). And when the box asks with `devc request savepoint [name]`, which the default `requests.auto` approves at once ([[concern:requests-and-approval]]): the daemon runs `devc save --request <id>`, which [[internal/data.Service.SaveRequested]] refuses, under the box lock, within `requested_interval` (10 minutes) of the last requested savepoint.
 
 **Retention.** After an owner's save, [[internal/data.Retention]] drops the owner's oldest unnamed savepoints beyond `keep` (default 10; 0 keeps all); named ones stay until `devc data gc --drop`. After a requested save, [[internal/data.RequestedRetention]] drops the oldest requested ones beyond `requested_keep` (default 10, at least 1), named or not. Neither counts the other; `devc data gc` applies both. A reflink copy is deleted by the savepoint-drop worker; a restic snapshot is forgotten, and its space comes back only when `devc data gc` runs `restic prune` ([[internal/data.Service.GC]]).
 

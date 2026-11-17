@@ -89,8 +89,8 @@ section = "The proxy"
 at = "daemon"
 ref = "internal/svclogin.Proxy.ServeHTTP"
 unchecked = "net/http's server, started by serviceManager.start on the connListener, accepts the stream and calls the handler; ConnContext attaches the decision made above"
-text = "A declared body over `max_body` gets 413; the rest of the exchange runs under `limits.timeout`."
-detail = "A body without a declared length (chunked) is cut at `max_body` only while it streams to the upstream, after the credential was added, so its first `max_body` bytes do reach the upstream before the request fails."
+text = "A declared body over `max_body` gets 413; a body without a declared length (chunked) is read whole first, and one over `max_body` gets 413 too, before the credential is fetched or anything reaches the upstream. The rest of the exchange runs under `limits.timeout`."
+detail = "The body is read within `limits.timeout`, into memory up to 1 MiB and beyond that into a temporary file removed at once, and sent on with its length ([[internal/svclogin.readBody]])."
 
 [[step]]
 at = "daemon"

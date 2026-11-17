@@ -10,7 +10,11 @@ package daemon
 // it. The client attaches through its own grouped session with the client
 // flag ignore-size (tmux.Observe): it never resizes the pane; the
 // pseudo-terminal gets the window's size, and follows it when the window
-// changes. An observing stream cannot type because the daemon, the only
+// changes. The opener confirms the stream (terminal.confirm) once it has
+// the answer; a stream not confirmed within termConfirm is ended, so one
+// whose answer was lost, or that the opener gave up on before it existed,
+// does not stay open (finding G5-06). An observing stream cannot type
+// because the daemon, the only
 // writer of its pseudo-terminal, refuses terminal.input for it (tmux's
 // read-only flag is not used: it makes tmux refuse the daemon's own
 // send-keys while the observer is attached). Control mode accepts
@@ -29,6 +33,7 @@ import (
 	"encoding/json"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mb706/devc/internal/boxside"
@@ -45,6 +50,7 @@ var (
 	termTotal    = 16
 	termSizePoll = 5 * time.Second
 	termWatch    = time.Second
+	termConfirm  = 30 * time.Second
 )
 
 const (
@@ -82,10 +88,14 @@ type termStream struct {
 	cancel  context.CancelFunc
 	// execDone is closed when the engine process has exited.
 	execDone chan struct{}
-	once     sync.Once
-	wmu      sync.Mutex
-	cols     int
-	rows     int
+	// opened is when the stream was added; confirmed is set by
+	// terminal.confirm.
+	opened    time.Time
+	confirmed atomic.Bool
+	once      sync.Once
+	wmu       sync.Mutex
+	cols      int
+	rows      int
 }
 
 func newTermManager(d *Daemon) *termManager {
@@ -186,7 +196,7 @@ func (m *termManager) open(ctx context.Context, c *proto.Conn, params json.RawMe
 	}
 	sctx, cancel := context.WithCancel(d.ctx)
 	st := &termStream{m: m, id: p.Stream, session: p.Session, ref: ref, window: window, client: client, control: control,
-		conn: c, eng: e.eng, ptmx: ptmx, cancel: cancel, execDone: make(chan struct{}), cols: cols, rows: rows}
+		conn: c, eng: e.eng, ptmx: ptmx, cancel: cancel, execDone: make(chan struct{}), opened: time.Now(), cols: cols, rows: rows}
 	m.mu.Lock()
 	if _, dup := m.streams[p.Stream]; dup {
 		m.mu.Unlock()
@@ -269,8 +279,9 @@ func (st *termStream) read() {
 	}
 }
 
-// watch ends the stream with its session or connection, and follows the
-// window's size.
+// watch ends the stream with its session or connection, or when its
+// opener has not confirmed it within termConfirm, and follows the window's
+// size.
 func (st *termStream) watch(ctx context.Context) {
 	tick := time.NewTicker(termWatch)
 	defer tick.Stop()
@@ -283,6 +294,10 @@ func (st *termStream) watch(ctx context.Context) {
 			st.end("the connection closed")
 			return
 		case <-tick.C:
+		}
+		if !st.confirmed.Load() && time.Since(st.opened) >= termConfirm {
+			st.end("the opener never confirmed the terminal")
+			return
 		}
 		e, ok := st.m.d.hub.lookup(keyOf(st.ref, st.session))
 		if !ok || !e.view.Live {
@@ -332,6 +347,21 @@ func (st *termStream) end(reason string) {
 		_ = st.conn.Notify(proto.NotifyTerminalEnd, proto.TerminalEnd{Stream: st.id, Reason: reason})
 		m.d.log.Info("terminal closed", "session", st.session, "reason", reason)
 	})
+}
+
+// confirm serves terminal.confirm for a stream of this connection: its
+// opener has the answer, so the stream stays.
+func (m *termManager) confirm(_ context.Context, c *proto.Conn, params json.RawMessage) (any, error) {
+	var p proto.TerminalStreamParams
+	if err := proto.DecodeParams(params, &p); err != nil {
+		return nil, err
+	}
+	st := m.get(p.Stream, c)
+	if st == nil {
+		return nil, proto.Errorf(proto.CodeNotFound, "no such terminal")
+	}
+	st.confirmed.Store(true)
+	return struct{}{}, nil
 }
 
 // input serves terminal.input: bytes for a control-mode stream of this

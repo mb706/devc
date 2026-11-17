@@ -106,3 +106,76 @@ func TestNotifierRetries(t *testing.T) {
 		t.Errorf("%d publishes after the restart", n-before)
 	}
 }
+
+// TestNotifierLostAnswer: a publish that reached ntfy although its answer
+// was lost stays pending; when the session leaves the state, its message
+// is cleared all the same (finding G5-17). Control: a pending record that
+// was never attempted (the machine has not named this hub its notifier)
+// is dropped without a clear.
+func TestNotifierLostAnswer(t *testing.T) {
+	oldBackoff, oldBase, oldTick := ntfyBackoff, notifyRetryBase, notifyRetryTick
+	ntfyBackoff, notifyRetryBase, notifyRetryTick = time.Millisecond, time.Hour, 50*time.Millisecond
+	t.Cleanup(func() { ntfyBackoff, notifyRetryBase, notifyRetryTick = oldBackoff, oldBase, oldTick })
+	h := newTestHub(t, "hub.test")
+	mach := h.issue(RoleMachine, "m1")
+	dev := h.issue(RoleDevice, "phone")
+	ntfy := newFakeNtfy(t)
+	writeHubConfig(t, h.dir, "[ntfy]\nurl = \""+ntfy.srv.URL+"\"\ntopic = \"devc-test\"\n")
+	addr, s, stop := startHub(t, h)
+	defer stop()
+	api := newAPIClient(t, addr, dev)
+	m := newFakeMachine(t)
+	s1, s2 := testSID(1), testSID(2)
+	for _, sid := range []string{s1, s2} {
+		m.add(sid, proto.TypeSessionStart, proto.SessionStart{Harness: "fake"})
+	}
+	conn := m.connect(addr, mach)
+	defer conn.Close()
+	waitFor(t, "the replay", func() bool { return api.detail(s2, "").Session.LastSeq == 1 })
+	clears := func(seq string) int {
+		n := 0
+		for _, r := range ntfy.requests() {
+			if r.method == "PUT" && (seq == "" || r.path == "/devc-test/"+seq+"/clear") {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Control: not the notifier, so nothing is attempted; the state ends
+	// and the record goes without a clear.
+	m.notify(m.add(s2, proto.TypeState, proto.State{State: "error"}))
+	waitFor(t, "a pending record", func() bool {
+		st, _ := s.Store().NoteStates()
+		return len(st) == 1 && st[0].State == NotePending && st[0].Tries == 0
+	})
+	m.notify(m.add(s2, proto.TypeState, proto.State{State: "working"}))
+	waitFor(t, "the record dropped", func() bool { st, _ := s.Store().NoteStates(); return len(st) == 0 })
+	if n := clears(""); n != 0 {
+		t.Errorf("%d clears for a message never attempted", n)
+	}
+
+	// Every attempt reaches ntfy, every answer is lost.
+	if err := conn.Call(context.Background(), proto.MethodHubRole, proto.HubRole{Notifier: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ntfy.mu.Lock()
+	ntfy.lose = ntfyAttempts
+	ntfy.mu.Unlock()
+	m.notify(m.add(s1, proto.TypeState, proto.State{State: "error"}))
+	var seq string
+	waitFor(t, "the publish, its answer lost", func() bool {
+		st, _ := s.Store().NoteStates()
+		if len(st) == 1 && st[0].State == NotePending && st[0].Tries > 0 {
+			seq = st[0].Seq
+			return true
+		}
+		return false
+	})
+	if posts := ntfy.requests(); len(posts) == 0 || posts[0].note.SequenceID != seq {
+		t.Fatalf("ntfy did not take the message: %+v", posts)
+	}
+	m.notify(m.add(s1, proto.TypeState, proto.State{State: "working"}))
+	waitFor(t, "the message cleared", func() bool { return clears(seq) == 1 })
+	waitFor(t, "the record gone", func() bool { st, _ := s.Store().NoteStates(); return len(st) == 0 })
+}

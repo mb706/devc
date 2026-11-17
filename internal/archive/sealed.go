@@ -5,15 +5,15 @@
 package archive
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
+
+	"github.com/mb706/devc/internal/proto"
 )
 
 // Sealed is an encrypted bundle of a realm's secrets (work order C17
@@ -164,14 +164,9 @@ func DecodeSealed(b []byte) (*Sealed, error) {
 	if len(b) > MaxSealed+4096 {
 		return nil, errors.New("the bundle is too large")
 	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
 	var s Sealed
-	if err := dec.Decode(&s); err != nil {
+	if err := proto.StrictJSON(b, &s); err != nil {
 		return nil, fmt.Errorf("invalid secrets bundle: %w", err)
-	}
-	if dec.More() {
-		return nil, errors.New("invalid secrets bundle: data after the object")
 	}
 	if err := s.Validate(); err != nil {
 		return nil, err

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -37,8 +38,10 @@ type fakeMachine struct {
 	readCap int
 	// list, when set, answers sessions.list instead (a hostile machine).
 	list func(p proto.SessionsListParams) (any, error)
-	// getHook, when set, runs (unlocked) before sessions.get answers.
-	getHook func(p proto.SessionsGetParams)
+	// getHook, when set, runs (unlocked) before sessions.get answers;
+	// getAnswer, when set, changes its answer (a hostile machine).
+	getHook   func(p proto.SessionsGetParams)
+	getAnswer func(res *proto.SessionsGetResult)
 	// sendDelay delays the answer to session.send.
 	sendDelay time.Duration
 }
@@ -169,7 +172,11 @@ func (m *fakeMachine) handlers() map[string]proto.Handler {
 			if len(evs) > p.Events {
 				evs = evs[len(evs)-p.Events:]
 			}
-			return proto.SessionsGetResult{Session: m.view(p.Session), Events: evs}, nil
+			res := proto.SessionsGetResult{Session: m.view(p.Session), Events: slices.Clone(evs)}
+			if m.getAnswer != nil {
+				m.getAnswer(&res)
+			}
+			return res, nil
 		},
 		proto.MethodEventsRead: func(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 			var p proto.EventsReadParams

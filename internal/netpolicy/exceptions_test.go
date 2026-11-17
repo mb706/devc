@@ -98,6 +98,7 @@ func TestExceptionStore(t *testing.T) {
 		`{"v":1,"exceptions":[{"id":"x000001","kind":"addr","host":"10.0.0.1","port":1,"addrs":["10.0.0.2"],"created":"2026-01-01T00:00:00Z","origin":"cli"}]}`,
 		`{"v":1,"exceptions":[{"id":"x000001","kind":"host","port":1,"created":"2026-01-01T00:00:00Z","origin":"box"}]}`,
 		`{"v":1,"exceptions":[{"id":"x000001","kind":"host","port":1,"created":"2026-01-01T00:00:00Z","origin":"cli"},{"id":"x000001","kind":"host","port":2,"created":"2026-01-01T00:00:00Z","origin":"cli"}]}`,
+		`{"v":1,"exceptions":[]}]`, `{"v":1,"exceptions":[]}}`, // nothing after the record (finding G4-24)
 	} {
 		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
 			t.Fatal(err)

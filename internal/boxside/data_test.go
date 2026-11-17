@@ -2,6 +2,8 @@ package boxside
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/mb706/devc/internal/safefs"
 )
 
 var testLayout = DataLayout{Root: "data", Inputs: []string{"raw"}, Work: []string{"scratch", "deep/work"}, Sealed: []string{"results"}}
@@ -297,6 +301,85 @@ func TestDataSealHostile(t *testing.T) {
 		t.Errorf("seal file %+v", res)
 	}
 	checkOwner(t, tw.p("data/results/single.txt"), 2000, 2000, 0o444)
+}
+
+// TestDataSealSwap swaps a regular file while it is being sealed, as a box
+// can: another file put at the name for the open and the original put back
+// before the check (finding G4-01) must leave no record and no digest.
+func TestDataSealSwap(t *testing.T) {
+	tw := newTestWorker(t)
+	tw.must(DataRequest{Op: OpSetup})
+	t.Cleanup(func() { sealHook = nil })
+	mv := func(from, to string) {
+		t.Helper()
+		if err := os.Rename(tw.p(from), tw.p(to)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tw.write("data/results/a.txt", "the box keeps writing this", 0o644)
+	tw.write("data/results/b.txt", "decoy", 0o644)
+	sealHook = func(step string) {
+		switch step {
+		case "open": // B goes to A's name for the open
+			mv("data/results/a.txt", "data/results/a.away")
+			mv("data/results/b.txt", "data/results/a.txt")
+		case "check": // and A comes back before the check
+			mv("data/results/a.txt", "data/results/b.txt")
+			mv("data/results/a.away", "data/results/a.txt")
+		}
+	}
+	res, err := tw.run(DataRequest{Op: OpSeal, Path: "results/a.txt", Digest: true, Content: true})
+	if err == nil || !strings.Contains(err.Error(), "was moved") {
+		t.Fatalf("swapped seal: %v, %+v", err, res)
+	}
+	if _, err := os.Stat(tw.p(".devc/seals.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("a record was written for a swapped seal: %v", readJSONL[SealRecord](t, tw.p(".devc/seals.jsonl")))
+	}
+	checkOwner(t, tw.p("data/results/a.txt"), 1000, 1000, 0o644) // still the box's
+	checkOwner(t, tw.p("data/results/b.txt"), 2000, 2000, 0o444) // sealed where it went
+
+	// A file put at the name for the open and left there is what is
+	// sealed, recorded and digested.
+	tw.write("data/results/c.txt", "original", 0o644)
+	tw.write("data/results/d.txt", "replacement", 0o644)
+	sealHook = func(step string) {
+		if step == "open" {
+			mv("data/results/d.txt", "data/results/c.txt")
+		}
+	}
+	res = tw.must(DataRequest{Op: OpSeal, Path: "results/c.txt", Digest: true, Content: true})
+	if len(res.Digests) != 1 || res.Size != int64(len("replacement")) || res.Digests[0].Content != fileContent("replacement") {
+		t.Errorf("seal of the replacement: %+v", res)
+	}
+	checkOwner(t, tw.p("data/results/c.txt"), 2000, 2000, 0o444)
+
+	// Control: without a swap the seal is recorded with the file's digest.
+	sealHook = nil
+	tw.write("data/results/e.txt", "plain", 0o644)
+	res = tw.must(DataRequest{Op: OpSeal, Path: "results/e.txt", Digest: true, Content: true})
+	if len(res.Digests) != 1 || res.Digests[0].Type != "file" || res.Digests[0].Content != fileContent("plain") {
+		t.Errorf("plain seal: %+v", res)
+	}
+	zone, err := safefs.OpenDir(tw.p("data/results"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zone.Close()
+	byName, err := digestEntry(zone, "e.txt", "results/e.txt", true)
+	if err != nil || byName != res.Digests[0] {
+		t.Errorf("digest from the descriptor %+v, by name %+v (%v)", res.Digests[0], byName, err)
+	}
+	recs := readJSONL[SealRecord](t, tw.p(".devc/seals.jsonl"))
+	if len(recs) != 2 || recs[0].Path != "results/c.txt" || recs[1].Path != "results/e.txt" {
+		t.Errorf("seal records %+v", recs)
+	}
+}
+
+// fileContent is the content hash of an entry that is one regular file.
+func fileContent(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	_, c := Digests([]DigestItem{{Path: ".", Type: 'f', Size: int64(len(content)), Sum: hex.EncodeToString(sum[:])}}, true)
+	return c
 }
 
 func readJSONL[T any](t *testing.T, file string) []T {

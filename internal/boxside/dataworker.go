@@ -389,12 +389,19 @@ func (s *treeStats) skip(rel, why string) {
 	s.rels = append(s.rels, rel)
 }
 
-// ownFile re-owns a regular file and sets its mode through a descriptor.
-func ownFile(d *safefs.Dir, name string, uid, gid int, mode func(uint32) uint32) (int64, error) {
+// openData opens the regular file d/name for reading without updating its
+// access time where the kernel allows that.
+func openData(d *safefs.Dir, name string) (*os.File, error) {
 	f, err := d.OpenFile(name, unix.O_RDONLY|unix.O_NOATIME, 0)
 	if errors.Is(err, unix.EPERM) {
 		f, err = d.OpenFile(name, unix.O_RDONLY, 0)
 	}
+	return f, err
+}
+
+// ownFile re-owns a regular file and sets its mode through a descriptor.
+func ownFile(d *safefs.Dir, name string, uid, gid int, mode func(uint32) uint32) (int64, error) {
+	f, err := openData(d, name)
 	if err != nil {
 		return 0, err
 	}
@@ -403,16 +410,27 @@ func ownFile(d *safefs.Dir, name string, uid, gid int, mode func(uint32) uint32)
 	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
 		return 0, err
 	}
+	return st.Size, ownOpen(f, st, uid, gid, mode)
+}
+
+// ownOpen re-owns the open file f, whose Fstat is st, and sets its mode.
+func ownOpen(f *os.File, st unix.Stat_t, uid, gid int, mode func(uint32) uint32) error {
 	if int(st.Uid) != uid || int(st.Gid) != gid {
 		if err := f.Chown(uid, gid); err != nil {
-			return 0, err
+			return err
 		}
 	}
 	if err := unix.Fchmod(int(f.Fd()), mode(st.Mode)); err != nil {
-		return 0, fmt.Errorf("chmod %s: %w", f.Name(), err)
+		return fmt.Errorf("chmod %s: %w", f.Name(), err)
 	}
-	return st.Size, nil
+	return nil
 }
+
+// sealHook, in tests, runs at two steps of sealing a regular file: "open",
+// before the worker opens the name, and "check", after it has re-owned the
+// open file and before it compares the name with it. A test swaps files
+// there as a box can while the worker runs.
+var sealHook func(step string)
 
 func sealFileMode(m uint32) uint32   { return m&0o555 | 0o444 }
 func unsealFileMode(m uint32) uint32 { return m&0o7777 | 0o200 }
@@ -524,6 +542,23 @@ func (w *DataWorker) seal(req DataRequest, res *DataResult, seal bool) error {
 	case !isType(st, unix.S_IFDIR) && !isType(st, unix.S_IFREG):
 		return fmt.Errorf("%s is a %s; only directories and regular files can be sealed", req.Path, safefs.TypeName(st.Mode))
 	}
+	// A regular file is opened once, and from then on everything is done to
+	// and decided by that descriptor's inode: whether it is sealed, its
+	// owner and mode, the check against the name and the digest. The box
+	// keeps running and may put another file at the name at any moment.
+	var file *os.File
+	if isType(st, unix.S_IFREG) {
+		if sealHook != nil {
+			sealHook("open")
+		}
+		if file, err = openData(zd, name); err != nil {
+			return err
+		}
+		defer file.Close()
+		if err := unix.Fstat(int(file.Fd()), &st); err != nil {
+			return err
+		}
+	}
 	sealed := int(st.Uid) == w.VaultUID
 	res.Already = sealed == seal
 	if !seal && !sealed {
@@ -535,17 +570,19 @@ func (w *DataWorker) seal(req DataRequest, res *DataResult, seal bool) error {
 		uid, gid = w.VaultUID, w.VaultGID
 	}
 	var ino unix.Stat_t
-	if isType(st, unix.S_IFREG) {
+	if file != nil {
 		mode := sealFileMode
 		if !seal {
 			mode = unsealFileMode
 		}
-		size, err := ownFile(zd, name, uid, gid, mode)
-		if err != nil {
+		if err := ownOpen(file, st, uid, gid, mode); err != nil {
 			return err
 		}
-		s.files, s.size = 1, size
+		s.files, s.size = 1, st.Size
 		ino = st
+		if sealHook != nil {
+			sealHook("check")
+		}
 	} else {
 		top, err := zd.Sub(name)
 		if err != nil {
@@ -579,19 +616,26 @@ func (w *DataWorker) seal(req DataRequest, res *DataResult, seal bool) error {
 			}
 		}
 	}
-	// The box could have renamed the entry before it was sealed; then the
-	// tree is sealed wherever it went, and the record would be wrong. For a
-	// directory ino is that of the directory sealed; for a regular file it
-	// is the Lstat before ownFile opened the name, so a file swapped in for
-	// the open and back before this check is not noticed.
+	// The box could have renamed the entry before it was sealed, or put
+	// another one at the name; then what was sealed is wherever it went, and
+	// a record would describe something else. ino is the inode of the open
+	// descriptor that was sealed (the directory's, or the regular file's),
+	// so the name must lead to it now. Sealed, it is the vault's in a sticky
+	// zone directory, so the box can no longer replace it.
 	if now, err := zd.Lstat(name); err != nil || now.Ino != ino.Ino || now.Dev != ino.Dev {
 		return fmt.Errorf("%s was moved while it was being processed; check the zone and try again", req.Path)
 	}
 	res.Files, res.Size, res.Skipped = s.files, s.size, s.skipped
 	if req.Digest && seal {
 		// The entry is read-only for the box now; its digest is that of
-		// what was sealed.
-		d, err := digestEntry(zd, name, req.Path, req.Content)
+		// what was sealed (a regular file's, read from the same descriptor).
+		var d EntryDigest
+		var err error
+		if file != nil {
+			d, err = digestOpen(file, req.Path, req.Content)
+		} else {
+			d, err = digestEntry(zd, name, req.Path, req.Content)
+		}
 		if err != nil {
 			return err
 		}

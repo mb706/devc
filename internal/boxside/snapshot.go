@@ -84,6 +84,34 @@ func (r *Repo) Snapshot(only, tmpDir string) SnapshotReport {
 // unborn branch gives a commit without a parent; a commit equal in tree
 // and parent to the worktree's current snapshot is reused, so a bank
 // records nothing new for a worktree that did not change.
+// snapshotSplit divides the untracked files of worktree w that git
+// lists (NUL-separated, ignored ones not included) into those a snapshot
+// takes and those it leaves out, each described with why: nested
+// repositories, files over SnapshotLimit, unreadable and special files.
+func snapshotSplit(w Worktree, others string) (add, skipped []string) {
+	for _, p := range strings.Split(others, "\x00") {
+		if p == "" {
+			continue
+		}
+		if strings.HasSuffix(p, "/") {
+			skipped = append(skipped, p+" (nested repository)")
+			continue
+		}
+		fi, err := os.Lstat(filepath.Join(w.Path, filepath.FromSlash(p)))
+		switch {
+		case err != nil:
+			skipped = append(skipped, p+" (unreadable)")
+		case fi.Mode().IsRegular() && fi.Size() > SnapshotLimit:
+			skipped = append(skipped, fmt.Sprintf("%s (%d MiB)", p, fi.Size()>>20))
+		case fi.Mode().IsRegular() || fi.Mode()&fs.ModeSymlink != 0:
+			add = append(add, p)
+		default:
+			skipped = append(skipped, p+" (not a regular file)")
+		}
+	}
+	return add, skipped
+}
+
 func (r *Repo) snapshotOne(w Worktree, tmpDir string) (SnapshotWorktree, error) {
 	var res SnapshotWorktree
 	f, err := os.CreateTemp(tmpDir, "devc-snapshot-*.index")
@@ -133,28 +161,7 @@ func (r *Repo) snapshotOne(w Worktree, tmpDir string) (SnapshotWorktree, error) 
 	if err != nil {
 		return res, err
 	}
-	var add []string
-	var skipped []string
-	for _, p := range strings.Split(others, "\x00") {
-		if p == "" {
-			continue
-		}
-		if strings.HasSuffix(p, "/") {
-			skipped = append(skipped, p+" (nested repository)")
-			continue
-		}
-		fi, err := os.Lstat(filepath.Join(w.Path, filepath.FromSlash(p)))
-		switch {
-		case err != nil:
-			skipped = append(skipped, p+" (unreadable)")
-		case fi.Mode().IsRegular() && fi.Size() > SnapshotLimit:
-			skipped = append(skipped, fmt.Sprintf("%s (%d MiB)", p, fi.Size()>>20))
-		case fi.Mode().IsRegular() || fi.Mode()&fs.ModeSymlink != 0:
-			add = append(add, p)
-		default:
-			skipped = append(skipped, p+" (not a regular file)")
-		}
-	}
+	add, skipped := snapshotSplit(w, others)
 	if len(add) > 0 {
 		if _, err := run(strings.Join(add, "\x00")+"\x00", "update-index", "--add", "-z", "--stdin"); err != nil {
 			return res, err

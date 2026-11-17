@@ -5,6 +5,7 @@
 package config
 
 import (
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -133,28 +134,51 @@ func validateGitHub(k checker, g Grants, app *GitHubApp) {
 	k.noDuplicates("grants.github_read", g.GitHubRead)
 }
 
-// validateGitHubSecrets refuses a project that would receive the realm's
-// GitHub credential (github.HostTokenSecret) or its App's private key
-// (github.app.key_secret) as an ordinary secret, through grants.secrets
-// or as a harness's credential (harnessOf: secret to harness), as
-// validateServiceGrants refuses a service's credential (finding X10 1).
-// With the key a box could mint its own tokens, past every check of
-// github.Minter.
-func validateGitHubSecrets(k checker, granted []string, harnessOf map[string]string, app *GitHubApp) {
-	type reserved struct{ holds, noun string }
-	held := map[string]reserved{github.HostTokenSecret: {"the realm's GitHub credential", "credential"}}
-	if app != nil && app.KeySecret != "" {
-		held[app.KeySecret] = reserved{"the private key of the realm's GitHub App (github.app.key_secret)", "key"}
+// A reservedSecret is a realm secret that no box may receive.
+type reservedSecret struct {
+	holds string // what it holds, for messages
+	noun  string // the word for it in "the … would enter the box"
+	// service is the service whose credential or cookie jar it is; empty
+	// for the GitHub credential and the App's key.
+	service string
+	jar     bool
+}
+
+// reservedSecret says whether the secret name of realm is reserved, and
+// what it holds: the realm's GitHub credential (github.HostTokenSecret),
+// the private key of its App (github.app.key_secret), a credential of one
+// of its services (value_secret, a cookie login's secrets) or a cookie jar
+// (any name starting with _jar.). With the GitHub credential or a
+// service's credential a box would get past the read facade's or the
+// service's rules; with the App's key it could mint its own tokens, past
+// every check of github.Minter.
+func (c *Config) reservedSecret(realm, name string) (reservedSecret, bool) {
+	if name == github.HostTokenSecret {
+		return reservedSecret{holds: "the realm's GitHub credential", noun: "credential"}, true
 	}
-	for i, s := range granted {
-		if r, ok := held[s]; ok {
-			k.bad(idx("grants.secrets", i), "the secret %s holds %s, and the project also receives it (grants.secrets): the %s would enter the box", s, r.holds, r.noun)
+	if r, ok := c.realms[realm]; ok && r.GitHub.App != nil && r.GitHub.App.KeySecret == name {
+		return reservedSecret{holds: "the private key of the realm's GitHub App (github.app.key_secret)", noun: "key"}, true
+	}
+	if svc, ok := strings.CutPrefix(name, JarSecretPrefix); ok {
+		return reservedSecret{holds: fmt.Sprintf("the cookie jar of service %q", svc), noun: "cookie jar", service: svc, jar: true}, true
+	}
+	for _, s := range c.Services(realm) {
+		if slices.Contains(s.CredentialSecrets(), name) {
+			return reservedSecret{holds: fmt.Sprintf("the credential of service %q", s.Name), noun: "credential", service: s.Name}, true
 		}
 	}
-	for _, s := range sortedKeys(harnessOf) {
-		if r, ok := held[s]; ok {
-			k.bad("harnesses", "the secret %s holds %s, and the project also receives it (as the credential of harness %s): the %s would enter the box", s, r.holds, harnessOf[s], r.noun)
-		}
+	return reservedSecret{}, false
+}
+
+// checkBoxSecret is the one guard for every way a project's configuration
+// names a realm secret for its box: an entry of grants.secrets, a
+// harness's credential and grants.github = "token:<secret>" (how says
+// which, for the message). A reserved secret (reservedSecret) is a problem
+// of the project, so nothing of it is served (findings X10 1, G4-02,
+// G4-03).
+func (c *Config) checkBoxSecret(k checker, key, realm, name, how string) {
+	if r, ok := c.reservedSecret(realm, name); ok {
+		k.bad(key, "the secret %s holds %s, and the project also receives it (%s): the %s would enter the box", name, r.holds, how, r.noun)
 	}
 }
 

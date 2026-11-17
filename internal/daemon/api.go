@@ -56,11 +56,12 @@ func (d *Daemon) handlers() map[string]proto.Handler {
 
 		proto.MethodNetSync: d.apiNetSync,
 
-		proto.MethodProjectsList:  d.apiProjects,
-		proto.MethodChangesGet:    d.apiChanges,
-		proto.MethodTerminalOpen:  d.term.open,
-		proto.MethodTerminalInput: d.term.input,
-		proto.MethodTerminalClose: d.term.close,
+		proto.MethodProjectsList:    d.apiProjects,
+		proto.MethodChangesGet:      d.apiChanges,
+		proto.MethodTerminalOpen:    d.term.open,
+		proto.MethodTerminalConfirm: d.term.confirm,
+		proto.MethodTerminalInput:   d.term.input,
+		proto.MethodTerminalClose:   d.term.close,
 	}
 }
 
@@ -282,14 +283,18 @@ func (d *Daemon) apiSession(_ context.Context, _ *proto.Conn, params json.RawMes
 	if n <= 0 {
 		n = defaultRecent
 	}
-	evs, err := lastEvents(e.file, min(n, maxRecent), maxPageBytes)
+	// The events end where the view does: the journal may already hold
+	// later ones the view has not folded yet, and a reader that applies the
+	// events above the view's LastSeq (the hub) must find them follow on
+	// from it (finding G5-08). Later events come as notifications.
+	v := e.view
+	evs, err := lastEvents(e.file, min(n, maxRecent), maxPageBytes, max(v.LastSeq, 1))
 	if err != nil {
 		return nil, err
 	}
 	if evs == nil {
 		evs = []proto.Event{}
 	}
-	v := e.view
 	d.decorate(&v)
 	return proto.SessionsGetResult{Session: v, Events: evs}, nil
 }

@@ -17,16 +17,19 @@ import (
 const (
 	MethodProjectsList = "projects.list"
 	MethodChangesGet   = "changes.get"
-	// A terminal stream: terminal.open starts it; terminal.input (control
-	// mode only) and terminal.close act on a stream the same connection
-	// opened. The daemon sends terminal.data, terminal.size and
-	// terminal.end notifications for it.
-	MethodTerminalOpen  = "terminal.open"
-	MethodTerminalInput = "terminal.input"
-	MethodTerminalClose = "terminal.close"
-	NotifyTerminalData  = "terminal.data"
-	NotifyTerminalSize  = "terminal.size"
-	NotifyTerminalEnd   = "terminal.end"
+	// A terminal stream: terminal.open starts it; terminal.confirm says
+	// that the opener has the answer and keeps the stream (a stream not
+	// confirmed within a short time is ended, finding G5-06);
+	// terminal.input (control mode only) and terminal.close act on a
+	// stream the same connection opened. The daemon sends terminal.data,
+	// terminal.size and terminal.end notifications for it.
+	MethodTerminalOpen    = "terminal.open"
+	MethodTerminalConfirm = "terminal.confirm"
+	MethodTerminalInput   = "terminal.input"
+	MethodTerminalClose   = "terminal.close"
+	NotifyTerminalData    = "terminal.data"
+	NotifyTerminalSize    = "terminal.size"
+	NotifyTerminalEnd     = "terminal.end"
 )
 
 // ProjectsListParams filter projects.list.

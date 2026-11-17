@@ -8,7 +8,10 @@
 // "data":…} (control mode only) and {"type":"visible","visible":bool}. The
 // hub sends {"type":"open",cols,rows,mode}, {"type":"size",cols,rows},
 // {"type":"ping"} (keeps proxies from closing a quiet stream) and
-// {"type":"end",reason} before it closes.
+// {"type":"end",reason} before it closes. Once the machine's answer to
+// terminal.open is accepted, the hub confirms the stream
+// (terminal.confirm); whatever ends the relay, a failed or unanswered open
+// included, it sends terminal.close (finding G5-06).
 //
 // Control mode is refused here unless hub.toml says [terminal] control =
 // true; the machine checks its own switch. A stream ends when the session
@@ -34,11 +37,13 @@ import (
 	"github.com/mb706/devc/internal/proto"
 )
 
-// Terminal relay limits (variables for tests).
+// Terminal relay limits (variables for tests). termOpenWait bounds the
+// machine's answer to terminal.open.
 var (
 	termHidden    = 30 * time.Minute
 	termPing      = 25 * time.Second
 	termSinkQueue = 512
+	termOpenWait  = 30 * time.Second
 )
 
 // termMsg is one message from the machine for a stream.
@@ -192,7 +197,16 @@ func (s *Server) apiTerminal(w http.ResponseWriter, r *http.Request) {
 	stream := newStreamID()
 	sink := l.addTerm(stream)
 	defer l.dropTerm(stream)
-	octx, ocancel := context.WithTimeout(ctx, 30*time.Second)
+	// The machine's stream is closed whatever ends this one, a failed or
+	// unanswered open included (a no-op when the machine never opened it or
+	// ended it already). An open whose answer is lost the machine ends
+	// itself, as it is never confirmed (finding G5-06).
+	defer func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer ccancel()
+		_, _ = l.forward(cctx, proto.MethodTerminalClose, proto.TerminalStreamParams{Stream: stream})
+	}()
+	octx, ocancel := context.WithTimeout(ctx, termOpenWait)
 	raw, err := l.forward(octx, proto.MethodTerminalOpen, proto.TerminalOpenParams{Stream: stream, Session: sid, Ref: s.sessionRef(machine, sid), Mode: mode})
 	ocancel()
 	var res proto.TerminalOpenResult
@@ -201,19 +215,17 @@ func (s *Server) apiTerminal(w http.ResponseWriter, r *http.Request) {
 			err = proto.Errorf(proto.CodeInternal, "invalid answer")
 		}
 	}
+	if err == nil {
+		cctx, ccancel := context.WithTimeout(ctx, 10*time.Second)
+		_, err = l.forward(cctx, proto.MethodTerminalConfirm, proto.TerminalStreamParams{Stream: stream})
+		ccancel()
+	}
 	if err != nil {
 		_, msg, _ := rpcStatus(err)
 		finish(msg)
 		return
 	}
 	s.log.Info("terminal opened", "machine", machine, "session", sid, "mode", mode, "cert", id.Name)
-	// The machine's stream is closed whatever ends this one (a no-op when
-	// the machine ended it).
-	defer func() {
-		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer ccancel()
-		_, _ = l.forward(cctx, proto.MethodTerminalClose, proto.TerminalStreamParams{Stream: stream})
-	}()
 	if sendJSON(map[string]any{"type": "open", "cols": res.Cols, "rows": res.Rows, "mode": mode}) != nil {
 		return
 	}

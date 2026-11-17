@@ -20,6 +20,7 @@ import (
 	"github.com/mb706/devc/internal/flock"
 	"github.com/mb706/devc/internal/names"
 	"github.com/mb706/devc/internal/paths"
+	"github.com/mb706/devc/internal/proto"
 	"github.com/mb706/devc/internal/safefs"
 )
 
@@ -204,10 +205,8 @@ func ParseManifest(b []byte) []Record {
 		if len(line) == 0 {
 			continue
 		}
-		dec := json.NewDecoder(bytes.NewReader(line))
-		dec.DisallowUnknownFields()
 		var r Record
-		if dec.Decode(&r) != nil || dec.More() || r.Check() != nil {
+		if proto.StrictJSON(line, &r) != nil || r.Check() != nil {
 			continue
 		}
 		out = append(out, r)

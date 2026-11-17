@@ -66,8 +66,9 @@ refs = ["file:web/app/store.js~function settleOutbox", "file:web/app/store.js~fu
 tests = ["file:web/check.sh"]
 
 [[invariant]]
-text = "A stream message or a detail read never replaces a session summary with one older by stream position; a snapshot replaces the summaries without that check."
+text = "No stream message, detail read or snapshot replaces a session summary with one older by stream position, and each session keeps the position of the summary it keeps."
 refs = ["file:web/app/store.js~function putSession", "file:web/app/store.js~export async function loadSnapshot"]
+tests = ["file:web/check.sh"]
 
 [[invariant]]
 text = "The development mode starts only with DEVC_DEV=1 and a loopback address, and no machine certificate reaches it."
@@ -226,7 +227,7 @@ The owner follows recent sessions of every machine from a phone or a browser: th
 
 **Start** ([[flow:web-app-start]]). `main.js` shows what local storage kept, asks `/api/me` who it is, and starts the stream module, which reads a snapshot (inbox, machines, requests) and opens the event stream from the snapshot's position.
 
-**Data flow.** [[diagram:data-flow]] One store ([[file:web/app/store.js~export const state|state]] in `store.js`) holds what the hub said; every screen re-renders through `useStore` after any change, batched once per microtask. Three things feed it: snapshot reads, stream messages ([[file:web/app/store.js~export function applyChange|applyChange]]) and a session's detail reads ([[file:web/app/store.js~export async function loadDetail|loadDetail]]). Each session summary remembers the stream position it is current at, and a stream message or detail read older than that does not replace it ([[finding:D1-12]]); a snapshot replaces them all without that check.
+**Data flow.** [[diagram:data-flow]] One store ([[file:web/app/store.js~export const state|state]] in `store.js`) holds what the hub said; every screen re-renders through `useStore` after any change, batched once per microtask. Three things feed it: snapshot reads, stream messages ([[file:web/app/store.js~export function applyChange|applyChange]]) and a session's detail reads ([[file:web/app/store.js~export async function loadDetail|loadDetail]]). Each session summary remembers the stream position it is current at, and a stream message or detail read older than that does not replace it ([[finding:D1-12]]); a snapshot keeps newer summaries too, with their positions.
 
 **The event stream** ([[file:web/app/stream.js~function open()|stream.js]]). One `EventSource` on `/api/stream`, naming up to 32 open sessions and the last change ID seen ([[internal/hub.Server.apiStream]]). Summaries, machines and requests arrive for everyone, events only for the named sessions. After an error the browser reconnects it by itself; when it closes for good, the app checks the login and reopens it with backoff from one second to a minute (when it gives up: [[flow:web-app-start]]). It reopens when the set of open sessions changes, and closes 30 seconds after the page is hidden.
 

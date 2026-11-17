@@ -38,6 +38,15 @@ func (u *upstreamSeen) last() *http.Request {
 	return u.reqs[len(u.reqs)-1]
 }
 
+func (u *upstreamSeen) lastBody() string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if len(u.body) == 0 {
+		return ""
+	}
+	return u.body[len(u.body)-1]
+}
+
 // testUpstream is a TLS server that answers by path.
 func testUpstream(t *testing.T) (*httptest.Server, *upstreamSeen) {
 	t.Helper()
@@ -245,12 +254,38 @@ func TestProxyLimits(t *testing.T) {
 	if !strings.HasPrefix(resp, "HTTP/1.1 413") || len(seen.reqs) != before {
 		t.Errorf("large body:\n%s", resp)
 	}
-	// A chunked body is cut at the limit.
-	chunk := fmt.Sprintf("%x\r\n%s\r\n", 1500, strings.Repeat("b", 1500))
-	resp = rawExchange(t, addr, "POST /api/x HTTP/1.1\r\nHost: "+addr+"\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"+chunk+"0\r\n\r\n")
-	if !strings.HasPrefix(resp, "HTTP/1.1 413") && !strings.HasPrefix(resp, "HTTP/1.1 502") {
-		t.Errorf("large chunked body:\n%s", resp)
+	// A body without a declared length is read whole before anything goes
+	// to the upstream, the credential included (finding G4-15): over the
+	// limit it is refused and the upstream sees nothing; within it, it goes
+	// out whole with its length, also when it is kept in a file.
+	chunked := func(parts ...string) string {
+		var b strings.Builder
+		for _, p := range parts {
+			fmt.Fprintf(&b, "%x\r\n%s\r\n", len(p), p)
+		}
+		return "POST /api/x HTTP/1.1\r\nHost: " + addr + "\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" + b.String() + "0\r\n\r\n"
 	}
+	creds := 0
+	addr = testProxy(t, srv, headerService(8601), func(ctx context.Context, p string) (Credential, error) { creds++; return staticCred(ctx, p) }, &logs, nil)
+	before = len(seen.reqs)
+	resp = rawExchange(t, addr, chunked(strings.Repeat("b", 600), strings.Repeat("c", 600)))
+	if !strings.HasPrefix(resp, "HTTP/1.1 413") || len(seen.reqs) != before || creds != 0 {
+		t.Errorf("large chunked body: %d requests reached the upstream, %d credentials\n%s", len(seen.reqs)-before, creds, resp)
+	}
+	old := bodyMemory
+	t.Cleanup(func() { bodyMemory = old })
+	for _, mem := range []int64{1 << 20, 100} {
+		bodyMemory = mem
+		resp = rawExchange(t, addr, chunked(strings.Repeat("d", 500), strings.Repeat("e", 524)))
+		if !strings.HasPrefix(resp, "HTTP/1.1 200") || seen.lastBody() != strings.Repeat("d", 500)+strings.Repeat("e", 524) || seen.last().ContentLength != 1024 {
+			t.Errorf("chunked body at the limit (memory %d): %q\n%s", mem, seen.lastBody(), resp)
+		}
+		resp = rawExchange(t, addr, chunked(strings.Repeat("f", 1025)))
+		if !strings.HasPrefix(resp, "HTTP/1.1 413") || seen.lastBody() == strings.Repeat("f", 1025) {
+			t.Errorf("chunked body one byte over (memory %d):\n%s", mem, resp)
+		}
+	}
+	bodyMemory = old
 	// Responses above the limit.
 	resp = rawExchange(t, addr, "GET /api/big HTTP/1.1\r\nHost: "+addr+"\r\nConnection: close\r\n\r\n")
 	if !strings.HasPrefix(resp, "HTTP/1.1 502") || !strings.Contains(resp, "larger than limits.max_body") {

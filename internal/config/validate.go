@@ -760,8 +760,13 @@ func validateProject(c *Config, p *Project, ps *problems) {
 	k.noDuplicates("requests.auto", p.Requests.Auto)
 
 	validateGrants(k, p.Grants)
+	// Every secret the configuration names for the box passes
+	// checkBoxSecret: the granted ones, the harnesses' credentials and a
+	// GitHub token's.
 	for i, s := range p.Grants.Secrets {
-		k.name(idx("grants.secrets", i), names.KindSecret, s)
+		if k.name(idx("grants.secrets", i), names.KindSecret, s) {
+			c.checkBoxSecret(k, idx("grants.secrets", i), p.Realm, s, "grants.secrets")
+		}
 	}
 	k.noDuplicates("grants.secrets", p.Grants.Secrets)
 	var app *GitHubApp
@@ -769,21 +774,22 @@ func validateProject(c *Config, p *Project, ps *problems) {
 		app = realm.GitHub.App
 	}
 	validateGitHub(k, p.Grants, app)
-	// Secrets the project's harnesses receive as their credential.
-	var harnessSecrets []string
+	if s := p.Grants.GitHubTokenSecret(); s != "" && names.ValidSecret(s) {
+		c.checkBoxSecret(k, "grants.github", p.Realm, s, fmt.Sprintf("as its GitHub token, grants.github = %q", p.Grants.GitHub))
+	}
 	harnessOf := map[string]string{}
 	for _, h := range p.Harnesses {
 		if m, ok := c.harnesses[h]; ok && m.Auth.Secret != "" {
-			harnessSecrets = append(harnessSecrets, m.Auth.Secret)
 			harnessOf[m.Auth.Secret] = h
 		}
 		if realm, ok := c.realms[p.Realm]; ok && realm.Harness[h].Secret != "" {
-			harnessSecrets = append(harnessSecrets, realm.Harness[h].Secret)
 			harnessOf[realm.Harness[h].Secret] = h
 		}
 	}
-	validateGitHubSecrets(k, p.Grants.Secrets, harnessOf, app)
-	validateServiceGrants(c, k, p, harnessSecrets)
+	for _, s := range sortedKeys(harnessOf) {
+		c.checkBoxSecret(k, "harnesses", p.Realm, s, "as the credential of harness "+harnessOf[s])
+	}
+	validateServiceGrants(c, k, p)
 
 	validateData(k, &p.Data)
 	k.shares("shares", p.Shares)

@@ -333,13 +333,22 @@ func decodeStrict(b []byte, v any) error {
 	if len(b) == 0 || b[0] != '{' {
 		return errors.New("not a JSON object")
 	}
+	return StrictJSON(b, v)
+}
+
+// StrictJSON decodes exactly one JSON value of b into v: unknown fields
+// are refused, and so is anything but white space after the value
+// (json.Decoder.More is false before a stray ']' or '}', findings G2-05,
+// G4-24). It is the decoder of reports and records from places a box or
+// a peer can write.
+func StrictJSON(b []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return errors.New("data after the JSON object")
+		return errors.New("data after the JSON value")
 	}
 	return nil
 }

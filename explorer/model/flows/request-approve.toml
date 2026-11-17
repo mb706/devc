@@ -36,7 +36,7 @@ at = "daemon"
 ref = "internal/daemon.requestService.create"
 checks = ["internal/proto.DecodeParams", "internal/requests.Validate", "internal/daemon.resolvedOf"]
 text = "The handler gets the project of the channel the stream arrived on; nothing in the request selects one. The parameters are decoded strictly and validated: only the fields of the kind, a known package manager, 1 to 32 package names matching a strict pattern, no duplicates. The project's configuration must be free of problems."
-detail = "A seal path is resolved against the project's data root ([[internal/data.Normalize]]). A refused request is stored nowhere: the box gets the error."
+detail = "A seal path is resolved against the project's data root as the box sees it, and a refusal names only that root ([[internal/data.NormalizeInBox]]). A refused request is stored nowhere: the box gets the error."
 
 [[step]]
 at = "daemon"

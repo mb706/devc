@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -241,20 +242,45 @@ func (g *digester) result(path, typ string) EntryDigest {
 
 // hashFile returns the length and SHA-256 of the regular file d/name.
 func hashFile(d *safefs.Dir, name string) (int64, string, error) {
-	f, err := d.OpenFile(name, unix.O_RDONLY|unix.O_NOATIME, 0)
-	if errors.Is(err, unix.EPERM) {
-		f, err = d.OpenFile(name, unix.O_RDONLY, 0)
-	}
+	f, err := openData(d, name)
 	if err != nil {
 		return 0, "", err
 	}
 	defer f.Close()
+	return hashOpen(f)
+}
+
+// hashOpen returns the length and SHA-256 of the open regular file f, read
+// from its start.
+func hashOpen(f *os.File) (int64, string, error) {
 	h := sha256.New()
-	n, err := io.Copy(h, f)
+	n, err := io.Copy(h, io.NewSectionReader(f, 0, 1<<62))
 	if err != nil {
 		return 0, "", err
 	}
 	return n, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// digestOpen describes the open regular file f as the entry path, as
+// digestEntry describes a regular file by its name.
+func digestOpen(f *os.File, path string, content bool) (EntryDigest, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
+		return EntryDigest{}, err
+	}
+	g := &digester{content: content}
+	it := DigestItem{Path: ".", Type: 'f', Size: st.Size}
+	if content {
+		n, sum, err := hashOpen(f)
+		if err != nil {
+			return EntryDigest{}, fmt.Errorf("computing the digest of %s: %w", path, err)
+		}
+		it.Size, it.Sum = n, sum
+	}
+	g.items = append(g.items, it)
+	g.files++
+	g.size += it.Size
+	return g.result(path, typeOf(st)), nil
 }
 
 // digestEntry describes parent/name as the entry path (relative to the

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -382,7 +383,7 @@ func parseSettings(name, format string, b []byte) (map[string]any, error) {
 		if err := dec.Decode(&v); err != nil {
 			return nil, err
 		}
-		if dec.More() {
+		if _, err := dec.Token(); err != io.EOF {
 			return nil, fmt.Errorf("trailing data after the JSON object")
 		}
 	case "toml":

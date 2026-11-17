@@ -376,12 +376,35 @@ func validateServices(c *Config, realm string, ps *problems) {
 	for _, s := range c.Services(realm) {
 		k := checker{file: s.File, ps: ps}
 		validateService(k, s)
+		switch s.Auth.Kind {
+		case ServiceAuthHeader:
+			c.checkServiceSecret(k, "auth.value_secret", s, s.Auth.ValueSecret)
+		case ServiceAuthCookie:
+			for i, n := range s.Auth.Secrets {
+				c.checkServiceSecret(k, idx("auth.secrets", i), s, n)
+			}
+		}
 		if s.Port > 0 {
 			if other, dup := ports[s.Port]; dup {
 				k.bad("port", "port %d is also the port of service %q: every service of a realm needs its own", s.Port, other)
 			}
 			ports[s.Port] = s.Name
 		}
+	}
+}
+
+// checkServiceSecret refuses a secret that service s's definition names
+// for its credential (value_secret, or a cookie login's secrets) when
+// reservedSecret reserves it for something else: the realm's GitHub
+// credential, its App's key or a cookie jar would go to the service's
+// upstream or into its login container. Services may share a credential:
+// none of them hands it to a box.
+func (c *Config) checkServiceSecret(k checker, key string, s *Service, name string) {
+	if !names.ValidSecret(name) {
+		return
+	}
+	if r, ok := c.reservedSecret(s.Realm, name); ok && (r.service == "" || r.jar) {
+		k.bad(key, "the secret %s holds %s, not a credential of this service: devc would hand it to the service's upstream or its login command", name, r.holds)
 	}
 }
 
@@ -444,9 +467,7 @@ func validateService(k checker, s *Service) {
 			k.bad("auth.secrets", "lists more than %d secrets", maxServiceSecrets)
 		}
 		for i, n := range a.Secrets {
-			if k.name(idx("auth.secrets", i), names.KindSecret, n) && strings.HasPrefix(n, JarSecretPrefix) {
-				k.bad(idx("auth.secrets", i), "%q is a cookie jar, not a login secret", n)
-			}
+			k.name(idx("auth.secrets", i), names.KindSecret, n)
 		}
 		k.noDuplicates("auth.secrets", a.Secrets)
 		if a.LoginPath != "" {
@@ -487,9 +508,10 @@ func validateService(k checker, s *Service) {
 }
 
 // validateServiceGrants checks grants.services of a project: services of
-// its realm that loaded, listed once, whose credential secrets the project
-// does not also receive, and whose ports are free in its box.
-func validateServiceGrants(c *Config, k checker, p *Project, harnessSecrets []string) {
+// its realm that loaded, listed once, and whose ports are free in its box.
+// That the project receives none of their credentials is checkBoxSecret's
+// part.
+func validateServiceGrants(c *Config, k checker, p *Project) {
 	k.noDuplicates("grants.services", p.Grants.Services)
 	for i, name := range p.Grants.Services {
 		key := idx("grants.services", i)
@@ -505,18 +527,8 @@ func validateServiceGrants(c *Config, k checker, p *Project, harnessSecrets []st
 			}
 			continue
 		}
-		for _, sec := range s.CredentialSecrets() {
-			if slices.Contains(p.Grants.Secrets, sec) || slices.Contains(harnessSecrets, sec) {
-				k.bad(key, "the secret %s holds the credential of service %q, and the project also receives it (grants.secrets or a harness): the credential would enter the box", sec, name)
-			}
-		}
 		if slices.Contains(p.Box.Ports, s.Port) {
 			k.bad(key, "service %q uses port %d in the box, which box.ports lists for the box's own server", name, s.Port)
-		}
-	}
-	for i, sec := range p.Grants.Secrets {
-		if strings.HasPrefix(sec, JarSecretPrefix) {
-			k.bad(idx("grants.secrets", i), "%q is a service's cookie jar; grant the service instead (grants.services)", sec)
 		}
 	}
 }

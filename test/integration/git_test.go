@@ -602,6 +602,73 @@ func TestGitAdopt(t *testing.T) {
 	}
 }
 
+// TestWorktreeRemoveUnpreserved: devc wt rm refuses, without --force, a
+// worktree that holds what no snapshot keeps (ignored files, an untracked
+// file over the snapshot's limit), and lists it, bounded and escaped (the
+// names come from the box); --force removes them and says how many
+// (findings G3-01, G3-19). Control: a worktree without such files is
+// removed without --force.
+func TestWorktreeRemoveUnpreserved(t *testing.T) {
+	e := gitSetup(t)
+	e.Timeout = 5 * time.Minute
+	up, _ := upstream(t) // its .gitignore ignores *.ign
+	ref := itest.RealmA + "/wtrm"
+	e.MustRun("project", "add", ref, "--from", "file://"+up, "--harness", "fake")
+
+	// Ignored files in a worktree git calls clean: 63 entries, one of them
+	// a directory, one named with a clipboard escape.
+	t1 := inBox(ref) + "/t1"
+	e.MustRun("wt", "new", "t1", ref)
+	boxSh(t, e, ref, "cd "+t1+` && echo secret > .env.ign && mkdir build.ign && echo x > build.ign/out &&
+		for i in $(seq 1 60); do : > f$i.ign; done && : > "$(printf 'evil\033]52;c;aGk=\007.ign')"`)
+	if got := boxSh(t, e, ref, "git -C "+t1+" status --porcelain"); got != "" {
+		t.Fatalf("t1 is not clean for git: %q", got)
+	}
+	res := e.Run("wt", "rm", "t1", ref)
+	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "63 files or directories") || !strings.Contains(res.Stderr, ".env.ign") ||
+		!strings.Contains(res.Stderr, "build.ign/") || !strings.Contains(res.Stderr, "more") || !strings.Contains(res.Stderr, "--force") {
+		t.Errorf("wt rm with ignored files: %d\n%s", res.ExitCode, res.Stderr)
+	}
+	if strings.ContainsAny(res.Stderr, "\x1b\x07") || !strings.Contains(res.Stderr, "evil�]52;c;aGk=�.ign") {
+		t.Errorf("a box's file name reached the terminal unescaped: %q", res.Stderr)
+	}
+	if n := strings.Count(res.Stderr, ".ign\n"); n > 25 {
+		t.Errorf("%d names listed, the list is not bounded", n)
+	}
+	if got := boxSh(t, e, ref, "cat "+t1+"/.env.ign"); got != "secret" {
+		t.Errorf("the ignored file after the refusal: %q", got)
+	}
+	if _, ok := wtLs(t, e, ref)["t1"]; !ok {
+		t.Error("t1 was removed")
+	}
+	res = e.MustRun("wt", "rm", "t1", ref, "--force")
+	if !strings.Contains(res.Stderr, "63 files or directories") {
+		t.Errorf("wt rm --force does not say how many it removed: %s", res.Stderr)
+	}
+	if _, ok := wtLs(t, e, ref)["t1"]; ok {
+		t.Error("t1 still listed after wt rm --force")
+	}
+
+	// An untracked file over the snapshot's limit.
+	e.MustRun("wt", "new", "t2", ref)
+	boxSh(t, e, ref, "head -c 11M /dev/zero > "+inBox(ref)+"/t2/big.dat")
+	if res := e.Run("wt", "rm", "t2", ref); res.ExitCode == 0 || !strings.Contains(res.Stderr, "big.dat (11 MiB)") {
+		t.Errorf("wt rm with a large untracked file: %d\n%s", res.ExitCode, res.Stderr)
+	}
+	if res := e.MustRun("wt", "rm", "t2", ref, "--force"); !strings.Contains(res.Stderr, "1 file or directory") {
+		t.Errorf("wt rm --force of the large file: %s", res.Stderr)
+	}
+
+	// Control: nothing of the kind, removed without --force.
+	e.MustRun("wt", "new", "t3", ref)
+	if res := e.MustRun("wt", "rm", "t3", ref); strings.Contains(res.Stderr, "file or director") {
+		t.Errorf("wt rm of a plain worktree: %s", res.Stderr)
+	}
+	if _, ok := wtLs(t, e, ref)["t3"]; ok {
+		t.Error("t3 still listed after wt rm")
+	}
+}
+
 // TestBankAll covers item 14 and banking at down.
 func TestBankAll(t *testing.T) {
 	e := gitSetup(t)

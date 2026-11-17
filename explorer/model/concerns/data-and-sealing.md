@@ -32,6 +32,7 @@ spec = ["doc:specs-v2.md#14.1", "doc:specs-v2.md#14.2"]
 tests = [
   "internal/boxside.TestDataSetup",
   "internal/boxside.TestDataSealHostile",
+  "internal/boxside.TestDataSealSwap",
   "internal/boxside.TestDataTrash",
   "internal/boxside.TestReadDataRequest",
   "internal/data.TestDecodeResult",
@@ -58,8 +59,9 @@ refs = ["internal/boxside.DataWorker.ownTree", "internal/safefs.Dir.Sub", "inter
 tests = ["internal/boxside.TestDataSealHostile", "test/integration.TestData"]
 
 [[invariant]]
-text = "A directory's seal is recorded only when the entry's name still refers to the directory the worker opened and sealed."
-refs = ["internal/boxside.DataWorker.seal"]
+text = "A seal is recorded, and its digest taken, only for the inode the worker opened and sealed: afterwards the entry's name must lead to the same device and inode as the open descriptor (a directory's, or a regular file's, opened once), and a regular file's digest is read from that descriptor."
+refs = ["internal/boxside.DataWorker.seal", "internal/boxside.ownOpen", "internal/boxside.digestOpen"]
+tests = ["internal/boxside.TestDataSealSwap"]
 
 [[invariant]]
 text = "The box can neither enter nor rename `.devc`, and a `.devc` the box created is refused rather than used."
@@ -72,9 +74,14 @@ refs = ["internal/boxside.DataWorker.rm", "internal/boxside.puller.displace", "i
 tests = ["internal/boxside.TestDataTrash", "internal/boxside.TestDataPullIn"]
 
 [[invariant]]
-text = "Every worker report is decoded strictly within 64 MiB, and its IDs, paths and digests are validated before the host uses them."
-refs = ["internal/data.DecodeResult", "internal/data.Service.work"]
+text = "Every worker report is decoded strictly within 64 MiB, with nothing after it, and its IDs, paths and digests are validated before the host uses them."
+refs = ["internal/data.DecodeResult", "internal/proto.StrictJSON", "internal/data.Service.work"]
 tests = ["internal/data.TestDecodeResult", "internal/data.TestDecodeDigests", "internal/boxside.TestReportBounds"]
+
+[[invariant]]
+text = "A seal path a box sends in a request is read against the data root as the box sees it, and its refusal names no host path."
+refs = ["internal/data.NormalizeInBox", "internal/daemon.requestService.create"]
+tests = ["internal/data.TestNormalizeInBox", "internal/daemon.TestRequestHostPaths"]
 
 [[diagram]]
 id = "entry-states"
@@ -155,7 +162,7 @@ A project's data tree holds what took days of compute: raw inputs, intermediate 
 
 ## How it works
 
-**Zones.** `[data]` in project.toml names a data root (default `data`, beside `main/`) and zone paths below it: `inputs`, `work`, `sealed`. Zones may not overlap; a project without zones has no data tree ([[internal/data.ProjectOf]]). The layout travels with every request and is checked again on both sides ([[internal/boxside.DataLayout.Validate]]). Path arguments are relative to the data root or absolute inside it, as the box or the host sees it; `..` is refused anywhere ([[internal/data.Normalize]]).
+**Zones.** `[data]` in project.toml names a data root (default `data`, beside `main/`) and zone paths below it: `inputs`, `work`, `sealed`. Zones may not overlap; a project without zones has no data tree ([[internal/data.ProjectOf]]). The layout travels with every request and is checked again on both sides ([[internal/boxside.DataLayout.Validate]]). Path arguments are relative to the data root or absolute inside it, as the box or the host sees it (a box's request: as the box sees it, [[internal/data.NormalizeInBox]]); `..` is refused anywhere ([[internal/data.Normalize]]).
 
 **Owners.** The [[term:vault]] is in-box UID 2000, an ID that no process in a box runs as or can take on, since boxes hold no capability ([[concern:isolation]]). A sticky directory lets only an entry's owner, or the directory's, rename or remove that entry, so the box cannot move anything the vault owns out of one. [[internal/boxside.DataWorker.layoutDirs]] makes the tree look like this:
 
@@ -189,11 +196,11 @@ podman run --rm --http-proxy=false --label devc.role=helper … --network none \
 
 The worker is the toolbox's devc, run as the container's root, which the box's mapping sends to one of your subordinate IDs; its capabilities count only in the container's user namespace, and the project directory (plus a read-only staging directory for restic restores and pulls) is all it can reach. restic runs from the same root filesystem but as the box user without capabilities ([[concern:savepoints]]). Only the data links are made in the box itself, by `devc box data-links` through `podman exec` as the box user ([[internal/data.Service.Links]]).
 
-**The protocol.** The host writes one [[internal/boxside.DataRequest]] as JSON to the worker's standard input; [[internal/boxside.ReadDataRequest]] reads at most 1 MiB, strictly, version 1. [[internal/boxside.DataWorker.Run]] validates the layout and the time again, and each operation its own fields (a seal target, trash and savepoint IDs, a staging name, sync targets). It prints one compact [[internal/boxside.DataResult]]; a failure is a `devc: ` line on standard error, which the host shows made printable ([[internal/data.workerError]]). The host captures at most 64 MiB, and [[internal/data.DecodeResult]] refuses unknown fields, a second value after the report (a stray `]` or `}` passes), another version or operation, negative counts, invalid IDs, paths that are not data paths, malformed digests and more than 100,000 of them. The worker caps the lists that grow with the tree ([[internal/boxside.capReport]]).
+**The protocol.** The host writes one [[internal/boxside.DataRequest]] as JSON to the worker's standard input; [[internal/boxside.ReadDataRequest]] reads at most 1 MiB, strictly, version 1. [[internal/boxside.DataWorker.Run]] validates the layout and the time again, and each operation its own fields (a seal target, trash and savepoint IDs, a staging name, sync targets). It prints one compact [[internal/boxside.DataResult]]; a failure is a `devc: ` line on standard error, which the host shows made printable ([[internal/data.workerError]]). The host captures at most 64 MiB, and [[internal/data.DecodeResult]] refuses unknown fields, anything but white space after the report ([[internal/proto.StrictJSON]]), another version or operation, negative counts, invalid IDs, paths that are not data paths, malformed digests and more than 100,000 of them. The worker caps the lists that grow with the tree ([[internal/boxside.capReport]]).
 
 **Setup** runs before a box is created or started, for the project and every data project it mounts read-write ([[internal/data.BoxHooks]]), and at the start of every worker operation that changes data (not of trash empty, savepoint drop and push-unstage). It creates what is missing, sets the owners and modes above, and refuses a layout path that is not a directory and a `.devc` that belongs to neither the vault nor the worker's root, which a crashed worker may leave. Input zones are mounted read-only over the project mount.
 
-**Sealing.** `devc seal <path>` takes a direct child of a sealed zone, a directory or a regular file ([[internal/boxside.DataLayout.SealTarget]]). The worker opens it without following links and hands a directory to the vault and makes it `0555` before it lists it; then [[internal/boxside.DataWorker.ownTree]] does the same top-down, removes the write and set-ID bits of each file through a descriptor, re-owns symlinks as links, and skips FIFOs, sockets and devices. Afterwards the entry's name must still be the directory it opened; a regular file's name is compared with its first `lstat` instead (below). A line goes to `.devc/seals.jsonl` with the relay's default-branch tip, and a digest to the manifest ([[concern:data-sync]]). Sealing a sealed entry walks it again, which completes an interrupted seal; it writes no seal record, and a manifest record only when `--content` asks for a content hash. `devc data unseal` walks bottom-up and gives the tree back with owner write bits. [[flow:data-seal]]
+**Sealing.** `devc seal <path>` takes a direct child of a sealed zone, a directory or a regular file ([[internal/boxside.DataLayout.SealTarget]]). The worker opens it without following links and hands a directory to the vault and makes it `0555` before it lists it; then [[internal/boxside.DataWorker.ownTree]] does the same top-down, removes the write and set-ID bits of each file through a descriptor, re-owns symlinks as links, and skips FIFOs, sockets and devices. A regular file is opened once, and its state, owner, mode and digest all go by that descriptor ([[internal/boxside.ownOpen]], [[internal/boxside.digestOpen]]). Then the name must lead to the sealed descriptor's inode, else no record. A line goes to `.devc/seals.jsonl` with the relay's default-branch tip, and a digest to the manifest ([[concern:data-sync]]). Sealing a sealed entry walks it again, which completes an interrupted seal; it writes no seal record, and a manifest record only when `--content` asks for a content hash. `devc data unseal` walks bottom-up and gives the tree back with owner write bits. [[flow:data-seal]]
 
 **The trash.** `devc data rm`, a pull and an in-place restore move entries by rename into `.devc/trash/<stamp>-<label>[-N]/payload/<path>`, with a `meta.json` of what moved; owners stay, so a sealed entry comes back sealed. `trash restore` checks every path first and refuses an occupied place ([[internal/boxside.DataWorker.trashRestore]]), but one that fails half-way cannot be repeated ([[doc:docs/dev/LEFTOVER.md#7]]); `trash empty` deletes, asking on a terminal. [[diagram:entry-states]]
 
@@ -204,7 +211,7 @@ The worker is the toolbox's devc, run as the container's root, which the box's m
 A box controls everything it owns in the tree, the names (any byte but NUL), symlinks, special files, its files' modes, and the timing: it keeps running while workers work.
 
 - **Tricking a worker.** Every step is one path component beneath a directory descriptor, never through a symlink ([[internal/safefs.Dir]]): `openat` with `O_NOFOLLOW`, `fchownat` without following, `fchmod` on descriptors, `renameat2` with `RENAME_NOREPLACE`, new files with `O_EXCL`. Trees deeper than 2,048 levels are refused.
-- **A swap during the seal.** A directory that belongs to the vault and is `0555` no longer changes, so the walk below it sees a still tree. A directory renamed before the worker took it is sealed wherever it went and the seal fails without a record. A regular file's name is checked against its `lstat` before the open: a box that swaps another file in for the open and back before the check gets a seal record and digest for a file it can still write ([[doc:docs/dev/LEFTOVER.md#7]]).
+- **A swap during the seal.** A directory that belongs to the vault and is `0555` no longer changes, so the walk below it sees a still tree. An entry renamed or swapped before the check is sealed wherever it went, and the seal fails without a record or digest; a file left at the name is the one sealed.
 - **What sealing does not do.** It is against the box, not you: `unseal`, `rm` and `trash empty` are your commands, and a command run with `devc root` (also an approved `package` request) has every capability in the box. A file a process opened for writing before the seal stays writable through that descriptor, so seal finished runs. The box can still read and copy sealed data. A hard-linked file is sealed under every name. Special files stay as they were. A worker killed half-way leaves a partly sealed entry until the next seal. Work zones have no protection beyond savepoints.
 - **Asking from the box.** A box can request a seal or a savepoint, approved by default (`requests.auto`), which the daemon carries out as `devc seal` and `devc save` ([[concern:requests-and-approval]]); no request unseals, removes, restores or empties the trash.
 - **Worker output.** The host uses report paths only after validation; skipped texts are made printable, and the CLI makes paths printable before printing them.

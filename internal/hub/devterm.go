@@ -95,6 +95,19 @@ func (m *devMachine) termInput(_ context.Context, _ *proto.Conn, params json.Raw
 	return struct{}{}, nil
 }
 
+// termConfirm accepts the hub's confirmation of an open stream; the
+// invented terminal does not end unconfirmed ones.
+func (m *devMachine) termConfirm(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
+	p, err := devDecode[proto.TerminalStreamParams](params)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := devTerms.Load(p.Stream); !ok {
+		return nil, proto.Errorf(proto.CodeNotFound, "no such terminal")
+	}
+	return struct{}{}, nil
+}
+
 func (m *devMachine) termClose(_ context.Context, _ *proto.Conn, params json.RawMessage) (any, error) {
 	p, err := devDecode[proto.TerminalStreamParams](params)
 	if err != nil {

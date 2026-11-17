@@ -48,9 +48,9 @@ tests = [
 related = ["security-model", "upstream", "requests-and-approval", "secrets", "box-lifecycle", "git-ratchet", "box-channel"]
 
 [[invariant]]
-text = "Unless a grant names its realm secret (`grants.secrets`, `token:github-token`), the host's GitHub credential is read only by the read facade and devc pr; facade answers and errors are scrubbed of it."
-refs = ["internal/github.HostToken", "internal/daemon.boxWorker.serveGitHub", "internal/cli.app.githubClient", "internal/github.Client.Scrub"]
-tests = ["internal/daemon.TestGitHubFacade", "test/integration.TestGitHub"]
+text = "The host's GitHub credential is read only by the read facade and devc pr (no grant may name its realm secret `github-token`); facade answers and errors are scrubbed of it."
+refs = ["internal/github.HostToken", "internal/daemon.boxWorker.serveGitHub", "internal/cli.app.githubClient", "internal/github.Client.Scrub", "internal/config.Config.checkBoxSecret"]
+tests = ["internal/daemon.TestGitHubFacade", "test/integration.TestGitHub", "internal/config.TestReservedSecrets"]
 
 [[invariant]]
 text = "A facade read is a GET of the project's repository, or of one that grants.github_read lists both in the box's capability record and now."
@@ -73,9 +73,9 @@ refs = ["internal/github.Minter.Token", "internal/github.Minter.verify", "intern
 tests = ["internal/github.TestMinter", "internal/github.TestPermissions"]
 
 [[invariant]]
-text = "Unless a grant names its secret, the App's private key is read only by the daemon, which parses it before any cache lookup and keeps every cache per project and per key."
-refs = ["internal/github.Minter.Token", "internal/github.KeyFingerprint"]
-tests = ["internal/github.TestMinter"]
+text = "The App's private key is read only by the daemon (no grant may name its secret), which parses it before any cache lookup and keeps every cache per project and per key."
+refs = ["internal/github.Minter.Token", "internal/github.KeyFingerprint", "internal/config.Config.checkBoxSecret"]
+tests = ["internal/github.TestMinter", "internal/config.TestReservedSecrets"]
 
 [[invariant]]
 text = "Through devc, a box opens a pull request or comments only by a request the user approved on the host's CLI, carried out by devc pr with the host's credential."
@@ -88,9 +88,9 @@ refs = ["internal/cli.checkPRBranch", "internal/cli.app.publishBranch"]
 tests = ["internal/cli.TestPRCreateChecksFirst"]
 
 [[invariant]]
-text = "No project receives the realm's GitHub credential or its App's private key as an ordinary secret: the configuration check refuses `grants.secrets`, or a harness's credential, that names `github-token` or the App's `key_secret`."
-refs = ["internal/config.validateGitHubSecrets"]
-tests = ["internal/config.TestGitHubSecretsNotGranted"]
+text = "No project receives the realm's GitHub credential or its App's private key: the one guard for reserved secrets refuses `grants.secrets`, a harness's credential and `grants.github = \"token:<secret>\"` that name `github-token` or the App's `key_secret`."
+refs = ["internal/config.Config.checkBoxSecret", "internal/config.Config.reservedSecret"]
+tests = ["internal/config.TestGitHubSecretsNotGranted", "internal/config.TestReservedSecrets"]
 
 [[diagram]]
 id = "github-credentials"
@@ -279,13 +279,11 @@ A box controls every field of a read and of a request, when and how often it ask
 
 - **Reading other repositories.** A repository is named only as `owner/name` or in an API path, checked against GitHub's name rules, and must be the project's or listed in `grants.github_read` at the start and now. The project's own is its upstream as configured now, without a capability record.
 - **Shaping the request.** Unknown parameter fields are refused when the parameters are decoded; [[internal/github.ParseAPIPath]] wants `repos/<owner>/<repo>[/…]` in printable ASCII without `%`, `\`, `#`, spaces, or empty, `.` and `..` segments. Every request is a GET built on the API base. What stays open is whatever the host's credential may GET below the allowed repositories.
-- **Getting the credential.** It is in no file, variable or argument of the box; answers, errors and the daemon's log never carry it.
+- **Getting the credential.** It is in no file, variable or argument of the box; answers, errors and the daemon's log never carry it. No grant may name `github-token` or the App's key secret, `token:<secret>` included ([[internal/config.Config.checkBoxSecret]]).
 - **Spending the user's rate limit.** 120 reads and 120 token requests a minute per project, 5 MiB per answer.
 - **Publishing.** Only the local CLI may approve `pr` and `comment` ([[internal/requests.MayDecide]]). Branch, title, body and base are the box's: approving pushes that branch to the upstream under the same name, a fast-forward only, unless it is not in the relay, is the base, a default branch or protected ([[internal/cli.checkPRBranch]], [[doc:docs/dev/LEFTOVER.md#github-service-logins-the-desktop-x10]], item 3). Box-chosen text goes only into `--flag=value` arguments before the `--` that ends the options, so none of it becomes an option or names the project ([[internal/daemon.requestCommands]]).
 - **A token in the box.** In the token modes the box holds a credential: GitHub, not the relay's branch policy, decides what it may do, and with `pull_requests` or `issues` write it opens pull requests and comments unasked ([[doc:docs/dev/LEFTOVER.md#5]]). A minted token covers one repository by ID; `workflows` is never granted ([[internal/github.CheckPermission]]). A stored `token:` secret is whatever the user made it. After a change of the mode, the upstream or the App a box gets no token until it is brought up again.
 - **The App's key.** It stays in the daemon; no project receives a token cached for another ([[finding:D2-09]]); an installation of another account, or a probe that sees another repository, is refused ([[finding:D2-03]]).
-
-The configuration check refuses `github-token` and the App's key secret in `grants.secrets` or as a harness's credential ([[internal/config.validateGitHubSecrets]]); `token:<secret>` still returns any realm secret ([[doc:docs/dev/LEFTOVER.md#7]]).
 
 ## Decisions that are not obvious
 

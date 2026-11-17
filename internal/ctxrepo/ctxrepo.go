@@ -17,7 +17,6 @@
 package ctxrepo
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -291,13 +290,5 @@ func decodeStrict(b []byte, v any) error {
 	if len(b) > maxBundleResult {
 		return errors.New("too large")
 	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if dec.More() {
-		return errors.New("data after the report")
-	}
-	return nil
+	return proto.StrictJSON(b, v)
 }

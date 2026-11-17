@@ -183,8 +183,7 @@ func tail(b []byte) string {
 }
 
 // DecodeResult decodes and validates a worker's result: no unknown fields,
-// no second value after it (Decoder.More does not see a stray ']' or '}'),
-// the expected operation, valid IDs and paths, sane
+// nothing after it (proto.StrictJSON), the expected operation, valid IDs and paths, sane
 // counts, well-formed digests. The skipped texts are made printable; paths
 // are only checked to be data paths, which may hold any byte but NUL, so
 // whoever prints one makes it printable.
@@ -192,14 +191,9 @@ func DecodeResult(b []byte, op string) (*boxside.DataResult, error) {
 	if len(b) > maxResult {
 		return nil, fmt.Errorf("larger than %d bytes", maxResult)
 	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
 	var r boxside.DataResult
-	if err := dec.Decode(&r); err != nil {
+	if err := proto.StrictJSON(b, &r); err != nil {
 		return nil, err
-	}
-	if dec.More() {
-		return nil, errors.New("unexpected data after the report")
 	}
 	if r.V != boxside.DataProtoVersion || r.Op != op {
 		return nil, fmt.Errorf("version %d, operation %q (want %d, %q)", r.V, r.Op, boxside.DataProtoVersion, op)

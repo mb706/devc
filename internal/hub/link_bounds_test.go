@@ -2,6 +2,7 @@ package hub
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -137,6 +138,81 @@ func TestRefreshBounds(t *testing.T) {
 // hold fetch nothing; gaps of fresh sessions are read again only within the
 // capacity (stored plus outstanding), by at most resyncWorkers at a time,
 // with a bounded queue (finding C2-02).
+// TestResyncSuccession: the events of a re-read must follow one another
+// on from the machine's view without gap or repeat, be valid events of the
+// session and no more than asked for; otherwise the link is closed and the
+// hub keeps the session as it held it (finding G5-08). Control: the same
+// re-read untouched is applied.
+func TestResyncSuccession(t *testing.T) {
+	sid := testSID(1)
+	for name, change := range map[string]func(res *proto.SessionsGetResult){
+		"gap":      func(res *proto.SessionsGetResult) { res.Events = slices.Delete(res.Events, 4, 5) },
+		"repeat":   func(res *proto.SessionsGetResult) { res.Events = slices.Insert(res.Events, 4, res.Events[4]) },
+		"order":    func(res *proto.SessionsGetResult) { res.Events[4], res.Events[5] = res.Events[5], res.Events[4] },
+		"renumber": func(res *proto.SessionsGetResult) { res.Events[6].Seq = 9 },
+		"after the view": func(res *proto.SessionsGetResult) {
+			res.Session.LastSeq = 2
+			res.Events = res.Events[3:]
+		},
+		"another session": func(res *proto.SessionsGetResult) { res.Events[4].Session = testSID(2) },
+		"too many": func(res *proto.SessionsGetResult) {
+			extra := make([]proto.Event, TailEvents)
+			for i := range extra {
+				extra[i] = res.Events[0]
+				extra[i].Seq = int64(i - TailEvents + 1)
+			}
+			res.Events = append(extra, res.Events...)
+		},
+		"control": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestHub(t, "hub.test")
+			mach := h.issue(RoleMachine, "m1")
+			dev := h.issue(RoleDevice, "phone")
+			addr, s := runHub(t, h)
+			api := newAPIClient(t, addr, dev)
+			m := newFakeMachine(t)
+			conn := m.connect(addr, mach)
+			t.Cleanup(func() { conn.Close() })
+			lastSeq := func() int64 {
+				rows, err := s.Store().Sessions(SessionFilter{Machine: "m1", Session: sid})
+				if err != nil || len(rows) != 1 {
+					return -1
+				}
+				return rows[0].LastSeq
+			}
+			m.notify(m.add(sid, proto.TypeSessionStart, proto.SessionStart{Harness: "fake"}))
+			for i := 0; i < 2; i++ {
+				m.notify(m.add(sid, proto.TypeNote, proto.Note{Text: "held"}))
+			}
+			waitFor(t, "three events", func() bool { return lastSeq() == 3 })
+			m.mu.Lock()
+			m.getAnswer = change
+			m.mu.Unlock()
+			// Events 4 to 7; only 7 is told: a gap, so the session is read again.
+			for i := 0; i < 3; i++ {
+				m.add(sid, proto.TypeNote, proto.Note{Text: "missed"})
+			}
+			m.notify(m.add(sid, proto.TypeNote, proto.Note{Text: "told"}))
+			if change == nil {
+				waitFor(t, "the re-read applied", func() bool { return lastSeq() == 7 })
+				if !machineOnline(t, api) {
+					t.Error("the link closed after a valid re-read")
+				}
+				return
+			}
+			waitFor(t, "the link closed", func() bool { return !machineOnline(t, api) })
+			if n := lastSeq(); n != 3 {
+				t.Errorf("the hub's session after a refused re-read: last seq %d", n)
+			}
+			evs, err := s.Store().Events("m1", sid, 0, 100)
+			if err != nil || len(evs) != 3 {
+				t.Errorf("the hub's events after a refused re-read: %d %v", len(evs), err)
+			}
+		})
+	}
+}
+
 func TestResyncBounds(t *testing.T) {
 	setup := func(t *testing.T) (*fakeMachine, *Server, apiClient, *proto.Conn) {
 		h := newTestHub(t, "hub.test")

@@ -5,9 +5,7 @@
 package netpolicy
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,6 +15,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/mb706/devc/internal/proto"
 )
 
 // Results of one canary probe.
@@ -190,9 +190,7 @@ func EvaluateCanary(report []byte, want []netip.Addr, port, accepted int) error 
 		return errors.New("the canary report is too large")
 	}
 	var probes []Probe
-	dec := json.NewDecoder(bytes.NewReader(report))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&probes); err != nil {
+	if err := proto.StrictJSON(report, &probes); err != nil {
 		return fmt.Errorf("the canary report cannot be parsed: %w", err)
 	}
 	seen := map[string]bool{}

@@ -94,13 +94,13 @@ text = "The layout is applied first: owners and modes of the project directory, 
 at = "helper"
 ref = "internal/boxside.DataWorker.ownTree"
 text = "The entry must be a directory or a regular file, not a symlink. A directory is opened without following a link, handed to the vault and made `0555` before it is listed, so nothing in the box can add, remove or swap its entries any more. Then the walk goes top-down, one descriptor per directory: each subdirectory is handed over and made read-only before it is entered, each file re-owned without its write and set-ID bits, symlinks re-owned as links, FIFOs, sockets and devices skipped and reported."
-detail = "An entry the vault owns already is walked again (completing an interrupted seal) and reported as sealed already. A regular file directly in the zone is re-owned and loses its write bits through a descriptor. Nothing reached through a symlink is touched; trees deeper than 2,048 levels are refused."
+detail = "An entry the vault owns already is walked again (completing an interrupted seal) and reported as sealed already. A regular file directly in the zone is opened once; whether it is sealed already, its new owner and mode all go by that descriptor ([[internal/boxside.ownOpen]]). Nothing reached through a symlink is touched; trees deeper than 2,048 levels are refused."
 
 [[step]]
 at = "helper"
 ref = "internal/boxside.digestEntry"
-text = "A directory's name must still refer to the directory the worker opened; if the box moved it first, the seal fails here without a record. Then the digest of what was sealed: every file and symlink with its size, and its content hash with `--content`."
-detail = "For a regular file the name is compared with the `lstat` made before the file was opened, not with the file the worker re-owned: a box that swaps another file in for the open and the original back before this check passes it, with a record and a digest of a file it can still write ([[concern:data-and-sealing]])."
+text = "The entry's name must still lead to the device and inode of the descriptor the worker sealed, a directory's or a regular file's; if the box moved or swapped it first, the seal fails here without a record. Then the digest of what was sealed: every file and symlink with its size, and its content hash with `--content`."
+detail = "A regular file's digest is read from the descriptor it was sealed through ([[internal/boxside.digestOpen]]). A file swapped in for the open and the original put back before this check is sealed wherever it went, and the check fails."
 
 [[step]]
 at = "helper"

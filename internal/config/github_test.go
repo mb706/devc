@@ -85,3 +85,60 @@ func TestGitHubSecretsNotGranted(t *testing.T) {
 		})
 	}
 }
+
+// TestReservedSecrets: one guard (Config.checkBoxSecret, on
+// Config.reservedSecret) refuses every way a project names a reserved
+// secret for its box, grants.github = "token:<secret>" included, and a
+// service's credential or a cookie jar for every project of the realm,
+// granted the service or not; a service's definition may not use the
+// GitHub credential, the App's key or a cookie jar (findings G4-02,
+// G4-03). Controls: a token in a secret of its own and another secret
+// granted beside a service; two services sharing a credential.
+func TestReservedSecrets(t *testing.T) {
+	const hello = "realms/demo/projects/hello/project.toml"
+	const wiki = "realms/demo/services/wiki/service.toml"
+	const app = "[github.app]\napp_id = 42\nkey_secret = \"app-key\"\n"
+	wikiWith := func(secret string) string { return strings.Replace(goodService, `"WIKI_TOKEN"`, `"`+secret+`"`, 1) }
+	shared := strings.Replace(goodService, "port = 8601", "port = 8603", 1)
+	for _, tc := range []struct {
+		name, realm, service, service2, project, file, key, want string
+	}{
+		{"control", app, goodService, shared, "github = \"token:gh_pat\"\nservices = [\"wiki\"]\nsecrets = [\"other\"]", "", "", ""},
+		{"token host credential", "", "", "", `github = "token:github-token"`, hello, "grants.github",
+			`the secret github-token holds the realm's GitHub credential, and the project also receives it (as its GitHub token, grants.github = "token:github-token"): the credential would enter the box`},
+		{"token app key", app, "", "", `github = "token:app-key"`, hello, "grants.github", "holds the private key of the realm's GitHub App (github.app.key_secret), and the project also receives it (as its GitHub token"},
+		{"token service credential", "", goodService, "", `github = "token:WIKI_TOKEN"`, hello, "grants.github", `holds the credential of service "wiki", and the project also receives it (as its GitHub token`},
+		{"token cookie jar", "", "", "", `github = "token:_jar.wiki"`, hello, "grants.github", `holds the cookie jar of service "wiki"`},
+		{"service credential not granted the service", "", goodService, "", `secrets = ["WIKI_TOKEN"]`, hello, "grants.secrets[0]", `holds the credential of service "wiki", and the project also receives it (grants.secrets)`},
+		{"service credential granted with it", "", goodService, "", "services = [\"wiki\"]\nsecrets = [\"WIKI_TOKEN\"]", hello, "grants.secrets[0]", `holds the credential of service "wiki"`},
+		{"service uses the host credential", "", wikiWith("github-token"), "", "", wiki, "auth.value_secret", "the secret github-token holds the realm's GitHub credential, not a credential of this service"},
+		{"service uses the app key", app, wikiWith("app-key"), "", "", wiki, "auth.value_secret", "the private key of the realm's GitHub App"},
+		{"service uses a cookie jar", "", wikiWith("_jar.intranet"), "", "", wiki, "auth.value_secret", `the cookie jar of service "intranet"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := copyExample(t)
+			if tc.realm != "" {
+				appendTo(t, dir, "realms/demo/realm.toml", tc.realm)
+			}
+			if tc.service != "" {
+				write(t, dir, wiki, tc.service)
+			}
+			if tc.service2 != "" {
+				write(t, dir, "realms/demo/services/wiki2/service.toml", tc.service2)
+			}
+			if tc.project != "" {
+				appendTo(t, dir, hello, "[grants]\n"+tc.project)
+			}
+			_, probs := load(t, dir)
+			if tc.want == "" {
+				if len(probs) > 0 {
+					t.Errorf("problems: %v", probs)
+				}
+				return
+			}
+			if len(probs) != 1 || !strings.HasSuffix(probs[0].File, tc.file) || probs[0].Key != tc.key || !strings.Contains(probs[0].Message, tc.want) {
+				t.Errorf("problems %v, want only %s: %s: …%s…", probs, tc.file, tc.key, tc.want)
+			}
+		})
+	}
+}

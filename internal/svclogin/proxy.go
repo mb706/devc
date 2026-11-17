@@ -13,6 +13,7 @@
 package svclogin
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -127,6 +129,30 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusRequestEntityTooLarge, fmt.Sprintf("devc service %s: the request body is larger than limits.max_body (%s)", s.Name, s.Limits.MaxBody))
 		return
 	}
+	// A body without a declared length is read whole, through the limit,
+	// before the credential is fetched and anything goes to the upstream
+	// (finding G4-15): one over the limit never reaches it. A declared
+	// length is enforced by the server's reader, which stops there.
+	if r.ContentLength < 0 && r.Body != nil && r.Body != http.NoBody {
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(s.TimeoutDuration()))
+		body, n, err := readBody(r.Body, maxBody)
+		_ = rc.SetReadDeadline(time.Time{})
+		var mbe *http.MaxBytesError
+		switch {
+		case errors.As(err, &mbe):
+			fail(http.StatusRequestEntityTooLarge, fmt.Sprintf("devc service %s: the request body is larger than limits.max_body (%s)", s.Name, s.Limits.MaxBody))
+			return
+		case err != nil:
+			fail(http.StatusBadRequest, fmt.Sprintf("devc service %s: the request body could not be read: %s", s.Name, printable(truncate(err.Error(), 200))))
+			return
+		}
+		defer body.Close()
+		r.Body, r.ContentLength, r.TransferEncoding = body, n, nil
+		if n == 0 {
+			r.Body = http.NoBody
+		}
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), s.TimeoutDuration())
 	defer cancel()
 	cred, err := req.Credential(ctx, req.Head.Path)
@@ -169,6 +195,46 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	rp.ServeHTTP(sw, r)
+}
+
+// bodyMemory is how much of a request body readBody keeps in memory; the
+// rest goes to a temporary file. A variable for tests.
+var bodyMemory int64 = 1 << 20
+
+// readBody reads body whole, at most max bytes (else an
+// *http.MaxBytesError), and returns it to be sent again with its length:
+// up to bodyMemory in memory, a longer one in a temporary file that is
+// removed at once (only the open descriptor keeps it). The caller closes
+// what it returns.
+func readBody(body io.Reader, max int64) (io.ReadCloser, int64, error) {
+	limited := &io.LimitedReader{R: body, N: max + 1}
+	var buf bytes.Buffer
+	n, err := io.CopyN(&buf, limited, min(bodyMemory, max)+1)
+	switch {
+	case err == io.EOF:
+		return io.NopCloser(&buf), n, nil
+	case err != nil:
+		return nil, 0, err
+	case n > max:
+		return nil, 0, &http.MaxBytesError{Limit: max}
+	}
+	f, err := os.CreateTemp("", "devc-service-body-*")
+	if err != nil {
+		return nil, 0, err
+	}
+	os.Remove(f.Name())
+	n, err = io.Copy(f, io.MultiReader(&buf, limited))
+	if err == nil && n > max {
+		err = &http.MaxBytesError{Limit: max}
+	}
+	if err == nil {
+		_, err = f.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		f.Close()
+		return nil, 0, err
+	}
+	return f, n, nil
 }
 
 func (p *Proxy) transport() http.RoundTripper {

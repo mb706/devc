@@ -50,7 +50,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | X13 Explorer content: synthesis | done | 68af4f6 |
 | Accuracy review G6 + corrections | done | 4ef8ae2 |
 | C20a Defects found while writing the explorer: high severity | done | b4f63da |
-| C20b Defects: rule violations of medium severity | done | |
+| C20b Defects: rule violations of medium severity | done | 79dc71a |
+| C20c Defects: gaps the accuracy review found | done | |
 
 ## Resuming
 
@@ -1456,3 +1457,22 @@ The four confirmed findings of the closing check (`docs/dev/reviews/F1-review.md
 - **Explorer model.** `box-lifecycle`, `daemon`, `git-ratchet`, `allowlist-proxy`, `github`, `fleet-archive`, `web-app`, `toolbox-and-harnesses`, `secrets`, `configuration`, `network-levels`, `security-model` (seven rows out of its gaps table, one narrowed to `token:`; rules 1 and 6); flows `box-up`, `box-git-push`, `request-pr`, `web-send`, `archive-upload`, `harness-login`, `allowlist-connect`, `network-install`, `secret-request`, `start-here`; glossary (`pending-record` new; `capability-record`, `allowlist`, `bank-ref`, `outbox`); `layout.toml`. Nine new invariants with code and tests. `./dev explore --check`: 0 errors, 0 warnings.
 - **Docs.** `docs/guide.md`: running boxes and restarts, login output, pr create checks, GitHub secrets, pending push records, proxy fail-closed, realm refusals in the archive, prompt settling in the web app.
 - **Exercise it.** `./dev test ./internal/box/ ./internal/daemon/ ./internal/gitx/ ./internal/cli/ ./internal/fleet/ ./internal/config/ ./internal/harness/ ./internal/proto/`; `web/check.sh` (after `./dev build`); `./dev itest -run '^(TestBoxLifecycle|TestNetworkPlainStart|TestSessions|TestHarnessLaunchAndSecrets|TestHarnessState|TestSecretsDaemon|TestDaemon|TestDaemonHostileEndpoints|TestRelayService|TestEscape|TestGit|TestNetworkAllowlist|TestGitHub|TestFleet|TestWebApp)$' -v`.
+
+### C20c Defects found by the accuracy review: gaps between the pages and the code
+
+- **Done.** G4-01, G4-02/G4-03, G3-01/G3-19, G4-17, G4-15, G2-05 (with G4-24), G2-01, G5-06, G5-07, G5-08 and G5-17 fixed as the work order's table decides; per item in `reviews/C20-response.md`, marked in `LEFTOVER.md` part 7.
+- **Seal** (`internal/boxside/dataworker.go`): a regular file is opened once; state, owner, mode (`ownOpen`) and digest (`digestOpen`) go by the descriptor, and the name must lead to its inode at the end. Test hook `sealHook`.
+- **Reserved secrets** (`internal/config/grants.go`): `Config.reservedSecret` (GitHub credential, App key, every service's credential, every `_jar.`) and the one guard `Config.checkBoxSecret` for `grants.secrets`, harness credentials and `token:`; `Config.checkServiceSecret` for service definitions. `validateGitHubSecrets` removed.
+- **`devc wt rm`**: box-side `Repo.Unpreserved` and a JSON `WorktreeRemoval` report (`devc box worktree rm --json`), decoded strictly by `gitx.Service.WorktreeRemove`; refusal lists 20 names, `--force` counts. `snapshotSplit` shared with snapshots.
+- **Before-session savepoints**: `devc save --before-session` (new flag); `daemon.commander.saveBeforeSession` in `runStart`, bounded by 30 minutes.
+- **Service bodies**: `svclogin.readBody` reads a body without a length through `max_body` before the credential (memory to 1 MiB, then an unlinked temporary file).
+- **Strict decoding**: `proto.StrictJSON`, used by `ParseLive`, `DecodeResult`, `ParseManifest`, git, context, archive, sealed-bundle, binding, exceptions, canary and data-links decoders.
+- **Host paths to a box**: `data.NormalizeInBox`; `daemon.boxView` on request results returned by `host.request.status`.
+- **Terminals**: new RPC `terminal.confirm` (hub allowlist, dev machine); the hub sends `terminal.close` on every path; the daemon ends streams not confirmed within 30 s (`termConfirm`).
+- **Hub re-reads**: `hub.checkTail` (contiguous, valid, on from the view, ≤ 500) or the link closes; `sessions.get` answers events up to its view's `LastSeq`.
+- **Notifications**: publish attempts stored before they go out; `notifier.ended` clears attempted pending records.
+- **Web app**: `loadSnapshot` keeps newer summaries and each kept summary's position.
+- **Decided within the table.** A service's credential is reserved for every project of the realm, granted the service or not; services may share a credential. "Ever published" for a notification means a publish was attempted. A body without a length is buffered (not streamed) so nothing of an oversized one goes out. The daemon's before-session savepoint is bounded like a requested one (30 min). The hub link's protocol number is unchanged by `terminal.confirm`. `wt rm` counts an ignored directory as one entry. Two more box reports (canary, data links) decoded strictly although not in the table.
+- **Explorer model.** `data-and-sealing`, `secrets`, `configuration`, `github`, `service-logins`, `worktrees-and-context`, `savepoints`, `input-and-receipts`, `sessions-and-events`, `watching-sessions`, `requests-and-approval`, `box-channel`, `hub-commands-and-terminal`, `hub-machine-link`, `hub-inbox-and-notifications`, `web-app`, `security-model` (four rows out of the gaps table, rule 2, the summary of fixed gaps); flows `data-seal`, `data-save`, `service-login`, `service-request`, `attach`, `trust-boundaries`, `request-approve`, `box-channel`, `hub-terminal`, `phone-answer`, `web-app-start`; glossary (`reserved-secret` new; `realm-secret`, `host-github-credential`, `cookie-jar`, `snapshot`, `savepoint`, `notification-record`); `layout.toml`. Eleven new or rewritten invariants with code and tests. `./dev explore --check`: 0 errors, 0 warnings.
+- **Docs.** `docs/guide.md`: what `wt rm` keeps and refuses, reserved secrets and `token:`, `before_session` for every start and with driver `none`, service bodies without a length.
+- **Exercise it.** `./dev test ./internal/boxside/ ./internal/config/ ./internal/daemon/ ./internal/hub/ ./internal/svclogin/ ./internal/data/ ./internal/gitx/ ./internal/proto/`; `web/check.sh` (after `./dev build`); `./dev itest -run '^(TestWorktreeRemoveUnpreserved|TestGit|TestData|TestSessions|TestServiceHeader|TestServiceCookie|TestHub|TestWebApp|TestFleet|TestContextRepository|TestNetworkInternet|TestRequests|TestGitHubTokens|TestHarnessLaunchAndSecrets|TestDaemon)$' -v`.

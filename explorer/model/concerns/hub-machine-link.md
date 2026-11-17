@@ -30,6 +30,7 @@ tests = [
   "internal/hub.TestMachineLink",
   "internal/hub.TestRefreshBounds",
   "internal/hub.TestResyncBounds",
+  "internal/hub.TestResyncSuccession",
   "internal/hub.TestTailBounds",
   "internal/hub.TestPruneThroughWorker",
   "internal/daemon.TestHubAllowlist",
@@ -53,9 +54,9 @@ refs = ["internal/hub.cleanEvent", "internal/hub.cleanView", "internal/hub.clean
 tests = ["internal/hub.TestMachineLink"]
 
 [[invariant]]
-text = "An event notification is applied only when its seq is the session's cursor plus one, and a gap leads to a re-read; a re-read takes the machine's view and events without checking that their seqs follow one another."
-refs = ["internal/hub.machineLink.applyEvent", "internal/hub.machineLink.finishResync"]
-tests = ["internal/hub.TestMachineLink"]
+text = "An event notification is applied only when its seq is the session's cursor plus one, and a gap leads to a re-read. A re-read is applied only when its events (at most 500, each a valid event of the session) follow one another without gap or repeat and on from the view's LastSeq; otherwise the link is closed and the hub keeps what it held."
+refs = ["internal/hub.machineLink.applyEvent", "internal/hub.checkTail", "internal/hub.machineLink.finishResync", "internal/daemon.Daemon.apiSession"]
+tests = ["internal/hub.TestMachineLink", "internal/hub.TestResyncSuccession"]
 
 [[invariant]]
 text = "The hub holds at most MaxMachineSessions sessions per machine, sessions being read for the first time included, and at most 500 events and 1 MiB of them per session."
@@ -221,7 +222,7 @@ A hub knows about a machine only what the machine's daemon tells it, and acts on
 
 **One worker per machine.** The goroutine serving `/machine` becomes the link's worker, the only one that touches the link's state. The codec's reader turns each notification into a [[internal/hub.linkItem]] on a queue of 4,096; the worker takes up to 500 at a time and applies them in one transaction ([[internal/hub.machineLink.process]], [[internal/hub.Store.Write]]). It never waits for the machine: [[internal/hub.machineLink.async]] runs each call in a goroutine and sends back a function for the worker to apply. An event is applied only as the successor of the session's cursor ([[internal/hub.machineLink.applyEvent]]): stored, folded into the [[term:session-view]], recorded in the change log. A duplicate is dropped; a gap, or an unknown session whose first event is not seq 1, starts a re-read.
 
-**Re-reads and refreshes.** A re-read ([[internal/hub.machineLink.startResync]]) asks `sessions.get` for that project's session: its view and last 500 events, which replace what the hub held, unchecked for gaps; events arriving meanwhile are held back and applied after, each as the successor. At `caught_up` and every 30 seconds, [[internal/hub.machineLink.startRefresh]] pages through `sessions.list` and asks `boxes.list`: sessions the stream did not bring are read, box states and windows updated, then `requests.list` replaces the pending requests. A `missed` notice is acted on only for a session the hub holds, of the same project.
+**Re-reads and refreshes.** A re-read ([[internal/hub.machineLink.startResync]]) asks `sessions.get` for its view and last 500 events ([[internal/daemon.Daemon.apiSession]]), which must follow on from the view ([[internal/hub.checkTail]]) and then replace what the hub held. Events arriving meanwhile are held back, then applied as successors. At `caught_up` and every 30 seconds, [[internal/hub.machineLink.startRefresh]] pages through `sessions.list` and asks `boxes.list`: sessions the stream did not bring are read, box states and windows updated, then `requests.list` replaces the pending requests. A `missed` notice is acted on only for a session the hub holds, of the same project.
 
 **Disconnects, restarts, pruning.** When a link ends the machine is marked offline and loses the notifier role; its rows stay and show as stale. At start the hub marks every machine offline. Everything a link resumes from is in the database; the worker's copies, re-read queue and held events are rebuilt on reconnecting. Every hour, sessions that are not live and whose last event is over 30 days old are removed (a later `seen` postpones it): through the worker for a connected machine, so its count agrees, directly for an offline one ([[internal/hub.Server.pruneSessions]], [[finding:C2-15]]).
 
@@ -245,7 +246,7 @@ A compromised machine controls all it sends: hello, notifications, the answers t
 - **Writing another machine's data.** Rows are keyed by the registry name of the link's certificate; nothing a machine sends names a machine.
 - **Hostile content.** Events are decoded strictly and checked: version, seq, session ID, a known type, timestamps, and the type's data through [[internal/proto.ValidateData]]; then re-encoded ([[internal/hub.cleanEvent]]). Views ([[internal/hub.cleanView]]: names, states, field sizes, at most 64 KiB), requests ([[internal/hub.cleanRequest]]: kind and risk agree, [[internal/requests.Validate]]) and boxes ([[internal/hub.cleanBoxes]]) likewise; what fails is dropped. A message is at most 1 MiB; a larger frame ends the connection.
 - **Filling the hub.** At most 20,000 sessions per machine, first reads included ([[internal/hub.MaxMachineSessions]]); per session at most 500 events and 1 MiB ([[internal/hub.Tx.TrimTail]]); pending requests as one answer holds; the change log keeps 20,000 entries for all machines. One machine can still hold about 20 GiB of event tails.
-- **Making the hub fetch without end.** A refresh asks for at most 20,000 sessions in strictly advancing pages, at most 64 MiB within two minutes ([[internal/hub.machineLink.listSessions]], [[finding:C2-01]]). Re-reads wait in a queue of 256 served four at a time; held-back events are capped at 2,000 per session and 20,000 in all ([[finding:C2-02]]). A refresh that breaks its bounds, or fails, closes the link; a full re-read queue defers the gap to the next refresh, and held events beyond their cap are dropped for another read.
+- **Making the hub fetch without end.** A refresh asks for at most 20,000 sessions in strictly advancing pages, at most 64 MiB within two minutes ([[internal/hub.machineLink.listSessions]], [[finding:C2-01]]). Re-reads wait in a queue of 256 served four at a time; held-back events are capped at 2,000 per session and 20,000 in all ([[finding:C2-02]]). A refresh or re-read that breaks its bounds, or fails, closes the link; a full re-read queue defers the gap to the next refresh, and held events beyond their cap are dropped for another read.
 - **Stalling the hub.** Every call has a minute; a worker that makes no room in its queue for a minute loses its link; a link silent for 90 seconds is closed.
 - **A compromised hub.** It reaches only the allowlist ([[concern:hub-commands-and-terminal]]).
 

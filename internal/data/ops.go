@@ -5,9 +5,7 @@
 package data
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -225,9 +223,7 @@ func (s *Service) Links(ctx context.Context, p *Project, container string) (boxs
 	if len(res.Stdout) > 1<<20 {
 		return rep, errors.New("the data-links report is too large")
 	}
-	dec := json.NewDecoder(bytes.NewReader(res.Stdout))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&rep); err != nil {
+	if err := proto.StrictJSON(res.Stdout, &rep); err != nil {
 		return rep, fmt.Errorf("the data-links report of %s is invalid: %w", container, err)
 	}
 	for _, w := range rep.Created {

@@ -327,7 +327,7 @@ The box controls its spool completely: content, size, whether its entries are fi
 - **Another project's session.** Ownership, above; and [[internal/session.Store.AppendHost]] never starts a journal for another project's session.
 - **Floods.** One run takes at most 8 MiB and 20,000 events per file and looks at 10,000 spool entries; a box that floods hints gets one run per 50 ms. Over time the budgets bound `durable/`, however the box spreads its events; other devc processes' appends count within ten seconds.
 - **Truncation and crashes.** A file that shrinks below the offset gets a note in the journal and is read on from its end. A torn journal line is skipped by readers. If the offset was not saved, ingestion resumes after the last spool offset the journal holds ([[finding:B6]]).
-- **A lying live-session report.** [[internal/session.ParseLive]] rejects the whole report when an entry is malformed, and reconciliation then changes nothing; through the engine, text after the first JSON value is ignored (`docs/dev/LEFTOVER.md` part 7). Any box can report `[]` and so end its own open sessions as `lost`.
+- **A lying live-session report.** [[internal/session.ParseLive]] rejects the whole report when an entry is malformed or anything but white space follows it ([[internal/proto.StrictJSON]]), and reconciliation then changes nothing. Any box can report `[]` and so end its own open sessions as `lost`.
 - **Late events.** After `session.end` events are dropped; a fully ingested file of an ended session is removed.
 
 ## Decisions that are not obvious

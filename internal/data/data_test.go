@@ -55,6 +55,24 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
+// TestNormalizeInBox: a path a box sent names the data root as the box
+// sees it; no error names the host's path (finding G2-01). Control: the
+// same in-box path is accepted.
+func TestNormalizeInBox(t *testing.T) {
+	root := t.TempDir()
+	p := &Project{Ref: names.ProjectRef{Realm: "r", Project: "p"}, HostDir: filepath.Join(root, "r", "p"),
+		Layout: boxside.DataLayout{Root: "data", Work: []string{"scratch"}, Sealed: []string{"results"}}}
+	if got, err := NormalizeInBox(p, "/w/r/p/data/results/run1"); err != nil || got != "results/run1" {
+		t.Errorf("in-box path: %q %v", got, err)
+	}
+	for _, arg := range []string{"/etc/passwd", root + "/r/p/data/results/run1", "/w/r/p/main/x"} {
+		_, err := NormalizeInBox(p, arg)
+		if err == nil || !strings.Contains(err.Error(), "(/w/r/p/data)") || strings.Contains(strings.ReplaceAll(err.Error(), arg, ""), root) {
+			t.Errorf("NormalizeInBox(%q) = %v", arg, err)
+		}
+	}
+}
+
 func TestIndexAndRetention(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "idx.jsonl")
 	base := time.Date(2026, 11, 15, 4, 0, 0, 0, time.UTC)
@@ -133,7 +151,7 @@ func TestTrashAgeAndPatterns(t *testing.T) {
 
 func TestDecodeResult(t *testing.T) {
 	ok := `{"v":1,"op":"seal","files":2,"size":3}`
-	if r, err := DecodeResult([]byte(ok), boxside.OpSeal); err != nil || r.Files != 2 {
+	if r, err := DecodeResult([]byte(ok+"\n"), boxside.OpSeal); err != nil || r.Files != 2 {
 		t.Errorf("valid result: %+v %v", r, err)
 	}
 	for _, bad := range []string{
@@ -142,6 +160,9 @@ func TestDecodeResult(t *testing.T) {
 		`{"v":2,"op":"seal","files":0,"size":0}`,
 		`{"v":1,"op":"seal","files":-1,"size":0}`,
 		`{"v":1,"op":"seal","files":0,"size":0}{}`,
+		`{"v":1,"op":"seal","files":0,"size":0}]`, // findings G2-05, G4-24
+		`{"v":1,"op":"seal","files":0,"size":0}}`,
+		`{"v":1,"op":"seal","files":0,"size":0} x`,
 		`{"v":1,"op":"seal","files":0,"size":0,"trash_id":"../x"}`,
 		`{"v":1,"op":"seal","files":0,"size":0,"paths":["/etc"]}`,
 		`{"v":1,"op":"seal","files":0,"size":0,"displaced":["a/../b"]}`,
@@ -619,4 +640,38 @@ func mustRequest(t *testing.T, req boxside.DataRequest) []byte {
 		t.Fatal(err)
 	}
 	return append(b, '\n')
+}
+
+// TestParseManifestStrict: a manifest line with anything after its record
+// is skipped like any other invalid line (finding G4-24); the record alone
+// is read.
+func TestParseManifestStrict(t *testing.T) {
+	rec := `{"v":1,"time":"2026-11-17T00:00:00Z","machine":"m1","action":"seal","path":"results/a","files":1,"size":1,"digest":"sha256:` + strings.Repeat("0", 64) + `"}`
+	if got := ParseManifest([]byte(rec + "\n")); len(got) != 1 || got[0].Path != "results/a" {
+		t.Fatalf("the record alone: %+v", got)
+	}
+	for _, after := range []string{"]", "}", " x", "{}"} {
+		if got := ParseManifest([]byte(rec + after + "\n" + rec + "\n")); len(got) != 1 {
+			t.Errorf("a record followed by %q: %d records", after, len(got))
+		}
+	}
+}
+
+// TestLinksStrict: the box's data-links report with anything after it is
+// refused (finding G4-24); the report alone is read.
+func TestLinksStrict(t *testing.T) {
+	eng := engine.NewFake()
+	eng.Put("devc-r-p", engine.ContainerInfo{Name: "devc-r-p", State: engine.ContainerState{Running: true}})
+	s := &Service{Engine: eng}
+	for out, ok := range map[string]bool{
+		`{"created":["main"],"skipped":[]}` + "\n": true,
+		`{"created":["main"],"skipped":[]}]`:       false,
+		`{"created":["main"],"skipped":[]} {}`:     false,
+	} {
+		eng.ExecFunc = func(engine.ExecOptions) (execx.Result, error) { return execx.Result{Stdout: []byte(out)}, nil }
+		rep, err := s.Links(context.Background(), nil, "devc-r-p")
+		if (err == nil) != ok || (ok && len(rep.Created) != 1) {
+			t.Errorf("report %q: %+v %v", out, rep, err)
+		}
+	}
 }

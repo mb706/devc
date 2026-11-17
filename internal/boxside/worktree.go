@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -104,41 +105,129 @@ func (r *Repo) Dirty(w Worktree) (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
-// ErrDirty is returned by RemoveWorktree for a worktree with changes.
-var ErrDirty = errors.New("the worktree has uncommitted changes")
+// MaxLostReported bounds the names a worktree removal reports of what it
+// would lose (or lost).
+const MaxLostReported = 20
 
-// RemoveWorktree removes a task worktree; its branch stays. A dirty
-// worktree is refused unless force is set.
-func (r *Repo) RemoveWorktree(name string, force bool) error {
+// WorktreeRemoval is the report of `devc box worktree rm --json`.
+type WorktreeRemoval struct {
+	Removed bool `json:"removed"`
+	// Dirty: refused because git sees uncommitted changes.
+	Dirty bool `json:"dirty,omitempty"`
+	// Lost names what no snapshot keeps (the first MaxLostReported, sorted),
+	// LostTotal counts all of it: what the removal refused to delete, or,
+	// with force, deleted.
+	Lost      []string `json:"lost,omitempty"`
+	LostTotal int      `json:"lost_total,omitempty"`
+}
+
+// Unpreserved lists what of worktree w no snapshot keeps, and so no bank
+// either: ignored files and directories (git status does not count them,
+// and git worktree remove deletes them even without --force) and the
+// untracked files a snapshot leaves out (snapshotSplit). The worktree's
+// data link is left out: removing it loses nothing.
+func (r *Repo) Unpreserved(w Worktree) ([]string, error) {
+	ignored, err := r.Git(w.Path, nil, nil, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
+	if err != nil {
+		return nil, err
+	}
+	var lost []string
+	for _, p := range strings.Split(string(ignored), "\x00") {
+		if p == "" {
+			continue
+		}
+		if p == DataLinkName {
+			if fi, err := os.Lstat(path.Join(w.Path, p)); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
+		}
+		lost = append(lost, p)
+	}
+	others, err := r.Git(w.Path, nil, nil, "ls-files", "-z", "--others", "--exclude-standard")
+	if err != nil {
+		return nil, err
+	}
+	_, skipped := snapshotSplit(w, string(others))
+	lost = append(lost, skipped...)
+	sort.Strings(lost)
+	return lost, nil
+}
+
+// RemoveWorktree removes a task worktree; its branch stays. Without force
+// it refuses (Removed false) a worktree with uncommitted changes or with
+// anything Unpreserved lists; with force it removes the worktree with all
+// of that, and the report counts what went.
+func (r *Repo) RemoveWorktree(name string, force bool) (WorktreeRemoval, error) {
+	var rep WorktreeRemoval
 	if err := CheckWorktreeName(name, ""); err != nil {
-		return err
+		return rep, err
 	}
 	wts, err := r.Worktrees()
 	if err != nil {
-		return err
+		return rep, err
 	}
 	for _, w := range wts {
 		if w.Name != name {
 			continue
 		}
+		lost, err := r.Unpreserved(w)
+		if err != nil {
+			return rep, err
+		}
+		rep.LostTotal, rep.Lost = len(lost), lost[:min(len(lost), MaxLostReported)]
 		if !force {
-			dirty, err := r.Dirty(w)
-			if err != nil {
-				return err
+			if rep.Dirty, err = r.Dirty(w); err != nil {
+				return rep, err
 			}
-			if dirty {
-				return fmt.Errorf("%w: commit them, or remove it anyway with --force", ErrDirty)
+			if rep.Dirty || len(lost) > 0 {
+				return rep, nil
 			}
 		}
 		args := []string{"worktree", "remove"}
 		if force {
 			args = append(args, "--force", "--force")
 		}
-		_, err := r.git(append(args, w.Path)...)
-		return err
+		if _, err := r.git(append(args, w.Path)...); err != nil {
+			return rep, err
+		}
+		rep.Removed = true
+		return rep, nil
 	}
-	return fmt.Errorf("there is no worktree %q", name)
+	return rep, fmt.Errorf("there is no worktree %q", name)
 }
+
+// Files says "1 file or directory" or "n files or directories".
+func Files(n int) string {
+	if n == 1 {
+		return "1 file or directory"
+	}
+	return strconv.Itoa(n) + " files or directories"
+}
+
+// RefusalText says why RemoveWorktree refused the worktree name (rep from
+// the box, its names already made printable by the caller): what it holds
+// that no snapshot keeps, listed, and uncommitted changes.
+func (rep WorktreeRemoval) RefusalText(name string) string {
+	var b strings.Builder
+	if rep.LostTotal > 0 {
+		fmt.Fprintf(&b, "%s holds %s that no snapshot or bank keeps (ignored files, untracked files over %d MiB, nested repositories, special files):\n", name, Files(rep.LostTotal), SnapshotLimit>>20)
+		for _, l := range rep.Lost {
+			fmt.Fprintf(&b, "  %s\n", l)
+		}
+		if more := rep.LostTotal - len(rep.Lost); more > 0 {
+			fmt.Fprintf(&b, "  … and %d more\n", more)
+		}
+		if rep.Dirty {
+			b.WriteString("it also has uncommitted changes. ")
+		}
+		b.WriteString("nothing was removed: move what you need out of the worktree first, or remove it with all of that using --force")
+		return b.String()
+	}
+	return ErrDirty.Error() + ": commit them, or remove it anyway with --force"
+}
+
+// ErrDirty describes a worktree with changes.
+var ErrDirty = errors.New("the worktree has uncommitted changes")
 
 // Divergence counts commits of a worktree's HEAD against another ref.
 type Divergence struct {
@@ -278,7 +367,11 @@ func (r *Repo) WorktreeHook(kind string, info *Info, stdin io.Reader, stdout io.
 		if path.Dir(p) != r.ProjectDir {
 			return fmt.Errorf("%q is not a worktree of this project", p)
 		}
-		return r.RemoveWorktree(path.Base(p), false)
+		rep, err := r.RemoveWorktree(path.Base(p), false)
+		if err == nil && !rep.Removed {
+			err = errors.New(rep.RefusalText(path.Base(p)))
+		}
+		return err
 	}
 	return fmt.Errorf("unknown worktree hook %q (create or remove)", kind)
 }

@@ -4,9 +4,7 @@
 package session
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -40,10 +38,8 @@ func ParseLive(out []byte) ([]Live, error) {
 	if len(out) > maxLiveOutput {
 		return nil, errors.New("the live-session report is too large")
 	}
-	dec := json.NewDecoder(bytes.NewReader(out))
-	dec.DisallowUnknownFields()
 	var ls []Live
-	if err := dec.Decode(&ls); err != nil {
+	if err := proto.StrictJSON(out, &ls); err != nil {
 		return nil, fmt.Errorf("parsing the live-session report: %w", err)
 	}
 	if len(ls) > MaxSpoolFiles {

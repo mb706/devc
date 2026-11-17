@@ -119,8 +119,8 @@ text = "The inbox's sections with session summaries; the requests likewise; the 
 at = "browser"
 ref = "file:web/app/store.js~export async function loadSnapshot"
 label = "loadSnapshot"
-text = "The store takes the snapshot, keeps sessions a screen has open, gives each summary the higher of its old version and the inbox's position, and starts from the lower of the inbox's and the requests' positions, the inbox's standing in for the machines'."
-detail = "The three reads run at once, so the machines may be read before the positions are noted: a change of a machine made between the two is in neither, and shows only when that machine changes again or a later snapshot is read. A summary the snapshot brings replaces the one held even when a detail read had a newer one."
+text = "The store takes the snapshot's summaries at the inbox's position, but keeps a summary held from a later position (a detail read or a stream change that came first) with its own, and sessions a screen has open; it starts from the lower of the inbox's and the requests' positions, the inbox's standing in for the machines'."
+detail = "The three reads run at once, so the machines may be read before the positions are noted: a change of a machine made between the two is in neither, and shows only when that machine changes again or a later snapshot is read. While the reads run, the page's other code (stream messages, detail reads) can change the store; the snapshot compares with what is held when its answers arrive."
 
 [[step]]
 from = "browser"

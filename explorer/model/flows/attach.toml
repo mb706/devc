@@ -71,7 +71,7 @@ at = "cli"
 ref = "internal/session.ParseLive"
 checks = ["internal/session.ParseLive"]
 text = "Every entry must have a valid session ID, a known source and valid window, pane and PID; an entry or field that is not as expected rejects the whole report and reconciliation changes nothing. Open sessions the box no longer runs end as `lost`."
-detail = "Only the first JSON value of the output is read: anything after it is ignored, so `[]` followed by other text counts as an empty report and ends every open session as `lost` (`docs/dev/LEFTOVER.md` part 7). A box can print `[]` alone to the same effect."
+detail = "Anything but white space after the report refuses it whole ([[internal/proto.StrictJSON]]); a box can still print `[]` alone, which ends every open session as `lost`."
 
 [[step]]
 section = "The window"

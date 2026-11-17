@@ -144,23 +144,39 @@ export async function checkAuth() {
 
 // loadSnapshot reads the inbox, machines and requests and returns the
 // stream position to resume from. current() is asked before the answer is
-// applied: a snapshot that a newer one superseded is dropped (null).
+// applied: a snapshot that a newer one superseded is dropped (null). A
+// summary held from a position after the snapshot's (a detail read or a
+// stream change that came first) stays, and every session keeps the
+// position of the summary it keeps (finding G5-07).
 export async function loadSnapshot(current = () => true) {
   const [inbox, machines, requests] = await Promise.all([
     api.get('/api/inbox'), api.get('/api/machines'), api.get('/api/requests'),
   ]);
   if (!current()) return null;
+  const snap = inbox.stream_id || 0;
   const sessions = {};
-  for (const sec of inbox.sections) for (const s of sec.sessions) sessions[key(s.machine, s.session)] = s;
-  // Sessions outside the inbox that a screen has open stay.
-  for (const k of Object.keys(state.details)) if (!sessions[k] && state.sessions[k]) sessions[k] = state.sessions[k];
+  const vers = {};
+  for (const sec of inbox.sections) {
+    for (const s of sec.sessions) {
+      const k = key(s.machine, s.session);
+      sessions[k] = s;
+      vers[k] = snap;
+    }
+  }
+  for (const [k, s] of Object.entries(state.sessions)) {
+    const have = state.sessionVer[k] || 0;
+    // Newer than the snapshot, or outside the inbox while a screen has it
+    // open: it stays, with its own position.
+    if ((snap && have > snap) || (!sessions[k] && state.details[k])) {
+      sessions[k] = s;
+      vers[k] = have;
+    }
+  }
   const ms = {};
   for (const m of machines.machines) ms[m.name] = m;
   const rs = {};
   for (const r of requests.requests) rs[key(r.machine, r.id)] = r;
   const pos = Math.min(inbox.stream_id, machines.stream_id ?? inbox.stream_id, requests.stream_id);
-  const vers = {};
-  for (const k of Object.keys(sessions)) vers[k] = Math.max(state.sessionVer[k] || 0, inbox.stream_id || 0);
   set({ sessions, sessionVer: vers, machines: ms, requests: rs, savedAt: 0, loadedAt: Date.now() });
   resolvePending();
   return pos;

@@ -762,6 +762,9 @@ type fakeNtfy struct {
 	mu   sync.Mutex
 	reqs []ntfyReq
 	fail int // answer 500 to that many requests first
+	// lose takes that many requests and then answers 500, as when ntfy
+	// took a message but the answer was lost.
+	lose int
 }
 
 type ntfyReq struct {
@@ -789,6 +792,11 @@ func newFakeNtfy(t *testing.T) *fakeNtfy {
 			json.Unmarshal(b, &q.note)
 		}
 		f.reqs = append(f.reqs, q)
+		if f.lose > 0 {
+			f.lose--
+			w.WriteHeader(500)
+			return
+		}
 		w.Write([]byte(`{"id":"x"}`))
 	}))
 	t.Cleanup(f.srv.Close)

@@ -49,9 +49,9 @@ tests = [
 related = ["security-model", "secrets", "allowlist-proxy", "box-channel", "box-lifecycle", "configuration"]
 
 [[invariant]]
-text = "A project that would also receive a service's credential secret (value_secret, auth.secrets, _jar.<name>) through grants.secrets or a harness has a configuration problem; grants.github's token: is not checked."
-refs = ["internal/config.Service.CredentialSecrets", "internal/config.validateServiceGrants", "internal/daemon.serviceManager.credential", "internal/svclogin.Login.Run"]
-tests = ["internal/config.TestBrokenServices", "test/integration.TestServiceHeader"]
+text = "No project of the realm receives a service's credential secret (value_secret, auth.secrets) or any cookie jar (_jar.<name>), whether it is granted the service or not: one guard refuses such a name in grants.secrets, as a harness's credential and in grants.github = \"token:<secret>\". A service's definition may not use the realm's GitHub credential, its App's key or a cookie jar."
+refs = ["internal/config.Config.checkBoxSecret", "internal/config.Config.reservedSecret", "internal/config.Config.checkServiceSecret", "internal/config.Service.CredentialSecrets", "internal/daemon.serviceManager.credential"]
+tests = ["internal/config.TestReservedSecrets", "internal/config.TestBrokenServices", "test/integration.TestServiceHeader"]
 
 [[invariant]]
 text = "A request reaches the upstream only if the service is in force for the box's container, its head passes CheckHead, and a rule allows its method on its normalised path."
@@ -67,6 +67,11 @@ tests = ["internal/svclogin.TestProxyHeaders", "internal/daemon.TestServiceHosti
 text = "The box's own credential, cookie, proxy and forwarding headers never reach the upstream; Set-Cookie, the upstream's 1xx responses and trailers never reach the box."
 refs = ["internal/svclogin.rewrite", "internal/svclogin.modifyResponse", "internal/svclogin.noTrace"]
 tests = ["internal/svclogin.TestProxyHeaders"]
+
+[[invariant]]
+text = "No request body larger than max_body reaches the upstream, nor any part of one: a body without a declared length is read whole through the limit before the credential is fetched."
+refs = ["internal/svclogin.Proxy.ServeHTTP", "internal/svclogin.readBody"]
+tests = ["internal/svclogin.TestProxyLimits"]
 
 [[invariant]]
 text = "Every credential part that goes out has at least eight characters and is among the values scrubbed from response headers."
@@ -222,7 +227,7 @@ Some services an agent needs offer no token a box could hold safely: only a pass
 | 4 | [[internal/svclogin.CheckHead]]: `METHOD /path HTTP/1.x` with single spaces, origin form only, token header names, no line folding or control characters, at most 100 fields, one `Content-Length` of digits or one `Transfer-Encoding: chunked` (never both, never with HTTP/1.0), exactly one `Host` that is `127.0.0.1:<port>` or `localhost:<port>`, no upgrade, `Expect` only `100-continue` | 400, 431, 501, 505, 403, 417 |
 | 5 | the path in normal form ([[internal/svclogin.NormalizeTarget]]): unreserved characters decoded; no encoded `/`, `\`, `%`, reserved or control character; no `.` or `..` segment, also before `;`; no empty segment but the last | 400 |
 | 6 | a rule allows the method on that path, matched at a segment boundary ([[internal/svclogin.Allowed]]) | 403 with the `[[allow]]` block that would be needed |
-| 7 | a declared `Content-Length` fits `max_body`; a body without one is cut at `max_body` only while it streams to the upstream, after step 8 | 413 |
+| 7 | the body fits `max_body`: a declared `Content-Length` is checked, a body without one is read whole, in memory up to 1 MiB and beyond that in an unlinked temporary file, and sent on with its length ([[internal/svclogin.readBody]]) | 413 |
 | 8 | the credential is on the host and valid | 503 with what to tell the user |
 
 Only after step 6 does net/http's server parse the same bytes, with keep-alives off, so nothing after the first request is served. [[internal/svclogin.rewrite]] sends the normalised path to the upstream's `Host`, removes the box's credential, cookie, proxy and forwarding headers and adds the credential; the transport uses the host's trust store, no proxy and no redirects. [[internal/svclogin.modifyResponse]] drops `Set-Cookie` and its kin, maps redirects on the upstream to the local address, scrubs every header and drops trailers ([[flow:service-request]] lists them all); the upstream's 1xx responses never pass ([[internal/svclogin.noTrace]]), though net/http's server answers `Expect: 100-continue` itself; a response over `max_body` gets 502 or, streamed, is aborted. Each request is logged to `durable/realms/<realm>/service-log/<name>.jsonl`: time, box, method, normalised path, status and devc's reason.
@@ -237,8 +242,8 @@ A box controls every byte of its requests and when it opens connections, and can
 
 - **Another service or path.** The service must be in force for the box's container. The rules see the normalised path and the upstream receives that same path, so nothing the upstream decodes later can change what was checked ([[finding:D2-16]]). Methods other than GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS can never be allowed.
 - **A smuggled second request.** The raw head is checked before net/http sees it, ambiguous framing is refused, and keep-alives are off.
-- **The credential.** The box's own credential headers are removed before the credential is added; it is in no file or environment of the box. A project that would also receive one of the service's secrets through `grants.secrets` (which may not list a `_jar.` secret) or a harness has a configuration problem ([[internal/config.validateServiceGrants]]); `grants.github = "token:<secret>"` escapes that check ([[doc:docs/dev/LEFTOVER.md#7]]). Headers are scrubbed, bodies are not: an upstream that reflects request headers in its body shows the credential ([[doc:docs/dev/LEFTOVER.md#5]]). Logs and messages hold no header or body; a failed automatic login's text stays on the host.
-- **The host's resources.** A stream needs a relay place, the head must come within 30 seconds, and the exchange ends at `timeout` plus five seconds, also when the box stops reading ([[finding:D2-04]]).
+- **The credential.** The box's own credential headers are removed before the credential is added; it is in no file or environment of the box. Its secrets and every jar are [[term:reserved-secret|reserved]]: no project of the realm may name one for its box ([[internal/config.Config.checkBoxSecret]]). Headers are scrubbed, bodies are not: an upstream that reflects request headers in its body shows the credential ([[doc:docs/dev/LEFTOVER.md#5]]). Logs and messages hold no header or body; a failed automatic login's text stays on the host.
+- **The host's resources.** A stream needs a relay place, the head must come within 30 seconds, and the exchange ends at `timeout` plus five seconds, also when the box stops reading ([[finding:D2-04]]). A body without a length is held whole (up to `max_body`), past 1 MiB on disk.
 - **The account.** Within its rules the box acts with the user's account, and the log records what it did.
 - **The login.** The login container sees only its scratch directory; its output is parsed strictly, and messages name cookies by position and never repeat the output ([[finding:D2-08]]). Every login secret is removed from its standard error and from errors before they are shown or stored.
 

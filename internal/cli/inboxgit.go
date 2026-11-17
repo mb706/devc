@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -74,20 +75,35 @@ func newBoxGitCmds(a *app) []*cobra.Command {
 	add.Flags().StringVar(&addBranch, "branch", "", "branch (default: the branch prefix plus the name)")
 	add.Flags().StringVar(&addStart, "start", "", "start of a new branch (default origin/HEAD)")
 
-	var rmForce bool
+	var rmForce, rmJSON bool
 	rm := &cobra.Command{
-		Use:   "rm <name> [--force]",
+		Use:   "rm <name> [--force] [--json]",
 		Short: "Remove a task worktree (the branch stays)",
-		Args:  cobra.ExactArgs(1),
+		Long: "Remove a task worktree. Without --force a worktree with uncommitted changes, or with files no snapshot keeps " +
+			"(ignored files, untracked files over the snapshot's limit, nested repositories, special files), is refused and they are listed; " +
+			"--force removes it with them. --json prints the report, a refusal included, for the host.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repo, _, err := a.boxRepo()
 			if err != nil {
 				return err
 			}
-			return repo.RemoveWorktree(args[0], rmForce)
+			rep, err := repo.RemoveWorktree(args[0], rmForce)
+			switch {
+			case err != nil:
+				return err
+			case rmJSON:
+				return writeJSON(a.stdout, rep)
+			case !rep.Removed:
+				return errors.New(rep.RefusalText(args[0]))
+			case rep.LostTotal > 0:
+				fmt.Fprintf(a.stderr, "removed %s with %s that no snapshot kept\n", args[0], boxside.Files(rep.LostTotal))
+			}
+			return nil
 		},
 	}
-	rm.Flags().BoolVar(&rmForce, "force", false, "remove a worktree with uncommitted changes")
+	rm.Flags().BoolVar(&rmForce, "force", false, "remove a worktree with uncommitted changes or files no snapshot keeps")
+	rm.Flags().BoolVar(&rmJSON, "json", false, "print the report as JSON")
 
 	var listJSON bool
 	var listDefault string

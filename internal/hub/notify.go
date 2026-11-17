@@ -13,7 +13,9 @@
 // in the X-Devc-Action header (never in the URL, which proxies log:
 // finding C2-06): random, single-use, valid for an hour, bound to that one
 // answer. When the session leaves the state, the message is cleared by its
-// sequence ID and its buttons stop working.
+// sequence ID and its buttons stop working; so is one whose publish was
+// attempted and may have reached ntfy although its answer was lost
+// (finding G5-17).
 
 package hub
 
@@ -338,10 +340,13 @@ const metaNotifyPos = "notify_pos"
 // notifier keeps the notification state of every session explicit and
 // durable (findings C2-13, C2-14): each attention state has a record,
 // pending until published (or handled without a message), sent, then
-// cleared once the state ends. A hub that is not the machine's notifier
-// records pending and sends what is still pending and still current when
-// it becomes the notifier; a state that ends before it was sent is
-// dropped. Failed publishes and clears are retried with backoff, also
+// cleared once the state ends. A pending record counts its publish
+// attempts in Tries, stored before each attempt goes to ntfy. A hub that
+// is not the machine's notifier records pending and sends what is still
+// pending and still current when it becomes the notifier; a state that
+// ends before any attempt to send it is dropped, one that ends after an
+// attempt is cleared like a sent one, as the message may be on the phone
+// (finding G5-17). Failed publishes and clears are retried with backoff, also
 // after a restart, and the change log position is kept, so a restart
 // misses nothing.
 type notifier struct {
@@ -588,36 +593,22 @@ func (n *notifier) update(ctx context.Context, k SessionKey, sum *SessionSummary
 	} else {
 		n.last[k] = want
 	}
-	now := n.s.now()
 	for key, r := range n.rows[k] {
-		if key == want {
-			continue
-		}
-		switch r.State {
-		case NotePending:
-			// Ended before it was sent: dropped.
-			n.drop(r)
-		case NoteSent:
-			if r.Seq == "" {
-				n.drop(r)
-				continue
-			}
-			if err := n.s.st.DeleteActions(r.Seq); err != nil {
-				n.s.log.Warn("notifications: removing buttons", "err", err)
-			}
-			r.State, r.Tries, r.NextAt = NoteCleared, 0, now
-			n.put(r)
-			n.clear(ctx, r)
+		if key != want {
+			n.ended(ctx, r)
 		}
 	}
+	now := n.s.now()
 	if want == "" {
 		return
 	}
 	if r := n.rows[k][want]; r != nil {
 		if r.State == NoteCleared {
 			// The state came back before its old message was cleared: the
-			// message (same sequence ID) is published again instead.
-			r.State, r.Tries, r.NextAt = NotePending, 0, now
+			// message (same sequence ID) is published again instead. It
+			// was published, so it counts as attempted: should the state
+			// end again first, the message is still cleared.
+			r.State, r.Tries, r.NextAt = NotePending, 1, now
 			n.put(r)
 			n.publish(ctx, r, sum)
 		}
@@ -633,6 +624,28 @@ func (n *notifier) update(ctx context.Context, k SessionKey, sum *SessionSummary
 	if r.State == NotePending {
 		n.publish(ctx, r, sum)
 	}
+}
+
+// ended handles a record whose state has ended (finding G5-17): one
+// that never had a message (pending with no attempt, or sent without
+// one) is dropped; one whose message was published, or whose publish was
+// attempted and may have reached ntfy although its answer was lost, loses
+// its buttons and has its message cleared. A cleared record goes on
+// clearing.
+func (n *notifier) ended(ctx context.Context, r *NoteState) {
+	switch {
+	case r.State == NoteCleared:
+		return
+	case r.Seq == "", r.State == NotePending && r.Tries == 0:
+		n.drop(r)
+		return
+	}
+	if err := n.s.st.DeleteActions(r.Seq); err != nil {
+		n.s.log.Warn("notifications: removing buttons", "err", err)
+	}
+	r.State, r.Tries, r.NextAt = NoteCleared, 0, n.s.now()
+	n.put(r)
+	n.clear(ctx, r)
 }
 
 // retryDue retries the publishes and clears that are due: a pending
@@ -670,7 +683,7 @@ func (n *notifier) retryDue(ctx context.Context) {
 			continue
 		}
 		if len(list) != 1 || notifyKey(&list[0]) != r.Key {
-			n.drop(r)
+			n.ended(ctx, r)
 			continue
 		}
 		n.publish(ctx, r, &list[0])
@@ -721,9 +734,15 @@ func (n *notifier) publish(ctx context.Context, r *NoteState, sum *SessionSummar
 		}
 	}
 	note := buildNotification(n.s.publicURL, n.c.cfg.Topic, r.Seq, sum, tokens)
+	// The attempt is stored before it goes out: ntfy may take the message
+	// although its answer is lost, and a state that ends from now on has
+	// its message cleared (finding G5-17).
+	r.Tries++
+	r.NextAt = now.Add(backoff(r.Tries))
+	n.put(r)
 	if err := n.c.publish(ctx, note); err != nil {
 		_ = n.s.st.DeleteActions(r.Seq)
-		fail("publishing failed; it is retried", err)
+		n.s.log.Warn("notifications: publishing failed; it is retried", "machine", k.Machine, "session", k.Session, "tries", r.Tries, "err", err)
 		return
 	}
 	r.State, r.Tries = NoteSent, 0

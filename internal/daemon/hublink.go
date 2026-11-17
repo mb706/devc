@@ -66,6 +66,7 @@ var hubMethods = []string{
 	proto.MethodProjectsList,
 	proto.MethodChangesGet,
 	proto.MethodTerminalOpen,
+	proto.MethodTerminalConfirm,
 	proto.MethodTerminalInput,
 	proto.MethodTerminalClose,
 }

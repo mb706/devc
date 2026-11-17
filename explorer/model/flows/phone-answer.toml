@@ -172,4 +172,4 @@ text = "The question is no longer pending and the session leaves needs-you; brow
 at = "hub"
 ref = "internal/hub.notifier.update"
 unchecked = "the notifier's goroutine wakes on Store.Changed when the worker's transaction commits"
-text = "The needs-you record ends: its buttons stop working and, if ntfy confirmed the message, it is cleared at ntfy by its sequence ID; a record still pending is dropped without a clear."
+text = "The needs-you record ends: its buttons stop working and, if its message was published or a publish attempted, it is cleared at ntfy by its sequence ID; a record never attempted is dropped."

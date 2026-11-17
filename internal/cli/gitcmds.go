@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mb706/devc/internal/box"
+	"github.com/mb706/devc/internal/boxside"
 	"github.com/mb706/devc/internal/config"
 	"github.com/mb706/devc/internal/data"
 	"github.com/mb706/devc/internal/engine"
@@ -880,9 +881,11 @@ func (a *app) stdoutTerminal() bool {
 
 // newWorktreeCmd is `devc wt new|ls|rm`. Only rm banks first: in a
 // project with a relay, a worktree is removed only once a bank has its
-// snapshot, unless --discard says to lose it. What a snapshot leaves out
-// (ignored files, untracked files over the limit, nested repositories)
-// goes with the worktree; without a relay nothing is banked.
+// snapshot, unless --discard says to lose it; without a relay nothing is
+// banked. What a snapshot leaves out (ignored files, untracked files over
+// the limit, nested repositories, special files) refuses the removal
+// unless --force, which removes it with the worktree (findings G3-01,
+// G3-19).
 func newWorktreeCmd(a *app) *cobra.Command {
 	var from string
 	newCmd := &cobra.Command{
@@ -941,8 +944,12 @@ func newWorktreeCmd(a *app) *cobra.Command {
 	rm := &cobra.Command{
 		Use:   "rm <name> [<realm>/<project>] [--force] [--discard]",
 		Short: "Bank, then remove a task worktree (its branch stays)",
-		Long: "Bank the box, then remove the worktree; nothing is removed unless the worktree's uncommitted work was banked. " +
-			"A worktree with uncommitted changes or live sessions is refused without --force (which still banks first). " +
+		Long: "In a project with a relay, bank the box first; the worktree is removed only once the bank has its snapshot (--force does not change that). " +
+			"A snapshot keeps the worktree's uncommitted changes and its untracked files up to 10 MiB; it keeps no ignored files, " +
+			"no larger untracked files, no nested repositories and no special files. " +
+			"Without --force, a worktree that holds such files, has uncommitted changes or has live sessions is refused, and the files are listed; " +
+			"--force removes it with them and says how many. " +
+			"Without a relay nothing is banked, so --force also loses uncommitted changes. " +
 			"--discard removes it without banking: its uncommitted work is lost.",
 		Args: rangeArgs(1, 2, "devc wt rm <name> [<realm>/<project>]"),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -974,15 +981,22 @@ func newWorktreeCmd(a *app) *cobra.Command {
 						return fmt.Errorf("the work in %s was not banked, so nothing was removed (%v): fix the problem and try again, or remove it with --discard", name, err)
 					}
 				}
-				if err := e.git.WorktreeRemove(ctx, p, name, rmForce || rmDiscard); err != nil {
+				rep, err := e.git.WorktreeRemove(ctx, p, name, rmForce || rmDiscard)
+				if err != nil {
 					return err
+				}
+				if !rep.Removed {
+					return errors.New(rep.RefusalText(name))
+				}
+				if rep.LostTotal > 0 {
+					fmt.Fprintf(a.stderr, "devc: %s: removed %s with %s that no snapshot kept\n", p.Ref, name, boxside.Files(rep.LostTotal))
 				}
 				fmt.Fprintf(a.stdout, "removed %s (the branch stays)\n", name)
 				return nil
 			})
 		},
 	}
-	rm.Flags().BoolVar(&rmForce, "force", false, "remove a worktree with changes or sessions (after banking it)")
+	rm.Flags().BoolVar(&rmForce, "force", false, "remove a worktree with changes, sessions or files no snapshot keeps (after banking it)")
 	rm.Flags().BoolVar(&rmDiscard, "discard", false, "remove the worktree without banking it; its uncommitted work is lost")
 	return group("wt", "Create, list and remove task worktrees", false, newCmd, ls, rm)
 }

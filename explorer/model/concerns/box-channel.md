@@ -203,7 +203,7 @@ Every handler gets the worker's project; nothing a box sends selects one.
 - **A recreated box.** The engine must report the worker's own container ID.
 - **Floods.** At most 96 streams waiting for their first line, then 32 for requests and the taken-over streams and 64 relays; a stream beyond is closed or refused at once, and the channel stays. The inspector allows 1,024 new streams and 32 pings or go-aways per ten seconds and 192 streams open or half-closed, each holding at most a 256 KiB window (48 MiB in all).
 - **Malformed or endless messages.** The 1 MiB line limit, strict decoding, the first-line and idle timeouts.
-- **Host details in answers.** Ordinary errors are hidden from the box, but a JSON-RPC error's message passes, and some carry host details: a seal request for a path outside the data root is told the data root's path on the host ([[internal/data.Normalize]], `docs/dev/LEFTOVER.md` part 7).
+- **Host details in answers.** Ordinary errors are hidden from the box, but a JSON-RPC error's message passes with what its handler wrote. A seal request's path is read and refused as the box sees it ([[internal/data.NormalizeInBox]]), and a request's result, which is devc's output on the host, goes to the box with host paths rewritten ([[internal/daemon.boxView]]).
 - **A box that removes its socket.** No new channel can be made until the box restarts (an accepted limit); removing the file does not close a channel already open.
 
 ## Decisions that are not obvious

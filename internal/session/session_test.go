@@ -344,11 +344,14 @@ func TestParseLive(t *testing.T) {
 	if err != nil || len(ls) != 2 || ls[0].Window != "@1" {
 		t.Errorf("%+v %v", ls, err)
 	}
-	if ls, err := ParseLive([]byte("[]")); err != nil || len(ls) != 0 {
+	if ls, err := ParseLive([]byte("[]\n")); err != nil || len(ls) != 0 {
 		t.Errorf("empty: %v %v", ls, err)
 	}
 	for _, bad := range []string{
 		``, `{}`, `[{"session":"x","source":"tmux","window":"@1"}]`,
+		// Nothing may follow the report (finding G2-05): an empty report
+		// with something after it would end every open session as lost.
+		`[] garbage`, `[]]`, `[]}`, `[] []`,
 		`[{"session":"` + sidA + `","source":"tmux"}]`,
 		`[{"session":"` + sidA + `","source":"evil"}]`,
 		`[{"session":"` + sidA + `","source":"tmux","window":"@1;kill"}]`,

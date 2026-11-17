@@ -712,9 +712,10 @@ func (m *devMachine) handlers() map[string]proto.Handler {
 			}
 			return devChanges(p.Scope, v.Worktree), nil
 		},
-		proto.MethodTerminalOpen:  m.termOpen,
-		proto.MethodTerminalInput: m.termInput,
-		proto.MethodTerminalClose: m.termClose,
+		proto.MethodTerminalOpen:    m.termOpen,
+		proto.MethodTerminalConfirm: m.termConfirm,
+		proto.MethodTerminalInput:   m.termInput,
+		proto.MethodTerminalClose:   m.termClose,
 	}
 }
 
