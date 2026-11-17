@@ -81,6 +81,11 @@
     // A section number ("12", "6.2") stands for its heading.
     var byNum = S.d.headings.filter(function (x) { return x.number === anchor && x.anchor !== anchor; })[0];
     if (byNum && !S.d.headings.some(function (x) { return x.anchor === anchor; })) anchor = byNum.anchor;
+    // So do the leading words of one heading's anchor ("x7").
+    if (!S.d.headings.some(function (x) { return x.anchor === anchor; })) {
+      var pre = S.d.headings.filter(function (x) { return x.anchor.indexOf(anchor + "-") === 0; });
+      if (pre.length === 1) anchor = pre[0].anchor;
+    }
     var t = S.el.querySelector('.dv-md [data-anchor="' + (window.CSS && CSS.escape ? CSS.escape(anchor) : anchor) + '"]');
     if (t) { t.scrollIntoView({ block: "start" }); markToc(anchor); }
   }

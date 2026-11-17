@@ -74,30 +74,49 @@
       "</article>" +
       '<aside class="cp-side"><div class="cp-side-in">' + sideHTML(c, pk, flows) + "</div></aside></div>";
     S = { el: el, c: c, graphs: [] };
+    S.spy = U.debounce(spy, 40);
+    el.addEventListener("scroll", S.spy, { passive: true });
     placeDiagrams(el.querySelector(".cp-body"), c);
     el.querySelector(".cp-body").addEventListener("click", onBodyClick);
     el.querySelector(".cp-side").addEventListener("click", onBodyClick);
     focus(r);
+    spy();
   }
 
+  // sideHTML: the side column, in the order a reader needs it while
+  // reading: where they are in the page, the flows to play, the code.
   function sideHTML(c, pk, flows) {
     var h = "";
+    var heads = X.md.headings(c.body || "").filter(function (x) { return x.level <= 2; });
+    if (heads.length > 2) h += side("On this page", null, '<ul class="cp-toc">' + heads.map(function (x) {
+      return '<li><a href="#" data-goto="' + esc(x.anchor) + '">' + esc(X.md.plainText(x.text)) + "</a></li>";
+    }).join("") + ((c.invariants || []).length ? '<li><a href="#" data-goto="invariants">Invariants <span class="count">' + c.invariants.length + "</span></a></li>" : "") + "</ul>", "toc");
+    if (flows.length) h += side("Flows", flows.length, '<div class="chips">' + flows.map(function (f) { return R.chip("flow:" + f.id, { act: "full" }); }).join("") + "</div>");
     h += side("Code", pk.length, layerPicture(c) + '<ul class="cp-pk">' + pk.map(function (p) {
       return "<li>" + R.chip("pkg:" + p.path, { cls: "small" }) + (p.whole ? "" : '<div class="cp-files">' + p.files.map(function (f) { return R.chip("file:" + f, { cls: "small flat" }); }).join("") + "</div>") + "</li>";
     }).join("") + "</ul>");
     if ((c.key || []).length) h += side("Key symbols", c.key.length, '<ul class="cp-key">' + c.key.map(function (k) { return "<li>" + R.chip(k, { cls: "small" }) + firstDoc(k) + "</li>"; }).join("") + "</ul>");
-    if ((c.invariants || []).length) h += side("Invariants", c.invariants.length, '<a class="small" href="#" data-goto="invariants">' + U.plural(c.invariants.length, "statement") + " with the code that enforces it</a>");
-    if (flows.length) h += side("Flows", flows.length, '<div class="chips">' + flows.map(function (f) { return R.chip("flow:" + f.id, { act: "full" }); }).join("") + "</div>");
+    if ((c.invariants || []).length && heads.length <= 2) h += side("Invariants", c.invariants.length, '<a class="small" href="#" data-goto="invariants">' + U.plural(c.invariants.length, "statement") + " with the code that enforces it</a>");
     var related = (c.related || []).slice();
     (M.concerns || []).forEach(function (o) { if (o.id !== c.id && (o.related || []).indexOf(c.id) >= 0 && related.indexOf(o.id) < 0) related.push(o.id); });
     if (related.length) h += side("Related", related.length, '<div class="chips">' + related.map(function (x) { return R.chip("concern:" + x, { act: "full" }); }).join("") + "</div>");
     if ((c.spec || []).length) h += side("Spec", c.spec.length, '<div class="chips">' + c.spec.map(function (x) { return R.chip(x, { cls: "small" }); }).join("") + "</div>");
     if ((c.tests || []).length) h += side("Tests", c.tests.length, '<div class="chips">' + c.tests.map(function (x) { return R.chip(x, { cls: "small" }); }).join("") + "</div>");
-    var heads = X.md.headings(c.body || "").filter(function (x) { return x.level <= 2; });
-    if (heads.length > 2) h += side("On this page", null, '<ul class="cp-toc">' + heads.map(function (x) {
-      return '<li><a href="#" data-goto="' + esc(x.anchor) + '">' + esc(X.md.plainText(x.text)) + "</a></li>";
-    }).join("") + ((c.invariants || []).length ? '<li><a href="#" data-goto="invariants">Invariants</a></li>' : "") + "</ul>", "toc");
     return h;
+  }
+
+  // spy marks, in "On this page", the section at the top of the view.
+  function spy() {
+    if (!S) return;
+    var toc = S.el.querySelector(".cp-toc");
+    if (!toc) return;
+    var top = S.el.getBoundingClientRect().top + 90, cur = null;
+    S.el.querySelectorAll(".cp-body > h2[data-anchor], .cp-inv > h2[data-anchor]").forEach(function (h) {
+      if (h.getBoundingClientRect().top <= top) cur = h.getAttribute("data-anchor");
+    });
+    toc.querySelectorAll("a[data-goto]").forEach(function (a, i) {
+      a.classList.toggle("cur", cur ? a.getAttribute("data-goto") === cur : i === 0);
+    });
   }
 
   // placeDiagrams puts each of the concern's diagrams after the block of
@@ -165,7 +184,7 @@
       var pk = packagesOf(c), flows = X.model.flowsOf("concern", c.id);
       return '<a class="ci-card" href="' + esc(X.router.href("concerns", c.id)) + '" data-ref="concern:' + esc(c.id) + '" data-act="full" data-nocard>' +
         '<div class="ci-top"><span class="ci-n num">' + (i + 1) + '</span><span class="ci-title">' + esc(c.title) + "</span></div>" +
-        (c.summary ? '<p class="ci-sum">' + esc(X.md.plainText(c.summary)) + "</p>" : "") +
+        (c.summary ? '<p class="ci-sum">' + X.doc.plain(X.md.plainText(c.summary)) + "</p>" : "") +
         '<div class="ci-pk">' + pk.slice(0, 10).map(function (p) {
           var pp = D.pkg(p.path), gh = pp && X.pkgTiles ? X.pkgTiles.groupHue(pp.group) : -1;
           return '<span class="ci-tile' + (p.whole ? "" : " part") + '"' + (gh >= 0 ? ' style="--gh:' + gh + '"' : "") + ' title="' + esc(p.path + (p.whole ? "" : ": " + U.plural(p.files.length, "file"))) + '">' + esc(U.lastElem(p.path)) + "</span>";
@@ -175,7 +194,10 @@
     el.innerHTML = h;
   }
 
-  function cleanup() { if (S) S.graphs.forEach(function (g) { g.destroy(); }); S = null; }
+  function cleanup() {
+    if (S) { S.graphs.forEach(function (g) { g.destroy(); }); S.el.removeEventListener("scroll", S.spy); }
+    S = null;
+  }
 
   X.router.register("concerns", {
     nav: "concerns",

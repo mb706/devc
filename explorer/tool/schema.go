@@ -843,8 +843,8 @@ type Step struct {
 	To      string `toml:"to" json:"to,omitempty"`
 	Section string `toml:"section" json:"section,omitempty"`
 	// Via is how a message passes: "exec", "rpc:<method>", "http:<route>",
-	// "event:<type>", "cmd:<command>", "reply", "file", "signal" or
-	// "stream".
+	// "event:<type>", "cmd:<command>", "reply", "file", "signal", "stream"
+	// or "net" (a connection to a listener).
 	Via   string `toml:"via" json:"via,omitempty"`
 	Label string `toml:"label" json:"label,omitempty"`
 	// Ref is the step's code: what the actor runs, or what sends.
@@ -890,6 +890,11 @@ type Connection struct {
 	// their target in Path.
 	Path         []string `json:"path,omitempty"`
 	DynamicEdges []int    `json:"dynamicEdges,omitempty"`
+	// ValueEdges marks, the same way, the edges that are no call: the
+	// earlier function only mentions the later one (passes it as a value,
+	// stores it in a table). Such a connection is weaker: the tool sees the
+	// function handed over, not called.
+	ValueEdges []int `json:"valueEdges,omitempty"`
 	// Via is the reference of the table entry that links the two (an
 	// "rpc:", "http:", "event:" or "cmd:" reference).
 	Via string `json:"via,omitempty"`
@@ -960,6 +965,12 @@ type Surface struct {
 	// "access", "xsite" and "handler" to the struct's field names.
 	Table  string            `toml:"table" json:"table,omitempty"`
 	Fields map[string]string `toml:"fields" json:"fields,omitempty"`
+	// Through (http, optional) are the functions every request of the
+	// table's routes passes before its handler, where the call graph cannot
+	// follow the router (a wrapper that checks access, then calls the
+	// handler through a function value). The flow check lets the step after
+	// an http: message continue in them as well as in the handler.
+	Through []string `toml:"through" json:"through,omitempty"`
 	// Root (config) is the struct type of the file; Key the first part of
 	// its keys ("project").
 	Root string `toml:"root" json:"root,omitempty"`

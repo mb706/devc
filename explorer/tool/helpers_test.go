@@ -27,7 +27,7 @@ func loadTestWorld(t *testing.T) *world {
 		{ImportPath: testModule + "/proto", Dir: root + "/proto", Name: "proto", GoFiles: []string{"proto.go"}, Module: mod},
 		{ImportPath: testModule + "/server", Dir: root + "/server", Name: "server", GoFiles: []string{"server.go"},
 			Imports: []string{testModule + "/proto"}, Module: mod},
-		{ImportPath: testModule + "/client", Dir: root + "/client", Name: "client", GoFiles: []string{"client.go"},
+		{ImportPath: testModule + "/client", Dir: root + "/client", Name: "client", GoFiles: []string{"client.go", "flows.go"},
 			TestGoFiles: []string{"client_test.go"}, Imports: []string{testModule + "/proto"}, Module: mod},
 	}
 	prog, err := buildProgram(root, testModule, listed)

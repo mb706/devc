@@ -6,12 +6,14 @@ A local web app for understanding this codebase: diagrams of what runs where and
 ./dev explore            # build explorer/dist/ (about 3 s once the tool is compiled)
 xdg-open explorer/dist/index.html
 ./dev explore --check    # validate the model against the code, build nothing
+./dev explore --check --only explorer/model/flows/box-up.toml   # only the messages about these files or directories
 ./dev explore --strict   # warnings fail too
 ./dev explore --model <dir> --out <dir>   # another model, another output directory (both below the repository)
-./dev explore query help # questions about the code for people writing the model
+./dev explore query help # questions about the code for people writing the model (several per run: query flow box-up symbol internal/box.Up)
 ./dev explore comments-only [commit]      # did the Go code change only in its comments since HEAD?
 explorer/check.sh [--no-build] [dir]      # build, then check the app in headless Chrome (screenshots in dir)
 explorer/check.sh --no-build --shot '#/concerns/network' [dir]   # screenshots of one page, both themes, two widths
+explorer/check.sh --no-build --full --shot '#/concerns/network' [dir]   # the same, of the whole page
 ```
 
 `explorer/dist/` is generated and ignored by git. It is a static site without a server and without network access: open `index.html` from disk. The explorer does not describe itself: the packages below `explorer/` are left out.
@@ -61,7 +63,7 @@ Everything in the model points at code and at other model objects with one synta
 | `env:DEVC_BOX` | An environment variable. |
 | `concern:network`, `flow:box-up`, `term:relay`, `actor:daemon`, `zone:box`, `channel:box-channel`, `surface:daemon-api`, `layer:foundation`, `group:git` | Objects of the model. |
 | `diagram:session-states`, `diagram:sessions/session-states` | A concern's diagram: bare in the text of the concern that has it (or when only one concern has one of that id), else with the concern's id. |
-| `doc:specs-v2.md#13`, `doc:specs-v2.md` | A heading of a document, by its number or its anchor; or the whole document. |
+| `doc:specs-v2.md#13`, `doc:specs-v2.md` | A heading of a document, by its number or its anchor; or the whole document. The leading words of an anchor are enough when only one heading starts with them: `doc:docs/dev/STATUS.md#x7` is the section "X7 Explorer content: git", where a chunk's deviations are recorded. |
 | `finding:C1-05`, `chunk:C10a` | A review finding, a work order. A finding label that two reviews use keeps the plain label in the review whose name starts with its letter; in the other it is `<review>/<label>` (`finding:A/B1` is review A's B1, `finding:B1` review B's). |
 
 In TOML, a reference is a string. In Markdown, write `[[internal/box.Up]]` or `[[internal/box.Up|bringing a box up]]`.
@@ -106,7 +108,7 @@ checks = ["internal/proto.ParseSpoolLine"]   # where what arrives is validated
 concerns = ["channel"]
 ```
 
-An actor with `commands` or `entry` is devc code. A command stands for itself and its subcommands, except those another actor names: `commands = ["devc"]` with `["devc daemon"]` on another actor gives every command to the first but `devc daemon` and its subcommands, and naming `devc daemon status` on the first takes that one back. The tool computes which functions can be reached from those entry points (for a command whose run function is a function literal, from what that literal mentions), which gives every package and function the set of actors it may run in. Name an `entry` only where no command leads there; an entry that builds the whole command tree (`cli.Main`) reaches everything.
+An actor with `commands` or `entry` is devc code. A command stands for itself and its subcommands, except those another actor names: `commands = ["devc"]` with `["devc daemon"]` on another actor gives every command to the first but `devc daemon` and its subcommands, and naming `devc daemon status` on the first takes that one back. The tool computes which functions can be reached from those entry points (for a command whose run function is a function literal, from what that literal mentions, and what a local closure of the same function that it calls mentions), which gives every package and function the set of actors it may run in. Name an `entry` only where no command leads there; an entry that builds the whole command tree (`cli.Main`) reaches everything.
 
 ### `packages.toml`: the static structure
 
@@ -182,7 +184,7 @@ text = "…"
 [[step]]
 from = "cli"                            # something that passes between two actors
 to = "podman"
-via = "exec"                            # exec | rpc:<method> | http:<route> | event:<type> | cmd:<command> | reply | file | signal | stream
+via = "exec"                            # exec | rpc:<method> | http:<route> | event:<type> | cmd:<command> | reply | file | signal | stream | net
 label = "podman create"
 ref = "internal/engine.Podman.Create"   # the code that sends
 text = "…"
@@ -198,14 +200,17 @@ text = "…"
 
 A step may carry `detail` (longer Markdown shown when the step is open) and `checks` (references to the code that validates what crossed a boundary).
 
-The build checks that consecutive steps of one actor are connected: there must be a path in the call graph from the earlier step's code to the later one's. For `via = "rpc:…"` the sending code must be among the method's callers and the next step's code among its handlers; likewise for routes, events and commands. A step that is connected in a way the tool cannot see says so: `unchecked = "started as a goroutine by the listener"`. The app shows the path it found between two steps.
+The build checks that consecutive steps of one actor are connected: there must be a path in the call graph from the earlier step's code to the later one's. For `via = "rpc:…"` the sending code must be among the method's callers and the next step's code among its handlers; likewise for routes, events and commands. A step that is connected in a way the tool cannot see says so: `unchecked = "started as a goroutine by the listener"`. The app shows the path it found between two steps; `./dev explore query flow <id>` prints them.
 
 In detail:
 
 - A step's `ref` should be a function or method. A type, field or constant works as the later step too: it is reached when a function on the path uses it.
-- The path may start in the code of any earlier step of the same actor, not only the latest: a function returns to its caller, and an earlier step may have started the goroutine the later one runs in. The shortest path wins (among equals, from the latest step), and the connection says which step it starts from. Paths are at most 8 calls long; test code is never on them.
-- A message ends the receiver's thread of work and starts a new one: the receiver's next step must be reachable from what receives the message. `rpc:<method>`: from the method's handlers; the sending step's code must also be a caller of the method, call one, or be called by one with the method's name (`sender` in the data). `http:<route>`: from the route's handler. `event:<type>`: from the code that reads that type; the sender must write it. `cmd:<command>`: from the command's run function (a process started with that devc command). `reply`: the answer to an earlier call; the receiver continues in its own code.
-- `exec` to devc code, `file`, `signal` and `stream` cannot be followed: the receiver's next step needs `unchecked`, with the reason. An `external = true` step (a person, a program that is not devc) has no code and breaks the actor's chain.
+- The path may start in the code of any earlier step of the same actor, not only the latest: a function returns to its caller, and an earlier step may have started the goroutine the later one runs in. The shortest path wins. Among equally short paths, the step whose function has not returned wins, the innermost first: the tool keeps the actor's steps as a stack, and a step that continues in the code of step 3 ends the steps after step 3 (their functions returned to it). Then the most recent step; and of steps that give the very same path, the most recent, whose code the path starts in. The connection says which step it starts from. Paths are at most 8 calls long; test code is never on them.
+- Of the shortest paths, one through calls wins over one through calls via interfaces or mentions. An edge that only mentions a function (passes it as a value, stores it in a table) is no call: a connection through one is shown as weaker, with ⤳ for that edge.
+- The order in which a flow's steps are found depends on where the actor's first step is: the tool looks for paths from the code of earlier steps, so a flow that starts in the middle of a call cannot later name the function that called it. Start an actor's chain at the entry function of the process or the goroutine: the command's run function, the handler, the loop.
+- A message ends the receiver's thread of work and starts a new one: the receiver's next step must be reachable from what receives the message. `rpc:<method>`: from the method's handlers; the sending step's code must also be a caller of the method, call one, or be called by one with the method's name (`sender` in the data). A method stored as a value of a map in a variable is sent by the function that looks it up there and passes it to a call. `http:<route>`: from the route's handler, and from the functions the surface names in `through` (a wrapper the router calls before every handler). `event:<type>`: from the code that reads that type; the sender must write it. `cmd:<command>`: from the command's run function (a process started with that devc command). `reply`: the answer to an earlier call; the receiver continues in its own code.
+- A command whose run function is a function literal (`RunE: func(…) error {…}` inside `newFooCmd`) starts in what the literal calls, and in what a local closure it calls calls (`send := func(…) {…}` in the same function). The function that holds the literal is the same code as the literal: a step naming `newFooCmd` connects right after the `cmd:` message, as the actor's first step, and as a `reply` at the end that prints the result.
+- `exec` to devc code, `file`, `signal`, `stream` and `net` (a connection to a listener: TCP, a Unix socket) cannot be followed: the receiver's next step needs `unchecked`, with the reason. An `external = true` step (a person, a program that is not devc) has no code and breaks the actor's chain; so does a step whose `ref` is a `file:` reference. Such a step may still carry `unchecked`: the app shows the reason, marked as not verified.
 - Tours (`kind = "tour"`) are reading orders; their steps are not checked for connections. A tour's step may name only a `ref`, or an actor with `at`.
 
 ### `glossary.toml`
@@ -263,6 +268,7 @@ id = "hub-routes"
 kind = "http"
 table = "internal/hub.routeTable"         # the function returning a slice literal of structs
 fields = { method = "method", path = "path", access = "access", xsite = "xsite", handler = "handle" }
+through = ["internal/hub.Server.guard"]   # optional: what every request passes before its handler
 
 [[surface]]
 id = "config-project"
@@ -276,7 +282,7 @@ kind = "env"
 pattern = "DEVC_[A-Z0-9_]+"               # names found in string literals and in the other files
 ```
 
-A method belongs to every rpc surface whose `handlers_in` registers a handler for it or whose `listed_in` lists it. Uses of a method's constant are sorted: a key of a map literal or of an index assignment, a `case` or a comparison registers a handler; an argument of a call or the value of a struct literal's field sends; anything else (a slice of allowed methods, the argument of a call that builds a handler being registered) only lists it. Event types are sorted the same way into readers, writers and other uses.
+A method belongs to every rpc surface whose `handlers_in` registers a handler for it or whose `listed_in` lists it. Uses of a method's constant are sorted: a key of a map literal or of an index assignment, a `case` or a comparison registers a handler; an argument of a call or the value of a struct literal's field sends; a value of a map literal held in a variable lists it, and a function that looks it up in that variable and passes what it found to a call (`m, ok := commandMethods[t]; …; l.forward(ctx, m, …)`) sends it; anything else (a slice of allowed methods, the argument of a call that builds a handler being registered) only lists it. Event types are sorted the same way into readers, writers and other uses.
 
 ### `overview.md`
 
@@ -338,9 +344,10 @@ The data contract between tool and app is the set of Go types in `explorer/tool/
 | A file that belongs to no concern | warning |
 | Two flow steps with no connection the tool can find | warning |
 | A package or multi-file package's file without a comment | warning |
+| A concern page of more than 1,200 words of prose (code blocks and tables are not counted) | warning |
 | A type error in the code | warning |
 
-A package comment counts for its own file. Errors fail the build. `--strict` turns warnings into errors.
+A package comment counts for its own file. Errors fail the build. `--strict` turns warnings into errors. `--only <file or directory>` (repeatable) shows only the messages about those files; errors elsewhere still fail.
 
 ## What the app shows
 
@@ -378,13 +385,13 @@ What an author of the model needs to know beyond the format: how long things can
 explorer/check.sh --no-build --shot '#/concerns/network' --shot '#/flows/box-up?step=7' "$(mktemp -d)"
 ```
 
-`--shot` takes any route of the app (copy it from the address bar after `index.html`), loads it in headless Chrome in the light and the dark theme at 1280 × 800 and 1920 × 1080, saves four PNG files per route in the directory, and fails if the page logs an error. Look at all four: the 1280 shots show what is cut or wrapped; the 1920 shots, whether a diagram uses the room. For a page with the inspector open, add `?i=<reference>` to the route (`#/runtime?i=actor:daemon`). A site built elsewhere (`./dev explore --out bin/x`) is checked with `--site bin/x`. The full `explorer/check.sh` (about two minutes) visits every view and runs the app's assertions; run it once before you hand in.
+`--shot` takes any route of the app (copy it from the address bar after `index.html`), loads it in headless Chrome in the light and the dark theme at 1280 × 800 and 1920 × 1080, saves four PNG files per route in the directory, and fails if the page logs an error. Look at all four: the 1280 shots show what is cut or wrapped; the 1920 shots, whether a diagram uses the room. For a page with the inspector open, add `?i=<reference>` to the route (`#/runtime?i=actor:daemon`). `--full` captures the whole page instead of the window (a concern page from its title to its last invariant; a flow's whole diagram), up to 16000 pixels tall. A flow route with `?step=<n>` shows that step in view. A site built elsewhere (`./dev explore --out bin/x`) is checked with `--site bin/x`. The full `explorer/check.sh` (about two minutes) visits every view and runs the app's assertions; run it once before you hand in.
 
 Routes: `#/overview`, `#/runtime`, `#/concerns/<id>` (`?diagram=<id>` scrolls to a diagram, `?h=<anchor>` to a heading), `#/flows/<id>?step=<n>`, `#/state`, `#/glossary?sel=<id>`, `#/docs/<path>`, `#/docs/findings?sel=<id>`, `#/code/<file>?sym=<reference>`, `#/pkg/<path>`.
 
 ### Text
 
-- **Markdown** in every text field: headings, paragraphs, `**bold**`, `*italic*`, `` `code` ``, lists (nested by indentation), tables, block quotes, fenced code (` ```go `, `toml`, `sh`, `json` are highlighted), links. Raw HTML is shown as text. `[[reference]]` becomes a link with the target's name; `[[reference|words]]` uses your words. A backticked name that is exactly one symbol, package or file (`` `internal/box.Up` ``, `` `internal/box` ``) becomes a link too; a bare name (`` `Up` ``) stays code. Mentions such as "finding C1-05", "work order C10a", "plan 3.6", "spec section 13" become links by themselves.
+- **Markdown** in every text field: headings, paragraphs, `**bold**`, `*italic*`, `` `code` ``, lists (nested by indentation), tables (a table wider than the text grows into the free width of the page, then scrolls sideways with a note above it saying so), block quotes, fenced code (` ```go `, `toml`, `sh`, `json` are highlighted), links. Raw HTML is shown as text. `[[reference]]` becomes a link with the target's name; `[[reference|words]]` uses your words. A backticked name that is exactly one symbol, package or file (`` `internal/box.Up` ``, `` `internal/box` ``) becomes a link too; a bare name (`` `Up` ``) stays code. Mentions such as "finding C1-05", "work order C10a", "plan 3.6", "spec section 13" become links by themselves.
 - **Summaries** (zones, actors, concerns, flows) are one sentence. What is shown where: the first sentence in lists and search results; the first paragraph, cut at 420 characters, in hover cards; three lines (about 150 characters) on concern and flow cards; two lines (about 200 characters) in the flow player's header. Longer summaries are cut with an ellipsis, not lost: the full text is on the object's own page.
 - **Titles**: concerns and flows up to about 40 characters (they are headings and card titles); actors, zones and channels up to about 20, two or three words (actor titles wrap to two lines on a card 96 to 190 pixels wide; channel titles are labels on the map).
 - **Invariants** are one sentence each, a property that holds, up to about 200 characters; put the reason in the concern's text. Name the code that enforces each one (`refs`) and, where there is one, the test that shows it (`tests`).
@@ -393,7 +400,8 @@ Routes: `#/overview`, `#/runtime`, `#/concerns/<id>` (`?diagram=<id>` scrolls to
 
 ### Concerns
 
-- The page is the concern's text in a column of about 74 characters, with a side column of its code, key symbols, flows, related concerns, spec sections and tests. The invariants come after the text, numbered, each with its code.
+- The page is the concern's text in a column of about 74 characters, with a side column that stays in view: "On this page" (its `##` sections and the invariants, the one being read marked), its flows, its code, key symbols (two lines of each doc comment), related concerns, spec sections and tests. With the inspector open the side column follows the page. The invariants come after the text, numbered, each with its code.
+- **Length**: 500 to 1,200 words of prose; `--check` warns beyond 1,200. Quoted code blocks and tables do not count.
 - Use `##` for sections (they get a rule above them and appear under "On this page" when there are three or more); `###` inside them. Write the five sections of the template; leave out one that has nothing to say rather than filling it.
 - A diagram appears after the paragraph (or list) that first names it with `[[diagram:<id>]]`; a diagram the text does not name comes after the first section. Name it where the reader needs it.
 
@@ -403,7 +411,7 @@ Routes: `#/overview`, `#/runtime`, `#/concerns/<id>` (`?diagram=<id>` scrolls to
 - **Columns**: four fit everywhere (1280 with the inspector open); five at 1280 without it; six at 1920. A wider diagram scrolls sideways. **Rows**: any number, but up to five keeps a diagram on one screen.
 - **Node labels**: up to about 25 characters (two lines). Give a node a `ref` when it stands for code: the box then shows the symbol's name under the label and opens the code on click. `zone` colours the box like that zone; use it where the zone is the point (box or host), not for decoration.
 - **Edge labels**: up to about 24 characters; longer ones wrap into a box of up to 150 pixels and crowd the picture. An edge's `ref` makes its label and line open the code.
-- A state machine of a dozen states works: edges both ways between two nodes run side by side, and an edge from a node to itself is a loop. Place states so that most edges join neighbours: an edge that skips a column must go around the boxes between.
+- A state machine of a dozen states works: edges both ways between two nodes run side by side, and an edge from a node to itself is a loop with its label beside it (on the side of the box with the fewest other edges). Place states so that most edges join neighbours: an edge that skips a column must go around the boxes between.
 
 ### Flows
 
@@ -413,7 +421,9 @@ Routes: `#/overview`, `#/runtime`, `#/concerns/<id>` (`?diagram=<id>` scrolls to
 - **`label`** (messages): what travels, short: `session.send {id, text}`, `podman create`. Up to about 30 characters fits between neighbouring lifelines; a longer label reaches over the lifelines beside it (readable, but busier) and is cut only at the diagram's edge, about 90 characters at 1280. The full label is always in the step panel.
 - **Steps of one actor** show the name of their `ref` (`Daemon.apiSend`) on the lifeline; name the function that does the step, not its caller. Give an `external` step a short `label`; else the diagram shows its first words.
 - **`text`**: one or two sentences, shown in full in the step panel (the first sentence in lists and tooltips). Longer explanations go in `detail`, shown under the text.
-- **Connections**: the step panel shows the path the build found from the previous step of the same actor, or your `unchecked` reason under "not verified by the tool". A step whose connection was not found carries a mark in the diagram; fix it, or say why with `unchecked`.
+- **Connections**: the step panel shows the path the build found from the previous step of the same actor, or your `unchecked` reason under "not verified by the tool" (on a step in JavaScript, a `file:` reference, too). A path through a function passed as a value is marked "verified, weaker". A step whose connection was not found carries a mark in the diagram; fix it, or say why with `unchecked`. `./dev explore query flow <id>` prints every connection with its path; `./dev explore --check --only explorer/model/flows/<id>.toml` only your flow's warnings.
+- **Messages without a table**: `via = "net"` for a connection to a listener (TCP, a Unix socket), `stream` for bytes on a connection that exists, `file` for a file one side writes and the other reads, `signal`, `exec`. The tool follows none of them: the receiver's next step needs `unchecked`.
+- **Commands**: after `via = "cmd:devc foo"`, the receiver's step may name the function that builds the command (`newFooCmd`, when its run function is a literal) or anything the literal calls; a final `reply` that prints the result may name `newFooCmd` too.
 - **Tours** have no diagram: a list of steps beside the step panel. Give each step a `ref` and a sentence of why to read it.
 
 ### The runtime map, the overview and the state view

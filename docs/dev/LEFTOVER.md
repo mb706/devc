@@ -358,6 +358,16 @@ After upgrading to C19r4: a desktop that runs from before is refused by `devc gu
 - A dense graph diagram (25 edges on 15 nodes) is legible but busy: the router lays parallel edges in tracks 6 pixels apart.
 - The large temporary model (40 concerns, 60 flows, a 40-step flow, a ten-actor flow, a 15-node diagram, a concern three times as long, 100 terms) was built under `bin/` (only the repository is mounted in the toolchain container) and deleted afterwards; `explorer/check.sh --site` passed on it.
 
+### Explorer (X14)
+
+- Checked in headless Chrome only (no Firefox here), like X2 and X3.
+- X4's report that the outline "drops a doc comment's first line when it starts with `(`" was not reproduced: `query outline`, the app's first-sentence and paragraph functions and the doc renderer all keep such lines (tried on synthetic text and on the 237 doc comments with a line starting with `(`); no doc comment starts with one today. If it recurs, the symbol is needed.
+- The connection check does not prefer the nearest earlier step outright: on today's model that would have lengthened 16 paths (two to four hops instead of one) and still not fixed the reported case, where the misleading step is also the nearest with a path. The shortest path still wins; among equally short ones the innermost step whose function has not returned. A longer path from the latest step is therefore never chosen over a shorter one from an earlier step that is still live.
+- An edge that only mentions a function (passed as a value) is marked as weaker even where the value is certainly called a line later; the call graph cannot tell.
+- A method constant held in a map counts as sent by every function that looks that map up and passes the result, or the variable it was assigned to, to any call, for every method in the map; no data flow beyond that one assignment is followed.
+- `through` on an http surface is supported and tested, but the model names none yet; until it does, the hub's `guard` and its checks can still appear only as `checks`.
+- No table in today's model is wider than its column; the sideways-scroll cue was checked with injected tables. `check.sh --full` grows the window up to 16000 pixels and leaves the inspector and the code view's own panes as they are.
+
 ## 6. Deferred work
 
 | Work | What it would take |

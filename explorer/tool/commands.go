@@ -4,6 +4,7 @@ package main
 
 import (
 	"go/ast"
+	"go/types"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -186,7 +187,10 @@ func (w *world) enclosingFunc(file string, line int) string {
 // literalSeeds returns the functions, methods and dispatch variables that
 // the function literal starting on a line mentions, so that a command's
 // reach starts from its own closure rather than from everything in the
-// function that builds it.
+// function that builds it. A local variable of the enclosing function that
+// is assigned a function literal (send := func(…) {…}) and that the
+// literal mentions is followed into that literal: commands that share a
+// helper closure reach what it calls.
 func (w *world) literalSeeds(file string, line int) []string {
 	var f *fileInfo
 	for _, g := range w.prog.files {
@@ -199,40 +203,99 @@ func (w *world) literalSeeds(file string, line int) []string {
 		return nil
 	}
 	var lit *ast.FuncLit
-	ast.Inspect(f.AST, func(n ast.Node) bool {
+	var decl ast.Node
+	for _, d := range f.AST.Decls {
+		ast.Inspect(d, func(n ast.Node) bool {
+			if lit != nil {
+				return false
+			}
+			if fl, ok := n.(*ast.FuncLit); ok && f.line(fl.Pos()) == line {
+				lit, decl = fl, d
+				return false
+			}
+			return true
+		})
 		if lit != nil {
-			return false
+			break
 		}
-		if fl, ok := n.(*ast.FuncLit); ok && f.line(fl.Pos()) == line {
-			lit = fl
-			return false
-		}
-		return true
-	})
+	}
 	if lit == nil {
 		return nil
 	}
+	info := f.Pkg.Info
+	closures := localClosures(decl, info)
 	seen := map[string]bool{}
+	followed := map[*ast.FuncLit]bool{lit: true}
 	var out []string
-	ast.Inspect(lit.Body, func(n ast.Node) bool {
-		id, ok := n.(*ast.Ident)
-		if !ok {
+	var walk func(body ast.Node)
+	walk = func(body ast.Node) {
+		ast.Inspect(body, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			obj := info.Uses[id]
+			for _, cl := range closures[obj] {
+				if !followed[cl] {
+					followed[cl] = true
+					walk(cl.Body)
+				}
+			}
+			ref := w.refOf(obj)
+			if ref == "" || seen[ref] {
+				return true
+			}
+			s := w.syms[ref]
+			if s.isFunc() || (s.Kind == "var" && len(w.edges[ref]) > 0) {
+				seen[ref] = true
+				out = append(out, ref)
+			}
+			if s.Kind == "imethod" {
+				for _, impl := range w.dyn[s.obj] {
+					if !seen[impl] {
+						seen[impl] = true
+						out = append(out, impl)
+					}
+				}
+			}
 			return true
+		})
+	}
+	walk(lit.Body)
+	return out
+}
+
+// localClosures maps the local variables of a declaration that are
+// assigned function literals (v := func…, v = func…, var v = func…) to
+// those literals.
+func localClosures(decl ast.Node, info *types.Info) map[types.Object][]*ast.FuncLit {
+	out := map[types.Object][]*ast.FuncLit{}
+	add := func(id *ast.Ident, e ast.Expr) {
+		fl, ok := ast.Unparen(e).(*ast.FuncLit)
+		if !ok || id == nil {
+			return
 		}
-		ref := w.refOf(f.Pkg.Info.Uses[id])
-		if ref == "" || seen[ref] {
-			return true
+		obj := info.Defs[id]
+		if obj == nil {
+			obj = info.Uses[id]
 		}
-		s := w.syms[ref]
-		if s.isFunc() || (s.Kind == "var" && len(w.edges[ref]) > 0) {
-			seen[ref] = true
-			out = append(out, ref)
+		if v, ok := obj.(*types.Var); ok && !v.IsField() && v.Parent() != v.Pkg().Scope() {
+			out[v] = append(out[v], fl)
 		}
-		if s.Kind == "imethod" {
-			for _, impl := range w.dyn[s.obj] {
-				if !seen[impl] {
-					seen[impl] = true
-					out = append(out, impl)
+	}
+	ast.Inspect(decl, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			if len(n.Lhs) == len(n.Rhs) {
+				for i, l := range n.Lhs {
+					id, _ := l.(*ast.Ident)
+					add(id, n.Rhs[i])
+				}
+			}
+		case *ast.ValueSpec:
+			if len(n.Names) == len(n.Values) {
+				for i, id := range n.Names {
+					add(id, n.Values[i])
 				}
 			}
 		}

@@ -9,18 +9,27 @@
 # flow changes the step, the URL and the inspected code, a reference in a
 # concern's text opens the inspector, the runtime map draws a connector
 # for every channel, a term shows its definition on hover, the findings
-# lead to code, the source marks flow steps, and the app, the largest file,
-# the largest document and the runtime map are fast. Nothing about the
+# lead to code, the source marks flow steps (one mark per kind on a line),
+# the flows index filters, the glossary's index selects a term, a concern's
+# side column starts with "On this page" and follows the reading, a wide
+# table says it scrolls, loops show their labels, a flow opened at a step
+# shows it, tour steps name their code once, unchecked reasons and weaker
+# paths are shown, the filtered runtime map names its channels, and the
+# app, the largest file, the largest document and the runtime map are fast. Nothing about the
 # code base is written here: the routes and the things to look for are
 # chosen from the site's data.
 #
-#   explorer/check.sh [--no-build] [--site dir] [--shot '#/route']... [output-directory]
+#   explorer/check.sh [--no-build] [--site dir] [--shot '#/route']... [--full] [output-directory]
 #
 #   --no-build   check explorer/dist as it is
 #   --site dir   check the site in dir (built with --out); implies --no-build
 #   --shot frag  only take screenshots of this route (repeatable), in both
 #                themes at 1280 and 1920 pixels, and report console errors;
 #                for authors previewing their pages
+#   --full       with --shot: capture the whole page, not only the window
+#                (the window grows until the page and the scrolling parts
+#                of the view, such as a flow's diagram, show everything;
+#                at most 16000 pixels tall)
 #
 # Needs python3 (standard library only: a minimal DevTools protocol client
 # below) and Chrome or Chromium: $CHROME, else chrome-headless-shell or
@@ -33,9 +42,11 @@ BUILD=1
 OUT_ARG=""
 SITE_DIR="$REPO/explorer/dist"
 SHOTS=()
+FULL=0
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	--no-build) BUILD=0; shift ;;
+	--full) FULL=1; shift ;;
 	--site) SITE_DIR="$(cd "$2" && pwd -P)"; BUILD=0; shift 2 ;;
 	--shot) SHOTS+=("$2"); shift 2 ;;
 	*) OUT_ARG="$1"; shift ;;
@@ -83,8 +94,8 @@ CHROME_PID=$!
 cat >"$WORK/cdp.py" <<'PY'
 import base64, json, os, socket, struct, sys, time, urllib.request
 
-site, cdp, out = sys.argv[1], sys.argv[2], sys.argv[3]
-only = sys.argv[4:]
+site, cdp, out, full = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
+only = sys.argv[5:]
 base = "file://" + site
 
 def wait_http(url, tries=100):
@@ -194,6 +205,31 @@ def size(w, h, scheme):
     page.send("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": 1, "mobile": False})
     page.send("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-color-scheme", "value": scheme}]})
 
+# How much taller the window must be for the view to show everything: the
+# largest overflow of a scrolling element of the view (the inspector and
+# the code view's own panes are left as they are).
+OVERFLOW_JS = """(() => {
+  let most = 0;
+  document.querySelectorAll('.view, .view *').forEach(e => {
+    if (e.closest('.view-code, .insp')) return;
+    const cs = getComputedStyle(e);
+    if (!/(auto|scroll)/.test(cs.overflowY) || !e.clientHeight || e.offsetParent === null && e !== document.querySelector('.view')) return;
+    most = Math.max(most, e.scrollHeight - e.clientHeight);
+  });
+  return most;
+})()"""
+
+def grow(w, h):
+    """Grows the window until the view no longer scrolls, at most 16000 pixels."""
+    for _ in range(6):
+        more = page.js(OVERFLOW_JS) or 0
+        if more <= 1 or h >= 16000:
+            break
+        h = min(16000, h + more)
+        page.send("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": 1, "mobile": False})
+        time.sleep(0.4)
+    return h
+
 # The check must be able to see an error: provoke one.
 size(1280, 800, "light")
 page.goto("#/overview")
@@ -215,7 +251,9 @@ if only:
                 size(w, h, scheme)
                 page.goto(frag)
                 time.sleep(0.8)
-                page.shot(f"{name}-{w}-{scheme}")
+                if full:
+                    grow(w, h)
+                page.shot(f"{name}-{w}-{scheme}" + ("-full" if full else ""))
                 collect(f"{frag} {w} {scheme}")
     print(f"{len(only) * 4} screenshots in {out}")
     if problems:
@@ -553,6 +591,104 @@ time.sleep(1.5)
 check(not bad["errs"], f"{bad['n']} references render as chips, cards and in the inspector" + (f": {bad['errs']}" if bad["errs"] else ""))
 collect("references")
 
+# The flows index: a filter narrows the flows, and the count follows.
+page.goto("#/flows")
+page.wait("document.querySelector('.fx-bar input') && document.querySelector('.fx-row')", "the flows index")
+total = page.js("document.querySelectorAll('.fx-row').length")
+word = page.js("(() => { const f = X.data.model.flows.find(f => f.kind !== 'tour'); return f ? f.title.split(/\\s+/).sort((a, b) => b.length - a.length)[0] : ''; })()")
+page.js(f"(() => {{ const i = document.querySelector('.fx-bar input'); i.value = {json.dumps(word)}; i.dispatchEvent(new Event('input')); }})()")
+time.sleep(0.4)
+shown = page.js("document.querySelectorAll('.fx-row:not(.hidden)').length")
+check(total == len(page.js("X.data.model.flows.map(f => f.id)")) and 0 < shown < total, f"the flows index lists {total} flows and tours; filtering by {word!r} leaves {shown}")
+page.shot("flows-filtered")
+collect("flows index")
+
+# The glossary's index of terms: a click selects the term.
+if pick["term"]:
+    page.goto("#/glossary")
+    page.wait("document.querySelector('.gl-index-in a[data-goto]')", "the glossary's index")
+    tid = page.js("(() => { const as = document.querySelectorAll('.gl-index-in a[data-goto]'); const a = as[Math.floor(as.length / 2)]; a.click(); return a.dataset.goto; })()")
+    page.wait(f"/[?&]sel={tid}(&|$)/.test(location.hash) && document.querySelector('.gl-t.sel[data-term=\"{tid}\"]')", "the term selected from the index", 5)
+    check(page.js("document.querySelectorAll('.gl-index-in a[data-goto]').length") == page.js("X.data.model.terms.length"), f"the glossary's index lists every term, and a click selects {tid}")
+    collect("glossary index")
+
+# A concern page: "On this page" comes first and marks the section read.
+if pick["concern"]:
+    page.goto(f"#/concerns/{pick['concern']}")
+    page.wait("document.querySelector('.cp-body')", "the concern page")
+    first = page.js("(document.querySelector('.cp-side-in .cp-s') || {className: ''}).className")
+    heads = page.js("document.querySelectorAll('.cp-body > h2').length")
+    if heads > 2:
+        page.js("(() => { const h = document.querySelectorAll('.cp-body > h2')[2]; h.scrollIntoView({block: 'start'}); })()")
+        time.sleep(0.4)
+        cur = page.js("(document.querySelector('.cp-toc a.cur') || {dataset: {}}).dataset.goto")
+        want = page.js("document.querySelectorAll('.cp-body > h2')[2].dataset.anchor")
+        check("toc" in first and cur == want, f"the side column of {pick['concern']} starts with \"On this page\", which marks the section in view ({cur})")
+    # A table wider than the text scrolls sideways with a cue.
+    page.js("""(() => { const d = document.createElement('div'); d.className = 'md'; d.style.width = '300px'; d.id = 'wide-test';
+      d.innerHTML = X.md.render('| a | b | c | d |\\n|---|---|---|---|\\n| `internal/daemon.requestService.decideLocked` | `internal/hub.Server.apiDecide` | `POST /api/requests/{machine}/{id}/decide` | x |', {});
+      document.querySelector('.cp-body').prepend(d); return 1; })()""")
+    time.sleep(0.4)
+    check(page.js("document.querySelector('#wide-test .md-tw').classList.contains('wide')") and page.js("getComputedStyle(document.querySelector('#wide-test .md-tw'), '::before').content.indexOf('scroll') >= 0"),
+          "a table wider than its column is marked and says it scrolls sideways")
+    collect("concern side column")
+
+# Diagrams: every label of a loop is drawn, inside its diagram.
+loops = page.js("""(() => { const out = []; (X.data.model.concerns || []).forEach(c => (c.diagrams || []).forEach(d => (d.edges || []).forEach(e => { if (e.from === e.to && e.label) out.push([c.id, d.id, e.label]); }))); return out; })()""")
+for cid, did, lab in loops[:4]:
+    page.goto(f"#/concerns/{cid}?diagram={did}")
+    page.wait(f"document.querySelector('.gd-fig[data-diagram=\"{cid}/{did}\"] .cx-lab')", f"the diagram {did}")
+    ok = page.js(f"""(() => {{ const fig = document.querySelector('.gd-fig[data-diagram="{cid}/{did}"]'), sc = fig.querySelector('.gd-scroll').getBoundingClientRect();
+      const l = [...fig.querySelectorAll('.cx-lab')].find(x => x.textContent === {json.dumps(lab)}); if (!l) return false;
+      const r = l.getBoundingClientRect(); return r.width > 0 && r.top >= sc.top && r.bottom <= sc.bottom && r.left >= sc.left - 1; }})()""")
+    check(ok, f"the loop {lab!r} of {cid}/{did} shows its label inside the diagram")
+    collect("loops")
+
+# Flows: ?step=N shows the step in the diagram; a tour step that names only
+# code shows the name once; an unchecked reason is shown; a path through a
+# function value is marked weaker; source margins have one mark per kind.
+if pick["flow"]:
+    n = pick["flowSteps"]
+    page.goto(f"#/flows/{pick['flow']}?step={n}")
+    page.wait("document.querySelector('.seq-row.cur') && X.inspector.current()", "the last step")
+    time.sleep(0.6)
+    vis = page.js("(() => { const d = document.querySelector('.fp-diagram').getBoundingClientRect(), r = document.querySelector('.seq-row.cur').getBoundingClientRect(); return r.top >= d.top && r.bottom <= d.bottom; })()")
+    check(vis, f"opening {pick['flow']} at step {n} shows that step in the diagram")
+    collect("step in view")
+if pick["tour"]:
+    page.goto(f"#/flows/{pick['tour']}")
+    page.wait("document.querySelector('.fl-step')", "the tour's steps")
+    dup = page.js("[...document.querySelectorAll('.fl-step')].filter(li => { const w = li.querySelector('.fl-who'), t = li.querySelector('.fl-what'); return w && t && w.textContent.trim() && w.textContent.trim() === t.textContent.trim(); }).length")
+    check(dup == 0, f"no step of {pick['tour']} shows its name twice")
+    collect("tour")
+unc = page.js("(() => { for (const f of X.data.model.flows) { if (f.kind === 'tour') continue; const st = X.model.steps(f); for (const e of st) if (e.step.unchecked) return [f.id, e.no]; } return null; })()")
+if unc:
+    page.goto(f"#/flows/{unc[0]}?step={unc[1]}")
+    page.wait("document.querySelector('.fp-step .fs-nav')", "a step with an unchecked reason")
+    check(page.js("document.querySelector('.fp-step').textContent.indexOf('The tool cannot see this connection') >= 0"), f"{unc[0]} step {unc[1]} shows its reason as not verified")
+    collect("unchecked")
+weak = page.js("(() => { for (const f of X.data.model.flows) { const st = X.model.steps(f); for (const e of st) if ((e.step.connections || []).some(c => (c.valueEdges || []).length)) return [f.id, e.no]; } return null; })()")
+if weak:
+    page.goto(f"#/flows/{weak[0]}?step={weak[1]}")
+    page.wait("document.querySelector('.fp-step .fs-nav')", "a step reached through a function value")
+    check(page.js("!!document.querySelector('.fp-step .fs-hop.val') && !!document.querySelector('.fp-step .tag.weak')"), f"{weak[0]} step {weak[1]} marks the path through a function value as weaker")
+    collect("weak path")
+if pick["stepFile"]:
+    page.goto(f"#/code/{pick['stepFile']}")
+    page.wait("document.querySelector('.src .mk .mkx')", "the margin marks")
+    dupk = page.js("[...document.querySelectorAll('.src .mk')].filter(m => { const k = [...m.children].map(x => x.className); return new Set(k).size !== k.length; }).length")
+    check(dupk == 0, "no line of the source carries two marks of one kind")
+    collect("marks per kind")
+
+# The runtime map, filtered by a concern, names the channels it keeps.
+fc = page.js("(() => { const c = (X.data.model.concerns || []).find(c => (X.data.model.channels || []).some(ch => (ch.concerns || []).indexOf(c.id) >= 0)); return c ? c.id : ''; })()")
+if fc:
+    page.goto(f"#/runtime?concern={fc}")
+    page.wait("document.querySelector('.rt-map.filtered g.cx')", "the filtered map")
+    time.sleep(0.5)
+    check(page.js("document.querySelectorAll('.rt-map .cx-lab.on').length > 0"), f"the runtime map filtered by {fc} labels the channels it keeps")
+    collect("filtered map labels")
+
 # Speed: the first paint, and opening the largest file.
 page.goto("#/overview")
 t = page.js("({ started: Math.round(X.startedAt || 0), fcp: Math.round((performance.getEntriesByName('first-contentful-paint')[0] || {}).startTime || 0) })")
@@ -573,4 +709,4 @@ if problems or failures:
 print("no errors or exceptions; all assertions hold")
 PY
 
-python3 -I "$WORK/cdp.py" "$SITE" "$CDP_PORT" "$OUT" ${SHOTS[@]+"${SHOTS[@]}"}
+python3 -I "$WORK/cdp.py" "$SITE" "$CDP_PORT" "$OUT" "$FULL" ${SHOTS[@]+"${SHOTS[@]}"}

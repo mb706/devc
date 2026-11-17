@@ -20,7 +20,7 @@ The reader will rely on what you write. One wrong sentence costs more than a mis
 
 1. Read the "Writing for the explorer" section of `explorer/README.md`, then the package comments of your packages.
 2. Read the `STATUS.md` sections of the chunks that built your area (the work order names them): they record what was built, what deviates from the plan and why. Skim the review responses that touch your area.
-3. Survey each package through the tool instead of opening every file (`./dev explore query …`, see `./dev explore query help`): the outline of a package or file with signatures and first doc sentences, who calls a function, what it calls, the path between two functions, who uses a field.
+3. Survey each package through the tool instead of opening every file (`./dev explore query …`, see `./dev explore query help`): the outline of a package or file with signatures and first doc sentences, its declarations without a doc comment (`undocumented`), who calls a function, what it calls, the path between two functions, who uses a field, a flow's connections with their paths (`flow`). Ask several questions in one run (`query outline internal/box undocumented internal/box`, or one per line on standard input with `query -`): each run loads the code once.
 4. Trace each flow from its entry point (a command, a handler, a hook) and read the bodies of the functions along the way. This is where the reading time goes, and it should.
 
 ## What each chunk delivers
@@ -49,7 +49,7 @@ One page per concern your work order lists (you may split or merge with a reason
 - **Decisions that are not obvious**: the things a reader would otherwise stop at and wonder about, each with its reason, and the finding or work order behind it where there is one.
 - **Where to start reading**: three to six references, in order.
 
-A page is 500 to 1,200 words. If it wants to be longer, it is two concerns.
+A page is 500 to 1,200 words of prose; quoted code blocks and tables do not count. `./dev explore --check` warns about a page beyond 1,200. If it wants to be longer, it is two concerns.
 
 Front matter: `packages` and `files` (every non-test file of your area must belong to a concern), `key` symbols (the ten or so to know), `spec` sections, `tests` (the tests that show the concern working; the integration tests are executable examples and worth pointing at), `related`.
 
@@ -64,7 +64,7 @@ The flows your work order lists, plus any you find the area needs.
 - Steps are waypoints: the entry point, every crossing from one actor to another, every place where input is checked, every state that is written, and the outcome the user sees. Eight to twenty-five steps.
 - A step's `text` is one or two sentences saying what happens there and why it matters. Subtleties (ordering that must hold, what happens on failure) go into `detail`.
 - Put `checks` on steps that receive something from a less trusted actor.
-- The tool must be able to connect consecutive steps. If it cannot, first suspect the flow: you may have skipped the function that links them, or the order may be wrong. Use `unchecked` only for a connection that really is invisible to a call graph (a goroutine reading a queue, a file one process writes and another reads), and say which.
+- The tool must be able to connect consecutive steps. If it cannot, first suspect the flow: you may have skipped the function that links them, or the order may be wrong. Start each actor's chain at the entry function of its process or goroutine (after a `cmd:` message, the function that builds the command is fine). Use `unchecked` only for a connection that really is invisible to a call graph (a goroutine reading a queue, a file one process writes and another reads, a connection to a listener: `via = "net"`), and say which. `./dev explore query flow <id>` prints the paths the tool found: read them, a path can be found and still be the wrong one.
 - A tour (`kind = "tour"`) is a reading order through code that is not a sequence in time: "how a path is resolved safely", "the proxy's request checks in order".
 
 ### 5. Glossary, layout, system, interfaces
@@ -78,8 +78,8 @@ Others write in these shared files too. Add and correct; do not reorganise.
 
 ## Before you finish
 
-1. `./dev explore --check`: no errors; no warnings from your files that you cannot justify in your report.
-2. `./dev explore`, then look at your pages: use `explorer/check.sh` or its way of starting a headless browser to take screenshots of each of your concern pages and of each flow at two or three steps. Read them as the owner would. Fix what reads badly, what is cut off, and any diagram that does not read at a glance.
+1. `./dev explore --check`: no errors; no warnings from your files that you cannot justify in your report (`--only explorer/model/concerns/<id>.md` shows those of one file or directory).
+2. `./dev explore`, then look at your pages: use `explorer/check.sh --shot` to take screenshots of each of your concern pages (`--full` for the whole page) and of each flow at two or three steps. Read them as the owner would. Fix what reads badly, what is cut off, and any diagram that does not read at a glance.
 3. `./dev explore comments-only`, `./dev fmt`, `./dev vet`.
 4. Read your concern pages once more against the code, sentence by sentence, as if someone else had written them.
 

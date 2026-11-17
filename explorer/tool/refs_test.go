@@ -44,10 +44,15 @@ func TestResolve(t *testing.T) {
 			break
 		}
 	}
+	status := "# Status\n\n### X1 The tool\n\n### X14 Polish\n\n### X1 again\n"
+	ix.docs["docs/status.md"] = &docFile{Document: Document{Path: "docs/status.md", Headings: parseHeadings(status)}, text: status}
 	good := []struct {
 		ref, concern string
 		want         ResolvedRef
 	}{
+		// The leading words of one heading's anchor.
+		{"doc:docs/plan.md#36", "", ResolvedRef{Kind: "doc", Key: "docs/plan.md", Anchor: "36-events-and-journal", Line: 5}},
+		{"doc:docs/status.md#x14", "", ResolvedRef{Kind: "doc", Key: "docs/status.md", Anchor: "x14-polish", Line: 5}},
 		{"proto.MethodPing", "", ResolvedRef{Kind: "symbol", Key: "proto.MethodPing", File: "proto/proto.go", Line: w.syms["proto.MethodPing"].Line}},
 		{"server.Server.ping", "", ResolvedRef{Kind: "symbol", Key: "server.Server.ping", File: "server/server.go", Line: w.syms["server.Server.ping"].Line}},
 		{"pkg:server", "", ResolvedRef{Kind: "package", Key: "server"}},
@@ -85,6 +90,7 @@ func TestResolve(t *testing.T) {
 		"concern:netwrk":            {"unknown concern", "did you mean network"},
 		"bogus:x":                   {"unknown kind of reference"},
 		"doc:docs/plan.md#9.9":      {"has no heading"},
+		"doc:docs/status.md#x1":     {"several headings starting with", "x1-the-tool", "x1-again"},
 		"file:server/server.go~zzz": {"no line of server/server.go contains"},
 		"server":                    {"names a package; write pkg:server"},
 		"rpc:x.sned":                {"did you mean x.send"},

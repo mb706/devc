@@ -41,9 +41,14 @@ X.refs = (function () {
     var s = (D.model.surfaces || []).filter(function (x) { return x.kind === kind; })[0];
     return s ? s.id : "";
   }
+  // headingOf finds a heading by its number or anchor, or by the leading
+  // words of one heading's anchor ("x7" for "x7-explorer-content-git").
   function headingOf(doc, key) {
     if (!doc || !key) return null;
-    return doc.headings.filter(function (h) { return h.number === key || h.anchor === key; })[0] || null;
+    var exact = doc.headings.filter(function (h) { return h.number === key || h.anchor === key; })[0];
+    if (exact) return exact;
+    var pre = doc.headings.filter(function (h) { return h.anchor.indexOf(key + "-") === 0; });
+    return pre.length === 1 ? pre[0] : null;
   }
   function modelTitle(o, key) { return (o && (o.title || o.label)) || key; }
 

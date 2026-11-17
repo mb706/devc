@@ -1,6 +1,7 @@
 // The Glossary (#/glossary?sel=<id>&q=<filter>): the terms in alphabetical
 // order with a filter, each with its other names, text, references and
-// related terms. Also the term's hover card (a [[term:…]] anywhere shows
+// related terms; beside them, in view, an index of every term's title (the
+// one at the top of the view marked). Also the term's hover card (a [[term:…]] anywhere shows
 // the definition) and its inspector view, with where the model uses it.
 (function () {
   "use strict";
@@ -26,15 +27,37 @@
     var h = '<div class="page gl"><h1>Glossary</h1><p class="lead">The project\'s vocabulary. A term named anywhere in the explorer shows its definition on hover.</p>' +
       '<div class="gl-bar"><input type="search" placeholder="Filter ' + terms.length + ' terms…" value="' + esc(r.params.q || "") + '" spellcheck="false">' +
       '<nav class="gl-letters">' + letters.map(function (l) { return '<a href="#" data-letter="' + esc(l) + '">' + esc(l) + "</a>"; }).join("") + '</nav><span class="muted small gl-n"></span></div>';
-    var cur = "";
-    h += '<div class="gl-list">';
+    var cur = "", idx = "";
+    h += '<div class="gl-body"><div class="gl-list">';
     terms.forEach(function (t) {
       var l = t.title[0].toUpperCase();
-      if (l !== cur) { cur = l; h += '<div class="gl-letter" data-l="' + esc(l) + '">' + esc(l) + "</div>"; }
+      if (l !== cur) { cur = l; h += '<div class="gl-letter" data-l="' + esc(l) + '">' + esc(l) + "</div>"; idx += '<div class="gl-il">' + esc(l) + "</div>"; }
       h += termHTML(t, sel);
+      idx += '<a href="' + esc(X.router.href("glossary", "", { sel: t.id })) + '" data-goto="' + esc(t.id) + '">' + esc(t.title) + "</a>";
     });
-    h += "</div>" + (terms.length ? "" : '<p class="muted">The model has no terms yet.</p>') + "</div>";
+    h += '</div><aside class="gl-index" aria-label="All terms"><div class="gl-index-in">' + idx + "</div></aside></div>" +
+      (terms.length ? "" : '<p class="muted">The model has no terms yet.</p>') + "</div>";
     el.innerHTML = h;
+    var index = el.querySelector(".gl-index-in");
+    index.addEventListener("click", function (ev) {
+      var a = ev.target.closest("[data-goto]");
+      if (!a || U.isModifiedClick(ev)) return;
+      ev.preventDefault();
+      X.router.setParams({ sel: a.getAttribute("data-goto") });
+    });
+    // spy marks, in the index, the term at the top of the view.
+    var spy = U.debounce(function () {
+      var top = el.getBoundingClientRect().top + 70, at = null;
+      el.querySelectorAll(".gl-t:not(.hidden)").forEach(function (a) { if (a.getBoundingClientRect().top <= top) at = a.getAttribute("data-term"); });
+      index.querySelectorAll("a.cur").forEach(function (a) { a.classList.remove("cur"); });
+      var a = at && index.querySelector('a[data-goto="' + (window.CSS && CSS.escape ? CSS.escape(at) : at) + '"]');
+      if (a) {
+        a.classList.add("cur");
+        var ir = index.getBoundingClientRect(), ar = a.getBoundingClientRect();
+        if (ar.top < ir.top + 20 || ar.bottom > ir.bottom - 20) index.scrollTop += ar.top - ir.top - ir.height / 3;
+      }
+    }, 50);
+    el.addEventListener("scroll", spy, { passive: true });
     var input = el.querySelector(".gl-bar input");
     function filter(q) {
       var toks = q.toLowerCase().split(/\s+/).filter(Boolean), n = 0;
@@ -46,6 +69,15 @@
       el.querySelectorAll(".gl-letter").forEach(function (L) {
         var next = L.nextElementSibling, any = false;
         while (next && !next.classList.contains("gl-letter")) { if (!next.classList.contains("hidden")) any = true; next = next.nextElementSibling; }
+        L.classList.toggle("hidden", !any);
+      });
+      // The index shows the terms the filter leaves, under their letters.
+      var shown = new Set();
+      el.querySelectorAll(".gl-t:not(.hidden)").forEach(function (a) { shown.add(a.getAttribute("data-term")); });
+      index.querySelectorAll("a[data-goto]").forEach(function (a) { a.classList.toggle("hidden", !shown.has(a.getAttribute("data-goto"))); });
+      index.querySelectorAll(".gl-il").forEach(function (L) {
+        var next = L.nextElementSibling, any = false;
+        while (next && !next.classList.contains("gl-il")) { if (!next.classList.contains("hidden")) any = true; next = next.nextElementSibling; }
         L.classList.toggle("hidden", !any);
       });
       el.querySelector(".gl-n").textContent = toks.length ? n + " of " + terms.length : "";
@@ -60,6 +92,7 @@
     });
     if (r.params.q) filter(r.params.q);
     scrollToSel(el, sel);
+    spy();
   }
   function scrollToSel(el, sel) {
     el.querySelectorAll(".gl-t.sel").forEach(function (a) { a.classList.remove("sel"); });

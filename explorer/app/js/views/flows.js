@@ -21,7 +21,8 @@
 
   var VIA = {
     exec: ["v-exec", "starts a program"], rpc: ["rpc", "RPC call"], http: ["route", "HTTP request"], event: ["event", "session event"],
-    cmd: ["command", "runs a devc command"], reply: ["v-reply", "reply"], file: ["file", "through a file"], signal: ["v-signal", "signal"], stream: ["v-stream", "stream"]
+    cmd: ["command", "runs a devc command"], reply: ["v-reply", "reply"], file: ["file", "through a file"], signal: ["v-signal", "signal"], stream: ["v-stream", "stream"],
+    net: ["v-net", "network connection to a listener"]
   };
   function viaKind(v) { return (v || "").split(":")[0]; }
   function viaIcon(v) { var k = VIA[viaKind(v)]; return k ? U.icon(k[0], "via") : ""; }
@@ -35,7 +36,7 @@
 
   // status of a step: the worst of its connections.
   function status(s) {
-    var st = "";
+    var st = s.unchecked ? "unchecked" : "";
     (s.connections || []).forEach(function (c) {
       if (c.status === "missing") st = "missing";
       else if (c.status === "unchecked" && st !== "missing") st = "unchecked";
@@ -90,10 +91,12 @@
       });
       var H = y + 14;
 
+      // Narrow lanes give the actor's name all the room, on two lines.
+      root.classList.toggle("narrow", colW < 128);
       var html = '<div class="seq-head" style="width:' + width + 'px">';
       bands.forEach(function (b) {
         var x0 = GUTTER + colW * b.from, w = colW * (b.to - b.from + 1);
-        html += '<div class="seq-band' + (b.z ? " z-" + esc(b.z.trust) : "") + '" style="left:' + x0 + "px;width:" + w + 'px"' + (b.z ? ' data-ref="zone:' + esc(b.z.id) + '"' : "") + ">" + esc(b.z ? b.z.title : "") + "</div>";
+        html += '<div class="seq-band' + (b.z ? " z-" + esc(b.z.trust) : "") + '" style="left:' + x0 + "px;width:" + w + 'px"' + (b.z ? ' data-ref="zone:' + esc(b.z.id) + '" data-nocard title="' + esc(b.z.title) + '"' : "") + ">" + esc(b.z ? b.z.title : "") + "</div>";
       });
       lanes.forEach(function (a, i) {
         var act = D.actor(a);
@@ -197,7 +200,9 @@
       if (r && opts.onSelect) opts.onSelect(+r.getAttribute("data-no"));
     });
     draw();
-    var ro = window.ResizeObserver ? new ResizeObserver(U.debounce(function () { if (root.isConnected) draw(); }, 60)) : null;
+    // A resize (the inspector opening, the window) redraws and keeps the
+    // current step in view.
+    var ro = window.ResizeObserver ? new ResizeObserver(U.debounce(function () { if (root.isConnected) { draw(); mark(true); } }, 60)) : null;
     if (ro) ro.observe(host);
     return {
       select: function (no) { cur = no; mark(true); },
@@ -215,7 +220,8 @@
       if (s.section) { h += '<li class="fl-sec">' + esc(s.section) + "</li>"; return; }
       var no = X.model.noOf(flow, i), st = status(s);
       var who = s.at ? actorDot(s.at) : actorDot(s.from) + '<span class="fl-arrow' + (X.model.crosses(s) ? " bnd" : "") + '">' + (X.model.crosses(s) ? '<i class="gate"></i>' : "") + "→</span>" + actorDot(s.to);
-      if (!s.at && !s.from && s.ref) who = '<span class="mono small">' + esc(X.model.symbolName(s.ref)) + "</span>";
+      // A tour's step may name only code: the name, once.
+      if (!s.at && !s.from) who = "";
       var what = s.from ? (viaIcon(s.via) + esc(s.label || viaTitle(s.via))) : s.ref ? '<span class="mono">' + esc(X.model.symbolName(s.ref)) + "</span>" : "";
       h += '<li class="fl-step' + (no === cur ? " cur" : "") + '" data-no="' + no + '"><span class="seq-no' + (st ? " " + st : "") + '">' + no + "</span>" +
         '<span class="fl-who">' + who + '</span><span class="fl-what">' + what + "</span>" +
@@ -229,11 +235,21 @@
 
   // ----- the step panel
 
-  function chain(path, dyn) {
-    var d = new Set(dyn || []);
+  // chain draws a path of the call graph: → a call, ⇢ a call through an
+  // interface, ⤳ a mention that is no call (the function handed over as a
+  // value, or held in a table).
+  function chain(path, dyn, val) {
+    var d = new Set(dyn || []), v = new Set(val || []);
     return '<div class="fs-chain">' + (path || []).map(function (r, i) {
-      return (i ? '<span class="fs-hop' + (d.has(i) ? " dyn" : "") + '" title="' + (d.has(i) ? "a call through an interface" : "calls or mentions") + '">' + (d.has(i) ? "⇢" : "→") + "</span>" : "") + R.chip(r, { cls: "small" });
+      if (!i) return R.chip(r, { cls: "small" });
+      var hop = v.has(i) ? ["val", "⤳", "passes it as a value or holds it in a table: the tool sees it handed over, not called"] :
+        d.has(i) ? ["dyn", "⇢", "a call through an interface"] : ["", "→", "calls"];
+      return '<span class="fs-hop ' + hop[0] + '" title="' + hop[2] + '">' + hop[1] + "</span>" + R.chip(r, { cls: "small" });
     }).join("") + "</div>";
+  }
+  // weak: a note under a path that rests on a function passed as a value.
+  function weakNote(c) {
+    return (c.valueEdges || []).length ? '<p class="small fs-weak">' + U.icon("info") + "Part of this path is a function passed as a value (⤳): the tool sees it handed over, not called. Weaker evidence than a call.</p>" : "";
   }
   var KIND_TEXT = { same: "the same code", path: "a path in the call graph", rpc: "through the RPC method", route: "through the route", event: "through the event type", command: "through the command", reply: "the answer to a call returns to its caller" };
   function connection(flow, s, c) {
@@ -242,9 +258,9 @@
       '<span class="muted small">continues in</span>' + R.chip("actor:" + c.actor, { cls: "small" });
     var body = "";
     if (c.status === "found") {
-      head += '<span class="tag ok">verified</span>';
+      head += (c.valueEdges || []).length ? '<span class="tag ok weak" title="the path passes a function as a value">verified, weaker</span>' : '<span class="tag ok">verified</span>';
       body += '<p class="small fs-how">' + esc(KIND_TEXT[c.kind] || c.kind || "") + (c.via ? " " + R.chip(c.via, { cls: "small" }) : "") + "</p>";
-      if (c.path && c.path.length) body += chain(c.path, c.dynamicEdges);
+      if (c.path && c.path.length) body += chain(c.path, c.dynamicEdges, c.valueEdges) + weakNote(c);
     } else if (c.status === "unchecked") {
       head += '<span class="tag">not verified</span>';
       body += '<div class="fs-uncheck"><b>The tool cannot see this connection.</b> The model says: ' + X.md.inline(s.unchecked || "", {}) + "</div>";
@@ -287,12 +303,17 @@
     if (flow.kind !== "tour") {
       var conns = s.connections || [];
       h += '<section class="sp-sec"><h3 class="sp-h">From the previous step</h3>';
-      if (!conns.length) h += '<p class="muted small">' + (no === 1 ? "The first step." : s.external ? "Not devc code: nothing to connect." : "No earlier step of " + (s.at ? "this actor" : "these actors") + " has code to connect from.") + "</p>";
+      var shown = conns.some(function (c) { return c.status === "unchecked"; });
+      if (s.unchecked && !shown) {
+        // The author's reason, where the tool has no step to connect from.
+        h += '<div class="fs-conn unchecked"><div class="fs-ch"><span class="muted small">The connection to this step</span><span class="tag">not verified</span></div>' +
+          '<div class="fs-uncheck"><b>The tool cannot see this connection.</b> The model says: ' + X.md.inline(s.unchecked, {}) + "</div></div>";
+      } else if (!conns.length) h += '<p class="muted small">' + (no === 1 ? "The first step." : s.external ? "Not devc code: nothing to connect." : "No earlier step of " + (s.at ? "this actor" : "these actors") + " has code to connect from.") + "</p>";
       conns.forEach(function (c) { h += connection(flow, s, c); });
       h += "</section>";
       if (s.sender) {
         h += '<section class="sp-sec"><h3 class="sp-h">How the code sends it</h3>' +
-          (s.sender.status === "found" ? '<p class="small fs-how">' + esc(KIND_TEXT[s.sender.kind] || "") + (s.sender.via ? " " + R.chip(s.sender.via, { cls: "small" }) : "") + "</p>" + chain(s.sender.path, s.sender.dynamicEdges) : '<div class="fs-uncheck warn">The step\'s code does not send ' + esc(s.via) + ".</div>") +
+          (s.sender.status === "found" ? '<p class="small fs-how">' + esc(KIND_TEXT[s.sender.kind] || "") + (s.sender.via ? " " + R.chip(s.sender.via, { cls: "small" }) : "") + "</p>" + chain(s.sender.path, s.sender.dynamicEdges, s.sender.valueEdges) + weakNote(s.sender) : '<div class="fs-uncheck warn">The step\'s code does not send ' + esc(s.via) + ".</div>") +
           (s.sender.note ? '<p class="muted small fs-note">' + X.md.inline(s.sender.note, {}) + "</p>" : "") + "</section>";
       }
     }
@@ -311,8 +332,8 @@
       (tour ? '<span class="tag">tour</span>' : "") +
       (flow.concern ? R.chip("concern:" + flow.concern, { cls: "small" }) : "") +
       (flow.trigger ? '<code class="fp-trigger" title="trigger">' + esc(flow.trigger) + "</code>" : "") +
-      '<span class="fp-tools"><a class="btn ghost small" href="' + esc(X.router.hrefKeep("runtime", "", { flow: flow.id })) + '">' + U.icon("actor") + "On the runtime map</a>" +
-      '<button class="btn ghost small" data-a="legend">' + U.icon("info") + "Legend</button></span></div>" +
+      '<span class="fp-tools"><a class="btn ghost small" href="' + esc(X.router.hrefKeep("runtime", "", { flow: flow.id })) + '" title="The flow\'s actors and channels on the runtime map">' + U.icon("actor") + '<span class="lbl">On the runtime map</span></a>' +
+      '<button class="btn ghost small" data-a="legend" title="What the marks of the diagram mean">' + U.icon("info") + '<span class="lbl">Legend</span></button></span></div>' +
       (flow.summary ? '<p class="fp-sum">' + X.md.inline(flow.summary, {}) + "</p>" : "") +
       '<div class="fp-legend hidden">' + legend() + "</div></header>" +
       '<div class="fp-main"><div class="fp-diagram"></div><aside class="fp-step"></aside></div></div>';
@@ -417,40 +438,67 @@
 
   // ----- the index
 
-  function flowCard(f) {
+  // The flows of each concern in the model's order, the tours apart; the
+  // groups flow in columns so that sixty flows fit on a few screens, and a
+  // filter narrows them by title, trigger, summary, actor or concern.
+  function flowRow(f) {
     var n = X.model.steps(f).length;
-    // (Names, not chips: the card is a link, and links do not nest.)
+    // (Names, not chips: the entry is a link, and links do not nest.)
     var actors = (f.actors || []).map(actorDot).join("");
-    return '<a class="fx-card" href="' + esc(X.router.href("flows", f.id)) + '" data-ref="flow:' + esc(f.id) + '" data-act="full" data-nocard>' +
-      '<div class="fx-top">' + U.icon(f.kind === "tour" ? "list" : "flow") + '<span class="fx-title">' + esc(f.title) + '</span><span class="muted small">' + U.plural(n, "step") + "</span></div>" +
-      (f.trigger ? '<code class="fx-trigger">' + esc(f.trigger) + "</code>" : "") +
-      (f.summary ? '<p class="fx-sum">' + esc(X.md.plainText(f.summary)) + "</p>" : "") +
+    var c = f.concern ? D.concern(f.concern) : null;
+    var text = [f.title, f.id, f.trigger || "", X.md.plainText(f.summary || ""), c ? c.title : ""].concat((f.actors || []).map(actorTitle)).join(" ").toLowerCase();
+    return '<a class="fx-row" href="' + esc(X.router.href("flows", f.id)) + '" data-ref="flow:' + esc(f.id) + '" data-act="full" data-nocard data-text="' + esc(text) + '">' +
+      '<div class="fx-top">' + U.icon(f.kind === "tour" ? "list" : "flow") + '<span class="fx-title">' + esc(f.title) + '</span><span class="muted small num">' + U.plural(n, "step") + "</span></div>" +
+      (f.trigger ? '<code class="fx-trigger" title="' + esc(f.trigger) + '">' + esc(f.trigger) + "</code>" : "") +
+      (f.summary ? '<p class="fx-sum">' + X.doc.plain(X.md.plainText(f.summary)) + "</p>" : "") +
       (actors ? '<div class="fx-actors">' + actors + "</div>" : "") + "</a>";
   }
-  function index(el) {
-    var flows = (M.flows || []).filter(function (f) { return f.kind !== "tour"; }), tours = (M.flows || []).filter(function (f) { return f.kind === "tour"; });
+  function group(head, list) {
+    return '<section class="fx-group"><h2 class="fx-gh">' + head + ' <span class="count">' + list.length + "</span></h2>" + list.map(flowRow).join("") + "</section>";
+  }
+  function index(el, r) {
+    var all = M.flows || [];
+    var flows = all.filter(function (f) { return f.kind !== "tour"; }), tours = all.filter(function (f) { return f.kind === "tour"; });
     var h = '<div class="page fx"><h1>Flows</h1><p class="lead">What happens, step by step: each flow is a sequence across actors, with the code of every step and the connection the build found between them. Tours are reading orders through the code.</p>';
-    if (!(M.flows || []).length) h += '<p class="muted">The model has no flows yet.</p>';
+    if (!all.length) { el.innerHTML = h + '<p class="muted">The model has no flows yet.</p></div>'; return; }
+    h += '<div class="fx-bar"><input type="search" placeholder="Filter ' + all.length + ' flows and tours: a title, a command, an actor…" value="' + esc(r.params.q || "") + '" spellcheck="false">' +
+      '<span class="muted small fx-n">' + U.plural(flows.length, "flow") + " · " + U.plural(tours.length, "tour") + "</span></div>";
     var groups = (M.concerns || []).map(function (c) { return { c: c, list: flows.filter(function (f) { return f.concern === c.id; }) }; }).filter(function (g) { return g.list.length; });
     var other = flows.filter(function (f) { return !f.concern || !D.concern(f.concern); });
-    groups.forEach(function (g) {
-      h += '<section class="fx-group"><h2 class="sec-h">' + R.chip("concern:" + g.c.id, { cls: "flat" }) + ' <span class="count">' + g.list.length + '</span></h2><div class="fx-grid">' + g.list.map(flowCard).join("") + "</div></section>";
-    });
-    if (other.length) h += '<section class="fx-group"><h2 class="sec-h">Other flows <span class="count">' + other.length + '</span></h2><div class="fx-grid">' + other.map(flowCard).join("") + "</div></section>";
-    if (tours.length) h += '<section class="fx-group"><h2 class="sec-h">' + U.icon("list") + 'Tours <span class="count">' + tours.length + '</span></h2><div class="fx-grid">' + tours.map(flowCard).join("") + "</div></section>";
-    el.innerHTML = h + "</div>";
+    h += '<div class="fx-cols">';
+    groups.forEach(function (g) { h += group(R.chip("concern:" + g.c.id, { cls: "flat" }), g.list); });
+    if (other.length) h += group("Other flows", other);
+    if (tours.length) h += group(U.icon("list") + "Tours", tours);
+    h += '</div><p class="muted fx-none hidden">No flow matches.</p></div>';
+    el.innerHTML = h;
+    var input = el.querySelector(".fx-bar input"), count = el.querySelector(".fx-n"), none = el.querySelector(".fx-none");
+    function filter(q) {
+      var toks = q.toLowerCase().split(/\s+/).filter(Boolean), n = 0;
+      el.querySelectorAll(".fx-row").forEach(function (a) {
+        var on = toks.every(function (k) { return a.getAttribute("data-text").indexOf(k) >= 0; });
+        a.classList.toggle("hidden", !on);
+        if (on) n++;
+      });
+      el.querySelectorAll(".fx-group").forEach(function (g) { g.classList.toggle("hidden", !g.querySelector(".fx-row:not(.hidden)")); });
+      count.textContent = toks.length ? n + " of " + all.length : U.plural(flows.length, "flow") + " · " + U.plural(tours.length, "tour");
+      none.classList.toggle("hidden", n > 0);
+    }
+    input.addEventListener("input", U.debounce(function () { filter(input.value); X.router.setParams({ q: input.value || null }); }, 120));
+    if (r.params.q) filter(r.params.q);
   }
 
   X.router.register("flows", {
     nav: "flows",
     title: function (r) { var f = D.flow(r.rest); return f ? f.title : "Flows"; },
     render: function (el, r) {
-      if (!r.rest) { S = null; index(el); return; }
+      if (!r.rest) { S = null; index(el, r); return; }
       var f = D.flow(r.rest);
       if (!f) { el.innerHTML = '<div class="page narrow"><h1>No such flow</h1><p class="muted"><code>' + esc(r.rest) + '</code> is not a flow of the model. See the <a href="#/flows">flows</a>.</p></div>'; return; }
       player(el, r, f);
     },
-    update: function (r) {
+    update: function (r, prev) {
+      // The index keeps its filter in the URL; typing must not re-render it.
+      if (!S && !r.rest && prev && !prev.rest) return true;
       if (!S || !r.rest || r.rest !== S.flow.id) return false;
       show(r);
       return true;

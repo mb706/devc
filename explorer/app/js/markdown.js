@@ -401,10 +401,43 @@ X.md = (function () {
     i += 2;
     while (i < b && !RE.blank.test(lines[i]) && lines[i].indexOf("|") >= 0) { rows.push(cells(lines[i])); i++; }
     function td(tag, c, k) { return "<" + tag + (align[k] ? ' style="text-align:' + align[k] + '"' : "") + ">" + inline(c, st.ctx) + "</" + tag + ">"; }
-    var html = '<div class="md-table"><table><thead><tr>' + head.map(function (c, k) { return td("th", c, k); }).join("") + "</tr></thead><tbody>" +
+    var html = '<div class="md-tw"><div class="md-table"><table><thead><tr>' + head.map(function (c, k) { return td("th", c, k); }).join("") + "</tr></thead><tbody>" +
       rows.map(function (r) { return "<tr>" + head.map(function (_, k) { return td("td", r[k] || "", k); }).join("") + "</tr>"; }).join("") +
-      "</tbody></table></div>";
+      "</tbody></table></div></div>";
     return { html: html, end: i };
+  }
+
+  // ----- tables wider than their column scroll sideways, with a cue: a
+  // line above saying so and a fade on each side that has more. Every
+  // table that appears anywhere is watched, and checked again on resize.
+  var tableRO = window.ResizeObserver ? new ResizeObserver(function (entries) {
+    entries.forEach(function (en) { fitTable(en.target); });
+  }) : null;
+  function fitTable(sc) {
+    var tw = sc.parentNode;
+    if (!tw || !tw.classList) return;
+    // First let it take the room its page allows beyond the text's measure
+    // (where the page's styles allow that), once, so it does not flicker.
+    if (!tw.classList.contains("grown") && sc.scrollWidth > sc.clientWidth + 1) tw.classList.add("grown");
+    var wide = sc.scrollWidth > sc.clientWidth + 1;
+    tw.classList.toggle("wide", wide);
+    tw.classList.toggle("at-start", !wide || sc.scrollLeft <= 1);
+    tw.classList.toggle("at-end", !wide || sc.scrollLeft + sc.clientWidth >= sc.scrollWidth - 1);
+  }
+  function watchTables(root) {
+    (root.querySelectorAll ? root.querySelectorAll(".md-table") : []).forEach(function (sc) {
+      if (sc._watched) return;
+      sc._watched = true;
+      sc.addEventListener("scroll", function () { fitTable(sc); }, { passive: true });
+      if (tableRO) tableRO.observe(sc); else fitTable(sc);
+    });
+  }
+  if (window.MutationObserver) {
+    new MutationObserver(function (muts) {
+      muts.forEach(function (m) {
+        m.addedNodes.forEach(function (n) { if (n.nodeType === 1 && (n.classList.contains("md-tw") || n.querySelector(".md-table"))) watchTables(n); });
+      });
+    }).observe(document.documentElement, { childList: true, subtree: true });
   }
 
   // plainText strips markup: for summaries in places that are links.

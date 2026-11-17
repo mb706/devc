@@ -163,15 +163,28 @@ func (ix *index) resolve(ref, concern string) (ResolvedRef, error) {
 			return r, nil
 		}
 		var names []string
+		var prefixed []Heading
 		for _, h := range d.Headings {
 			if h.Number == anchor || h.Anchor == anchor {
 				r.Anchor, r.Line = h.Anchor, h.Line
 				return r, nil
 			}
+			if anchor != "" && strings.HasPrefix(h.Anchor, anchor+"-") {
+				prefixed = append(prefixed, h)
+			}
 			names = append(names, h.Anchor)
 			if h.Number != "" {
 				names = append(names, h.Number)
 			}
+		}
+		// The leading words of one heading's anchor name it too
+		// ("#x7" for "X7 Explorer content: git").
+		if len(prefixed) == 1 {
+			r.Anchor, r.Line = prefixed[0].Anchor, prefixed[0].Line
+			return r, nil
+		}
+		if len(prefixed) > 1 {
+			return ResolvedRef{}, fmt.Errorf("document %s has several headings starting with %q (%s)", p, anchor, strings.Join(clipList(headingAnchors(prefixed), 4), ", "))
 		}
 		return ResolvedRef{}, fmt.Errorf("document %s has no heading %q%s", p, anchor, suggest(anchor, names))
 	case "finding":
@@ -290,6 +303,15 @@ func keysOf[V any](m map[string]V) []string {
 }
 
 func sortedKeys(m map[string]bool) []string { return keysOf(m) }
+
+// headingAnchors lists the anchors of headings.
+func headingAnchors(hs []Heading) []string {
+	var out []string
+	for _, h := range hs {
+		out = append(out, h.Anchor)
+	}
+	return out
+}
 
 // mdRefRE finds [[reference]] and [[reference|text]] in Markdown.
 var mdRefRE = regexp.MustCompile(`\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]`)

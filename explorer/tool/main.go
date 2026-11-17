@@ -3,7 +3,7 @@
 // explorer/model, checks the model against the code, and writes a static
 // site that works when opened from disk.
 //
-//	go run ./explorer/tool [--check] [--strict] [--out dir] [--model dir]
+//	go run ./explorer/tool [--check] [--strict] [--only path]... [--out dir] [--model dir]
 //	go run ./explorer/tool query help
 //	go run ./explorer/tool comments-only
 //
@@ -41,6 +41,28 @@ func main() {
 type options struct {
 	check, strict bool
 	out, model    string
+	only          stringList
+}
+
+// stringList is a flag that may be given several times.
+type stringList []string
+
+func (l *stringList) String() string     { return strings.Join(*l, ",") }
+func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
+
+// shown reports whether a diagnostic is about one of the files or
+// directories of --only (all when none is given).
+func (o options) shown(d Diagnostic) bool {
+	if len(o.only) == 0 {
+		return true
+	}
+	for _, p := range o.only {
+		p = strings.TrimSuffix(filepath.ToSlash(filepath.Clean(p)), "/")
+		if d.File == p || strings.HasPrefix(d.File, p+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -59,8 +81,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.strict, "strict", false, "treat warnings as errors")
 	fs.StringVar(&o.out, "out", "", "output directory (default explorer/dist)")
 	fs.StringVar(&o.model, "model", "", "model directory (default explorer/model)")
+	fs.Var(&o.only, "only", "show only the messages about this file or directory (repeatable); errors elsewhere still fail")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: explore [--check] [--strict] [--out dir] [--model dir]\n       explore query help\n       explore comments-only")
+		fmt.Fprintln(stderr, "usage: explore [--check] [--strict] [--only path]... [--out dir] [--model dir]\n       explore query help\n       explore comments-only")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -227,7 +250,12 @@ func analyze(modelDir string, stderr io.Writer) (*result, error) {
 		add("group", x.ID)
 	}
 
-	c := &checker{w: w, ix: ix, m: lm, cmds: cmds, refs: map[string]ResolvedRef{}}
+	c := &checker{w: w, ix: ix, m: lm, cmds: cmds, refs: map[string]ResolvedRef{}, through: map[string][]string{}}
+	for _, s := range md.Surfaces {
+		if s.Kind == "http" {
+			c.through[s.ID] = s.Through
+		}
+	}
 	c.checkModel()
 	c.checkCode()
 	for i := range md.Flows {
@@ -306,8 +334,16 @@ func build(o options, stdout, stderr io.Writer) int {
 		return 1
 	}
 	core := res.core
-	errs, warns := 0, 0
+	errs, warns, hiddenErrs, hiddenWarns := 0, 0, 0, 0
 	for _, d := range core.Diagnostics {
+		if !o.shown(d) {
+			if d.Severity == "error" {
+				hiddenErrs++
+			} else {
+				hiddenWarns++
+			}
+			continue
+		}
 		if d.Severity == "error" {
 			errs++
 		} else {
@@ -315,7 +351,10 @@ func build(o options, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout, formatDiag(d))
 	}
-	failed := errs > 0 || (o.strict && warns > 0)
+	if len(o.only) > 0 {
+		fmt.Fprintf(stdout, "explore: --only hides %d errors and %d warnings about other files\n", hiddenErrs, hiddenWarns)
+	}
+	failed := errs+hiddenErrs > 0 || (o.strict && warns > 0)
 	cnt := core.Build.Counts
 	fmt.Fprintf(stdout, "explore: %d packages, %d symbols, %d uses, %d commands, %d RPC methods, %d routes, %d event types, %d configuration keys, %d environment variables\n",
 		cnt.Packages, cnt.Symbols, cnt.Uses, cnt.Commands, cnt.RPC, cnt.Routes, cnt.Events, cnt.Config, cnt.Env)

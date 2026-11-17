@@ -37,6 +37,9 @@ X.graph = (function () {
     var fig = U.h("figure.gd-fig");
     if (opts.concern) fig.setAttribute("data-diagram", opts.concern + "/" + d.id);
     var scroll = U.h("div.gd-scroll");
+    // A loop on a box at the edge reaches out of the grid: room for it and
+    // its label.
+    if (edges.some(function (e) { return e.from === e.to; })) scroll.classList.add("loops");
     var grid = U.h("div.gd", { style: "grid-template-columns:repeat(" + cols + ",minmax(104px,190px));grid-template-rows:repeat(" + rows + ",auto);column-gap:" + Math.round(colGap) + "px;row-gap:" + rowGap + "px" });
     var els = new Map();
     nodes.forEach(function (n) {

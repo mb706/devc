@@ -142,6 +142,10 @@ func (w *world) reachable(seeds []string) map[string]bool {
 type pathResult struct {
 	path []string
 	dyn  []int // indexes in path whose incoming edge is dynamic
+	// val are the indexes in path whose incoming edge is no call: the
+	// function is only mentioned (passed as a value, stored in a table),
+	// so the path shows it handed over, not called.
+	val []int
 }
 
 // Bounds of a path search: queries look further than the flow checks,
@@ -161,7 +165,24 @@ func (w *world) findPath(sources []string, target string) (pathResult, bool) {
 	return w.findPathDepth(sources, target, maxPathDepth)
 }
 
+// weak is the cost of an edge among paths of the same length: an edge
+// through an interface or one that only mentions its callee is weaker
+// evidence than a static call.
+func (e *edgeRec) weak() int {
+	n := 0
+	if e.dynamic {
+		n++
+	}
+	if !e.call {
+		n++
+	}
+	return n
+}
+
 // findPathDepth is findPath with a bound on the path's length in edges.
+// Of the shortest paths it returns one with the fewest weak edges (calls
+// through interfaces, mentions that are no calls), so a path prefers
+// static calls.
 func (w *world) findPathDepth(sources []string, target string, maxDepth int) (pathResult, bool) {
 	ts := w.syms[target]
 	if ts == nil {
@@ -170,8 +191,8 @@ func (w *world) findPathDepth(sources []string, target string, maxDepth int) (pa
 	funcTarget := ts.isFunc() || ts.Kind == "var"
 	allowTest := false
 	parent := map[string]string{}
-	depth := map[string]int{}
-	var queue []string
+	cost := map[string]int{} // weak edges on the best path found to a node
+	var layer []string
 	for _, s := range sources {
 		if w.syms[s] == nil {
 			continue
@@ -182,10 +203,10 @@ func (w *world) findPathDepth(sources []string, target string, maxDepth int) (pa
 		if w.syms[s].Test {
 			allowTest = true
 		}
-		if _, ok := depth[s]; !ok {
-			depth[s] = 0
+		if _, ok := cost[s]; !ok {
+			cost[s] = 0
 			parent[s] = ""
-			queue = append(queue, s)
+			layer = append(layer, s)
 		}
 	}
 	build := func(end string, extra string) pathResult {
@@ -196,48 +217,76 @@ func (w *world) findPathDepth(sources []string, target string, maxDepth int) (pa
 		if extra != "" {
 			p = append(p, extra)
 		}
-		var dyn []int
+		var r pathResult
+		r.path = p
 		for i := 1; i < len(p); i++ {
-			if e := w.edges[p[i-1]][p[i]]; e != nil && e.dynamic {
-				dyn = append(dyn, i)
+			if e := w.edges[p[i-1]][p[i]]; e != nil {
+				if e.dynamic {
+					r.dyn = append(r.dyn, i)
+				}
+				if !e.call {
+					r.val = append(r.val, i)
+				}
 			}
 		}
-		return pathResult{path: p, dyn: dyn}
+		return r
 	}
 	visited := 0
-	for len(queue) > 0 && visited < maxVisited {
-		cur := queue[0]
-		queue = queue[1:]
-		visited++
-		if !funcTarget && w.usesIn[cur][target] {
-			return build(cur, target), true
-		}
-		if depth[cur] >= maxDepth {
-			continue
-		}
-		tos := make([]string, 0, len(w.edges[cur]))
-		for to := range w.edges[cur] {
-			tos = append(tos, to)
-		}
-		sort.Strings(tos)
-		// Static edges first, so a path prefers them.
-		sort.SliceStable(tos, func(i, j int) bool {
-			return !w.edges[cur][tos[i]].dynamic && w.edges[cur][tos[j]].dynamic
-		})
-		for _, to := range tos {
-			if _, ok := depth[to]; ok {
-				continue
+	for depth := 0; len(layer) > 0 && visited < maxVisited; depth++ {
+		visited += len(layer)
+		if !funcTarget {
+			// A target that is no function: the first function of this
+			// layer that uses it, the one with the fewest weak edges.
+			best := ""
+			for _, cur := range layer {
+				if w.usesIn[cur][target] && (best == "" || cost[cur] < cost[best]) {
+					best = cur
+				}
 			}
-			if s := w.syms[to]; s == nil || (s.Test && !allowTest) {
-				continue
+			if best != "" {
+				return build(best, target), true
 			}
-			depth[to] = depth[cur] + 1
-			parent[to] = cur
-			if to == target {
-				return build(to, ""), true
-			}
-			queue = append(queue, to)
 		}
+		if depth >= maxDepth {
+			break
+		}
+		// The next layer: every node first reached from this one, in the
+		// order of discovery (callees by name, static edges first), through
+		// the parent with the fewest weak edges (ties: the first found).
+		var next []string
+		inNext := map[string]bool{}
+		for _, cur := range layer {
+			tos := make([]string, 0, len(w.edges[cur]))
+			for to := range w.edges[cur] {
+				tos = append(tos, to)
+			}
+			sort.Strings(tos)
+			sort.SliceStable(tos, func(i, j int) bool {
+				return !w.edges[cur][tos[i]].dynamic && w.edges[cur][tos[j]].dynamic
+			})
+			for _, to := range tos {
+				if _, seen := cost[to]; seen && !inNext[to] {
+					continue
+				}
+				if s := w.syms[to]; s == nil || (s.Test && !allowTest) {
+					continue
+				}
+				c := cost[cur] + w.edges[cur][to].weak()
+				if inNext[to] {
+					if c < cost[to] {
+						cost[to], parent[to] = c, cur
+					}
+					continue
+				}
+				cost[to], parent[to] = c, cur
+				inNext[to] = true
+				next = append(next, to)
+			}
+		}
+		if inNext[target] {
+			return build(target, ""), true
+		}
+		layer = next
 	}
 	return pathResult{}, false
 }

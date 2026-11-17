@@ -37,8 +37,11 @@ func TestClassifyRPC(t *testing.T) {
 		{"x.ping", []string{"server.Server.handlers -> server.Server.ping", "server.Server.more -> server.Server.ping"},
 			[]string{"client.Hint"}, nil, []string{"x"}},
 		// The function that builds the handler; an argument of a call is a
-		// call.
-		{"x.send", []string{"server.Server.handlers -> server.Server.factory"}, []string{"client.Send"}, nil, []string{"x"}},
+		// call. A value of a map literal is listed, and a function that
+		// looks it up in the map's variable and passes it to a call sends it
+		// (Lookup only compares it).
+		{"x.send", []string{"server.Server.handlers -> server.Server.factory"}, []string{"client.Send", "client.Forward"},
+			[]string{"client.methods"}, []string{"x"}},
 		// A case is a handler of the enclosing function; a slice literal
 		// only lists.
 		{"x.listed", []string{"server.Server.dispatch -> server.Server.dispatch"}, nil, []string{"server.allowed"}, nil},

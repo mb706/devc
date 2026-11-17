@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // checker resolves and checks the model.
@@ -20,6 +22,9 @@ type checker struct {
 	cmds  map[string]*commandInfo
 	refs  map[string]ResolvedRef
 	diags []Diagnostic
+	// through maps an http surface to the functions every request of its
+	// routes passes before the handler (Surface.Through).
+	through map[string][]string
 }
 
 func (c *checker) errorf(file, place, format string, args ...any) {
@@ -160,6 +165,7 @@ func (c *checker) checkModel() {
 			}
 		case "http":
 			c.ref(ifile, p+" table", s.Table, "")
+			c.refs2(ifile, p+" through", s.Through, "")
 			for _, role := range []string{"method", "path", "access", "xsite", "handler"} {
 				if s.Fields[role] == "" {
 					c.errorf(ifile, p+" fields", "missing field name for %q", role)
@@ -263,6 +269,9 @@ func (c *checker) checkModel() {
 			}
 		}
 		c.markdown(f, "", cn.Body, id, c.m.bodyLine[f])
+		if n := proseWords(cn.Body); n > concernWordLimit {
+			c.warnf(f, "", "the page has %d words of prose, more than the guide's %d (code blocks and tables are not counted)", n, concernWordLimit)
+		}
 	}
 
 	for fi := range m.Flows {
@@ -271,8 +280,48 @@ func (c *checker) checkModel() {
 	c.markdown(fn("overview.md"), "", m.Overview, "", 1)
 }
 
+// concernWordLimit is the length of a concern page, in words of prose,
+// beyond which --check warns (docs/dev/chunks/X-content-guide.md).
+const concernWordLimit = 1200
+
+// proseWords counts the words of a Markdown text that are prose: fenced
+// code blocks and tables are left out, a [[reference]] counts as one word
+// and [[reference|words]] as its words.
+func proseWords(md string) int {
+	n := 0
+	fence := ""
+	for _, l := range strings.Split(md, "\n") {
+		t := strings.TrimSpace(l)
+		if fence != "" {
+			if strings.HasPrefix(t, fence) {
+				fence = ""
+			}
+			continue
+		}
+		if strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
+			fence = t[:3]
+			continue
+		}
+		if strings.HasPrefix(t, "|") {
+			continue
+		}
+		t = mdRefRE.ReplaceAllStringFunc(t, func(m string) string {
+			if sub := mdRefRE.FindStringSubmatch(m); sub[2] != "" {
+				return sub[2]
+			}
+			return "ref"
+		})
+		for _, w := range strings.Fields(t) {
+			if strings.IndexFunc(w, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) >= 0 {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // viaKinds are the kinds of a message step's via.
-var viaKinds = map[string]bool{"exec": true, "file": true, "signal": true, "stream": true, "reply": true}
+var viaKinds = map[string]bool{"exec": true, "file": true, "signal": true, "stream": true, "net": true, "reply": true}
 
 // checkFlowShape checks the fields of a flow and its steps.
 func (c *checker) checkFlowShape(fl *Flow) {
@@ -289,7 +338,7 @@ func (c *checker) checkFlowShape(fl *Flow) {
 	}
 	for i := range fl.Steps {
 		s := &fl.Steps[i]
-		p := fmt.Sprintf("step %d", i+1)
+		p := stepPlace(fl, i)
 		shapes := 0
 		if s.At != "" {
 			shapes++
@@ -326,7 +375,7 @@ func (c *checker) checkFlowShape(fl *Flow) {
 			} else if kind, _, _ := strings.Cut(s.Via, ":"); kind == "rpc" || kind == "http" || kind == "event" || kind == "cmd" {
 				c.ref(f, p+" via", s.Via, "")
 			} else if !viaKinds[s.Via] {
-				c.errorf(f, p+" via", "%q is not one of exec, rpc:<method>, http:<route>, event:<type>, cmd:<command>, reply, file, signal, stream", s.Via)
+				c.errorf(f, p+" via", "%q is not one of exec, rpc:<method>, http:<route>, event:<type>, cmd:<command>, reply, file, signal, stream, net", s.Via)
 			}
 		}
 		switch {
@@ -424,10 +473,15 @@ func (c *checker) checkCode() {
 
 // ----- flows
 
-// codePoint is where an actor's code continues from.
+// codePoint is where an actor's code may continue from.
 type codePoint struct {
 	step int
 	refs []string
+	// cmd is the command whose run function this code is: the code that
+	// receives a cmd: message, and a step naming the function that holds
+	// the command's run literal. A later step naming that function is the
+	// same code.
+	cmd *commandInfo
 }
 
 // pendingMsg is a message that arrived at an actor: its next step must be
@@ -437,117 +491,246 @@ type pendingMsg struct {
 	entries []string
 	kind    string
 	via     string
-	broken  string // why the next step cannot be connected, if it cannot
+	cmd     *commandInfo // for a cmd: message
+	broken  string       // why the next step cannot be connected, if it cannot
+}
+
+// actorState is what connectFlow keeps for one actor.
+type actorState struct {
+	// hist holds the code of every earlier step that had code, in order;
+	// live the indexes in hist of those whose functions have not returned,
+	// innermost last. A step that continues in the code of hist[k] ends
+	// the code points after k: they returned to it.
+	hist    []codePoint
+	live    []int
+	pending *pendingMsg
+	replied bool
+	// last is the index (in Flow.Steps) of the actor's latest step, -1
+	// when it has none.
+	last int
+}
+
+// push records a code point the actor's later steps may continue in.
+func (a *actorState) push(cp codePoint) {
+	a.hist = append(a.hist, cp)
+	a.live = append(a.live, len(a.hist)-1)
+}
+
+// resume makes hist[k] the innermost live code point: the code points
+// after it returned to it (or, for one that had returned, its function
+// runs again, as a goroutine it started does).
+func (a *actorState) resume(k int) {
+	for j, x := range a.live {
+		if x == k {
+			a.live = a.live[:j+1]
+			return
+		}
+	}
+	var keep []int
+	for _, x := range a.live {
+		if x < k {
+			keep = append(keep, x)
+		}
+	}
+	a.live = append(keep, k)
+}
+
+// rank orders the actor's code points for choosing where a step continues:
+// the live ones from the innermost out, then the others from the most
+// recent back.
+func (a *actorState) rank() []int {
+	out := make([]int, 0, len(a.hist))
+	isLive := map[int]bool{}
+	for j := len(a.live) - 1; j >= 0; j-- {
+		out = append(out, a.live[j])
+		isLive[a.live[j]] = true
+	}
+	for k := len(a.hist) - 1; k >= 0; k-- {
+		if !isLive[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// pathFrom searches the connection from a code point to a step's code. A
+// code point of a command's run literal reaches the function that holds
+// the literal in one step: they are the same code.
+func (c *checker) pathFrom(cp codePoint, target string) (pathResult, bool, bool) {
+	if cp.cmd != nil && cp.cmd.RunLiteral && cp.cmd.Run == target {
+		return pathResult{path: []string{target}}, true, true
+	}
+	r, ok := c.w.findPathDepth(cp.refs, target, flowDepth)
+	return r, ok, false
+}
+
+// literalNote explains a connection to the function that holds a
+// command's run literal.
+func literalNote(ci *commandInfo) string {
+	return fmt.Sprintf("the run function of %s is a function literal in %s: the same code", "`"+ci.Path+"`", ci.Run)
 }
 
 // connectFlow fills in the connections of a flow's steps and reports the
 // ones the tool cannot find. Each actor keeps the code of its earlier
-// steps: a step connects to the most recent one from which the call graph
-// has a path, so a step may continue in the code of an earlier step after
-// the functions of the steps in between returned, or in a goroutine an
-// earlier step started.
+// steps. A step connects to the earlier step with the shortest path in the
+// call graph to its code; among equally short paths, to the innermost step
+// whose function has not returned, else to the most recent. So a step may
+// continue in the code of an earlier step after the functions of the steps
+// in between returned, or in a goroutine an earlier step started.
 func (c *checker) connectFlow(fl *Flow, rpc map[string]*RPCMethod, routes map[string]*Route, events map[string]*EventType) {
-	history := map[string][]codePoint{}
-	pending := map[string]*pendingMsg{}
-	replied := map[string]bool{}
-	push := func(actor string, step int, refs []string) {
-		history[actor] = append(history[actor], codePoint{step: step, refs: refs})
+	actors := map[string]*actorState{}
+	state := func(id string) *actorState {
+		a := actors[id]
+		if a == nil {
+			a = &actorState{last: -1}
+			actors[id] = a
+		}
+		return a
 	}
-	connect := func(actor string, i int, s *Step) {
-		hist := history[actor]
+	// connect connects step i of actor a and returns the code point the
+	// actor's later steps may continue in.
+	connect := func(actor string, i int, s *Step) codePoint {
+		a := state(actor)
+		self := codePoint{step: i, refs: []string{s.Ref}}
 		if s.Unchecked != "" {
 			from := -1
-			if p := pending[actor]; p != nil {
-				from = p.step
-			} else if len(hist) > 0 {
-				from = hist[len(hist)-1].step
+			if a.pending != nil {
+				from = a.pending.step
+			} else if len(a.hist) > 0 {
+				from = a.hist[len(a.hist)-1].step
 			}
 			if from >= 0 {
 				s.Connections = append(s.Connections, Connection{Actor: actor, From: from, Status: "unchecked", Note: s.Unchecked})
 			}
-			delete(pending, actor)
-			return
+			a.pending = nil
+			return self
 		}
-		if p := pending[actor]; p != nil {
-			delete(pending, actor)
+		if p := a.pending; p != nil {
+			a.pending = nil
 			conn := Connection{Actor: actor, From: p.step, Kind: p.kind, Via: p.via}
-			if p.broken != "" {
-				conn.Status, conn.Note = "missing", p.broken
-				c.warnf(fl.File, fmt.Sprintf("step %d", i+1), "%s", p.broken)
-			} else if r, ok := c.w.findPathDepth(p.entries, s.Ref, flowDepth); ok {
-				conn.Status, conn.Path, conn.DynamicEdges = "found", r.path, r.dyn
-				conn.Note = fmt.Sprintf("%s arrives at %s", p.via, r.path[0])
-				// The receiving code is where later steps may continue.
-				push(actor, p.step, p.entries)
-			} else {
-				conn.Status = "missing"
-				conn.Note = fmt.Sprintf("no path in the call graph from the code that receives %s (%s) to %s", p.via, strings.Join(clipList(p.entries, 4), ", "), s.Ref)
-				c.warnf(fl.File, fmt.Sprintf("step %d", i+1), "%s", conn.Note)
-			}
-			s.Connections = append(s.Connections, conn)
-			return
-		}
-		if len(hist) == 0 {
-			return
-		}
-		latest := hist[len(hist)-1]
-		// The shortest path from any earlier step wins; among equals, the
-		// most recent step. A longer path through the over-approximated
-		// graph is more likely to be one that never happens.
-		best := -1
-		var r pathResult
-		for k := len(hist) - 1; k >= 0; k-- {
-			if p, ok := c.w.findPathDepth(hist[k].refs, s.Ref, flowDepth); ok && (best < 0 || len(p.path) < len(r.path)) {
-				best, r = k, p
-			}
-		}
-		if best >= 0 {
-			conn := Connection{Actor: actor, From: hist[best].step, Kind: "path", Status: "found", Path: r.path, DynamicEdges: r.dyn}
 			switch {
-			case len(r.path) == 1:
-				conn.Kind = "same"
-			case replied[actor]:
-				conn.Kind = "reply"
-			}
-			if best < len(hist)-1 {
-				conn.Note = fmt.Sprintf("continues in the code of step %d, not of the latest step %d (a function returned to its caller, or another goroutine of the same process)", hist[best].step+1, latest.step+1)
+			case p.broken != "":
+				conn.Status, conn.Note = "missing", p.broken
+				c.warnf(fl.File, stepPlace(fl, i), "%s", p.broken)
+			case p.cmd != nil && p.cmd.RunLiteral && p.cmd.Run == s.Ref:
+				conn.Status, conn.Path = "found", []string{s.Ref}
+				conn.Note = fmt.Sprintf("%s arrives at %s; %s", p.via, s.Ref, literalNote(p.cmd))
+				a.push(codePoint{step: p.step, refs: p.entries, cmd: p.cmd})
+				self = codePoint{step: i, refs: p.cmd.seeds, cmd: p.cmd}
+			default:
+				if r, ok := c.w.findPathDepth(p.entries, s.Ref, flowDepth); ok {
+					conn.Status, conn.Path, conn.DynamicEdges, conn.ValueEdges = "found", r.path, r.dyn, r.val
+					conn.Note = fmt.Sprintf("%s arrives at %s", p.via, r.path[0])
+					// The receiving code is where later steps may continue.
+					a.push(codePoint{step: p.step, refs: p.entries, cmd: p.cmd})
+				} else {
+					conn.Status = "missing"
+					conn.Note = fmt.Sprintf("no path in the call graph from the code that receives %s (%s) to %s", p.via, strings.Join(clipList(p.entries, 4), ", "), s.Ref)
+					c.warnf(fl.File, stepPlace(fl, i), "%s", conn.Note)
+				}
 			}
 			s.Connections = append(s.Connections, conn)
-			return
+			return self
 		}
-		conn := Connection{Actor: actor, From: latest.step, Kind: "path", Status: "missing"}
-		conn.Note = fmt.Sprintf("no path in the call graph from %s (step %d) or the code of the actor's earlier steps to %s", strings.Join(latest.refs, ", "), latest.step+1, s.Ref)
-		c.warnf(fl.File, fmt.Sprintf("step %d", i+1), "%s", conn.Note)
+		if len(a.hist) == 0 {
+			return self
+		}
+		latest := a.hist[len(a.hist)-1]
+		best, alias := -1, false
+		var r pathResult
+		paths := map[int]pathResult{}
+		for _, k := range a.rank() {
+			p, ok, al := c.pathFrom(a.hist[k], s.Ref)
+			if !ok {
+				continue
+			}
+			paths[k] = p
+			if best < 0 || len(p.path) < len(r.path) {
+				best, r, alias = k, p, al
+			}
+		}
+		// The same path from a more recent step names that step: it is the
+		// one whose code the path starts in.
+		for k, p := range paths {
+			if k > best && !alias && slices.Equal(p.path, r.path) {
+				best = k
+			}
+		}
+		if best < 0 {
+			conn := Connection{Actor: actor, From: latest.step, Kind: "path", Status: "missing"}
+			conn.Note = fmt.Sprintf("no path in the call graph from %s (step %d) or the code of the actor's earlier steps to %s", strings.Join(clipList(latest.refs, 4), ", "), stepNo(fl, latest.step), s.Ref)
+			c.warnf(fl.File, stepPlace(fl, i), "%s", conn.Note)
+			s.Connections = append(s.Connections, conn)
+			return self
+		}
+		from := a.hist[best]
+		conn := Connection{Actor: actor, From: from.step, Kind: "path", Status: "found", Path: r.path, DynamicEdges: r.dyn, ValueEdges: r.val}
+		switch {
+		case len(r.path) == 1:
+			conn.Kind = "same"
+		case a.replied:
+			conn.Kind = "reply"
+		}
+		var notes []string
+		if alias {
+			notes = append(notes, literalNote(from.cmd))
+			self = codePoint{step: i, refs: from.cmd.seeds, cmd: from.cmd}
+		}
+		if best < len(a.hist)-1 {
+			notes = append(notes, fmt.Sprintf("continues in the code of step %d, not of the latest step %d (a function returned to its caller, or another goroutine of the same process)", stepNo(fl, from.step), stepNo(fl, latest.step)))
+		}
+		conn.Note = strings.Join(notes, "; ")
+		a.resume(best)
 		s.Connections = append(s.Connections, conn)
+		return self
+	}
+	// noCode handles a step of an actor that has no code the tool knows (a
+	// file: reference, an external step): it breaks the actor's chain, and
+	// an unchecked reason is still shown, from the actor's previous step.
+	noCode := func(actor string, i int, s *Step) {
+		a := state(actor)
+		if s.Unchecked != "" {
+			from := a.last
+			if a.pending != nil {
+				from = a.pending.step
+			}
+			if from >= 0 {
+				s.Connections = append(s.Connections, Connection{Actor: actor, From: from, Status: "unchecked", Note: s.Unchecked})
+			}
+		}
+		a.hist, a.live, a.pending = nil, nil, nil
 	}
 	for i := range fl.Steps {
 		s := &fl.Steps[i]
-		if s.Section != "" {
+		if s.Section != "" || fl.Kind == "tour" {
 			continue
 		}
-		if fl.Kind == "tour" {
-			continue
-		}
+		hasCode := !s.External && s.Ref != "" && c.w.syms[s.Ref] != nil
 		if s.At != "" {
-			if s.External || s.Ref == "" || c.w.syms[s.Ref] == nil {
-				delete(history, s.At)
-				delete(pending, s.At)
-				continue
+			a := state(s.At)
+			if hasCode {
+				cp := connect(s.At, i, s)
+				a.push(cp)
+				a.replied = false
+			} else {
+				noCode(s.At, i, s)
 			}
-			connect(s.At, i, s)
-			push(s.At, i, []string{s.Ref})
-			replied[s.At] = false
+			a.last = i
 			continue
 		}
 		if s.From == "" {
 			continue
 		}
-		hasCode := !s.External && s.Ref != "" && c.w.syms[s.Ref] != nil
 		if hasCode {
-			connect(s.From, i, s)
-			push(s.From, i, []string{s.Ref})
-			replied[s.From] = false
+			a := state(s.From)
+			cp := connect(s.From, i, s)
+			a.push(cp)
+			a.replied = false
+		} else if s.Unchecked != "" {
+			noCode(s.From, i, s)
 		}
+		state(s.From).last = i
+		to := state(s.To)
 		kind, arg, _ := strings.Cut(s.Via, ":")
 		switch kind {
 		case "rpc":
@@ -568,17 +751,18 @@ func (c *checker) connectFlow(fl *Flow, rpc map[string]*RPCMethod, routes map[st
 			if len(entries) == 0 {
 				p.broken = fmt.Sprintf("%s has no handler the tool can see", s.Via)
 			}
-			pending[s.To] = p
+			to.pending = p
 		case "http":
 			r := routes[arg]
 			if r == nil {
 				break
 			}
-			p := &pendingMsg{step: i, entries: []string{r.Handler}, kind: "route", via: s.Via}
+			entries := append(append([]string{}, c.through[r.Surface]...), r.Handler)
+			p := &pendingMsg{step: i, entries: entries, kind: "route", via: s.Via}
 			if r.Handler == "" {
 				p.broken = fmt.Sprintf("%s has no handler the tool can see", s.Via)
 			}
-			pending[s.To] = p
+			to.pending = p
 		case "event":
 			e := events[arg]
 			if e == nil {
@@ -597,23 +781,23 @@ func (c *checker) connectFlow(fl *Flow, rpc map[string]*RPCMethod, routes map[st
 			if len(entries) == 0 {
 				p.broken = fmt.Sprintf("%s has no reader the tool can see", s.Via)
 			}
-			pending[s.To] = p
+			to.pending = p
 		case "cmd":
 			ci := c.cmds[arg]
 			if ci == nil {
 				break
 			}
-			p := &pendingMsg{step: i, entries: ci.seeds, kind: "command", via: s.Via}
+			p := &pendingMsg{step: i, entries: ci.seeds, kind: "command", via: s.Via, cmd: ci}
 			if len(ci.seeds) == 0 {
 				p.broken = fmt.Sprintf("%s has no run function", s.Via)
 			}
-			pending[s.To] = p
+			to.pending = p
 		case "reply":
-			delete(pending, s.To)
-			replied[s.To] = true
+			to.pending = nil
+			to.replied = true
 		default:
-			pending[s.To] = &pendingMsg{step: i, kind: kind, via: s.Via,
-				broken: fmt.Sprintf("the tool cannot follow a message by %q from step %d to the next step of %s; say why with unchecked", s.Via, i+1, s.To)}
+			to.pending = &pendingMsg{step: i, kind: kind, via: s.Via,
+				broken: fmt.Sprintf("the tool cannot follow a message by %q from step %d to the next step of %s; say why with unchecked", s.Via, stepNo(fl, i), s.To)}
 		}
 	}
 	// A broken message whose receiver never acts again is not a problem.
@@ -637,12 +821,12 @@ func (c *checker) senderCheck(fl *Flow, i int, s *Step, kind string, sites []Sit
 		}
 	}
 	if r, ok := c.w.findPathAny([]string{s.Ref}, ins); ok {
-		conn.Status, conn.Path, conn.DynamicEdges = "found", r.path, r.dyn
+		conn.Status, conn.Path, conn.DynamicEdges, conn.ValueEdges = "found", r.path, r.dyn, r.val
 		conn.Note = fmt.Sprintf("%s calls %s, which sends %s", s.Ref, r.path[len(r.path)-1], s.Via)
 		return conn
 	}
 	if r, ok := c.w.findPathDepth(ins, s.Ref, flowDepth); ok {
-		conn.Status, conn.Path, conn.DynamicEdges = "found", r.path, r.dyn
+		conn.Status, conn.Path, conn.DynamicEdges, conn.ValueEdges = "found", r.path, r.dyn, r.val
 		conn.Note = fmt.Sprintf("%s names %s and calls %s", r.path[0], s.Via, s.Ref)
 		return conn
 	}
@@ -652,8 +836,32 @@ func (c *checker) senderCheck(fl *Flow, i int, s *Step, kind string, sites []Sit
 		what = "writes"
 	}
 	conn.Note = fmt.Sprintf("%s is not connected to any code that %s %s (%s)", s.Ref, what, s.Via, strings.Join(clipList(ins, 4), ", "))
-	c.warnf(fl.File, fmt.Sprintf("step %d", i+1), "%s", conn.Note)
+	c.warnf(fl.File, stepPlace(fl, i), "%s", conn.Note)
 	return conn
+}
+
+// stepNo is the number the app shows for the step at index i of a flow:
+// sections are not counted.
+func stepNo(fl *Flow, i int) int {
+	n := 0
+	for k := 0; k <= i && k < len(fl.Steps); k++ {
+		if fl.Steps[k].Section == "" {
+			n++
+		}
+	}
+	return n
+}
+
+// stepPlace names the step at index i in a message: its number in the app,
+// and its position among the file's [[step]] tables where that differs.
+func stepPlace(fl *Flow, i int) string {
+	if fl.Steps[i].Section != "" {
+		return fmt.Sprintf("[[step]] %d (a section)", i+1)
+	}
+	if n := stepNo(fl, i); n != i+1 {
+		return fmt.Sprintf("step %d ([[step]] %d)", n, i+1)
+	}
+	return fmt.Sprintf("step %d", i+1)
 }
 
 // findPathAny searches a path from sources to any of targets.

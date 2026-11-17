@@ -170,6 +170,19 @@ X.source = (function () {
     return out + esc(text.slice(p));
   }
 
+  // oneOfEach keeps one mark of each kind on a line (several flow steps
+  // on one declaration would make the line tall); its title lists them all
+  // and it leads to the first.
+  function oneOfEach(ms) {
+    var by = new Map();
+    ms.forEach(function (m) {
+      var k = m.cls || "";
+      if (!by.has(k)) by.set(k, { cls: m.cls, ref: m.ref, href: m.href, titles: [] });
+      if (m.title) by.get(k).titles.push(m.title);
+    });
+    return Array.from(by.values()).map(function (g) { return { cls: g.cls, ref: g.ref, href: g.href, title: g.titles.join("\n") }; });
+  }
+
   function marksOf(path) {
     var m = new Map();
     markProviders.forEach(function (fn) {
@@ -239,7 +252,7 @@ X.source = (function () {
         var mk = "";
         if (hasMarks) {
           var ms = marks.get(n);
-          mk = '<i class="mk">' + (ms ? ms.map(function (m) {
+          mk = '<i class="mk">' + (ms ? oneOfEach(ms).map(function (m) {
             return '<a class="mkx ' + esc(m.cls || "") + '"' + (m.ref ? ' data-ref="' + esc(m.ref) + '" data-nocard' : "") +
               (m.href ? ' href="' + esc(m.href) + '" data-act="full"' : "") + ' title="' + esc(m.title || "") + '"></a>';
           }).join("") : "") + "</i>";

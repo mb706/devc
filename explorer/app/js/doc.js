@@ -34,7 +34,8 @@ X.doc = (function () {
       if (!doc) return false;
       if (i < 0) return true;
       var h = r.slice(i + 1);
-      return doc.headings.some(function (x) { return x.number === h || x.anchor === h; });
+      return doc.headings.some(function (x) { return x.number === h || x.anchor === h; }) ||
+        doc.headings.filter(function (x) { return x.anchor.indexOf(h + "-") === 0; }).length === 1;
     }
     return true;
   }

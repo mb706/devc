@@ -127,14 +127,16 @@ X.connectors = (function () {
         addEnd(ends, e.from, e._s[0], e, b, "from");
         addEnd(ends, e.to, e._s[1], e, a, "to");
       });
-      // Loops go on the side of their box with the fewest other ends.
+      // Loops go on the side of their box with the fewest other ends, not
+      // on the left edge of the host (a scroller cannot show what is left
+      // of it; the diagram leaves room above and below).
       var loopSides = new Map();
       live.forEach(function (e) {
         if (e.from !== e.to) return;
-        var best = "top", n = Infinity;
+        var best = "top", n = Infinity, b = box(e.from);
         ["top", "right", "bottom", "left"].forEach(function (s) {
-          var c = 0;
-          ends.forEach(function (list, k) { if (k.el === e.from && k.side === s) c = list.length; });
+          var c = s === "left" && b.x < 40 ? 2.5 : 0;
+          ends.forEach(function (list, k) { if (k.el === e.from && k.side === s) c += list.length; });
           var taken = loopSides.get(e.from) || [];
           c += taken.filter(function (x) { return x === s; }).length * 2;
           if (c < n) { n = c; best = s; }

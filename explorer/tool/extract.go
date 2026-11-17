@@ -42,6 +42,9 @@ type world struct {
 	// watch maps the Ref of a constant whose uses are classified (RPC
 	// methods, event types) to the sites found.
 	watch map[string]*watched
+	// mapVals are the uses of watched constants as values of map literals,
+	// resolved after the walk (see sendersFromMaps).
+	mapVals []mapVal
 	// envRE finds environment variable names in string literals.
 	envRE   *regexp.Regexp
 	envUses map[string][]Site
@@ -74,11 +77,24 @@ type edgeRec struct {
 	line    int
 	dynamic bool
 	via     string
+	// call is set when at least one use behind the edge calls the callee;
+	// an edge without it only mentions a function (passes it as a value),
+	// or leads to or from a package variable that holds functions.
+	call bool
 }
 
 // watched collects the classified sites of one constant.
 type watched struct {
 	handlers, callers, listed, tests []Site
+}
+
+// mapVal is a watched constant used as a value of a map literal held in a
+// variable: a function that looks the constant up in that variable and
+// passes it to a call sends it.
+type mapVal struct {
+	target string       // the constant's Ref
+	holder types.Object // the variable the map literal is assigned to
+	in     string       // the declaration the literal is in
 }
 
 func newWorld(prog *program) *world {
@@ -587,10 +603,11 @@ func (w *world) walkUses() {
 	for from, vars := range w.varUses {
 		for v, line := range vars {
 			if len(w.edges[v]) > 0 && from != v {
-				w.addEdge(from, v, line, false, "")
+				w.addEdge(from, v, line, false, false, "")
 			}
 		}
 	}
+	w.sendersFromMaps()
 }
 
 // calleeIdent returns the identifier that names the function of a call.
@@ -753,10 +770,10 @@ func (w *world) ident(f *fileInfo, id *ast.Ident, in string, stack []ast.Node, c
 		w.usesIn[in][target] = true
 		switch {
 		case ts.isFunc():
-			w.addEdge(in, target, line, false, "")
+			w.addEdge(in, target, line, false, kind == "call", "")
 		case ts.Kind == "imethod":
 			for _, impl := range w.dyn[ts.obj] {
-				w.addEdge(in, impl, line, true, target)
+				w.addEdge(in, impl, line, true, kind == "call", target)
 			}
 		case ts.Kind == "var":
 			if w.varUses[in] == nil {
@@ -780,13 +797,164 @@ func (w *world) ident(f *fileInfo, id *ast.Ident, in string, stack []ast.Node, c
 			wt.callers = append(wt.callers, site)
 		default:
 			wt.listed = append(wt.listed, site)
+			if kind == "mapvalue" {
+				if h := mapHolder(stack, info); h != nil {
+					w.mapVals = append(w.mapVals, mapVal{target: target, holder: h, in: in})
+				}
+			}
 		}
 	}
 }
 
+// mapHolder returns the variable that the map literal around the end of
+// stack is assigned to (var v = map…{…}, v := map…{…}), or nil.
+func mapHolder(stack []ast.Node, info *types.Info) types.Object {
+	for j := len(stack) - 1; j > 0; j-- {
+		lit, ok := stack[j].(*ast.CompositeLit)
+		if !ok {
+			continue
+		}
+		var id *ast.Ident
+		switch p := stack[j-1].(type) {
+		case *ast.ValueSpec:
+			for k, v := range p.Values {
+				if v == lit && k < len(p.Names) {
+					id = p.Names[k]
+				}
+			}
+		case *ast.AssignStmt:
+			for k, v := range p.Rhs {
+				if v == lit && k < len(p.Lhs) && len(p.Lhs) == len(p.Rhs) {
+					id, _ = p.Lhs[k].(*ast.Ident)
+				}
+			}
+		}
+		if id == nil {
+			return nil
+		}
+		if obj := info.Defs[id]; obj != nil {
+			return obj
+		}
+		return info.Uses[id]
+	}
+	return nil
+}
+
+// sendersFromMaps classifies the functions that look a watched constant up
+// in the map variable holding it and pass what they found to a call
+// (method, ok := commandMethods[t]; …; l.forward(ctx, method, …)) as
+// sending it, at the line of the lookup.
+func (w *world) sendersFromMaps() {
+	byHolder := map[types.Object][]mapVal{}
+	var holders []types.Object
+	for _, mv := range w.mapVals {
+		if byHolder[mv.holder] == nil {
+			holders = append(holders, mv.holder)
+		}
+		byHolder[mv.holder] = append(byHolder[mv.holder], mv)
+	}
+	for _, h := range holders {
+		mvs := byHolder[h]
+		// A package variable is looked up anywhere; a local one in the
+		// declaration that holds it.
+		var cands []string
+		if hr := w.refOf(h); hr != "" {
+			for _, s := range w.symList {
+				if s.isFunc() && w.usesIn[s.Ref][hr] {
+					cands = append(cands, s.Ref)
+				}
+			}
+		} else {
+			cands = []string{mvs[0].in}
+		}
+		for _, fn := range cands {
+			d, s := w.declOf[fn], w.syms[fn]
+			if d == nil || s == nil {
+				continue
+			}
+			for _, line := range lookupsPassed(d, s.file, h) {
+				site := Site{File: s.File, Line: line, In: fn}
+				for _, mv := range mvs {
+					wt := w.watch[mv.target]
+					if s.Test {
+						wt.tests = append(wt.tests, site)
+					} else {
+						wt.callers = append(wt.callers, site)
+					}
+				}
+			}
+		}
+	}
+}
+
+// lookupsPassed returns the lines of the index expressions on the variable
+// v in decl whose value is passed to a call: directly as an argument, or
+// through the variable it is assigned to.
+func lookupsPassed(decl *ast.FuncDecl, f *fileInfo, v types.Object) []int {
+	info := f.Pkg.Info
+	var lines []int
+	passed := map[types.Object]bool{} // variables used as arguments of calls
+	ast.Inspect(decl, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			for _, a := range call.Args {
+				if id, ok := ast.Unparen(a).(*ast.Ident); ok {
+					if obj := info.Uses[id]; obj != nil {
+						passed[obj] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+	isLookup := func(e ast.Expr) (*ast.IndexExpr, bool) {
+		ix, ok := ast.Unparen(e).(*ast.IndexExpr)
+		if !ok {
+			return nil, false
+		}
+		id, ok := ast.Unparen(ix.X).(*ast.Ident)
+		return ix, ok && info.Uses[id] == v
+	}
+	var found []token.Pos
+	ast.Inspect(decl, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.CallExpr:
+			for _, a := range n.Args {
+				if ix, ok := isLookup(a); ok {
+					found = append(found, ix.Pos())
+				}
+			}
+		case *ast.AssignStmt:
+			if len(n.Rhs) == 1 && len(n.Lhs) >= 1 {
+				if ix, ok := isLookup(n.Rhs[0]); ok {
+					if id, ok := n.Lhs[0].(*ast.Ident); ok {
+						obj := info.Defs[id]
+						if obj == nil {
+							obj = info.Uses[id]
+						}
+						if passed[obj] {
+							found = append(found, ix.Pos())
+						}
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			if len(n.Values) == 1 && len(n.Names) >= 1 {
+				if ix, ok := isLookup(n.Values[0]); ok && passed[info.Defs[n.Names[0]]] {
+					found = append(found, ix.Pos())
+				}
+			}
+		}
+		return true
+	})
+	for _, p := range found {
+		lines = append(lines, f.line(p))
+	}
+	return lines
+}
+
 // addEdge records a call graph edge; the first line wins, a static edge
-// wins over a dynamic one.
-func (w *world) addEdge(from, to string, line int, dynamic bool, via string) {
+// wins over a dynamic one, and a call over a mention.
+func (w *world) addEdge(from, to string, line int, dynamic, call bool, via string) {
 	m := w.edges[from]
 	if m == nil {
 		m = map[string]*edgeRec{}
@@ -796,9 +964,10 @@ func (w *world) addEdge(from, to string, line int, dynamic bool, via string) {
 		if e.dynamic && !dynamic {
 			e.dynamic, e.via = false, ""
 		}
+		e.call = e.call || call
 		return
 	}
-	m[to] = &edgeRec{line: line, dynamic: dynamic, via: via}
+	m[to] = &edgeRec{line: line, dynamic: dynamic, via: via, call: call}
 }
 
 // stringLit records environment variable names in a string literal.
@@ -850,6 +1019,9 @@ func (w *world) classify(stack []ast.Node, info *types.Info, in string) (string,
 		}
 		if lit != nil && isStruct(info.TypeOf(lit)) {
 			return "call", ""
+		}
+		if lit != nil && isMap(info.TypeOf(lit)) {
+			return "mapvalue", ""
 		}
 		return "listed", ""
 	case *ast.CaseClause:

@@ -136,7 +136,9 @@
       router: "grid",
       // Cards, and the titles of zones, which lines should not run through.
       obstacles: function () { return Array.from(cardEls.values()).concat(Array.from(map.querySelectorAll(".rt-zh .rt-zl"))); },
-      labelWhen: function (e) { return / hl/.test(" " + layerClass(e)); },
+      // Labels of the lit channels: hovered or selected, else those a
+      // filter keeps.
+      labelWhen: function (e) { return / (hl|on)\b/.test(" " + layerClass(e)); },
       labelAway: function () { var f = state.hover || state.sel; return f && f.kind === "actor" ? cardEls.get(f.id) : null; },
       onDraw: gates
     });
@@ -219,6 +221,7 @@
         var id = e.data.id, c = [];
         if (l.ch) c.push(l.ch.has(id) ? (l.f.kind === "channel" ? "hl sel" : "hl") : "dim");
         if (flt && !flt.channels.has(id)) c.push("out");
+        else if (flt && !l.ch) c.push("on");
         return c.join(" ");
       };
       layer.setClass(classFn);
