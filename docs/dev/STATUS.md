@@ -51,7 +51,8 @@ Progress log for devc v2. The implementing agent of each chunk appends a section
 | Accuracy review G6 + corrections | done | 4ef8ae2 |
 | C20a Defects found while writing the explorer: high severity | done | b4f63da |
 | C20b Defects: rule violations of medium severity | done | 79dc71a |
-| C20c Defects: gaps the accuracy review found | done | |
+| C20c Defects: gaps the accuracy review found | done | bfa6ae1 |
+| Check H of the C20 fixes | in progress | |
 
 ## Resuming
 
